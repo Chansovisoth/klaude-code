@@ -27,7 +27,7 @@ done — committed on branch klaude/20260712-1430
 Prereqs: [Ollama](https://ollama.com/download), Docker, ~10GB disk for models.
 
 ```bash
-git clone https://github.com/YOU/klaude-code && cd klaude-code
+git clone https://github.com/Chansovisoth/klaude-code && cd klaude-code
 make setup          # docker services + uv sync + models for your RAM tier + doctor
 uv run klaude chat  # or: uv tool install --editable apps/cli && klaude chat
 ```
