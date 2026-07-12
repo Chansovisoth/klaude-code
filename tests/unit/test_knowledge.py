@@ -88,3 +88,52 @@ def test_permission_gate():
         gate.check("run_shell", "rm -rf /")  # answered n
     gate.check("run_shell", "ls")  # answered a -> becomes allow
     gate.check("run_shell", "ls")  # no prompt needed anymore
+
+
+def test_agent_executes_text_form_tool_call():
+    from klaude_core import Agent, PermissionGate, Tool
+
+    class FakeOllama:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, model, messages, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "role": "assistant",
+                    "content": (
+                        "I will look it up.\n\n"
+                        "<function=web_search> "
+                        "<parameter=query> Dieng city country   </tool_call>"
+                    ),
+                }
+            return {"role": "assistant", "content": "Dieng is a place."}
+
+    tool = Tool(
+        "web_search",
+        "Search the web.",
+        {"type": "object", "properties": {"query": {"type": "string"}}},
+        lambda query: f"found {query}",
+    )
+    agent = Agent(
+        FakeOllama(),
+        "fake-model",
+        [tool],
+        PermissionGate({"web_search": "allow"}, lambda tool, detail: "y"),
+        "system",
+    )
+
+    events = list(agent.run("look it up"))
+
+    assert events[0].kind == "tool_start"
+    assert events[0].payload == {
+        "tool": "web_search",
+        "args": {"query": "Dieng city country"},
+    }
+    assert events[1].kind == "tool_result"
+    assert "found Dieng city country" in events[1].payload["result"]
+    assert not any(
+        event.kind == "text" and "<function=web_search>" in event.payload.get("content", "")
+        for event in events
+    )

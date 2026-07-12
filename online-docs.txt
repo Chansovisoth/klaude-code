@@ -1,0 +1,278 @@
+# ADD MORE DOCS LINKS TO THE LIST IF NEEDED
+
+# ============================================================
+# NEXT.JS
+# ============================================================
+
+# Complete Next.js documentation.
+uv run klaude learn https://nextjs.org/docs/llms-full.txt -c nextjs
+
+# Next.js documentation URL index.
+uv run klaude learn https://nextjs.org/docs/llms.txt -c nextjs-index
+
+# Main Next.js documentation.
+uv run klaude learn https://nextjs.org/docs -c nextjs-overview
+
+# App Router documentation.
+uv run klaude learn https://nextjs.org/docs/app -c nextjs-app
+
+# App Router — Getting Started.
+uv run klaude learn https://nextjs.org/docs/app/getting-started -c nextjs-app-getting-started
+
+# App Router — Guides.
+uv run klaude learn https://nextjs.org/docs/app/guides -c nextjs-app-guides
+
+# App Router — API Reference.
+uv run klaude learn https://nextjs.org/docs/app/api-reference -c nextjs-app-api
+
+# App Router — Directives.
+uv run klaude learn https://nextjs.org/docs/app/api-reference/directives -c nextjs-directives
+
+# App Router — Built-in components.
+uv run klaude learn https://nextjs.org/docs/app/api-reference/components -c nextjs-components
+
+# App Router — File-system conventions.
+uv run klaude learn https://nextjs.org/docs/app/api-reference/file-conventions -c nextjs-file-conventions
+
+# App Router — Functions and hooks.
+uv run klaude learn https://nextjs.org/docs/app/api-reference/functions -c nextjs-functions
+
+# App Router — Configuration reference.
+uv run klaude learn https://nextjs.org/docs/app/api-reference/config -c nextjs-config
+
+# next.config.js options.
+uv run klaude learn https://nextjs.org/docs/app/api-reference/config/next-config-js -c nextjs-config-options
+
+# Next.js command-line tools.
+uv run klaude learn https://nextjs.org/docs/app/api-reference/cli -c nextjs-cli
+
+# Deployment adapters.
+uv run klaude learn https://nextjs.org/docs/app/api-reference/adapters -c nextjs-adapters
+
+# Edge Runtime.
+uv run klaude learn https://nextjs.org/docs/app/api-reference/edge -c nextjs-edge-runtime
+
+# Turbopack reference.
+uv run klaude learn https://nextjs.org/docs/app/api-reference/turbopack -c nextjs-turbopack
+
+# Pages Router documentation.
+uv run klaude learn https://nextjs.org/docs/pages -c nextjs-pages
+
+# Pages Router — Getting Started.
+uv run klaude learn https://nextjs.org/docs/pages/getting-started -c nextjs-pages-getting-started
+
+# Pages Router — Guides.
+uv run klaude learn https://nextjs.org/docs/pages/guides -c nextjs-pages-guides
+
+# Pages Router — Building applications.
+uv run klaude learn https://nextjs.org/docs/pages/building-your-application -c nextjs-pages-building
+
+# Pages Router — API Reference.
+uv run klaude learn https://nextjs.org/docs/pages/api-reference -c nextjs-pages-api
+
+# Next.js architecture documentation.
+uv run klaude learn https://nextjs.org/docs/architecture -c nextjs-architecture
+
+# Accessibility documentation.
+uv run klaude learn https://nextjs.org/docs/architecture/accessibility -c nextjs-accessibility
+
+# Fast Refresh architecture.
+uv run klaude learn https://nextjs.org/docs/architecture/fast-refresh -c nextjs-fast-refresh
+
+# Next.js Compiler.
+uv run klaude learn https://nextjs.org/docs/architecture/nextjs-compiler -c nextjs-compiler
+
+# Supported browsers.
+uv run klaude learn https://nextjs.org/docs/architecture/supported-browsers -c nextjs-supported-browsers
+
+# Community documentation.
+uv run klaude learn https://nextjs.org/docs/community -c nextjs-community
+
+# Contribution guide.
+uv run klaude learn https://nextjs.org/docs/community/contribution-guide -c nextjs-contributing
+
+# Rspack integration.
+uv run klaude learn https://nextjs.org/docs/community/rspack -c nextjs-rspack
+
+# Next.js glossary.
+uv run klaude learn https://nextjs.org/docs/app/glossary -c nextjs-glossary
+
+
+# ============================================================
+# REACT
+# ============================================================
+
+# React documentation index for AI tools.
+# Your fetcher currently needs plain-text support for this URL.
+uv run klaude learn https://react.dev/llms.txt -c react-index
+
+# Main React documentation.
+uv run klaude learn https://react.dev -c react
+
+# React learning documentation.
+uv run klaude learn https://react.dev/learn -c react-learn
+
+# React API reference.
+uv run klaude learn https://react.dev/reference/react -c react-api
+
+
+# ============================================================
+# TYPESCRIPT
+# ============================================================
+
+# Main TypeScript documentation.
+uv run klaude learn https://www.typescriptlang.org/docs/ -c typescript
+
+# TypeScript Handbook.
+uv run klaude learn https://www.typescriptlang.org/docs/handbook/intro.html -c typescript-handbook
+
+# TypeScript compiler configuration reference.
+uv run klaude learn https://www.typescriptlang.org/tsconfig/ -c typescript-config
+
+
+# ============================================================
+# JAVASCRIPT
+# ============================================================
+
+# MDN JavaScript documentation root.
+uv run klaude learn https://developer.mozilla.org/en-US/docs/Web/JavaScript -c javascript
+
+# JavaScript language guide.
+uv run klaude learn https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide -c javascript-guide
+
+# JavaScript language and API reference.
+uv run klaude learn https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference -c javascript-reference
+
+
+# ============================================================
+# HTML
+# ============================================================
+
+# MDN HTML documentation root.
+uv run klaude learn https://developer.mozilla.org/en-US/docs/Web/HTML -c html
+
+# HTML guides.
+uv run klaude learn https://developer.mozilla.org/en-US/docs/Web/HTML/Guides -c html-guides
+
+# HTML elements, attributes, and reference.
+uv run klaude learn https://developer.mozilla.org/en-US/docs/Web/HTML/Reference -c html-reference
+
+
+# ============================================================
+# CSS
+# ============================================================
+
+# MDN CSS documentation root.
+uv run klaude learn https://developer.mozilla.org/en-US/docs/Web/CSS -c css
+
+# CSS guides.
+uv run klaude learn https://developer.mozilla.org/en-US/docs/Web/CSS/Guides -c css-guides
+
+# CSS properties, selectors, functions, and reference.
+uv run klaude learn https://developer.mozilla.org/en-US/docs/Web/CSS/Reference -c css-reference
+
+
+# ============================================================
+# TAILWIND CSS
+# ============================================================
+
+# Tailwind CSS documentation.
+uv run klaude learn https://tailwindcss.com/docs -c tailwind
+
+
+# ============================================================
+# SHADCN/UI
+# ============================================================
+
+# shadcn/ui documentation.
+uv run klaude learn https://ui.shadcn.com/docs -c shadcn
+
+
+# ============================================================
+# NODE.JS
+# ============================================================
+
+# Latest Node.js API documentation.
+uv run klaude learn https://nodejs.org/docs/latest/api/ -c nodejs
+
+
+# ============================================================
+# VITE
+# ============================================================
+
+# Vite guides and configuration documentation.
+uv run klaude learn https://vite.dev/guide/ -c vite
+
+
+# ============================================================
+# POSTGRESQL
+# ============================================================
+
+# Current PostgreSQL documentation.
+uv run klaude learn https://www.postgresql.org/docs/current/ -c postgresql
+
+
+# ============================================================
+# GO
+# ============================================================
+
+# Main Go documentation.
+uv run klaude learn https://go.dev/doc/ -c golang
+
+
+# ============================================================
+# GIN WEB FRAMEWORK
+# ============================================================
+
+# Gin framework documentation.
+uv run klaude learn https://gin-gonic.com/en/docs/ -c gin
+
+
+# ============================================================
+# GODOT ENGINE 4.7
+# ============================================================
+
+# Godot 4.7 documentation root.
+uv run klaude learn https://docs.godotengine.org/en/4.7/ -c godot
+
+# GDScript language documentation.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/scripting/gdscript/ -c gdscript
+
+# Complete Godot class and API reference.
+uv run klaude learn https://docs.godotengine.org/en/4.7/classes/ -c godot-api
+
+# Godot 3D documentation.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/3d/ -c godot-3d
+
+# Godot 2D documentation.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/2d/ -c godot-2d
+
+# Godot physics documentation.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/physics/ -c godot-physics
+
+# Godot shader documentation.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/shaders/ -c godot-shaders
+
+# Navigation and pathfinding.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/navigation/ -c godot-navigation
+
+# Multiplayer and networking.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/networking/ -c godot-networking
+
+# User interface and Control nodes.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/ui/ -c godot-ui
+
+# Editor plugins and extensions.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/plugins/ -c godot-plugins
+
+# Asset import pipeline.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/assets_pipeline/ -c godot-assets
+
+# Exporting Godot projects.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/export/ -c godot-export
+
+# Performance and optimization.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/performance/ -c godot-performance
+
+# Godot project and scripting best practices.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/best_practices/ -c godot-best-practices

@@ -16,7 +16,7 @@ done — committed on branch klaude/20260712-1430
 ## What it does
 
 - **Codes with you**: reads, edits, greps, runs shell commands — each destructive action behind a y/n/always permission gate.
-- **Learns documentation**: `klaude learn https://nextjs.org/docs -c nextjs` scrapes, chunks, embeds, and stores docs locally. The agent then answers from *your* knowledge base before touching the web (hybrid BM25 + vector + rerank retrieval).
+- **Learns documentation**: `klaude learn https://nextjs.org/docs -l nextjs` scrapes, chunks, embeds, and stores docs in a named library. The agent then answers from *your* knowledge base before touching the web (hybrid BM25 + vector + rerank retrieval).
 - **Searches the web privately**: self-hosted SearXNG (70+ engines, no keys, no limits) + a clean-markdown fetch cascade.
 - **Git-native**: never touches your branch. Works on `klaude/<task>`, one commit per edit — review everything with `git diff`, or in VS Code's Source Control panel, and revert any single action.
 - **Remembers you**: `klaude remember "we use Tailwind"` — durable facts injected into every session.
@@ -40,11 +40,14 @@ uv run klaude chat  # or: uv tool install --editable apps/cli && klaude chat
 |---|---|
 | `klaude chat` | interactive agent session in the current repo |
 | `klaude ask "…"` | one-shot question, tools enabled |
-| `klaude learn URL -c nextjs` | ingest docs into the knowledge base |
-| `klaude query "…" -c nextjs` | inspect raw retrieval (no LLM) |
+| `klaude learn URL -l nextjs` | ingest docs into a named library |
+| `klaude query "…" -l nextjs` | inspect raw retrieval from a library (no LLM) |
+| `klaude libraries` | list learned libraries |
 | `klaude search "…"` | local web search |
 | `klaude remember "…"` | save a durable fact |
 | `klaude doctor` | verify services, models, config |
+
+`-l` / `--library` is the friendly name for a knowledge bucket. `-c` / `--collection` still works as a compatibility alias.
 
 ## Architecture
 

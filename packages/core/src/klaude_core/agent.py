@@ -10,6 +10,7 @@ typed agent framework.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -18,6 +19,14 @@ from .ollama import Ollama
 from .permissions import PermissionDenied, PermissionGate
 
 ToolFn = Callable[..., str]
+TEXT_TOOL_RE = re.compile(
+    r"<function=(?P<name>[a-zA-Z_][\w-]*)>\s*(?P<body>.*?)</tool_call>",
+    re.DOTALL,
+)
+TEXT_PARAM_RE = re.compile(
+    r"<parameter=(?P<name>[a-zA-Z_][\w-]*)>\s*(?P<value>.*?)(?=<parameter=|$)",
+    re.DOTALL,
+)
 
 
 @dataclass
@@ -45,6 +54,28 @@ class AgentEvent:
 
     kind: str  # "text" | "tool_start" | "tool_result" | "error" | "done"
     payload: dict[str, Any]
+
+
+def _parse_text_tool_calls(content: str, known_tools: set[str]) -> list[dict[str, Any]]:
+    """Accept the text tool-call format some local models emit."""
+    stripped = content.strip()
+    if not stripped or "<function=" not in stripped:
+        return []
+
+    calls: list[dict[str, Any]] = []
+    for match in TEXT_TOOL_RE.finditer(stripped):
+        name = match.group("name")
+        if name not in known_tools:
+            return []
+        args = {
+            param.group("name"): param.group("value").strip()
+            for param in TEXT_PARAM_RE.finditer(match.group("body"))
+        }
+        calls.append({"function": {"name": name, "arguments": args}})
+
+    if not calls:
+        return []
+    return calls
 
 
 class Agent:
@@ -77,15 +108,18 @@ class Agent:
                 return
 
             self.messages.append(msg)
-            tool_calls = msg.get("tool_calls") or []
+            content = msg.get("content", "")
+            tool_calls = msg.get("tool_calls") or _parse_text_tool_calls(
+                content, set(self.tools)
+            )
 
             if not tool_calls:
-                yield AgentEvent("text", {"content": msg.get("content", "")})
+                yield AgentEvent("text", {"content": content})
                 yield AgentEvent("done", {})
                 return
 
-            if msg.get("content"):
-                yield AgentEvent("text", {"content": msg["content"]})
+            if content and msg.get("tool_calls"):
+                yield AgentEvent("text", {"content": content})
 
             for call in tool_calls:
                 fn = call.get("function", {})

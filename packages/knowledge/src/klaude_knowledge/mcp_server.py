@@ -17,18 +17,18 @@ def main() -> None:
 
     @mcp.tool()
     def learn_url(url: str, collection: str) -> str:
-        """Fetch a documentation page and store it in the local knowledge base."""
+        """Fetch a documentation page and store it in a knowledge library."""
         from klaude_web import Web
 
         text = Web(cfg).fetch(url)
         n = kn.learn_text(collection, text, source=url)
-        return f"learned {n} chunks from {url} into '{collection}'"
+        return f"learned {n} chunks from {url} into library '{collection}'"
 
     @mcp.tool()
     def learn_file(path: str, collection: str) -> str:
-        """Index a local text/markdown file into the knowledge base."""
+        """Index a local text/markdown file into a knowledge library."""
         n = kn.learn_file(collection, path)
-        return f"learned {n} chunks from {path} into '{collection}'"
+        return f"learned {n} chunks from {path} into library '{collection}'"
 
     @mcp.tool()
     def query_knowledge(question: str, collection: str = "") -> str:
@@ -37,7 +37,12 @@ def main() -> None:
 
     @mcp.tool()
     def list_collections() -> str:
-        """List knowledge collections."""
+        """List knowledge libraries. Kept for collection-compatible clients."""
+        return "\n".join(kn.store.collections()) or "(none yet)"
+
+    @mcp.tool()
+    def list_libraries() -> str:
+        """List knowledge libraries."""
         return "\n".join(kn.store.collections()) or "(none yet)"
 
     mcp.run()

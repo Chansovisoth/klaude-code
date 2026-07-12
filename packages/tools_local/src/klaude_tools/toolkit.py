@@ -23,6 +23,7 @@ class Workspace:
     def __init__(self, root: Path, auto_commit: bool = True):
         self.root = root.resolve()
         self.auto_commit = auto_commit
+        self.write_enabled = True
 
     # --- helpers ---------------------------------------------------------
     def _jail(self, rel: str) -> Path:
@@ -45,6 +46,7 @@ class Workspace:
         if not self._is_repo():
             return "not a git repo — edits will not be auto-committed"
         if self._git("status", "--porcelain"):
+            self.write_enabled = False
             return (
                 "WORKING TREE IS DIRTY — commit or stash your changes first; "
                 "klaude will not mix its edits with yours"
@@ -57,6 +59,12 @@ class Workspace:
             self._git("switch", "-c", branch)
         return f"working on branch {branch}"
 
+    def _require_write_enabled(self) -> None:
+        if not self.write_enabled:
+            raise PermissionError(
+                "working tree is dirty; commit or stash your changes before AI edits"
+            )
+
     def _commit(self, message: str) -> None:
         if self.auto_commit and self._is_repo():
             self._git("add", "-A")
@@ -68,6 +76,7 @@ class Workspace:
         return text[:MAX_READ] + ("\n...[truncated]" if len(text) > MAX_READ else "")
 
     def write_file(self, path: str, content: str) -> str:
+        self._require_write_enabled()
         p = self._jail(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
@@ -75,6 +84,7 @@ class Workspace:
         return f"wrote {len(content)} chars to {path}"
 
     def edit_file(self, path: str, old_str: str, new_str: str) -> str:
+        self._require_write_enabled()
         p = self._jail(path)
         text = p.read_text()
         n = text.count(old_str)
@@ -119,6 +129,7 @@ class Workspace:
         return self._git("diff", "HEAD~1", "--stat") + "\n\n" + self._git("diff", "HEAD~1")
 
     def git_commit(self, message: str) -> str:
+        self._require_write_enabled()
         self._git("add", "-A")
         return self._git("commit", "-m", message)
 

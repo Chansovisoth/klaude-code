@@ -3,8 +3,9 @@
 Commands:
   klaude chat                 interactive agent session in the current repo
   klaude ask "question"       one-shot question (tools enabled)
-  klaude learn URL|FILE -c X  ingest docs into the knowledge base
-  klaude query "q" [-c X]     hybrid-search the knowledge base
+  klaude learn URL|FILE -l X  ingest docs into a named library
+  klaude query "q" [-l X]     hybrid-search the knowledge base
+  klaude libraries            list learned libraries
   klaude search "q"           local web search (SearXNG)
   klaude remember "fact"      append a durable fact to memory
   klaude doctor               verify every service and model
@@ -179,7 +180,14 @@ def ask(question: str, model: str = typer.Option("", help="override model")):
 @app.command()
 def learn(
     source: str,
-    collection: str = typer.Option(..., "-c", "--collection", help="collection name"),
+    library: str = typer.Option(
+        ...,
+        "-l",
+        "--library",
+        "-c",
+        "--collection",
+        help="library name",
+    ),
 ):
     """Ingest a URL or local file into the knowledge base."""
     from klaude_knowledge import Knowledge
@@ -190,25 +198,55 @@ def learn(
     if source.startswith(("http://", "https://")):
         console.print(f"[dim]fetching {source}...[/]")
         text = Web(cfg).fetch(source)
-        n = kn.learn_text(collection, text, source=source)
+        n = kn.learn_text(library, text, source=source)
     else:
-        n = kn.learn_file(collection, source)
-    console.print(f"[green]learned {n} chunks into '{collection}'[/]")
+        n = kn.learn_file(library, source)
+    console.print(f"[green]learned {n} chunks into library '{library}'[/]")
 
 
 @app.command()
 def query(
     question: str,
-    collection: str = typer.Option("", "-c", "--collection"),
+    library: str = typer.Option(
+        "",
+        "-l",
+        "--library",
+        "-c",
+        "--collection",
+        help="library name; omit to search all",
+    ),
     k: int = typer.Option(6, "-k"),
 ):
     """Hybrid-search the knowledge base (no LLM, raw chunks)."""
     from klaude_knowledge import Knowledge
 
     kn = Knowledge(load_config())
-    for hit in kn.query(question, collection, k):
+    for hit in kn.query(question, library, k):
         src = hit.get("source") or hit.get("collection", "?")
         console.print(Panel(hit["text"][:600], title=src, border_style="dim"))
+
+
+def _print_libraries() -> None:
+    from klaude_knowledge import Knowledge
+
+    names = Knowledge(load_config()).store.collections()
+    if not names:
+        console.print("[dim](none yet)[/]")
+        return
+    for name in names:
+        console.print(name)
+
+
+@app.command()
+def libraries():
+    """List learned knowledge libraries."""
+    _print_libraries()
+
+
+@app.command("collections")
+def collections_alias():
+    """List learned knowledge libraries."""
+    _print_libraries()
 
 
 @app.command()
