@@ -1,0 +1,20 @@
+# Copy to ~/.config/klaude/config.toml and edit. Everything has defaults;
+# an empty file (or no file) works out of the box.
+
+[models]
+# tier = "full"        # lite | standard | full (auto-detected from RAM if unset)
+# [models.override]
+# coder = "qwen3-coder:30b"
+
+[services]
+# ollama_url  = "http://localhost:11434"
+# searxng_url = "http://localhost:8888"
+# crawl4ai_url = "http://localhost:11235"   # uncomment if running the heavy profile
+
+[permissions]
+# run_shell = "ask"    # ask | allow | deny
+# edit_file = "ask"
+
+[agent]
+# max_steps = 20
+# retrieval_k = 6

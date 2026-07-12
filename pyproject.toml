@@ -1,0 +1,37 @@
+[project]
+name = "klaude-code-workspace"
+version = "0.1.0"
+description = "klaude-code: a local-first AI coding agent (Ollama + RAG + web search)"
+requires-python = ">=3.11"
+dependencies = [
+    "klaude-cli",
+]
+
+[tool.uv.workspace]
+members = ["apps/cli", "packages/*"]
+
+[tool.uv.sources]
+klaude-cli = { workspace = true }
+klaude-core = { workspace = true }
+klaude-knowledge = { workspace = true }
+klaude-web = { workspace = true }
+klaude-tools = { workspace = true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

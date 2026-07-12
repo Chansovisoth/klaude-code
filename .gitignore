@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+dist/
+*.egg-info/
+uv.lock
+deploy/searxng/*
+!deploy/searxng/settings.yml
+.env

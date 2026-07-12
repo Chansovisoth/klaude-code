@@ -1,0 +1,22 @@
+# klaude-code SearXNG config.
+# The critical line: "json" in formats — without it every API call returns 403.
+# NOTE: the secret key is NOT set here. It comes from the SEARXNG_SECRET
+# environment variable, injected by docker-compose from the gitignored .env.
+use_default_settings: true
+
+server:
+  limiter: false
+  image_proxy: false
+
+search:
+  formats:
+    - html
+    - json
+
+engines:
+  - name: google
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: bing
+    disabled: false
