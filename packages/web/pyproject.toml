@@ -1,6 +1,6 @@
 [project]
 name = "klaude-web"
-version = "0.1.0"
+version = "0.2.0a1"
 description = "klaude-code web layer: SearXNG search + fetch cascade"
 requires-python = ">=3.11"
 dependencies = ["httpx>=0.27", "trafilatura>=1.9", "klaude-core"]

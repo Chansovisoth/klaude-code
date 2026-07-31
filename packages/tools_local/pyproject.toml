@@ -1,6 +1,6 @@
 [project]
 name = "klaude-tools"
-version = "0.1.0"
+version = "0.2.0a1"
 description = "klaude-code built-in tools: fs, shell, git, edit"
 requires-python = ">=3.11"
 dependencies = ["klaude-core"]

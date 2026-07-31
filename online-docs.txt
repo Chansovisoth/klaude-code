@@ -276,3 +276,1062 @@ uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/performance/ -
 
 # Godot project and scripting best practices.
 uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/best_practices/ -c godot-best-practices
+
+
+# ============================================================
+# PHP
+# ============================================================
+
+# Current PHP manual and standard-library reference.
+uv run klaude learn https://www.php.net/manual/en/ -c php
+
+# PHP language reference.
+uv run klaude learn https://www.php.net/manual/en/langref.php -c php-language
+
+# PHP security guidance.
+uv run klaude learn https://www.php.net/manual/en/security.php -c php-security
+
+
+# ============================================================
+# LARAVEL 13
+# ============================================================
+
+# Current Laravel documentation.
+uv run klaude learn https://laravel.com/docs/13.x -c laravel
+
+# Laravel installation and AI-assisted development.
+uv run klaude learn https://laravel.com/docs/13.x/installation -c laravel-installation
+
+# Laravel request lifecycle and architecture.
+uv run klaude learn https://laravel.com/docs/13.x/lifecycle -c laravel-architecture
+
+# Laravel service container.
+uv run klaude learn https://laravel.com/docs/13.x/container -c laravel-container
+
+# Laravel routing.
+uv run klaude learn https://laravel.com/docs/13.x/routing -c laravel-routing
+
+# Laravel middleware.
+uv run klaude learn https://laravel.com/docs/13.x/middleware -c laravel-middleware
+
+# Laravel controllers.
+uv run klaude learn https://laravel.com/docs/13.x/controllers -c laravel-controllers
+
+# Laravel validation.
+uv run klaude learn https://laravel.com/docs/13.x/validation -c laravel-validation
+
+# Laravel authentication.
+uv run klaude learn https://laravel.com/docs/13.x/authentication -c laravel-authentication
+
+# Laravel authorization.
+uv run klaude learn https://laravel.com/docs/13.x/authorization -c laravel-authorization
+
+# Laravel database fundamentals.
+uv run klaude learn https://laravel.com/docs/13.x/database -c laravel-database
+
+# Laravel query builder.
+uv run klaude learn https://laravel.com/docs/13.x/queries -c laravel-query-builder
+
+# Laravel migrations.
+uv run klaude learn https://laravel.com/docs/13.x/migrations -c laravel-migrations
+
+# Laravel Eloquent ORM.
+uv run klaude learn https://laravel.com/docs/13.x/eloquent -c laravel-eloquent
+
+# Laravel Eloquent relationships.
+uv run klaude learn https://laravel.com/docs/13.x/eloquent-relationships -c laravel-relationships
+
+# Laravel API resources.
+uv run klaude learn https://laravel.com/docs/13.x/eloquent-resources -c laravel-api-resources
+
+# Laravel Blade templates.
+uv run klaude learn https://laravel.com/docs/13.x/blade -c laravel-blade
+
+# Laravel queues.
+uv run klaude learn https://laravel.com/docs/13.x/queues -c laravel-queues
+
+# Laravel cache.
+uv run klaude learn https://laravel.com/docs/13.x/cache -c laravel-cache
+
+# Laravel events.
+uv run klaude learn https://laravel.com/docs/13.x/events -c laravel-events
+
+# Laravel broadcasting.
+uv run klaude learn https://laravel.com/docs/13.x/broadcasting -c laravel-broadcasting
+
+# Laravel filesystem.
+uv run klaude learn https://laravel.com/docs/13.x/filesystem -c laravel-filesystem
+
+# Laravel mail.
+uv run klaude learn https://laravel.com/docs/13.x/mail -c laravel-mail
+
+# Laravel notifications.
+uv run klaude learn https://laravel.com/docs/13.x/notifications -c laravel-notifications
+
+# Laravel scheduling.
+uv run klaude learn https://laravel.com/docs/13.x/scheduling -c laravel-scheduling
+
+# Laravel testing.
+uv run klaude learn https://laravel.com/docs/13.x/testing -c laravel-testing
+
+# Laravel HTTP testing.
+uv run klaude learn https://laravel.com/docs/13.x/http-tests -c laravel-http-testing
+
+# Laravel deployment.
+uv run klaude learn https://laravel.com/docs/13.x/deployment -c laravel-deployment
+
+# Laravel Sanctum.
+uv run klaude learn https://laravel.com/docs/13.x/sanctum -c laravel-sanctum
+
+# Laravel Boost for AI coding agents.
+uv run klaude learn https://laravel.com/docs/13.x/boost -c laravel-boost
+
+# Laravel MCP support.
+uv run klaude learn https://laravel.com/docs/13.x/mcp -c laravel-mcp
+
+# Laravel AI SDK.
+uv run klaude learn https://laravel.com/docs/13.x/ai-sdk -c laravel-ai-sdk
+
+
+# ============================================================
+# COMPOSER — MARKDOWN SOURCES
+# ============================================================
+
+# Composer documentation.
+uv run klaude learn https://getcomposer.org/doc/ -c composer
+
+# Composer command-line reference in Markdown.
+uv run klaude learn https://getcomposer.org/doc/03-cli.md -c composer-cli
+
+# composer.json schema in Markdown.
+uv run klaude learn https://getcomposer.org/doc/04-schema.md -c composer-schema
+
+# Composer repositories in Markdown.
+uv run klaude learn https://getcomposer.org/doc/05-repositories.md -c composer-repositories
+
+# Composer configuration in Markdown.
+uv run klaude learn https://getcomposer.org/doc/06-config.md -c composer-config
+
+
+# ============================================================
+# PYTHON
+# ============================================================
+
+# Current Python documentation.
+uv run klaude learn https://docs.python.org/3/ -c python
+
+# Python tutorial.
+uv run klaude learn https://docs.python.org/3/tutorial/ -c python-tutorial
+
+# Python language reference.
+uv run klaude learn https://docs.python.org/3/reference/ -c python-language
+
+# Python standard library.
+uv run klaude learn https://docs.python.org/3/library/ -c python-standard-library
+
+# Python packaging guide.
+uv run klaude learn https://packaging.python.org/en/latest/ -c python-packaging
+
+
+# ============================================================
+# UV — AI-READY
+# ============================================================
+
+# Official uv AI documentation index.
+uv run klaude learn https://docs.astral.sh/uv/llms.txt -c uv
+
+# uv documentation root.
+uv run klaude learn https://docs.astral.sh/uv/ -c uv-docs
+
+# uv CLI reference.
+uv run klaude learn https://docs.astral.sh/uv/reference/cli/ -c uv-cli
+
+
+# ============================================================
+# FASTAPI
+# ============================================================
+
+# FastAPI documentation.
+uv run klaude learn https://fastapi.tiangolo.com/ -c fastapi
+
+# FastAPI tutorial.
+uv run klaude learn https://fastapi.tiangolo.com/tutorial/ -c fastapi-tutorial
+
+# Advanced FastAPI guide.
+uv run klaude learn https://fastapi.tiangolo.com/advanced/ -c fastapi-advanced
+
+# FastAPI deployment.
+uv run klaude learn https://fastapi.tiangolo.com/deployment/ -c fastapi-deployment
+
+
+# ============================================================
+# PYDANTIC — AI-READY
+# ============================================================
+
+# Official Pydantic AI documentation index.
+uv run klaude learn https://docs.pydantic.dev/latest/llms.txt -c pydantic
+
+# Pydantic documentation.
+uv run klaude learn https://docs.pydantic.dev/latest/ -c pydantic-docs
+
+# Pydantic concepts.
+uv run klaude learn https://docs.pydantic.dev/latest/concepts/ -c pydantic-concepts
+
+# Pydantic API reference.
+uv run klaude learn https://docs.pydantic.dev/latest/api/ -c pydantic-api
+
+
+# ============================================================
+# DJANGO
+# ============================================================
+
+# Current stable Django documentation.
+uv run klaude learn https://docs.djangoproject.com/en/stable/ -c django
+
+# Django tutorial.
+uv run klaude learn https://docs.djangoproject.com/en/stable/intro/ -c django-tutorial
+
+# Django database and model layer.
+uv run klaude learn https://docs.djangoproject.com/en/stable/topics/db/ -c django-database
+
+# Django authentication.
+uv run klaude learn https://docs.djangoproject.com/en/stable/topics/auth/ -c django-authentication
+
+# Django testing.
+uv run klaude learn https://docs.djangoproject.com/en/stable/topics/testing/ -c django-testing
+
+# Django deployment.
+uv run klaude learn https://docs.djangoproject.com/en/stable/howto/deployment/ -c django-deployment
+
+
+# ============================================================
+# FLASK
+# ============================================================
+
+# Current Flask documentation.
+uv run klaude learn https://flask.palletsprojects.com/en/stable/ -c flask
+
+# Flask quickstart.
+uv run klaude learn https://flask.palletsprojects.com/en/stable/quickstart/ -c flask-quickstart
+
+# Flask API reference.
+uv run klaude learn https://flask.palletsprojects.com/en/stable/api/ -c flask-api
+
+# Flask deployment.
+uv run klaude learn https://flask.palletsprojects.com/en/stable/deploying/ -c flask-deployment
+
+
+# ============================================================
+# BUN — AI-READY
+# ============================================================
+
+# Official Bun AI documentation index.
+uv run klaude learn https://bun.sh/llms.txt -c bun
+
+# Bun documentation.
+uv run klaude learn https://bun.com/docs/ -c bun-docs
+
+
+# ============================================================
+# EXPRESS.JS
+# ============================================================
+
+# Express guide.
+uv run klaude learn https://expressjs.com/en/guide/ -c express
+
+# Express API reference.
+uv run klaude learn https://expressjs.com/en/api.html -c express-api
+
+# Express middleware resources.
+uv run klaude learn https://expressjs.com/en/resources/middleware.html -c express-middleware
+
+
+# ============================================================
+# NESTJS
+# ============================================================
+
+# NestJS documentation.
+uv run klaude learn https://docs.nestjs.com/ -c nestjs
+
+# NestJS controllers.
+uv run klaude learn https://docs.nestjs.com/controllers -c nestjs-controllers
+
+# NestJS providers and dependency injection.
+uv run klaude learn https://docs.nestjs.com/providers -c nestjs-providers
+
+# NestJS modules.
+uv run klaude learn https://docs.nestjs.com/modules -c nestjs-modules
+
+# NestJS authentication.
+uv run klaude learn https://docs.nestjs.com/security/authentication -c nestjs-authentication
+
+# NestJS database techniques.
+uv run klaude learn https://docs.nestjs.com/techniques/database -c nestjs-database
+
+# NestJS testing.
+uv run klaude learn https://docs.nestjs.com/fundamentals/testing -c nestjs-testing
+
+
+# ============================================================
+# ASTRO — AI-READY
+# ============================================================
+
+# Official Astro AI documentation index.
+uv run klaude learn https://docs.astro.build/llms.txt -c astro
+
+# Astro documentation.
+uv run klaude learn https://docs.astro.build/en/getting-started/ -c astro-docs
+
+# Astro guides.
+uv run klaude learn https://docs.astro.build/en/guides/ -c astro-guides
+
+# Astro reference.
+uv run klaude learn https://docs.astro.build/en/reference/ -c astro-reference
+
+
+# ============================================================
+# VUE AND NUXT
+# ============================================================
+
+# Vue guide.
+uv run klaude learn https://vuejs.org/guide/ -c vue
+
+# Vue API reference.
+uv run klaude learn https://vuejs.org/api/ -c vue-api
+
+# Vue Router.
+uv run klaude learn https://router.vuejs.org/ -c vue-router
+
+# Pinia state management.
+uv run klaude learn https://pinia.vuejs.org/ -c pinia
+
+# Nuxt documentation.
+uv run klaude learn https://nuxt.com/docs -c nuxt
+
+# Nuxt guide.
+uv run klaude learn https://nuxt.com/docs/guide -c nuxt-guide
+
+# Nuxt API reference.
+uv run klaude learn https://nuxt.com/docs/api -c nuxt-api
+
+
+# ============================================================
+# SVELTE AND SVELTEKIT
+# ============================================================
+
+# Svelte documentation.
+uv run klaude learn https://svelte.dev/docs/svelte/overview -c svelte
+
+# SvelteKit documentation.
+uv run klaude learn https://svelte.dev/docs/kit/introduction -c sveltekit
+
+
+# ============================================================
+# ANGULAR
+# ============================================================
+
+# Angular documentation.
+uv run klaude learn https://angular.dev/overview -c angular
+
+# Angular guides.
+uv run klaude learn https://angular.dev/guide -c angular-guides
+
+# Angular API reference.
+uv run klaude learn https://angular.dev/api -c angular-api
+
+
+# ============================================================
+# REACT NATIVE AND EXPO — AI-READY EXPO
+# ============================================================
+
+# React Native documentation.
+uv run klaude learn https://reactnative.dev/docs/getting-started -c react-native
+
+# React Native components and APIs.
+uv run klaude learn https://reactnative.dev/docs/components-and-apis -c react-native-api
+
+# Official Expo AI documentation index.
+uv run klaude learn https://docs.expo.dev/llms.txt -c expo
+
+# Expo documentation.
+uv run klaude learn https://docs.expo.dev/ -c expo-docs
+
+
+# ============================================================
+# FLUTTER AND DART — AI-READY FLUTTER
+# ============================================================
+
+# Official Flutter AI documentation index.
+uv run klaude learn https://docs.flutter.dev/llms.txt -c flutter
+
+# Flutter documentation.
+uv run klaude learn https://docs.flutter.dev/ -c flutter-docs
+
+# Flutter cookbook.
+uv run klaude learn https://docs.flutter.dev/cookbook -c flutter-cookbook
+
+# Dart language documentation.
+uv run klaude learn https://dart.dev/language -c dart
+
+# Dart API reference.
+uv run klaude learn https://api.dart.dev/ -c dart-api
+
+
+# ============================================================
+# SUPABASE — AI-READY
+# ============================================================
+
+# Official Supabase AI documentation index.
+uv run klaude learn https://supabase.com/llms.txt -c supabase
+
+# Supabase documentation.
+uv run klaude learn https://supabase.com/docs -c supabase-docs
+
+# Supabase authentication.
+uv run klaude learn https://supabase.com/docs/guides/auth -c supabase-auth
+
+# Supabase database.
+uv run klaude learn https://supabase.com/docs/guides/database -c supabase-database
+
+# Supabase storage.
+uv run klaude learn https://supabase.com/docs/guides/storage -c supabase-storage
+
+
+# ============================================================
+# STRIPE — AI-READY
+# ============================================================
+
+# Official Stripe AI documentation index.
+uv run klaude learn https://docs.stripe.com/llms.txt -c stripe
+
+# Stripe documentation.
+uv run klaude learn https://docs.stripe.com/ -c stripe-docs
+
+# Stripe API reference.
+uv run klaude learn https://docs.stripe.com/api -c stripe-api
+
+# Stripe payments.
+uv run klaude learn https://docs.stripe.com/payments -c stripe-payments
+
+# Stripe webhooks.
+uv run klaude learn https://docs.stripe.com/webhooks -c stripe-webhooks
+
+
+# ============================================================
+# DATABASES AND ORMS
+# ============================================================
+
+# MySQL 8.4 LTS reference manual.
+uv run klaude learn https://dev.mysql.com/doc/refman/8.4/en/ -c mysql
+
+# MariaDB documentation.
+uv run klaude learn https://mariadb.com/docs/ -c mariadb
+
+# SQLite documentation.
+uv run klaude learn https://www.sqlite.org/docs.html -c sqlite
+
+# Redis documentation.
+uv run klaude learn https://redis.io/docs/latest/ -c redis
+
+# MongoDB server manual.
+uv run klaude learn https://www.mongodb.com/docs/manual/ -c mongodb
+
+# Prisma ORM.
+uv run klaude learn https://www.prisma.io/docs/orm -c prisma
+
+# Prisma Client.
+uv run klaude learn https://www.prisma.io/docs/orm/prisma-client -c prisma-client
+
+# Prisma migrations.
+uv run klaude learn https://www.prisma.io/docs/orm/prisma-migrate -c prisma-migrate
+
+# Drizzle ORM.
+uv run klaude learn https://orm.drizzle.team/docs/overview -c drizzle-orm
+
+
+# ============================================================
+# DOCKER — AI-READY
+# ============================================================
+
+# Official Docker AI documentation index.
+uv run klaude learn https://docs.docker.com/llms.txt -c docker
+
+# Docker Engine.
+uv run klaude learn https://docs.docker.com/engine/ -c docker-engine
+
+# Dockerfile reference.
+uv run klaude learn https://docs.docker.com/reference/dockerfile/ -c dockerfile
+
+# Docker Compose.
+uv run klaude learn https://docs.docker.com/compose/ -c docker-compose
+
+
+# ============================================================
+# KUBERNETES
+# ============================================================
+
+# Kubernetes documentation.
+uv run klaude learn https://kubernetes.io/docs/home/ -c kubernetes
+
+# Kubernetes concepts.
+uv run klaude learn https://kubernetes.io/docs/concepts/ -c kubernetes-concepts
+
+# Kubernetes tasks.
+uv run klaude learn https://kubernetes.io/docs/tasks/ -c kubernetes-tasks
+
+# Kubernetes reference.
+uv run klaude learn https://kubernetes.io/docs/reference/ -c kubernetes-reference
+
+
+# ============================================================
+# CLOUDFLARE — AI-READY
+# ============================================================
+
+# Official Cloudflare AI documentation index.
+uv run klaude learn https://developers.cloudflare.com/llms.txt -c cloudflare
+
+# Cloudflare Workers.
+uv run klaude learn https://developers.cloudflare.com/workers/ -c cloudflare-workers
+
+# Cloudflare Zero Trust.
+uv run klaude learn https://developers.cloudflare.com/cloudflare-one/ -c cloudflare-zero-trust
+
+# Cloudflare DNS.
+uv run klaude learn https://developers.cloudflare.com/dns/ -c cloudflare-dns
+
+# Cloudflare R2.
+uv run klaude learn https://developers.cloudflare.com/r2/ -c cloudflare-r2
+
+# Cloudflare D1.
+uv run klaude learn https://developers.cloudflare.com/d1/ -c cloudflare-d1
+
+
+# ============================================================
+# WEB SERVERS
+# ============================================================
+
+# NGINX documentation.
+uv run klaude learn https://nginx.org/en/docs/ -c nginx
+
+# NGINX reverse proxy guide.
+uv run klaude learn https://docs.nginx.com/nginx/admin-guide/web-server/reverse-proxy/ -c nginx-reverse-proxy
+
+# Apache HTTP Server 2.4 documentation.
+uv run klaude learn https://httpd.apache.org/docs/2.4/ -c apache-httpd
+
+
+# ============================================================
+# GIT AND GITHUB
+# ============================================================
+
+# Git reference documentation.
+uv run klaude learn https://git-scm.com/docs -c git
+
+# Pro Git book.
+uv run klaude learn https://git-scm.com/book/en/v2 -c git-book
+
+# GitHub Actions documentation.
+uv run klaude learn https://docs.github.com/en/actions -c github-actions
+
+# GitHub REST API.
+uv run klaude learn https://docs.github.com/en/rest -c github-api
+
+# GitHub security documentation.
+uv run klaude learn https://docs.github.com/en/code-security -c github-security
+
+
+# ============================================================
+# TERRAFORM AND ANSIBLE
+# ============================================================
+
+# Terraform documentation.
+uv run klaude learn https://developer.hashicorp.com/terraform/docs -c terraform
+
+# Terraform language.
+uv run klaude learn https://developer.hashicorp.com/terraform/language -c terraform-language
+
+# Ansible documentation.
+uv run klaude learn https://docs.ansible.com/ansible/latest/ -c ansible
+
+# Ansible playbooks.
+uv run klaude learn https://docs.ansible.com/ansible/latest/playbook_guide/index.html -c ansible-playbooks
+
+
+# ============================================================
+# TESTING
+# ============================================================
+
+# Current PHPUnit documentation.
+uv run klaude learn https://docs.phpunit.de/en/current/ -c phpunit
+
+# Pest PHP documentation.
+uv run klaude learn https://pestphp.com/docs/installation -c pest
+
+# Vitest documentation.
+uv run klaude learn https://vitest.dev/guide/ -c vitest
+
+# Jest documentation.
+uv run klaude learn https://jestjs.io/docs/getting-started -c jest
+
+# Playwright documentation.
+uv run klaude learn https://playwright.dev/docs/intro -c playwright
+
+# Cypress documentation.
+uv run klaude learn https://docs.cypress.io/ -c cypress
+
+# pytest documentation.
+uv run klaude learn https://docs.pytest.org/en/stable/ -c pytest
+
+
+# ============================================================
+# LOCAL AI AND MODEL RUNTIMES
+# ============================================================
+
+# Ollama documentation.
+uv run klaude learn https://docs.ollama.com/ -c ollama
+
+# Ollama API reference.
+uv run klaude learn https://docs.ollama.com/api/introduction -c ollama-api
+
+# Ollama Modelfile reference.
+uv run klaude learn https://docs.ollama.com/modelfile -c ollama-modelfile
+
+# llama.cpp repository documentation.
+uv run klaude learn https://github.com/ggml-org/llama.cpp -c llama-cpp
+
+# vLLM documentation.
+uv run klaude learn https://docs.vllm.ai/en/latest/ -c vllm
+
+# Open WebUI documentation.
+uv run klaude learn https://docs.openwebui.com/ -c open-webui
+
+# SGLang documentation.
+uv run klaude learn https://docs.sglang.ai/ -c sglang
+
+
+# ============================================================
+# AI DEVELOPMENT AND RAG TOOLS
+# ============================================================
+
+# Hugging Face documentation.
+uv run klaude learn https://huggingface.co/docs -c hugging-face
+
+# Transformers documentation.
+uv run klaude learn https://huggingface.co/docs/transformers/index -c transformers
+
+# Datasets documentation.
+uv run klaude learn https://huggingface.co/docs/datasets/index -c huggingface-datasets
+
+# Tokenizers documentation.
+uv run klaude learn https://huggingface.co/docs/tokenizers/index -c huggingface-tokenizers
+
+# Gradio documentation.
+uv run klaude learn https://www.gradio.app/docs -c gradio
+
+# LangChain Python documentation.
+uv run klaude learn https://python.langchain.com/docs/ -c langchain
+
+# LangGraph documentation.
+uv run klaude learn https://langchain-ai.github.io/langgraph/ -c langgraph
+
+# LlamaIndex documentation.
+uv run klaude learn https://docs.llamaindex.ai/en/stable/ -c llamaindex
+
+# Model Context Protocol specification.
+uv run klaude learn https://modelcontextprotocol.io/docs/ -c mcp
+
+# Chroma documentation.
+uv run klaude learn https://docs.trychroma.com/ -c chroma
+
+# Qdrant documentation.
+uv run klaude learn https://qdrant.tech/documentation/ -c qdrant
+
+# Weaviate documentation.
+uv run klaude learn https://docs.weaviate.io/weaviate -c weaviate
+
+# Milvus documentation.
+uv run klaude learn https://milvus.io/docs -c milvus
+
+
+# ============================================================
+# CODE EDITORS AND IDES
+# ============================================================
+
+# Visual Studio Code documentation.
+uv run klaude learn https://code.visualstudio.com/docs -c vscode
+
+# VS Code command-line interface.
+uv run klaude learn https://code.visualstudio.com/docs/editor/command-line -c vscode-cli
+
+# VS Code extension development.
+uv run klaude learn https://code.visualstudio.com/api -c vscode-extensions
+
+# JetBrains IDE documentation.
+uv run klaude learn https://www.jetbrains.com/help/ -c jetbrains
+
+# Neovim documentation.
+uv run klaude learn https://neovim.io/doc/user/ -c neovim
+
+# Vim help documentation.
+uv run klaude learn https://vimhelp.org/ -c vim
+
+
+# ============================================================
+# TERMINAL AND SHELL TOOLS
+# ============================================================
+
+# GNU Bash manual.
+uv run klaude learn https://www.gnu.org/software/bash/manual/ -c bash
+
+# Zsh documentation.
+uv run klaude learn https://zsh.sourceforge.io/Doc/ -c zsh
+
+# Fish shell documentation.
+uv run klaude learn https://fishshell.com/docs/current/ -c fish-shell
+
+# PowerShell documentation.
+uv run klaude learn https://learn.microsoft.com/en-us/powershell/ -c powershell
+
+# tmux manual.
+uv run klaude learn https://man7.org/linux/man-pages/man1/tmux.1.html -c tmux
+
+# GNU Screen manual.
+uv run klaude learn https://www.gnu.org/software/screen/manual/screen.html -c gnu-screen
+
+# Starship prompt documentation.
+uv run klaude learn https://starship.rs/guide/ -c starship
+
+
+# ============================================================
+# COMMAND-LINE UTILITIES
+# ============================================================
+
+# curl documentation.
+uv run klaude learn https://curl.se/docs/ -c curl
+
+# wget manual.
+uv run klaude learn https://www.gnu.org/software/wget/manual/ -c wget
+
+# jq manual.
+uv run klaude learn https://jqlang.github.io/jq/manual/ -c jq
+
+# yq documentation.
+uv run klaude learn https://mikefarah.gitbook.io/yq/ -c yq
+
+# ripgrep guide.
+uv run klaude learn https://github.com/BurntSushi/ripgrep/blob/master/GUIDE.md -c ripgrep
+
+# fd documentation.
+uv run klaude learn https://github.com/sharkdp/fd -c fd
+
+# fzf documentation.
+uv run klaude learn https://github.com/junegunn/fzf -c fzf
+
+# bat documentation.
+uv run klaude learn https://github.com/sharkdp/bat -c bat
+
+# GNU coreutils manual.
+uv run klaude learn https://www.gnu.org/software/coreutils/manual/ -c coreutils
+
+
+# ============================================================
+# LINUX AND SYSTEM ADMINISTRATION
+# ============================================================
+
+# Ubuntu Server documentation.
+uv run klaude learn https://documentation.ubuntu.com/server/ -c ubuntu-server
+
+# Arch Linux Wiki.
+uv run klaude learn https://wiki.archlinux.org/ -c arch-linux
+
+# systemd documentation.
+uv run klaude learn https://systemd.io/ -c systemd
+
+# systemd manual pages.
+uv run klaude learn https://www.freedesktop.org/software/systemd/man/latest/ -c systemd-manpages
+
+# Linux manual pages.
+uv run klaude learn https://man7.org/linux/man-pages/ -c linux-manpages
+
+# OpenSSH manual.
+uv run klaude learn https://www.openssh.com/manual.html -c openssh
+
+# rsync documentation.
+uv run klaude learn https://rsync.samba.org/documentation.html -c rsync
+
+# cron manual.
+uv run klaude learn https://man7.org/linux/man-pages/man5/crontab.5.html -c cron
+
+
+# ============================================================
+# PACKAGE MANAGERS
+# ============================================================
+
+# npm documentation.
+uv run klaude learn https://docs.npmjs.com/ -c npm
+
+# pnpm documentation.
+uv run klaude learn https://pnpm.io/ -c pnpm
+
+# Yarn documentation.
+uv run klaude learn https://yarnpkg.com/getting-started -c yarn
+
+# Homebrew documentation.
+uv run klaude learn https://docs.brew.sh/ -c homebrew
+
+# pip documentation.
+uv run klaude learn https://pip.pypa.io/en/stable/ -c pip
+
+# pipx documentation.
+uv run klaude learn https://pipx.pypa.io/stable/ -c pipx
+
+# APT user guide.
+uv run klaude learn https://www.debian.org/doc/manuals/debian-reference/ch02.en.html -c apt
+
+# Snap documentation.
+uv run klaude learn https://snapcraft.io/docs -c snap
+
+# Flatpak documentation.
+uv run klaude learn https://docs.flatpak.org/en/latest/ -c flatpak
+
+
+# ============================================================
+# BUILD SYSTEMS AND MONOREPOS
+# ============================================================
+
+# webpack documentation.
+uv run klaude learn https://webpack.js.org/concepts/ -c webpack
+
+# Rollup documentation.
+uv run klaude learn https://rollupjs.org/ -c rollup
+
+# esbuild documentation.
+uv run klaude learn https://esbuild.github.io/ -c esbuild
+
+# Turborepo documentation.
+uv run klaude learn https://turbo.build/repo/docs -c turborepo
+
+# Nx documentation.
+uv run klaude learn https://nx.dev/docs -c nx
+
+# Make manual.
+uv run klaude learn https://www.gnu.org/software/make/manual/ -c make
+
+# Ninja build system manual.
+uv run klaude learn https://ninja-build.org/manual.html -c ninja
+
+
+# ============================================================
+# API DEVELOPMENT AND TESTING TOOLS
+# ============================================================
+
+# Postman documentation.
+uv run klaude learn https://learning.postman.com/docs/ -c postman
+
+# Bruno documentation.
+uv run klaude learn https://docs.usebruno.com/ -c bruno
+
+# Insomnia documentation.
+uv run klaude learn https://developer.konghq.com/insomnia/ -c insomnia
+
+# OpenAPI specification.
+uv run klaude learn https://spec.openapis.org/oas/latest.html -c openapi
+
+# Swagger documentation.
+uv run klaude learn https://swagger.io/docs/ -c swagger
+
+# GraphQL documentation.
+uv run klaude learn https://graphql.org/learn/ -c graphql
+
+# GraphQL specification.
+uv run klaude learn https://spec.graphql.org/ -c graphql-specification
+
+# gRPC documentation.
+uv run klaude learn https://grpc.io/docs/ -c grpc
+
+
+# ============================================================
+# DATABASE ADMINISTRATION TOOLS
+# ============================================================
+
+# DBeaver documentation.
+uv run klaude learn https://dbeaver.com/docs/dbeaver/ -c dbeaver
+
+# pgAdmin documentation.
+uv run klaude learn https://www.pgadmin.org/docs/ -c pgadmin
+
+# phpMyAdmin documentation.
+uv run klaude learn https://docs.phpmyadmin.net/en/latest/ -c phpmyadmin
+
+# Adminer documentation.
+uv run klaude learn https://www.adminer.org/en/ -c adminer
+
+
+# ============================================================
+# OBSERVABILITY AND MONITORING
+# ============================================================
+
+# Grafana documentation.
+uv run klaude learn https://grafana.com/docs/grafana/latest/ -c grafana
+
+# Prometheus documentation.
+uv run klaude learn https://prometheus.io/docs/ -c prometheus
+
+# Grafana Loki documentation.
+uv run klaude learn https://grafana.com/docs/loki/latest/ -c loki
+
+# Grafana Tempo documentation.
+uv run klaude learn https://grafana.com/docs/tempo/latest/ -c tempo
+
+# OpenTelemetry documentation.
+uv run klaude learn https://opentelemetry.io/docs/ -c opentelemetry
+
+# Sentry documentation.
+uv run klaude learn https://docs.sentry.io/ -c sentry
+
+# Elastic documentation.
+uv run klaude learn https://www.elastic.co/docs -c elastic
+
+# Kibana documentation.
+uv run klaude learn https://www.elastic.co/docs/explore-analyze/visualize -c kibana
+
+
+# ============================================================
+# CI CD AND GITOPS
+# ============================================================
+
+# GitLab CI/CD documentation.
+uv run klaude learn https://docs.gitlab.com/ci/ -c gitlab-ci
+
+# Jenkins documentation.
+uv run klaude learn https://www.jenkins.io/doc/ -c jenkins
+
+# CircleCI documentation.
+uv run klaude learn https://circleci.com/docs/ -c circleci
+
+# Argo CD documentation.
+uv run klaude learn https://argo-cd.readthedocs.io/en/stable/ -c argocd
+
+# Flux documentation.
+uv run klaude learn https://fluxcd.io/flux/ -c flux
+
+# Tekton documentation.
+uv run klaude learn https://tekton.dev/docs/ -c tekton
+
+
+# ============================================================
+# NETWORKING AND PRIVATE ACCESS
+# ============================================================
+
+# Tailscale documentation.
+uv run klaude learn https://tailscale.com/kb -c tailscale
+
+# WireGuard documentation.
+uv run klaude learn https://www.wireguard.com/quickstart/ -c wireguard
+
+# Cloudflare Tunnel documentation.
+uv run klaude learn https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/ -c cloudflare-tunnel
+
+# Caddy documentation.
+uv run klaude learn https://caddyserver.com/docs/ -c caddy
+
+# Traefik documentation.
+uv run klaude learn https://doc.traefik.io/traefik/ -c traefik
+
+# HAProxy documentation.
+uv run klaude learn https://www.haproxy.com/documentation/haproxy-configuration-manual/latest/ -c haproxy
+
+
+# ============================================================
+# SECURITY TOOLS AND STANDARDS
+# ============================================================
+
+# OWASP Top Ten.
+uv run klaude learn https://owasp.org/www-project-top-ten/ -c owasp-top-ten
+
+# OWASP Cheat Sheet Series.
+uv run klaude learn https://cheatsheetseries.owasp.org/ -c owasp-cheatsheets
+
+# Let's Encrypt documentation.
+uv run klaude learn https://letsencrypt.org/docs/ -c lets-encrypt
+
+# Certbot documentation.
+uv run klaude learn https://eff-certbot.readthedocs.io/en/stable/ -c certbot
+
+# Trivy documentation.
+uv run klaude learn https://trivy.dev/latest/docs/ -c trivy
+
+# Semgrep documentation.
+uv run klaude learn https://semgrep.dev/docs/ -c semgrep
+
+# Nmap reference guide.
+uv run klaude learn https://nmap.org/book/man.html -c nmap
+
+# fail2ban documentation.
+uv run klaude learn https://github.com/fail2ban/fail2ban/wiki -c fail2ban
+
+
+# ============================================================
+# VIRTUALIZATION AND CONTAINERS
+# ============================================================
+
+# Proxmox VE documentation.
+uv run klaude learn https://pve.proxmox.com/pve-docs/ -c proxmox
+
+# QEMU documentation.
+uv run klaude learn https://www.qemu.org/docs/master/ -c qemu
+
+# libvirt documentation.
+uv run klaude learn https://libvirt.org/docs.html -c libvirt
+
+# Incus documentation.
+uv run klaude learn https://linuxcontainers.org/incus/docs/main/ -c incus
+
+# Podman documentation.
+uv run klaude learn https://docs.podman.io/en/latest/ -c podman
+
+# Vagrant documentation.
+uv run klaude learn https://developer.hashicorp.com/vagrant/docs -c vagrant
+
+
+# ============================================================
+# CLOUD COMMAND-LINE TOOLS
+# ============================================================
+
+# AWS CLI documentation.
+uv run klaude learn https://docs.aws.amazon.com/cli/latest/userguide/ -c aws-cli
+
+# Google Cloud CLI documentation.
+uv run klaude learn https://cloud.google.com/sdk/docs -c gcloud-cli
+
+# Azure CLI documentation.
+uv run klaude learn https://learn.microsoft.com/en-us/cli/azure/ -c azure-cli
+
+# DigitalOcean CLI documentation.
+uv run klaude learn https://docs.digitalocean.com/reference/doctl/ -c doctl
+
+# Cloudflare Wrangler documentation.
+uv run klaude learn https://developers.cloudflare.com/workers/wrangler/ -c wrangler
+
+
+# ============================================================
+# DOCUMENTATION AND DIAGRAMMING
+# ============================================================
+
+# Markdown guide.
+uv run klaude learn https://www.markdownguide.org/ -c markdown
+
+# Mermaid documentation.
+uv run klaude learn https://mermaid.js.org/intro/ -c mermaid
+
+# PlantUML documentation.
+uv run klaude learn https://plantuml.com/ -c plantuml
+
+# Docusaurus documentation.
+uv run klaude learn https://docusaurus.io/docs -c docusaurus
+
+# MkDocs documentation.
+uv run klaude learn https://www.mkdocs.org/user-guide/ -c mkdocs
+
+# Material for MkDocs documentation.
+uv run klaude learn https://squidfunk.github.io/mkdocs-material/ -c mkdocs-material
