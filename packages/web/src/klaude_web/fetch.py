@@ -7,6 +7,9 @@ pure-Python HTML fallback.
 
 from __future__ import annotations
 
+from html import unescape
+from html.parser import HTMLParser
+
 import httpx
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) klaude-code/0.1 (+local research agent)"
@@ -18,6 +21,34 @@ TEXT_CONTENT_TYPES = {
     "text/plain",
     "text/xml",
 }
+
+
+class _MetadataParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.in_title = False
+        self.title_parts: list[str] = []
+        self.meta: dict[str, list[str]] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() == "title":
+            self.in_title = True
+            return
+        if tag.lower() != "meta":
+            return
+        attr_map = {key.lower(): value or "" for key, value in attrs}
+        key = (attr_map.get("property") or attr_map.get("name") or "").lower()
+        content = attr_map.get("content", "").strip()
+        if key and content:
+            self.meta.setdefault(key, []).append(unescape(content))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "title":
+            self.in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self.in_title:
+            self.title_parts.append(data)
 
 
 def _content_type(headers: httpx.Headers) -> str:
@@ -46,9 +77,45 @@ def _direct_text_fetch(url: str) -> str | None:
     return text
 
 
-def _crawl4ai(base_url: str, url: str) -> str:
+def _html_metadata_markdown(html: str) -> str:
+    parser = _MetadataParser()
+    parser.feed(html)
+    title = " ".join(" ".join(parser.title_parts).split())
+    title = next(iter(parser.meta.get("og:title", [])), title)
+    descriptions = []
+    for key in ("og:description", "description", "twitter:description"):
+        for value in parser.meta.get(key, []):
+            normalized = " ".join(value.split())
+            if normalized and normalized not in descriptions:
+                descriptions.append(normalized)
+    tags = []
+    for key in ("og:video:tag", "article:tag"):
+        for value in parser.meta.get(key, []):
+            normalized = " ".join(value.split())
+            if normalized and normalized not in tags:
+                tags.append(normalized)
+
+    lines = []
+    if title:
+        lines.append(f"# {title}")
+    if descriptions:
+        lines.append("Description:")
+        lines.extend(descriptions)
+    if tags:
+        lines.append("Tags: " + ", ".join(tags[:20]))
+    return "\n\n".join(lines)
+
+
+def crawl4ai_headers(api_key: str = "") -> dict[str, str]:
+    if not api_key:
+        return {}
+    return {"Authorization": f"Bearer {api_key}", "X-API-Key": api_key}
+
+
+def _crawl4ai(base_url: str, url: str, api_key: str = "") -> str:
     r = httpx.post(
         f"{base_url.rstrip('/')}/md",
+        headers=crawl4ai_headers(api_key),
         json={"url": url, "f": "fit"},
         timeout=60,
     )
@@ -70,6 +137,7 @@ def _trafilatura(url: str) -> str:
         follow_redirects=True,
     )
     r.raise_for_status()
+    metadata = _html_metadata_markdown(r.text)
     text = trafilatura.extract(
         r.text,
         output_format="markdown",
@@ -77,12 +145,16 @@ def _trafilatura(url: str) -> str:
         include_links=True,
         include_tables=True,
     )
+    if metadata and text and text.strip():
+        return f"{metadata}\n\n{text.strip()}"
+    if metadata:
+        return metadata
     if not text or not text.strip():
         raise RuntimeError("trafilatura extracted no content")
     return text.strip()
 
 
-def fetch_page(url: str, crawl4ai_url: str = "") -> str:
+def fetch_page(url: str, crawl4ai_url: str = "", crawl4ai_api_key: str = "") -> str:
     errors: list[str] = []
     try:
         direct_text = _direct_text_fetch(url)
@@ -92,7 +164,7 @@ def fetch_page(url: str, crawl4ai_url: str = "") -> str:
         errors.append(f"direct text: {e}")
     if crawl4ai_url:
         try:
-            return _crawl4ai(crawl4ai_url, url)
+            return _crawl4ai(crawl4ai_url, url, crawl4ai_api_key)
         except Exception as e:
             errors.append(f"crawl4ai: {e}")
     try:

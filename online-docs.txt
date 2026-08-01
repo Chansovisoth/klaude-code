@@ -474,8 +474,8 @@ uv run klaude learn https://docs.pydantic.dev/latest/llms.txt -c pydantic
 # Pydantic documentation.
 uv run klaude learn https://docs.pydantic.dev/latest/ -c pydantic-docs
 
-# Pydantic concepts.
-uv run klaude learn https://docs.pydantic.dev/latest/concepts/ -c pydantic-concepts
+# Pydantic concepts: models.
+uv run klaude learn https://docs.pydantic.dev/latest/concepts/models/ -c pydantic-concepts
 
 # Pydantic API reference.
 uv run klaude learn https://docs.pydantic.dev/latest/api/ -c pydantic-api
@@ -1335,3 +1335,1745 @@ uv run klaude learn https://www.mkdocs.org/user-guide/ -c mkdocs
 
 # Material for MkDocs documentation.
 uv run klaude learn https://squidfunk.github.io/mkdocs-material/ -c mkdocs-material
+
+
+# ============================================================
+# C++ — CURRENT STANDARD AND IMPORTANT VERSIONS
+# ============================================================
+
+# C++ does not use an LTS model. C++23 is the current published ISO standard.
+uv run klaude learn https://isocpp.org/std/the-standard -c cpp-standard-current
+
+# ISO C++ status, including in-progress C++26 work.
+uv run klaude learn https://isocpp.org/std/status -c cpp-standard-status
+
+# General C++ reference.
+uv run klaude learn https://en.cppreference.com/w/cpp -c cpp
+
+# C++ language reference.
+uv run klaude learn https://en.cppreference.com/w/cpp/language -c cpp-language
+
+# C++ standard library reference.
+uv run klaude learn https://en.cppreference.com/w/cpp/standard_library -c cpp-standard-library
+
+# C++23 current-standard features.
+uv run klaude learn https://en.cppreference.com/w/cpp/23 -c cpp23
+
+# C++20 important production baseline.
+uv run klaude learn https://en.cppreference.com/w/cpp/20 -c cpp20
+
+# C++17 common legacy production baseline.
+uv run klaude learn https://en.cppreference.com/w/cpp/17 -c cpp17
+
+# C++ Core Guidelines.
+uv run klaude learn https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines -c cpp-core-guidelines
+
+
+# ============================================================
+# C — CURRENT STANDARD AND IMPORTANT VERSIONS
+# ============================================================
+
+# C does not use an LTS model. C23 is the current published ISO standard.
+uv run klaude learn https://www.open-std.org/jtc1/sc22/wg14/ -c c-standard-current
+
+# Official C standard project status for C23, C17, C11, and C2y.
+uv run klaude learn https://www.open-std.org/jtc1/sc22/wg14/www/projects.html -c c-standard-status
+
+# General C reference.
+uv run klaude learn https://en.cppreference.com/w/c -c c
+
+# C language reference.
+uv run klaude learn https://en.cppreference.com/w/c/language -c c-language
+
+# C standard library reference.
+uv run klaude learn https://en.cppreference.com/w/c/header -c c-standard-library
+
+# C23 current-standard features.
+uv run klaude learn https://en.cppreference.com/w/c/23 -c c23
+
+# C17 important stable production baseline.
+uv run klaude learn https://en.cppreference.com/w/c/17 -c c17
+
+# C11 common embedded and systems baseline.
+uv run klaude learn https://en.cppreference.com/w/c/11 -c c11
+
+
+# ============================================================
+# C AND C++ COMPILERS AND STANDARD LIBRARIES
+# ============================================================
+
+# Latest GCC manuals.
+uv run klaude learn https://gcc.gnu.org/onlinedocs/ -c gcc
+
+# GCC C standards support, including C23 and experimental C2y.
+uv run klaude learn https://gcc.gnu.org/projects/c-status.html -c gcc-c-standards
+
+# GCC C++ standards support.
+uv run klaude learn https://gcc.gnu.org/projects/cxx-status.html -c gcc-cpp-standards
+
+# GCC C language options.
+uv run klaude learn https://gcc.gnu.org/onlinedocs/gcc/C-Dialect-Options.html -c gcc-c-options
+
+# GCC C++ language options.
+uv run klaude learn https://gcc.gnu.org/onlinedocs/gcc/C_002b_002b-Dialect-Options.html -c gcc-cpp-options
+
+# GNU libstdc++ documentation.
+uv run klaude learn https://gcc.gnu.org/onlinedocs/libstdc++/ -c libstdcpp
+
+# Clang compiler documentation.
+uv run klaude learn https://clang.llvm.org/docs/ -c clang
+
+# Clang compiler user's manual.
+uv run klaude learn https://clang.llvm.org/docs/UsersManual.html -c clang-user-manual
+
+# Clang C++ standards support.
+uv run klaude learn https://clang.llvm.org/cxx_status.html -c clang-cpp-standards
+
+# LLVM libc++ standard library.
+uv run klaude learn https://libcxx.llvm.org/ -c libcxx
+
+# Microsoft C, C++, and assembler documentation.
+uv run klaude learn https://learn.microsoft.com/en-us/cpp/ -c msvc
+
+# Microsoft C++ language reference.
+uv run klaude learn https://learn.microsoft.com/en-us/cpp/cpp/cpp-language-reference -c msvc-cpp-language
+
+# Microsoft C language reference.
+uv run klaude learn https://learn.microsoft.com/en-us/cpp/c-language/c-language-reference -c msvc-c-language
+
+# Microsoft C++ standard library.
+uv run klaude learn https://learn.microsoft.com/en-us/cpp/standard-library/cpp-standard-library-reference -c msvc-cpp-standard-library
+
+# Microsoft C runtime library.
+uv run klaude learn https://learn.microsoft.com/en-us/cpp/c-runtime-library/c-run-time-library-reference -c msvc-c-runtime
+
+# MSVC compiler options.
+uv run klaude learn https://learn.microsoft.com/en-us/cpp/build/reference/compiler-options -c msvc-compiler
+
+
+# ============================================================
+# C AND C++ ANALYSIS, FORMATTING, AND SANITIZERS
+# ============================================================
+
+# Clang-Tidy static analysis.
+uv run klaude learn https://clang.llvm.org/extra/clang-tidy/ -c clang-tidy
+
+# Clang-Format.
+uv run klaude learn https://clang.llvm.org/docs/ClangFormat.html -c clang-format
+
+# AddressSanitizer.
+uv run klaude learn https://clang.llvm.org/docs/AddressSanitizer.html -c address-sanitizer
+
+# UndefinedBehaviorSanitizer.
+uv run klaude learn https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html -c undefined-behavior-sanitizer
+
+# ThreadSanitizer.
+uv run klaude learn https://clang.llvm.org/docs/ThreadSanitizer.html -c thread-sanitizer
+
+
+# ============================================================
+# C AND C++ BUILD SYSTEMS AND PACKAGE MANAGERS
+# ============================================================
+
+# Current CMake documentation.
+uv run klaude learn https://cmake.org/cmake/help/latest/ -c cmake
+
+# CMake tutorial.
+uv run klaude learn https://cmake.org/cmake/help/latest/guide/tutorial/ -c cmake-tutorial
+
+# CMake CLI manual.
+uv run klaude learn https://cmake.org/cmake/help/latest/manual/cmake.1.html -c cmake-cli
+
+# CMake presets.
+uv run klaude learn https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html -c cmake-presets
+
+# CTest.
+uv run klaude learn https://cmake.org/cmake/help/latest/manual/ctest.1.html -c ctest
+
+# CPack.
+uv run klaude learn https://cmake.org/cmake/help/latest/manual/cpack.1.html -c cpack
+
+# Meson build system.
+uv run klaude learn https://mesonbuild.com/Manual.html -c meson
+
+# Ninja build system.
+
+# Current Conan 2 documentation.
+uv run klaude learn https://docs.conan.io/2/ -c conan
+
+# Conan 2 tutorial.
+uv run klaude learn https://docs.conan.io/2/tutorial.html -c conan-tutorial
+
+# Microsoft vcpkg.
+uv run klaude learn https://learn.microsoft.com/en-us/vcpkg/ -c vcpkg
+
+
+# ============================================================
+# C AND C++ DEBUGGING AND PROFILING
+# ============================================================
+
+# GNU GDB.
+uv run klaude learn https://sourceware.org/gdb/current/onlinedocs/gdb.html -c gdb
+
+# LLDB tutorial.
+uv run klaude learn https://lldb.llvm.org/use/tutorial.html -c lldb
+
+# Valgrind manual.
+uv run klaude learn https://valgrind.org/docs/manual/manual.html -c valgrind
+
+# Linux perf wiki.
+uv run klaude learn https://perf.wiki.kernel.org/index.php/Main_Page -c linux-perf
+
+
+# ============================================================
+# C# 14 AND .NET 10 LTS
+# ============================================================
+
+# C# documentation root.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/csharp/ -c csharp
+
+# C# language reference.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/ -c csharp-language
+
+# C# 14 latest stable features for .NET 10.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/csharp/whats-new/csharp-14 -c csharp14
+
+# C# language versioning.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/language-versioning -c csharp-versioning
+
+# Configure C# language version.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/configure-language-version -c csharp-language-config
+
+# General .NET documentation.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/ -c dotnet
+
+# .NET releases and support policy.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/core/releases-and-support -c dotnet-support
+
+# .NET 10 current LTS overview.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/core/whats-new/dotnet-10/overview -c dotnet10-lts
+
+# .NET 10 API reference.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/api/?view=net-10.0 -c dotnet10-api
+
+# .NET 8 LTS documentation for existing projects.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/core/whats-new/dotnet-8/overview -c dotnet8-lts
+
+# .NET CLI.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/core/tools/ -c dotnet-cli
+
+# .NET project SDK.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/core/project-sdk/overview -c dotnet-project-sdk
+
+# .NET Base Class Library.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/standard/class-library-overview -c dotnet-bcl
+
+# .NET deployment.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/core/deploying/ -c dotnet-deployment
+
+# .NET Native AOT.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/ -c dotnet-native-aot
+
+
+# ============================================================
+# ASP.NET CORE 10 LTS
+# ============================================================
+
+# ASP.NET Core 10 documentation.
+uv run klaude learn https://learn.microsoft.com/en-us/aspnet/core/?view=aspnetcore-10.0 -c aspnet-core
+
+# ASP.NET Core web APIs.
+uv run klaude learn https://learn.microsoft.com/en-us/aspnet/core/web-api/?view=aspnetcore-10.0 -c aspnet-core-api
+
+# ASP.NET Core minimal APIs.
+uv run klaude learn https://learn.microsoft.com/en-us/aspnet/core/fundamentals/minimal-apis/?view=aspnetcore-10.0 -c aspnet-core-minimal-api
+
+# ASP.NET Core security.
+uv run klaude learn https://learn.microsoft.com/en-us/aspnet/core/security/?view=aspnetcore-10.0 -c aspnet-core-security
+
+# ASP.NET Core authentication.
+uv run klaude learn https://learn.microsoft.com/en-us/aspnet/core/security/authentication/?view=aspnetcore-10.0 -c aspnet-core-authentication
+
+# ASP.NET Core dependency injection.
+uv run klaude learn https://learn.microsoft.com/en-us/aspnet/core/fundamentals/dependency-injection?view=aspnetcore-10.0 -c aspnet-core-di
+
+# ASP.NET Core configuration.
+uv run klaude learn https://learn.microsoft.com/en-us/aspnet/core/fundamentals/configuration/?view=aspnetcore-10.0 -c aspnet-core-configuration
+
+# ASP.NET Core testing.
+uv run klaude learn https://learn.microsoft.com/en-us/aspnet/core/test/?view=aspnetcore-10.0 -c aspnet-core-testing
+
+
+# ============================================================
+# ENTITY FRAMEWORK CORE 10
+# ============================================================
+
+# Entity Framework Core.
+uv run klaude learn https://learn.microsoft.com/en-us/ef/core/ -c ef-core
+
+# EF Core modeling.
+uv run klaude learn https://learn.microsoft.com/en-us/ef/core/modeling/ -c ef-core-modeling
+
+# EF Core querying.
+uv run klaude learn https://learn.microsoft.com/en-us/ef/core/querying/ -c ef-core-querying
+
+# EF Core migrations.
+uv run klaude learn https://learn.microsoft.com/en-us/ef/core/managing-schemas/migrations/ -c ef-core-migrations
+
+# EF Core performance.
+uv run klaude learn https://learn.microsoft.com/en-us/ef/core/performance/ -c ef-core-performance
+
+
+# ============================================================
+# C# AND .NET BUILD, PACKAGES, AND TESTING
+# ============================================================
+
+# MSBuild.
+uv run klaude learn https://learn.microsoft.com/en-us/visualstudio/msbuild/msbuild -c msbuild
+
+# NuGet.
+uv run klaude learn https://learn.microsoft.com/en-us/nuget/ -c nuget
+
+# NuGet package creation.
+uv run klaude learn https://learn.microsoft.com/en-us/nuget/create-packages/overview-and-workflow -c nuget-packaging
+
+# xUnit.net v3 getting started.
+uv run klaude learn https://xunit.net/docs/getting-started/v3/getting-started -c xunit
+
+# NUnit.
+uv run klaude learn https://docs.nunit.org/ -c nunit
+
+# .NET testing.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/core/testing/ -c dotnet-testing
+
+# ============================================================
+# MICROSOFT AI-READY DOCUMENTATION AND SOURCE REPOSITORIES
+# ============================================================
+
+# Official Microsoft Learn MCP server repository.
+# This is the preferred live source for current Microsoft documentation and code samples.
+uv run klaude learn https://github.com/MicrosoftDocs/mcp -c microsoft-learn-mcp
+
+# Microsoft Learn MCP endpoint and server documentation.
+uv run klaude learn https://learn.microsoft.com/api/mcp -c microsoft-learn-mcp-api
+
+# Microsoft MCP catalog of official servers and integrations.
+uv run klaude learn https://github.com/microsoft/mcp -c microsoft-mcp-catalog
+
+# Microsoft MCP curriculum with examples in C#, .NET, Java, TypeScript, JavaScript, Rust, and Python.
+uv run klaude learn https://github.com/microsoft/mcp-for-beginners -c microsoft-mcp-guide
+
+
+# ============================================================
+# MICROSOFT .NET AND C# MARKDOWN SOURCES
+# ============================================================
+
+# Official .NET and C# documentation source repository.
+# Contains Markdown used to build Microsoft Learn documentation.
+uv run klaude learn https://github.com/dotnet/docs -c dotnet-docs-source
+
+# C# Markdown documentation source tree.
+uv run klaude learn https://github.com/dotnet/docs/tree/main/docs/csharp -c csharp-docs-source
+
+# .NET Core and SDK Markdown documentation source tree.
+uv run klaude learn https://github.com/dotnet/docs/tree/main/docs/core -c dotnet-core-docs-source
+
+# .NET platform and class-library Markdown documentation source tree.
+uv run klaude learn https://github.com/dotnet/docs/tree/main/docs/standard -c dotnet-standard-docs-source
+
+# Official ASP.NET Core documentation source repository.
+uv run klaude learn https://github.com/dotnet/AspNetCore.Docs -c aspnet-core-docs-source
+
+# ASP.NET Core Markdown documentation source tree.
+uv run klaude learn https://github.com/dotnet/AspNetCore.Docs/tree/main/aspnetcore -c aspnet-core-markdown
+
+
+# ============================================================
+# MICROSOFT C AND C++ MARKDOWN SOURCES
+# ============================================================
+
+# Official Microsoft C and C++ documentation source repository.
+uv run klaude learn https://github.com/MicrosoftDocs/cpp-docs -c microsoft-cpp-docs-source
+
+# Microsoft C++ language Markdown source.
+uv run klaude learn https://github.com/MicrosoftDocs/cpp-docs/tree/main/docs/cpp -c msvc-cpp-markdown
+
+# Microsoft C language Markdown source.
+uv run klaude learn https://github.com/MicrosoftDocs/cpp-docs/tree/main/docs/c-language -c msvc-c-markdown
+
+# Microsoft C++ standard library Markdown source.
+uv run klaude learn https://github.com/MicrosoftDocs/cpp-docs/tree/main/docs/standard-library -c msvc-cpp-standard-library-markdown
+
+# Microsoft C and C++ build-tooling Markdown source.
+uv run klaude learn https://github.com/MicrosoftDocs/cpp-docs/tree/main/docs/build -c msvc-build-markdown
+
+# Microsoft C runtime library Markdown source.
+uv run klaude learn https://github.com/MicrosoftDocs/cpp-docs/tree/main/docs/c-runtime-library -c msvc-c-runtime-markdown
+
+# Microsoft C++ code-quality and static-analysis Markdown source.
+uv run klaude learn https://github.com/MicrosoftDocs/cpp-docs/tree/main/docs/code-quality -c msvc-cpp-code-quality
+
+
+# ============================================================
+# MICROSOFT TEAMS SDK — OFFICIAL LLM TEXT FILES
+# ============================================================
+
+# Teams SDK AI documentation index.
+uv run klaude learn https://microsoft.github.io/teams-sdk/llms_docs/llms.txt -c microsoft-teams-sdk
+
+# Teams SDK C# documentation index.
+uv run klaude learn https://microsoft.github.io/teams-sdk/llms_docs/llms_csharp.txt -c microsoft-teams-sdk-csharp
+
+# Complete Teams SDK C# documentation optimized for AI assistants.
+uv run klaude learn https://microsoft.github.io/teams-sdk/llms_docs/llms_csharp_full.txt -c microsoft-teams-sdk-csharp-full
+
+# Teams SDK TypeScript documentation index.
+uv run klaude learn https://microsoft.github.io/teams-sdk/llms_docs/llms_typescript.txt -c microsoft-teams-sdk-typescript
+
+# Complete Teams SDK TypeScript documentation optimized for AI assistants.
+uv run klaude learn https://microsoft.github.io/teams-sdk/llms_docs/llms_typescript_full.txt -c microsoft-teams-sdk-typescript-full
+
+# Teams SDK Python documentation index.
+uv run klaude learn https://microsoft.github.io/teams-sdk/llms_docs/llms_python.txt -c microsoft-teams-sdk-python
+
+# Complete Teams SDK Python documentation optimized for AI assistants.
+uv run klaude learn https://microsoft.github.io/teams-sdk/llms_docs/llms_python_full.txt -c microsoft-teams-sdk-python-full
+
+
+# ============================================================
+# UNITY — LATEST SUPPORTED AND CURRENT LTS
+# ============================================================
+
+# Unity does not currently publish an official llms.txt for the complete engine docs.
+# Unity 6.5 is the latest supported production release.
+# Unity 6.3 is the current Long-Term Support release, supported until December 2027.
+
+# Unity 6 release lifecycle, latest releases, and LTS support.
+uv run klaude learn https://unity.com/releases/unity-6/support -c unity-releases
+
+# Unity 6.5 latest supported User Manual.
+uv run klaude learn https://docs.unity3d.com/6000.5/Documentation/Manual/index.html -c unity-latest
+
+# Unity 6.5 latest supported C# Scripting API.
+uv run klaude learn https://docs.unity3d.com/6000.5/Documentation/ScriptReference/index.html -c unity-latest-api
+
+# New and changed features in Unity 6.5.
+uv run klaude learn https://docs.unity3d.com/6000.5/Documentation/Manual/WhatsNew.html -c unity-latest-whats-new
+
+# Unity 6.5 C# scripting guide.
+uv run klaude learn https://docs.unity3d.com/6000.5/Documentation/Manual/scripting.html -c unity-scripting
+
+# Unity 6.5 2D game development.
+uv run klaude learn https://docs.unity3d.com/6000.5/Documentation/Manual/Unity2D.html -c unity-2d
+
+# Unity 6.5 physics.
+uv run klaude learn https://docs.unity3d.com/6000.5/Documentation/Manual/PhysicsSection.html -c unity-physics
+
+# Unity 6.5 rendering pipelines.
+uv run klaude learn https://docs.unity3d.com/6000.5/Documentation/Manual/render-pipelines.html -c unity-rendering
+
+# Unity 6.5 UI systems.
+uv run klaude learn https://docs.unity3d.com/6000.5/Documentation/Manual/UIToolkits.html -c unity-ui
+
+# Unity 6.5 multiplayer development.
+uv run klaude learn https://docs.unity3d.com/6000.5/Documentation/Manual/multiplayer.html -c unity-multiplayer
+
+# Unity 6.5 performance and profiling tools.
+uv run klaude learn https://docs.unity3d.com/6000.5/Documentation/Manual/performance-profiling-tools.html -c unity-performance
+
+# Unity 6.5 advanced best-practice guides.
+uv run klaude learn https://docs.unity3d.com/6000.5/Documentation/Manual/best-practice-guides.html -c unity-best-practices
+
+# Unity 6.5 platform and build documentation.
+uv run klaude learn https://docs.unity3d.com/6000.5/Documentation/Manual/PlatformSpecific.html -c unity-platforms
+
+# Unity 6.5 package management.
+uv run klaude learn https://docs.unity3d.com/6000.5/Documentation/Manual/PackagesList.html -c unity-packages
+
+# Unity 6.5 AI overview.
+uv run klaude learn https://docs.unity3d.com/6000.5/Documentation/Manual/unity-ai.html -c unity-ai
+
+# Latest Unity AI Assistant package documentation.
+uv run klaude learn https://docs.unity3d.com/Packages/com.unity.ai.assistant@latest -c unity-ai-assistant
+
+# Latest Unity AI Generators package documentation.
+uv run klaude learn https://docs.unity3d.com/Packages/com.unity.ai.generators@latest -c unity-ai-generators
+
+# Latest Unity AI Inference package documentation.
+uv run klaude learn https://docs.unity3d.com/Packages/com.unity.ai.inference@latest -c unity-ai-inference
+
+# Unity 6.3 current LTS User Manual.
+uv run klaude learn https://docs.unity3d.com/6000.3/Documentation/Manual/index.html -c unity-lts
+
+# Unity 6.3 current LTS C# Scripting API.
+uv run klaude learn https://docs.unity3d.com/6000.3/Documentation/ScriptReference/index.html -c unity-lts-api
+
+# Unity 6.3 LTS scripting guide.
+uv run klaude learn https://docs.unity3d.com/6000.3/Documentation/Manual/scripting.html -c unity-lts-scripting
+
+# Unity ML-Agents open-source toolkit.
+uv run klaude learn https://github.com/Unity-Technologies/ml-agents -c unity-ml-agents
+
+
+# ============================================================
+# UNREAL ENGINE 5.8 — LATEST STABLE
+# ============================================================
+
+# Unreal Engine does not currently publish an official llms.txt for all engine docs.
+# Unreal Engine 5.8 is the current stable release.
+
+# Complete Unreal Engine 5.8 documentation.
+uv run klaude learn https://dev.epicgames.com/documentation/en-us/unreal-engine -c unreal-engine
+
+# Unreal Engine 5.8 documentation landing page.
+uv run klaude learn https://dev.epicgames.com/documentation/unreal-engine/unreal-engine-5-8-documentation -c unreal-engine-5-8
+
+# Unreal Engine 5.8 release notes.
+uv run klaude learn https://dev.epicgames.com/documentation/unreal-engine/unreal-engine-5-8-release-notes -c unreal-engine-release-notes
+
+# Unreal Engine getting-started documentation.
+uv run klaude learn https://dev.epicgames.com/documentation/en-us/unreal-engine/get-started -c unreal-engine-getting-started
+
+# Unreal Engine C++ programming documentation.
+uv run klaude learn https://dev.epicgames.com/documentation/en-us/unreal-engine/programming-with-cplusplus-in-unreal-engine -c unreal-engine-cpp
+
+# Unreal Engine C++ API reference.
+uv run klaude learn https://dev.epicgames.com/documentation/en-us/unreal-engine/API -c unreal-engine-api
+
+# Unreal Engine C++ programming tutorials.
+uv run klaude learn https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-engine-cpp-programming-tutorials -c unreal-engine-cpp-tutorials
+
+# Unreal Engine C++ quick start.
+uv run klaude learn https://dev.epicgames.com/documentation/unreal-engine/unreal-engine-cpp-quick-start -c unreal-engine-cpp-quickstart
+
+# Unreal Engine C++ development environment setup.
+uv run klaude learn https://dev.epicgames.com/documentation/unreal-engine/setting-up-your-development-environment-for-cplusplus-in-unreal-engine -c unreal-engine-cpp-setup
+
+# Epic C++ coding standard.
+uv run klaude learn https://dev.epicgames.com/documentation/unreal-engine/epic-cplusplus-coding-standard-for-unreal-engine -c unreal-engine-cpp-style
+
+# Blueprint versus C++ guidance.
+uv run klaude learn https://dev.epicgames.com/documentation/en-us/unreal-engine/coding-in-unreal-engine-blueprint-vs-cplusplus -c unreal-engine-blueprints-cpp
+
+# Compiling Unreal Engine game projects with C++.
+uv run klaude learn https://dev.epicgames.com/documentation/unreal-engine/compiling-game-projects-in-unreal-engine-using-cplusplus -c unreal-engine-build
+
+# Official Unreal MCP server documentation for AI agents.
+uv run klaude learn https://dev.epicgames.com/documentation/unreal-engine/unreal-mcp-in-unreal-editor -c unreal-engine-mcp
+
+# Unreal MCP API reference.
+uv run klaude learn https://dev.epicgames.com/documentation/unreal-engine/API/PluginIndex/ModelContextProtocol -c unreal-engine-mcp-api
+
+# PCG and LLM workflows through Unreal MCP.
+uv run klaude learn https://dev.epicgames.com/documentation/unreal-engine/working-with-pcg-and-llms-using-unreal-mcp-in-unreal-engine -c unreal-engine-mcp-pcg
+
+
+# ============================================================
+# GAMEMAKER — LTS 2026 AND LATEST BETA
+# ============================================================
+
+# GameMaker does not currently publish an official llms.txt.
+# LTS 2026 is the recommended stable production release.
+# The 2026.100 line is the current beta/update stream.
+
+# GameMaker release notes and version overview.
+uv run klaude learn https://releases.gamemaker.io/ -c gamemaker-releases
+
+# GameMaker LTS 2026.0 release notes.
+uv run klaude learn https://releases.gamemaker.io/release-notes/2026/0 -c gamemaker-lts-release-notes
+
+# Current GameMaker 2026.100 beta/update release notes.
+uv run klaude learn https://releases.gamemaker.io/release-notes/2026/100 -c gamemaker-latest-release-notes
+
+# GameMaker LTS 2026 manual.
+uv run klaude learn https://manual.gamemaker.io/lts/en/Content.htm -c gamemaker
+
+# Current GameMaker beta manual.
+uv run klaude learn https://manual.gamemaker.io/beta/en/Content.htm -c gamemaker-beta
+
+# GameMaker LTS Quick Start Guide.
+uv run klaude learn https://manual.gamemaker.io/lts/en/Quick_Start_Guide/Quick_Start_Guide.htm -c gamemaker-quickstart
+
+# GameMaker Language overview.
+uv run klaude learn https://manual.gamemaker.io/lts/en/GameMaker_Language/GML_Overview/GML_Overview.htm -c gml
+
+# Complete GameMaker Language function reference.
+uv run klaude learn https://manual.gamemaker.io/lts/en/GameMaker_Language/GML_Reference/GML_Reference.htm -c gml-api
+
+# GameMaker IDE reference.
+uv run klaude learn https://manual.gamemaker.io/lts/en/The_IDE/The_IDE.htm -c gamemaker-ide
+
+# GameMaker knowledge base and platform setup links.
+uv run klaude learn https://manual.gamemaker.io/lts/en/Introduction/Our_Knowledge_Base.htm -c gamemaker-platforms
+
+
+# ============================================================
+# RPG MAKER MZ — CURRENT STANDALONE RPG MAKER
+# ============================================================
+
+# RPG Maker does not currently publish an official llms.txt.
+# RPG Maker MZ remains the current traditional standalone desktop RPG Maker.
+# Its runtime and plugins use JavaScript.
+
+# Complete RPG Maker MZ help.
+uv run klaude learn https://rpgmakerofficial.com/product/MZ_help-en/ -c rpg-maker-mz
+
+# RPG Maker MZ searchable help index.
+uv run klaude learn https://rpgmakerofficial.com/product/MZ_help-en/index.html -c rpg-maker-mz-help
+
+# RPG Maker MZ getting-started help.
+uv run klaude learn https://rpgmakerofficial.com/product/MZ_help-en/01.html -c rpg-maker-mz-getting-started
+
+# RPG Maker MZ database documentation.
+uv run klaude learn https://rpgmakerofficial.com/product/MZ_help-en/01_08.html -c rpg-maker-mz-database
+
+# RPG Maker MZ event commands.
+uv run klaude learn https://rpgmakerofficial.com/product/MZ_help-en/01_10.html -c rpg-maker-mz-events
+
+# RPG Maker MZ advanced scripts and plugin commands.
+uv run klaude learn https://rpgmakerofficial.com/product/MZ_help-en/01_10_16.html -c rpg-maker-mz-scripting
+
+# RPG Maker MZ asset standards.
+uv run klaude learn https://rpgmakerofficial.com/product/MZ_help-en/01_11_01.html -c rpg-maker-mz-assets
+
+# RPG Maker MZ output and deployment formats.
+uv run klaude learn https://rpgmakerofficial.com/product/MZ_help-en/01_11_03.html -c rpg-maker-mz-deployment
+
+# RPG Maker MZ official plugin documentation.
+uv run klaude learn https://rpgmakerofficial.com/product/MZ_help-en/01_11_05.html -c rpg-maker-mz-plugins
+
+# RPG Maker MZ JavaScript core API.
+uv run klaude learn https://rpgmakerofficial.com/product/mz/rmmz_api/ -c rpg-maker-mz-api
+
+
+# ============================================================
+# RPG MAKER UNITE — UNITY-BASED EDITION
+# ============================================================
+
+# RPG Maker Unite is a separate Unity-based product, not a successor to MZ.
+
+# RPG Maker Unite official web manuals.
+uv run klaude learn https://rpgmakerunite.com/en/manuals/ -c rpg-maker-unite
+
+# RPG Maker Unite beginner tutorial.
+uv run klaude learn https://rpgmakerunite.com/en/learn/ -c rpg-maker-unite-tutorial
+
+# RPG Maker Unite first steps.
+uv run klaude learn https://rpgmakerunite.com/en/learn/001_eng.html -c rpg-maker-unite-getting-started
+
+# RPG Maker Unite database manual.
+uv run klaude learn https://rpgmakerunite.com/en/article/9735505910937/ -c rpg-maker-unite-database
+
+# RPG Maker Unite Unity 6 setup guide.
+uv run klaude learn https://rpgmakerunite.com/en/article/42283883803673/ -c rpg-maker-unite-unity-setup
+
+
+# ============================================================
+# REN'PY 8.5 — LATEST STABLE VISUAL NOVEL ENGINE
+# ============================================================
+
+# Ren'Py does not currently publish an official llms.txt.
+# Ren'Py 8.5.3 is the latest official stable release.
+# The official source repository contains clean reStructuredText documentation.
+
+# Ren'Py documentation root.
+uv run klaude learn https://www.renpy.org/doc/html/ -c renpy
+
+# Ren'Py release list and current stable version.
+uv run klaude learn https://www.renpy.org/release_list.html -c renpy-releases
+
+# Ren'Py quickstart.
+uv run klaude learn https://www.renpy.org/doc/html/quickstart.html -c renpy-quickstart
+
+# Ren'Py language basics.
+uv run klaude learn https://www.renpy.org/doc/html/language_basics.html -c renpy-language
+
+# Ren'Py Python integration.
+uv run klaude learn https://www.renpy.org/doc/html/python.html -c renpy-python
+
+# Ren'Py screen language.
+uv run klaude learn https://www.renpy.org/doc/html/screens.html -c renpy-screens
+
+# Ren'Py style properties.
+uv run klaude learn https://www.renpy.org/doc/html/style_properties.html -c renpy-styles
+
+# Ren'Py dialogue and text.
+uv run klaude learn https://www.renpy.org/doc/html/dialogue.html -c renpy-dialogue
+
+# Ren'Py building and distributing games.
+uv run klaude learn https://www.renpy.org/doc/html/build.html -c renpy-build
+
+# Ren'Py command-line automation.
+uv run klaude learn https://www.renpy.org/doc/html/cli.html -c renpy-cli
+
+# Ren'Py changelog.
+uv run klaude learn https://www.renpy.org/doc/html/changelog.html -c renpy-changelog
+
+# Official Ren'Py source and documentation repository.
+uv run klaude learn https://github.com/renpy/renpy -c renpy-source
+
+# Clean reStructuredText documentation source from the stable fix branch.
+uv run klaude learn https://github.com/renpy/renpy/tree/fix/sphinx/source -c renpy-docs-source
+
+
+# ============================================================
+# MONOGAME 3.8.5 — .NET AND C# GAME FRAMEWORK
+# ============================================================
+
+# MonoGame does not currently publish an official llms.txt.
+# MonoGame 3.8.5 is the latest stable release.
+# The official documentation source repository contains Markdown and DocFX files.
+
+# MonoGame documentation hub.
+uv run klaude learn https://docs.monogame.net/articles/ -c monogame
+
+# MonoGame 3.8.5 release announcement.
+uv run klaude learn https://monogame.net/blog/2026-07-15-3.8.5-release-2026/ -c monogame-3-8-5
+
+# MonoGame what's-new documentation.
+uv run klaude learn https://docs.monogame.net/articles/whats_new.html -c monogame-whats-new
+
+# MonoGame getting started.
+uv run klaude learn https://docs.monogame.net/articles/getting_started/index.html -c monogame-getting-started
+
+# MonoGame API reference.
+uv run klaude learn https://docs.monogame.net/api/ -c monogame-api
+
+# MonoGame content pipeline.
+uv run klaude learn https://docs.monogame.net/articles/content/why_content_pipeline.html -c monogame-content-pipeline
+
+# MonoGame version migration and update guide.
+uv run klaude learn https://docs.monogame.net/articles/migration/updating_versions.html -c monogame-migration
+
+# Official MonoGame framework source repository.
+uv run klaude learn https://github.com/MonoGame/MonoGame -c monogame-source
+
+# Official MonoGame Markdown and DocFX documentation source.
+uv run klaude learn https://github.com/MonoGame/docs.monogame.github.io -c monogame-docs-source
+
+# MonoGame documentation Markdown articles directory.
+uv run klaude learn https://github.com/MonoGame/docs.monogame.github.io/tree/main/articles -c monogame-docs-markdown
+
+# ============================================================
+# GAME ENGINE INSTALLATION, SDK, IDE, AND FIRST-PROJECT SETUP
+# ============================================================
+
+# These direct setup pages are included because broad documentation roots may
+# not provide enough installation detail when klaude learn fetches one page.
+
+
+# ============================================================
+# GODOT 4.7 INSTALLATION AND PROJECT SETUP
+# ============================================================
+
+# Godot 4.7 editor and exported-project system requirements.
+uv run klaude learn https://docs.godotengine.org/en/4.7/about/system_requirements.html -c godot-installation
+
+# Godot getting-started introduction.
+uv run klaude learn https://docs.godotengine.org/en/4.7/getting_started/introduction/index.html -c godot-getting-started
+
+# Godot step-by-step project setup and fundamentals.
+uv run klaude learn https://docs.godotengine.org/en/4.7/getting_started/step_by_step/index.html -c godot-project-setup
+
+# Godot C# and .NET setup.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/scripting/c_sharp/index.html -c godot-csharp-setup
+
+# Godot external editor, LSP, and DAP setup.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/editor/external_editor.html -c godot-editor-integration
+
+# Godot export templates and project export setup.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/export/exporting_projects.html -c godot-export-setup
+
+# Godot command-line and headless setup.
+uv run klaude learn https://docs.godotengine.org/en/4.7/tutorials/editor/command_line_tutorial.html -c godot-cli-setup
+
+
+# ============================================================
+# UNITY HUB, EDITOR, MODULE, AND FIRST-PROJECT SETUP
+# ============================================================
+
+# Install Unity Hub on Windows, macOS, or Linux.
+uv run klaude learn https://docs.unity.com/en-us/hub/install-hub -c unity-installation
+
+# Install Unity Hub on Windows and macOS.
+uv run klaude learn https://docs.unity.com/en-us/hub/install-hub-win-mac -c unity-installation-win-mac
+
+# Install Unity Hub on Ubuntu and other Linux distributions.
+uv run klaude learn https://docs.unity.com/en-us/hub/install-hub-linux -c unity-installation-linux
+
+# Download and manage Unity Editor installations.
+uv run klaude learn https://docs.unity.com/en-us/hub/install-editors -c unity-editor-installation
+
+# Install an Editor version and platform modules.
+uv run klaude learn https://docs.unity.com/en-us/hub/add-editor -c unity-editor-modules
+
+# Create and manage Unity projects through Unity Hub.
+uv run klaude learn https://docs.unity.com/en-us/hub/projects -c unity-project-setup
+
+# Unity Hub settings and interface reference.
+uv run klaude learn https://docs.unity.com/en-us/hub/hub-reference -c unity-hub-setup
+
+# Install and manage Unity from the command line.
+uv run klaude learn https://docs.unity.com/hub/unity-cli -c unity-cli-installation
+
+# Unity 6.5 first-project and editor introduction.
+uv run klaude learn https://docs.unity3d.com/6000.5/Documentation/Manual/GettingStarted.html -c unity-getting-started
+
+# Unity 6.5 platform build setup.
+uv run klaude learn https://docs.unity3d.com/6000.5/Documentation/Manual/PlatformSpecific.html -c unity-platform-setup
+
+
+# ============================================================
+# UNREAL ENGINE 5.8 INSTALLATION AND C++ SETUP
+# ============================================================
+
+# Install Unreal Engine with the Epic Games Launcher.
+uv run klaude learn https://dev.epicgames.com/documentation/en-us/unreal-engine/install-unreal-engine -c unreal-engine-installation
+
+# Install Unreal Engine and create an initial project.
+uv run klaude learn https://dev.epicgames.com/documentation/en-us/unreal-engine/installing-and-setting-up-a-project -c unreal-engine-project-setup
+
+# Create a first Unreal Engine project.
+uv run klaude learn https://dev.epicgames.com/documentation/en-us/unreal-engine/create-your-first-project-in-unreal-engine -c unreal-engine-first-project
+
+# Unreal Engine C++ development-environment setup.
+uv run klaude learn https://dev.epicgames.com/documentation/en-us/unreal-engine/setting-up-your-development-environment-for-cplusplus-in-unreal-engine -c unreal-engine-cpp-setup
+
+# Visual Studio workloads and configuration for Unreal Engine.
+uv run klaude learn https://dev.epicgames.com/documentation/en-us/unreal-engine/setting-up-visual-studio-development-environment-for-cplusplus-projects-in-unreal-engine -c unreal-engine-visual-studio-setup
+
+# Unreal Engine C++ quick start.
+uv run klaude learn https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-engine-cpp-quick-start -c unreal-engine-first-cpp-project
+
+# Compile and configure Unreal Engine C++ projects.
+uv run klaude learn https://dev.epicgames.com/documentation/en-us/unreal-engine/compiling-game-projects-in-unreal-engine-using-cplusplus -c unreal-engine-build-setup
+
+# Unreal Engine project settings.
+uv run klaude learn https://dev.epicgames.com/documentation/en-us/unreal-engine/project-settings-in-unreal-engine -c unreal-engine-project-settings
+
+# Installed-build setup for teams and custom engine distributions.
+uv run klaude learn https://dev.epicgames.com/documentation/en-us/unreal-engine/installed-build-reference-guide-for-unreal-engine -c unreal-engine-team-installation
+
+
+# ============================================================
+# GAMEMAKER LTS 2026 INSTALLATION AND TARGET SDK SETUP
+# ============================================================
+
+# Download and install GameMaker on Windows, macOS, or Ubuntu.
+uv run klaude learn https://gamemaker.io/en/help/articles/installing-gamemaker -c gamemaker-installation
+
+# GameMaker installation guide and runtime-module setup.
+uv run klaude learn https://manual.gamemaker.io/monthly/en/Setting_Up_And_Version_Information/Installation_Guide.htm -c gamemaker-runtime-setup
+
+# GameMaker LTS 2026 release and migration guidance.
+uv run klaude learn https://gamemaker.io/en/blog/lts-2026-release -c gamemaker-lts-setup
+
+# GameMaker LTS 2026 release notes and setup links.
+uv run klaude learn https://releases.gamemaker.io/release-notes/2026/0 -c gamemaker-lts-installation
+
+# Required SDKs and version-specific platform setup.
+uv run klaude learn https://gamemaker.io/en/help/articles/gamemaker-s-required-sdks -c gamemaker-required-sdks
+
+# LTS manual required-SDK entry.
+uv run klaude learn https://manual.gamemaker.io/lts/en/Setting_Up_And_Version_Information/Required_SDKs.htm -c gamemaker-lts-required-sdks
+
+# GameMaker permissions, firewall, proxy, and antivirus requirements.
+uv run klaude learn https://gamemaker.io/en/help/articles/user-permissions-and-internet-access-required-by-gamemaker -c gamemaker-permissions-setup
+
+# GameMaker account and licensing setup.
+uv run klaude learn https://manual.gamemaker.io/lts/en/Setting_Up_And_Version_Information/Licencing_Information.htm -c gamemaker-license-setup
+
+# GameMaker Windows target setup.
+uv run klaude learn https://gamemaker.io/en/help/articles/setting-up-for-windows -c gamemaker-windows-setup
+
+# GameMaker Ubuntu target setup.
+uv run klaude learn https://gamemaker.io/en/help/articles/setting-up-for-ubuntu -c gamemaker-ubuntu-setup
+
+# GameMaker Android SDK and export setup.
+uv run klaude learn https://gamemaker.io/en/help/articles/setting-up-for-android -c gamemaker-android-setup
+
+# GameMaker HTML5 target setup.
+uv run klaude learn https://gamemaker.io/en/help/articles/setting-up-for-html5 -c gamemaker-html5-setup
+
+
+# ============================================================
+# RPG MAKER MZ INSTALLATION AND FIRST-PROJECT SETUP
+# ============================================================
+
+# RPG Maker MZ product page and system requirements.
+uv run klaude learn https://www.rpgmakerweb.com/products/rpg-maker-mz -c rpg-maker-mz-installation
+
+# RPG Maker product activation and support.
+uv run klaude learn https://www.rpgmakerweb.com/product-support -c rpg-maker-mz-activation
+
+# Create, save, open, back up, and manage an RPG Maker MZ project.
+uv run klaude learn https://rpgmakerofficial.com/product/MZ_help-en/01_02.html -c rpg-maker-mz-project-setup
+
+# RPG Maker MZ editor menus and initial tool setup.
+uv run klaude learn https://rpgmakerofficial.com/product/MZ_help-en/01_04.html -c rpg-maker-mz-editor-setup
+
+# RPG Maker MZ plugin, resource, developer-tool, and tutorial setup.
+uv run klaude learn https://rpgmakerofficial.com/product/MZ_help-en/01_05.html -c rpg-maker-mz-tools-setup
+
+# RPG Maker MZ deployment and output setup.
+uv run klaude learn https://rpgmakerofficial.com/product/MZ_help-en/01_11_03.html -c rpg-maker-mz-deployment-setup
+
+
+# ============================================================
+# RPG MAKER UNITE INSTALLATION AND UNITY SETUP
+# ============================================================
+
+# RPG Maker Unite installation and setup manual index.
+uv run klaude learn https://rpgmakerunite.com/en/manuals/ -c rpg-maker-unite-installation
+
+# Epic Games Store Unity installation procedure.
+uv run klaude learn https://support.rpgmakerunite.com/hc/en-us/articles/40388047000601-Epic-Store-Unity-Installation-Procedure -c rpg-maker-unite-epic-installation
+
+# Epic Store project creation and update procedure.
+uv run klaude learn https://rpgmakerunite.com/en/article/26107471213977/ -c rpg-maker-unite-epic-setup
+
+# Current recommended Unity Editor version.
+uv run klaude learn https://rpgmakerunite.com/en/article/mgtt8utb0mdnnccrmhkr8f9h/ -c rpg-maker-unite-unity-version
+
+# Unity 6 setup for the Epic Games Store edition.
+uv run klaude learn https://rpgmakerunite.com/en/article/42150945562905/ -c rpg-maker-unite-unity6-epic
+
+# Unity 6 setup for the Asset Store edition.
+uv run klaude learn https://rpgmakerunite.com/en/article/42283883803673/ -c rpg-maker-unite-unity6-asset-store
+
+# RPG Maker Unite first steps.
+uv run klaude learn https://rpgmakerunite.com/en/learn/001_eng.html -c rpg-maker-unite-first-project
+
+
+# ============================================================
+# REN'PY 8.5 INSTALLATION AND PLATFORM SETUP
+# ============================================================
+
+# Download the latest stable Ren'Py SDK.
+uv run klaude learn https://www.renpy.org/latest.html -c renpy-installation
+
+# Extract, launch, configure, and create the first Ren'Py project.
+uv run klaude learn https://www.renpy.org/doc/html/quickstart.html -c renpy-project-setup
+
+# Ren'Py common startup and environment problems.
+uv run klaude learn https://www.renpy.org/doc/html/problems.html -c renpy-installation-troubleshooting
+
+# Ren'Py build and distribution setup.
+uv run klaude learn https://www.renpy.org/doc/html/build.html -c renpy-build-setup
+
+# Ren'Py command-line setup and automation.
+uv run klaude learn https://www.renpy.org/doc/html/cli.html -c renpy-cli-setup
+
+# Ren'Py Android packaging setup.
+uv run klaude learn https://www.renpy.org/doc/html/android.html -c renpy-android-setup
+
+# Ren'Py iOS packaging setup.
+uv run klaude learn https://www.renpy.org/doc/html/ios.html -c renpy-ios-setup
+
+# Ren'Py web export setup.
+uv run klaude learn https://www.renpy.org/doc/html/web.html -c renpy-web-setup
+
+
+# ============================================================
+# MONOGAME 3.8.5 .NET SDK, TEMPLATE, IDE, AND PLATFORM SETUP
+# ============================================================
+
+# MonoGame getting-started hub with OS and toolset selection.
+uv run klaude learn https://docs.monogame.net/articles/getting_started/ -c monogame-installation
+
+# MonoGame installation and first-project tutorial.
+uv run klaude learn https://docs.monogame.net/articles/tutorials/building_2d_games/02_getting_started/ -c monogame-project-setup
+
+# MonoGame supported platforms and required workloads.
+uv run klaude learn https://docs.monogame.net/articles/getting_started/platforms.html -c monogame-platform-setup
+
+# MonoGame project structure after template installation.
+uv run klaude learn https://docs.monogame.net/articles/getting_started/3_understanding_the_code.html -c monogame-first-project
+
+# MonoGame content builder project setup.
+uv run klaude learn https://docs.monogame.net/articles/getting_started/content_pipeline/content_builder_project.html -c monogame-content-setup
+
+# MonoGame content tools and IDE extension setup.
+uv run klaude learn https://docs.monogame.net/articles/getting_to_know/howto/content_pipeline/HowTo_GameContent_Add.html -c monogame-content-tools
+
+# MonoGame platform-specific how-to guides.
+uv run klaude learn https://docs.monogame.net/articles/getting_to_know/howto/index.html -c monogame-platform-guides
+
+# MonoGame migration and NuGet package update setup.
+uv run klaude learn https://docs.monogame.net/articles/migration/migrate_38.html -c monogame-migration-setup
+
+# MonoGame complete reference guide PDF.
+uv run klaude learn https://docs.monogame.net/downloads/MonoGameGuide.pdf -c monogame-reference-guide
+
+
+# ============================================================
+# GAME UI AND UX REFERENCE DATABASE
+# ============================================================
+
+# Game UI Database contains tens of thousands of curated game interface screenshots.
+# It is image-heavy and may provide limited RAG text unless Klaude supports
+# JavaScript rendering, image metadata extraction, and multimodal indexing.
+uv run klaude learn https://www.gameuidatabase.com/ -c game-ui-database
+
+# Alternate entry point used by Game UI Database.
+uv run klaude learn https://www.gameuidatabase.com/index.php -c game-ui-database-index
+
+# ============================================================
+# INSTALLATION, ENVIRONMENT, AND FIRST-PROJECT SETUP
+# ============================================================
+
+# Direct setup pages are kept separately because `klaude learn` currently
+# fetches one source at a time instead of recursively ingesting every linked page.
+
+
+# ============================================================
+# WEB DEVELOPMENT ENVIRONMENT
+# ============================================================
+
+# Install the basic software needed for web development.
+uv run klaude learn https://developer.mozilla.org/en-US/docs/Learn_web_development/Getting_started/Environment_setup/Installing_software -c web-development-setup
+
+# Set up files, folders, editors, browsers, and local development tools.
+uv run klaude learn https://developer.mozilla.org/en-US/docs/Learn_web_development/Getting_started/Environment_setup/Dealing_with_files -c web-project-setup
+
+# Browser developer tools setup and overview.
+uv run klaude learn https://developer.mozilla.org/en-US/docs/Learn_web_development/Howto/Tools_and_setup/What_are_browser_developer_tools -c browser-devtools-setup
+
+
+# ============================================================
+# NEXT.JS, REACT, TYPESCRIPT, AND FRONTEND SETUP
+# ============================================================
+
+# Current Next.js App Router installation and create-next-app setup.
+uv run klaude learn https://nextjs.org/docs/app/getting-started/installation -c nextjs-installation
+
+# Next.js Pages Router installation.
+uv run klaude learn https://nextjs.org/docs/pages/getting-started/installation -c nextjs-pages-installation
+
+# create-next-app CLI setup and options.
+uv run klaude learn https://nextjs.org/docs/app/api-reference/cli/create-next-app -c nextjs-create-app
+
+# React installation and recommended project approaches.
+uv run klaude learn https://react.dev/learn/installation -c react-installation
+
+# React editor, TypeScript, DevTools, and compiler setup.
+uv run klaude learn https://react.dev/learn/setup -c react-setup
+
+# Build a React application from scratch.
+uv run klaude learn https://react.dev/learn/build-a-react-app-from-scratch -c react-project-setup
+
+# Add React to an existing project.
+uv run klaude learn https://react.dev/learn/add-react-to-an-existing-project -c react-existing-project-setup
+
+# React Compiler installation and verification.
+uv run klaude learn https://react.dev/learn/react-compiler/installation -c react-compiler-installation
+
+# Install TypeScript through npm, NuGet, or Visual Studio.
+uv run klaude learn https://www.typescriptlang.org/download/ -c typescript-installation
+
+# TypeScript project configuration with tsconfig.
+uv run klaude learn https://www.typescriptlang.org/docs/handbook/tsconfig-json.html -c typescript-project-setup
+
+# Tailwind CSS installation overview.
+uv run klaude learn https://tailwindcss.com/docs/installation -c tailwind-installation
+
+# Install Tailwind CSS with Vite.
+uv run klaude learn https://tailwindcss.com/docs/installation/using-vite -c tailwind-vite-setup
+
+# Install Tailwind CSS with PostCSS.
+uv run klaude learn https://tailwindcss.com/docs/installation/using-postcss -c tailwind-postcss-setup
+
+# Install Tailwind CSS using the CLI.
+uv run klaude learn https://tailwindcss.com/docs/installation/tailwind-cli -c tailwind-cli-setup
+
+# shadcn/ui installation overview.
+uv run klaude learn https://ui.shadcn.com/docs/installation -c shadcn-installation
+
+# shadcn/ui installation for Next.js.
+uv run klaude learn https://ui.shadcn.com/docs/installation/next -c shadcn-nextjs-setup
+
+# shadcn/ui installation for Vite.
+uv run klaude learn https://ui.shadcn.com/docs/installation/vite -c shadcn-vite-setup
+
+# Vite project scaffolding and installation.
+uv run klaude learn https://vite.dev/guide/ -c vite-installation
+
+# webpack installation and first bundle.
+uv run klaude learn https://webpack.js.org/guides/getting-started/ -c webpack-installation
+
+# Rollup installation and tutorial.
+uv run klaude learn https://rollupjs.org/tutorial/ -c rollup-installation
+
+# esbuild installation and first build.
+uv run klaude learn https://esbuild.github.io/getting-started/ -c esbuild-installation
+
+# Turborepo installation and repository setup.
+uv run klaude learn https://turbo.build/repo/docs/getting-started/installation -c turborepo-installation
+
+# Nx installation and workspace creation.
+uv run klaude learn https://nx.dev/getting-started/installation -c nx-installation
+
+
+# ============================================================
+# NODE.JS AND JAVASCRIPT PACKAGE MANAGER SETUP
+# ============================================================
+
+# Download the current Node.js LTS release and installation instructions.
+uv run klaude learn https://nodejs.org/en/download -c nodejs-installation
+
+# Node.js releases, LTS lines, and support status.
+uv run klaude learn https://nodejs.org/en/about/previous-releases -c nodejs-release-setup
+
+# Install Node.js and npm.
+uv run klaude learn https://docs.npmjs.com/downloading-and-installing-node-js-and-npm -c npm-nodejs-installation
+
+# npm account and local project setup.
+uv run klaude learn https://docs.npmjs.com/getting-started -c npm-project-setup
+
+# pnpm installation.
+uv run klaude learn https://pnpm.io/installation -c pnpm-installation
+
+# Yarn installation.
+uv run klaude learn https://yarnpkg.com/getting-started/install -c yarn-installation
+
+# Bun installation.
+uv run klaude learn https://bun.com/docs/installation -c bun-installation
+
+
+# ============================================================
+# JAVASCRIPT AND TYPESCRIPT FRAMEWORK SETUP
+# ============================================================
+
+# Express installation.
+uv run klaude learn https://expressjs.com/en/starter/installing.html -c express-installation
+
+# Express application generator.
+uv run klaude learn https://expressjs.com/en/starter/generator.html -c express-project-setup
+
+# NestJS installation and first project.
+uv run klaude learn https://docs.nestjs.com/first-steps -c nestjs-installation
+
+# Astro installation and project setup.
+uv run klaude learn https://docs.astro.build/en/install-and-setup/ -c astro-installation
+
+# Vue installation and first application.
+uv run klaude learn https://vuejs.org/guide/quick-start.html -c vue-installation
+
+# Nuxt installation and project creation.
+uv run klaude learn https://nuxt.com/docs/getting-started/installation -c nuxt-installation
+
+# Create a SvelteKit project.
+uv run klaude learn https://svelte.dev/docs/kit/creating-a-project -c sveltekit-installation
+
+# Angular local environment and workspace setup.
+uv run klaude learn https://angular.dev/installation -c angular-installation
+
+
+# ============================================================
+# MOBILE APPLICATION SETUP
+# ============================================================
+
+# React Native local development environment setup.
+uv run klaude learn https://reactnative.dev/docs/set-up-your-environment -c react-native-installation
+
+# Create and configure an Expo project.
+uv run klaude learn https://docs.expo.dev/get-started/create-a-project/ -c expo-installation
+
+# Expo development environment setup.
+uv run klaude learn https://docs.expo.dev/get-started/set-up-your-environment/ -c expo-environment-setup
+
+# Install the Flutter SDK.
+uv run klaude learn https://docs.flutter.dev/install -c flutter-installation
+
+# Configure Flutter development tools and editors.
+uv run klaude learn https://docs.flutter.dev/tools -c flutter-tooling-setup
+
+# Install the Dart SDK.
+uv run klaude learn https://dart.dev/get-dart -c dart-installation
+
+
+# ============================================================
+# PHP, LARAVEL, AND COMPOSER SETUP
+# ============================================================
+
+# PHP installation and configuration.
+uv run klaude learn https://www.php.net/manual/en/install.php -c php-installation
+
+# PHP configuration file setup.
+uv run klaude learn https://www.php.net/manual/en/configuration.file.php -c php-configuration
+
+# Current Laravel installation and first application.
+
+# Laravel configuration and environment setup.
+uv run klaude learn https://laravel.com/docs/13.x/configuration -c laravel-configuration
+
+# Composer installer and setup.
+uv run klaude learn https://getcomposer.org/download/ -c composer-installation
+
+# Composer library and project initialization.
+uv run klaude learn https://getcomposer.org/doc/01-basic-usage.md -c composer-project-setup
+
+
+# ============================================================
+# PYTHON AND PYTHON FRAMEWORK SETUP
+# ============================================================
+
+# Install and configure Python on supported operating systems.
+uv run klaude learn https://docs.python.org/3/using/index.html -c python-installation
+
+# Python virtual environments.
+uv run klaude learn https://docs.python.org/3/library/venv.html -c python-venv-setup
+
+# Python packaging and project setup tutorial.
+uv run klaude learn https://packaging.python.org/en/latest/tutorials/packaging-projects/ -c python-project-setup
+
+# Install uv.
+uv run klaude learn https://docs.astral.sh/uv/getting-started/installation/ -c uv-installation
+
+# Create and manage a project with uv.
+uv run klaude learn https://docs.astral.sh/uv/guides/projects/ -c uv-project-setup
+
+# FastAPI installation and first application.
+uv run klaude learn https://fastapi.tiangolo.com/tutorial/first-steps/ -c fastapi-installation
+
+# Pydantic installation.
+uv run klaude learn https://docs.pydantic.dev/latest/install/ -c pydantic-installation
+
+# Django installation.
+uv run klaude learn https://docs.djangoproject.com/en/stable/topics/install/ -c django-installation
+
+# Django first project tutorial.
+uv run klaude learn https://docs.djangoproject.com/en/stable/intro/tutorial01/ -c django-project-setup
+
+# Flask installation and virtual-environment setup.
+uv run klaude learn https://flask.palletsprojects.com/en/stable/installation/ -c flask-installation
+
+
+# ============================================================
+# GO AND GIN SETUP
+# ============================================================
+
+# Download and install Go.
+uv run klaude learn https://go.dev/doc/install -c golang-installation
+
+# Manage multiple Go installations.
+uv run klaude learn https://go.dev/doc/manage-install -c golang-version-setup
+
+# Create a Go module and first application.
+uv run klaude learn https://go.dev/doc/tutorial/create-module -c golang-project-setup
+
+# Gin installation and first web API.
+uv run klaude learn https://gin-gonic.com/en/docs/quickstart/ -c gin-installation
+
+
+# ============================================================
+# C, C++, C#, AND .NET TOOLCHAIN SETUP
+# ============================================================
+
+# Install GCC from binaries or operating-system packages.
+uv run klaude learn https://gcc.gnu.org/install/binaries.html -c gcc-installation
+
+# Build and install GCC from source.
+uv run klaude learn https://gcc.gnu.org/install/ -c gcc-source-installation
+
+# Download and install LLVM and Clang.
+uv run klaude learn https://releases.llvm.org/ -c clang-installation
+
+# Build Clang and LLVM from source.
+uv run klaude learn https://clang.llvm.org/get_started.html -c clang-source-setup
+
+# Install Visual Studio C++ development tools.
+uv run klaude learn https://learn.microsoft.com/en-us/cpp/build/vscpp-step-0-installation -c msvc-installation
+
+# Download and install CMake.
+uv run klaude learn https://cmake.org/download/ -c cmake-installation
+
+# Install Conan 2.
+uv run klaude learn https://docs.conan.io/2/installation.html -c conan-installation
+
+# Install and bootstrap vcpkg.
+uv run klaude learn https://learn.microsoft.com/en-us/vcpkg/get_started/get-started -c vcpkg-installation
+
+# Install the .NET SDK and runtime.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/core/install/ -c dotnet-installation
+
+# Install .NET on Ubuntu.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/core/install/linux-ubuntu -c dotnet-ubuntu-installation
+
+# Create a .NET console application.
+uv run klaude learn https://learn.microsoft.com/en-us/dotnet/core/tutorials/with-visual-studio-code -c dotnet-project-setup
+
+# ASP.NET Core first web application.
+uv run klaude learn https://learn.microsoft.com/en-us/aspnet/core/getting-started/?view=aspnetcore-10.0 -c aspnet-core-project-setup
+
+# Entity Framework Core installation.
+uv run klaude learn https://learn.microsoft.com/en-us/ef/core/get-started/overview/install -c ef-core-installation
+
+# Install the EF Core command-line tools.
+uv run klaude learn https://learn.microsoft.com/en-us/ef/core/cli/dotnet -c ef-core-cli-setup
+
+
+# ============================================================
+# DATABASE SERVER AND ORM SETUP
+# ============================================================
+
+# PostgreSQL downloads and operating-system installation options.
+uv run klaude learn https://www.postgresql.org/download/ -c postgresql-installation
+
+# PostgreSQL server initialization and startup.
+uv run klaude learn https://www.postgresql.org/docs/current/creating-cluster.html -c postgresql-server-setup
+
+# MySQL 8.4 installation guide.
+uv run klaude learn https://dev.mysql.com/doc/mysql-installation-excerpt/8.4/en/ -c mysql-installation
+
+# MariaDB server installation.
+uv run klaude learn https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/installing-mariadb -c mariadb-installation
+
+# Download SQLite command-line and development packages.
+uv run klaude learn https://www.sqlite.org/download.html -c sqlite-installation
+
+# Install Redis Open Source.
+uv run klaude learn https://redis.io/docs/latest/operate/oss_and_stack/install/install-redis/ -c redis-installation
+
+# MongoDB Community Edition installation.
+uv run klaude learn https://www.mongodb.com/docs/manual/installation/ -c mongodb-installation
+
+# Prisma ORM getting started.
+uv run klaude learn https://www.prisma.io/docs/getting-started -c prisma-installation
+
+# Drizzle ORM getting started by database and driver.
+uv run klaude learn https://orm.drizzle.team/docs/get-started -c drizzle-installation
+
+# Supabase local development and CLI setup.
+uv run klaude learn https://supabase.com/docs/guides/local-development -c supabase-local-setup
+
+# Supabase CLI installation.
+uv run klaude learn https://supabase.com/docs/guides/local-development/cli/getting-started -c supabase-cli-installation
+
+# Stripe CLI installation and authentication.
+uv run klaude learn https://docs.stripe.com/stripe-cli -c stripe-cli-installation
+
+
+# ============================================================
+# CONTAINERS, KUBERNETES, AND INFRASTRUCTURE SETUP
+# ============================================================
+
+# Docker Engine installation overview.
+uv run klaude learn https://docs.docker.com/engine/install/ -c docker-installation
+
+# Install Docker Engine on Ubuntu.
+uv run klaude learn https://docs.docker.com/engine/install/ubuntu/ -c docker-ubuntu-installation
+
+# Linux post-installation steps for Docker.
+uv run klaude learn https://docs.docker.com/engine/install/linux-postinstall/ -c docker-linux-setup
+
+# Install Docker Compose on Linux.
+uv run klaude learn https://docs.docker.com/compose/install/linux/ -c docker-compose-installation
+
+# Kubernetes production-environment setup.
+uv run klaude learn https://kubernetes.io/docs/setup/ -c kubernetes-installation
+
+# Install kubectl on Linux.
+uv run klaude learn https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/ -c kubectl-installation
+
+# Install and start Minikube.
+uv run klaude learn https://minikube.sigs.k8s.io/docs/start/ -c minikube-installation
+
+# Install Terraform.
+uv run klaude learn https://developer.hashicorp.com/terraform/install -c terraform-installation
+
+# Terraform first infrastructure project.
+uv run klaude learn https://developer.hashicorp.com/terraform/tutorials/aws-get-started/install-cli -c terraform-project-setup
+
+# Install Ansible.
+uv run klaude learn https://docs.ansible.com/ansible/latest/installation_guide/intro_installation.html -c ansible-installation
+
+# Build an Ansible inventory.
+uv run klaude learn https://docs.ansible.com/ansible/latest/inventory_guide/intro_inventory.html -c ansible-inventory-setup
+
+
+# ============================================================
+# CLOUDFLARE, WEB SERVER, AND DEPLOYMENT SETUP
+# ============================================================
+
+# Install and update Cloudflare Wrangler.
+uv run klaude learn https://developers.cloudflare.com/workers/wrangler/install-and-update/ -c wrangler-installation
+
+# Create a Cloudflare Workers project.
+uv run klaude learn https://developers.cloudflare.com/workers/get-started/guide/ -c cloudflare-workers-setup
+
+# Cloudflare Tunnel installation and first tunnel.
+uv run klaude learn https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/ -c cloudflare-tunnel-setup
+
+# Install official NGINX packages.
+uv run klaude learn https://nginx.org/en/linux_packages.html -c nginx-installation
+
+# Install and configure Apache HTTP Server on Ubuntu.
+uv run klaude learn https://ubuntu.com/server/docs/how-to/web-services/install-apache2 -c apache-installation
+
+# Install Git.
+uv run klaude learn https://git-scm.com/book/en/v2/Getting-Started-Installing-Git -c git-installation
+
+# Initial Git configuration.
+uv run klaude learn https://git-scm.com/book/en/v2/Getting-Started-First-Time-Git-Setup -c git-configuration
+
+# Install GitHub CLI.
+uv run klaude learn https://cli.github.com/manual/installation -c github-cli-installation
+
+
+# ============================================================
+# TESTING TOOL SETUP
+# ============================================================
+
+# Install PHPUnit.
+uv run klaude learn https://docs.phpunit.de/en/current/installation.html -c phpunit-installation
+
+# Install Pest PHP.
+uv run klaude learn https://pestphp.com/docs/installation -c pest-installation
+
+# Install and configure Vitest.
+uv run klaude learn https://vitest.dev/guide/ -c vitest-installation
+
+# Install and configure Jest.
+uv run klaude learn https://jestjs.io/docs/getting-started -c jest-installation
+
+# Install Playwright and browser dependencies.
+uv run klaude learn https://playwright.dev/docs/intro -c playwright-installation
+
+# Install Cypress.
+uv run klaude learn https://docs.cypress.io/app/get-started/install-cypress -c cypress-installation
+
+# Install pytest and create a first test.
+uv run klaude learn https://docs.pytest.org/en/stable/getting-started.html -c pytest-installation
+
+
+# ============================================================
+# LOCAL AI MODEL RUNTIME SETUP
+# ============================================================
+
+# Install Ollama on Linux.
+uv run klaude learn https://docs.ollama.com/linux -c ollama-installation
+
+# Install Ollama on Windows.
+uv run klaude learn https://docs.ollama.com/windows -c ollama-windows-installation
+
+# Install Ollama on macOS.
+uv run klaude learn https://docs.ollama.com/macos -c ollama-macos-installation
+
+# Build llama.cpp with CMake and optional GPU backends.
+uv run klaude learn https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md -c llama-cpp-installation
+
+# Install vLLM.
+uv run klaude learn https://docs.vllm.ai/en/latest/getting_started/installation/ -c vllm-installation
+
+# Install Open WebUI with Docker, Python, or Kubernetes.
+uv run klaude learn https://docs.openwebui.com/getting-started/quick-start/ -c open-webui-installation
+
+# Install SGLang.
+uv run klaude learn https://docs.sglang.ai/get_started/install.html -c sglang-installation
+
+
+# ============================================================
+# AI, RAG, EMBEDDING, AND VECTOR DATABASE SETUP
+# ============================================================
+
+# Install Hugging Face Transformers.
+uv run klaude learn https://huggingface.co/docs/transformers/installation -c transformers-installation
+
+# Install Hugging Face Datasets.
+uv run klaude learn https://huggingface.co/docs/datasets/installation -c huggingface-datasets-installation
+
+# Install Hugging Face Tokenizers.
+uv run klaude learn https://huggingface.co/docs/tokenizers/installation -c huggingface-tokenizers-installation
+
+# Install Gradio and create a first application.
+uv run klaude learn https://www.gradio.app/guides/quickstart -c gradio-installation
+
+# Install LangChain.
+uv run klaude learn https://python.langchain.com/docs/how_to/installation/ -c langchain-installation
+
+# Install LangGraph.
+uv run klaude learn https://langchain-ai.github.io/langgraph/tutorials/introduction/ -c langgraph-installation
+
+# Install LlamaIndex.
+uv run klaude learn https://docs.llamaindex.ai/en/stable/getting_started/installation/ -c llamaindex-installation
+
+# Model Context Protocol quickstart and SDK setup.
+uv run klaude learn https://modelcontextprotocol.io/quickstart -c mcp-installation
+
+# Chroma getting started.
+uv run klaude learn https://docs.trychroma.com/getting-started -c chroma-installation
+
+# Qdrant local and Docker quickstart.
+uv run klaude learn https://qdrant.tech/documentation/quickstart/ -c qdrant-installation
+
+# Weaviate Docker installation.
+uv run klaude learn https://docs.weaviate.io/deploy/installation-guides/docker-installation -c weaviate-installation
+
+# Milvus standalone Docker installation.
+uv run klaude learn https://milvus.io/docs/install_standalone-docker.md -c milvus-installation
+
+
+# ============================================================
+# EDITOR, IDE, TERMINAL, AND SHELL SETUP
+# ============================================================
+
+# Install Visual Studio Code on Linux.
+uv run klaude learn https://code.visualstudio.com/docs/setup/linux -c vscode-installation
+
+# Install Visual Studio Code on Windows.
+uv run klaude learn https://code.visualstudio.com/docs/setup/windows -c vscode-windows-installation
+
+# Install Visual Studio Code on macOS.
+uv run klaude learn https://code.visualstudio.com/docs/setup/mac -c vscode-macos-installation
+
+# Install JetBrains IDEs with Toolbox App.
+uv run klaude learn https://www.jetbrains.com/toolbox-app/ -c jetbrains-installation
+
+# Install Neovim.
+uv run klaude learn https://github.com/neovim/neovim/blob/master/INSTALL.md -c neovim-installation
+
+# Download and install Vim.
+uv run klaude learn https://www.vim.org/download.php -c vim-installation
+
+# Install PowerShell on Linux.
+uv run klaude learn https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-linux -c powershell-linux-installation
+
+# Install Fish shell.
+uv run klaude learn https://fishshell.com/docs/current/#installing-fish -c fish-installation
+
+# Build and install tmux.
+uv run klaude learn https://github.com/tmux/tmux/wiki/Installing -c tmux-installation
+
+# Install Starship prompt.
+uv run klaude learn https://starship.rs/guide/#step-1-install-starship -c starship-installation
+
+
+# ============================================================
+# COMMAND-LINE UTILITY SETUP
+# ============================================================
+
+# Download and install curl.
+uv run klaude learn https://curl.se/download.html -c curl-installation
+
+# Install jq.
+uv run klaude learn https://jqlang.github.io/jq/download/ -c jq-installation
+
+# Install yq.
+uv run klaude learn https://github.com/mikefarah/yq/#install -c yq-installation
+
+# Install ripgrep.
+uv run klaude learn https://github.com/BurntSushi/ripgrep#installation -c ripgrep-installation
+
+# Install fd.
+uv run klaude learn https://github.com/sharkdp/fd#installation -c fd-installation
+
+# Install fzf.
+uv run klaude learn https://github.com/junegunn/fzf#installation -c fzf-installation
+
+# Install bat.
+uv run klaude learn https://github.com/sharkdp/bat#installation -c bat-installation
+
+
+# ============================================================
+# LINUX SERVER AND PACKAGE MANAGER SETUP
+# ============================================================
+
+# Install Ubuntu Server.
+uv run klaude learn https://ubuntu.com/tutorials/install-ubuntu-server -c ubuntu-server-installation
+
+# Install and configure OpenSSH Server.
+uv run klaude learn https://ubuntu.com/server/docs/how-to/security/openssh-server -c openssh-server-setup
+
+# Install Homebrew.
+uv run klaude learn https://docs.brew.sh/Installation -c homebrew-installation
+
+# Install pip.
+uv run klaude learn https://pip.pypa.io/en/stable/installation/ -c pip-installation
+
+# Install pipx.
+uv run klaude learn https://pipx.pypa.io/stable/installation/ -c pipx-installation
+
+# Install and configure Snap.
+uv run klaude learn https://snapcraft.io/docs/installing-snapd -c snap-installation
+
+# Install and configure Flatpak.
+uv run klaude learn https://flatpak.org/setup/ -c flatpak-installation
+
+
+# ============================================================
+# API CLIENT AND DATABASE ADMINISTRATION TOOL SETUP
+# ============================================================
+
+# Install Postman.
+uv run klaude learn https://learning.postman.com/docs/getting-started/installation/installation-and-updates/ -c postman-installation
+
+# Download and install Bruno.
+uv run klaude learn https://docs.usebruno.com/get-started/bruno-basics/download -c bruno-installation
+
+# Install and configure Insomnia.
+uv run klaude learn https://developer.konghq.com/insomnia/get-started/ -c insomnia-installation
+
+# Install Swagger Editor locally.
+uv run klaude learn https://github.com/swagger-api/swagger-editor -c swagger-editor-installation
+
+# Install DBeaver.
+uv run klaude learn https://dbeaver.com/docs/dbeaver/Installation/ -c dbeaver-installation
+
+# Install pgAdmin.
+uv run klaude learn https://www.pgadmin.org/download/ -c pgadmin-installation
+
+# Install and configure phpMyAdmin.
+uv run klaude learn https://docs.phpmyadmin.net/en/latest/setup.html -c phpmyadmin-installation
+
+
+# ============================================================
+# OBSERVABILITY AND MONITORING SETUP
+# ============================================================
+
+# Install Grafana.
+uv run klaude learn https://grafana.com/docs/grafana/latest/setup-grafana/installation/ -c grafana-installation
+
+# Prometheus first steps and local setup.
+uv run klaude learn https://prometheus.io/docs/introduction/first_steps/ -c prometheus-installation
+
+# Install Grafana Loki.
+uv run klaude learn https://grafana.com/docs/loki/latest/setup/install/ -c loki-installation
+
+# Install and configure Grafana Tempo.
+uv run klaude learn https://grafana.com/docs/tempo/latest/setup/ -c tempo-installation
+
+# OpenTelemetry getting started.
+uv run klaude learn https://opentelemetry.io/docs/getting-started/ -c opentelemetry-installation
+
+# Choose and configure a Sentry platform SDK.
+uv run klaude learn https://docs.sentry.io/platforms/ -c sentry-installation
+
+# Install Elasticsearch.
+uv run klaude learn https://www.elastic.co/docs/deploy-manage/deploy/self-managed/installing-elasticsearch -c elasticsearch-installation
+
+# Install Kibana.
+uv run klaude learn https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-kibana -c kibana-installation
+
+
+# ============================================================
+# CI, CD, AND GITOPS SETUP
+# ============================================================
+
+# Install GitLab Runner.
+uv run klaude learn https://docs.gitlab.com/runner/install/ -c gitlab-runner-installation
+
+# Install Jenkins.
+uv run klaude learn https://www.jenkins.io/doc/book/installing/ -c jenkins-installation
+
+# Install CircleCI local CLI.
+uv run klaude learn https://circleci.com/docs/local-cli/ -c circleci-cli-installation
+
+# Install Argo CD and connect a cluster.
+uv run klaude learn https://argo-cd.readthedocs.io/en/stable/getting_started/ -c argocd-installation
+
+# Install Flux.
+uv run klaude learn https://fluxcd.io/flux/installation/ -c flux-installation
+
+# Install Tekton Pipelines.
+uv run klaude learn https://tekton.dev/docs/installation/ -c tekton-installation
+
+
+# ============================================================
+# NETWORKING, PROXY, AND PRIVATE ACCESS SETUP
+# ============================================================
+
+# Install Tailscale on Linux.
+uv run klaude learn https://tailscale.com/download/linux -c tailscale-installation
+
+# Install WireGuard.
+uv run klaude learn https://www.wireguard.com/install/ -c wireguard-installation
+
+# Install Caddy.
+uv run klaude learn https://caddyserver.com/docs/install -c caddy-installation
+
+# Install Traefik.
+uv run klaude learn https://doc.traefik.io/traefik/getting-started/install-traefik/ -c traefik-installation
+
+# Install HAProxy on Linux.
+uv run klaude learn https://www.haproxy.com/documentation/haproxy-enterprise/getting-started/installation/linux/ -c haproxy-installation
+
+
+# ============================================================
+# SECURITY TOOL SETUP
+# ============================================================
+
+# Select Certbot installation instructions by operating system and web server.
+uv run klaude learn https://certbot.eff.org/instructions -c certbot-installation
+
+# Install Trivy.
+uv run klaude learn https://trivy.dev/latest/getting-started/installation/ -c trivy-installation
+
+# Install Semgrep.
+uv run klaude learn https://semgrep.dev/docs/getting-started/ -c semgrep-installation
+
+# Download and install Nmap.
+uv run klaude learn https://nmap.org/download.html -c nmap-installation
+
+# Install and configure fail2ban.
+uv run klaude learn https://github.com/fail2ban/fail2ban -c fail2ban-installation
+
+
+# ============================================================
+# VIRTUALIZATION AND ALTERNATIVE CONTAINER SETUP
+# ============================================================
+
+# Install Proxmox VE.
+uv run klaude learn https://pve.proxmox.com/wiki/Installation -c proxmox-installation
+
+# Download or build QEMU.
+uv run klaude learn https://www.qemu.org/download/ -c qemu-installation
+
+# Compile and install libvirt.
+uv run klaude learn https://libvirt.org/compiling.html -c libvirt-installation
+
+# Install Incus.
+uv run klaude learn https://linuxcontainers.org/incus/docs/main/installing/ -c incus-installation
+
+# Install Podman.
+uv run klaude learn https://podman.io/docs/installation -c podman-installation
+
+# Install Vagrant.
+uv run klaude learn https://developer.hashicorp.com/vagrant/install -c vagrant-installation
+
+
+# ============================================================
+# CLOUD CLI SETUP
+# ============================================================
+
+# Install AWS CLI version 2.
+uv run klaude learn https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html -c aws-cli-installation
+
+# Install Google Cloud CLI.
+uv run klaude learn https://cloud.google.com/sdk/docs/install -c gcloud-cli-installation
+
+# Install Azure CLI.
+uv run klaude learn https://learn.microsoft.com/en-us/cli/azure/install-azure-cli -c azure-cli-installation
+
+# Install DigitalOcean doctl.
+uv run klaude learn https://docs.digitalocean.com/reference/doctl/how-to/install/ -c doctl-installation
+
+
+# ============================================================
+# DOCUMENTATION AND DIAGRAMMING TOOL SETUP
+# ============================================================
+
+# Install Mermaid for local or JavaScript use.
+uv run klaude learn https://mermaid.js.org/config/setup/README.html -c mermaid-installation
+
+# Install and run PlantUML.
+uv run klaude learn https://plantuml.com/starting -c plantuml-installation
+
+# Install Docusaurus and create a documentation site.
+uv run klaude learn https://docusaurus.io/docs/installation -c docusaurus-installation
+
+# Install MkDocs.
+uv run klaude learn https://www.mkdocs.org/user-guide/installation/ -c mkdocs-installation
+
+# Install Material for MkDocs.
+uv run klaude learn https://squidfunk.github.io/mkdocs-material/getting-started/ -c mkdocs-material-installation

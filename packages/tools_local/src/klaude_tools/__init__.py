@@ -1,3 +1,15 @@
-from .toolkit import Workspace, build_tools
+from .toolkit import (
+    CommandClassification,
+    GitCommandError,
+    Workspace,
+    build_tools,
+    classify_command,
+)
 
-__all__ = ["Workspace", "build_tools"]
+__all__ = [
+    "CommandClassification",
+    "GitCommandError",
+    "Workspace",
+    "build_tools",
+    "classify_command",
+]

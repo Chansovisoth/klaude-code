@@ -1,4 +1,4 @@
-.PHONY: setup dev up down test lint doctor
+.PHONY: setup dev up down test lint typecheck check doctor
 
 setup:
 	bash scripts/install.sh
@@ -16,7 +16,12 @@ test:
 	uv run pytest -q
 
 lint:
-	uv run ruff check . && uv run mypy packages apps || true
+	RUFF_NO_CACHE=true .venv/bin/ruff check .
+
+typecheck:
+	uv run mypy packages apps
+
+check: test lint
 
 doctor:
 	uv run klaude doctor

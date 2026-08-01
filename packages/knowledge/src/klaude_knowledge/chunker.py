@@ -73,7 +73,9 @@ def chunk_markdown(md: str, title: str = "") -> list[Chunk]:
             cur_text.append(block)
             emit()
             continue
-        if cur_text and (section != cur_section or sum(map(len, cur_text)) + len(block) > CHUNK_CHARS):
+        if cur_text and (
+            section != cur_section or sum(map(len, cur_text)) + len(block) > CHUNK_CHARS
+        ):
             emit()
         cur_section = section
         cur_text.append(block)
