@@ -7,7 +7,12 @@ remote page extraction.
 
 from __future__ import annotations
 
+import hashlib
+import logging
+
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class ExaConfigError(RuntimeError):
@@ -15,8 +20,16 @@ class ExaConfigError(RuntimeError):
 
 
 def _headers(api_key: str) -> dict[str, str]:
+    api_key = api_key.strip()
     if not api_key:
         raise ExaConfigError("EXA_API_KEY is required for the Exa web provider")
+    fingerprint = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:10]
+    logger.debug(
+        "Exa auth configured=%s length=%d fingerprint=%s header=x-api-key",
+        bool(api_key),
+        len(api_key),
+        fingerprint,
+    )
     return {"x-api-key": api_key, "Content-Type": "application/json"}
 
 

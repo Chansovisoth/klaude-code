@@ -47,6 +47,33 @@ def test_session_search_and_recent_sessions(tmp_path):
     assert recent[1]["session_id"] == "s1"
 
 
+def test_delete_one_session_removes_only_that_session(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    memory.log_turn("s1", "user", "first")
+    memory.log_turn("s1", "assistant", "reply")
+    memory.log_turn("s2", "user", "second")
+
+    assert memory.delete_session("s1") == 2
+
+    assert memory.load_session("s1") == []
+    assert [session["session_id"] for session in memory.recent_sessions()] == ["s2"]
+    assert memory.delete_session("missing") == 0
+
+
+def test_clear_sessions_removes_all_session_turns(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    memory.log_turn("s1", "user", "first")
+    memory.log_turn("s1", "assistant", "reply")
+    memory.log_turn("s2", "user", "second")
+
+    assert memory.session_counts() == {"sessions": 2, "turns": 3}
+    assert memory.clear_sessions() == {"sessions": 2, "turns": 3}
+
+    assert memory.recent_sessions() == []
+    assert memory.search_sessions("first") == []
+    assert memory.clear_sessions() == {"sessions": 0, "turns": 0}
+
+
 def test_auto_memory_toggle_and_candidates(tmp_path):
     memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
 

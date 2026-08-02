@@ -6,7 +6,7 @@ this file before diving into implementation details.
 
 ## Project Summary
 
-`klaude-code` is a local-first AI coding agent, version `0.2.0a1`. It runs as a
+`klaude-code` is a local-first AI coding agent, version `0.2.0a2`. It runs as a
 Python `uv` workspace with a Typer/Rich CLI, Ollama model runtime, local memory,
 refreshable knowledge libraries, multi-provider web search, local-first URL
 fetching, and MCP servers for the web and knowledge layers.

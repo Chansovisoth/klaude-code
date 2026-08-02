@@ -4,8 +4,87 @@ import klaude_core.config as config_module
 from klaude_core.config import load_config
 
 
+def test_source_root_resolves_visible_config_and_portable_data_dirs(tmp_path, monkeypatch):
+    source_root = tmp_path / "klaude-code"
+    monkeypatch.delenv("KLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("KLAUDE_DATA_DIR", raising=False)
+    monkeypatch.delenv("KLAUDE_HOME", raising=False)
+    monkeypatch.setattr(config_module, "SOURCE_ROOT", source_root)
+    monkeypatch.setattr(config_module, "KLAUDE_HOME", source_root / ".klaude")
+
+    assert config_module._resolve_config_dir() == source_root / "config"
+    assert config_module._resolve_data_dir() == source_root / ".klaude" / "data"
+
+
+def test_explicit_klaude_home_relocates_config_and_data_dirs(tmp_path, monkeypatch):
+    home = tmp_path / "portable-home"
+    monkeypatch.delenv("KLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("KLAUDE_DATA_DIR", raising=False)
+    monkeypatch.setenv("KLAUDE_HOME", str(home))
+    monkeypatch.setattr(config_module, "KLAUDE_HOME", home)
+
+    assert config_module._resolve_config_dir() == home / "config"
+    assert config_module._resolve_data_dir() == home / "data"
+
+
+def test_explicit_config_and_data_dirs_override_klaude_home(tmp_path, monkeypatch):
+    home = tmp_path / ".klaude"
+    config_dir = tmp_path / "custom-config"
+    data_dir = tmp_path / "custom-data"
+    monkeypatch.setattr(config_module, "KLAUDE_HOME", home)
+    monkeypatch.setenv("KLAUDE_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("KLAUDE_DATA_DIR", str(data_dir))
+
+    assert config_module._resolve_config_dir() == config_dir
+    assert config_module._resolve_data_dir() == data_dir
+
+
+def test_load_config_reads_ollama_runtime_options(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    data_dir = tmp_path / "data"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        "[ollama.options]\n"
+        "num_ctx = 8192\n"
+        "num_thread = 6\n"
+        "num_gpu = 0\n"
+    )
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
+
+    cfg = load_config()
+
+    assert cfg.ollama_options == {"num_ctx": 8192, "num_thread": 6, "num_gpu": 0}
+
+
+def test_env_paths_ignore_unrelated_workdir_dotenv_when_source_root_is_known(
+    tmp_path,
+    monkeypatch,
+):
+    config_dir = tmp_path / ".klaude" / "config"
+    source_root = tmp_path / "klaude-code"
+    workdir = tmp_path / "app"
+    config_dir.mkdir(parents=True)
+    source_root.mkdir()
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "SOURCE_ROOT", source_root)
+
+    paths = config_module._env_paths()
+
+    assert config_dir / ".env" in paths
+    assert source_root / ".env" in paths
+    assert workdir / ".env" not in paths
+
+
 def test_load_config_reads_dotenv_for_provider_keys(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    data_dir = tmp_path / "data"
+    config_dir.mkdir()
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
     monkeypatch.delenv("CRAWL4AI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
@@ -14,7 +93,7 @@ def test_load_config_reads_dotenv_for_provider_keys(tmp_path, monkeypatch):
     monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
     monkeypatch.delenv("HUGGINGFACE_API_KEY", raising=False)
     monkeypatch.delenv("KLAUDE_WEB_PROVIDER", raising=False)
-    (tmp_path / ".env").write_text(
+    (config_dir / ".env").write_text(
         "CRAWL4AI_API_KEY=crawl4ai-from-dotenv\n"
         "GEMINI_API_KEY=gemini-from-dotenv\n"
         "PARALLEL_API_KEY=parallel-from-dotenv\n"
@@ -43,6 +122,112 @@ def test_load_config_reads_dotenv_for_provider_keys(tmp_path, monkeypatch):
     os.environ.pop("FIRECRAWL_API_KEY", None)
     os.environ.pop("HUGGINGFACE_API_KEY", None)
     os.environ.pop("KLAUDE_WEB_PROVIDER", None)
+
+
+def test_config_dir_dotenv_precedes_project_dotenv(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    data_dir = tmp_path / "data"
+    config_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
+    monkeypatch.setattr(config_module, "SOURCE_ROOT", tmp_path)
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    (config_dir / ".env").write_text("EXA_API_KEY=from-config-dotenv\n")
+    (tmp_path / ".env").write_text("EXA_API_KEY=from-project-dotenv\n")
+
+    cfg = load_config()
+
+    assert cfg.exa_api_key == "from-config-dotenv"
+    assert cfg.config_file == config_dir / "config.toml"
+
+
+def test_exa_api_key_uses_project_dotenv_before_provider_construction(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    data_dir = tmp_path / "data"
+    config_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
+    monkeypatch.setattr(config_module, "SOURCE_ROOT", tmp_path)
+    monkeypatch.setenv("EXA_API_KEY", "stale-shell-key")
+    (tmp_path / ".env").write_text("EXA_API_KEY=  from-project-dotenv  # comment\n")
+
+    cfg = load_config()
+
+    assert cfg.exa_api_key == "from-project-dotenv"
+
+    from klaude_web.providers import ProviderRegistry
+
+    provider = ProviderRegistry(cfg).providers["exa"]
+    assert provider.api_key() == "from-project-dotenv"
+
+
+def test_tavily_api_key_uses_project_dotenv_before_provider_construction(
+    tmp_path,
+    monkeypatch,
+):
+    config_dir = tmp_path / "config"
+    data_dir = tmp_path / "data"
+    config_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
+    monkeypatch.setattr(config_module, "SOURCE_ROOT", tmp_path)
+    monkeypatch.setenv("TAVILY_API_KEY", "stale-shell-key")
+    (tmp_path / ".env").write_text("TAVILY_API_KEY=  from-project-tavily  # comment\n")
+
+    cfg = load_config()
+
+    assert cfg.tavily_api_key == "from-project-tavily"
+
+    from klaude_web.providers import ProviderRegistry
+
+    provider = ProviderRegistry(cfg).providers["tavily"]
+    assert provider.api_key() == "from-project-tavily"
+
+
+def test_firecrawl_api_key_uses_project_dotenv_before_provider_construction(
+    tmp_path,
+    monkeypatch,
+):
+    config_dir = tmp_path / "config"
+    data_dir = tmp_path / "data"
+    config_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
+    monkeypatch.setattr(config_module, "SOURCE_ROOT", tmp_path)
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "stale-shell-key")
+    (tmp_path / ".env").write_text(
+        "FIRECRAWL_API_KEY=  from-project-firecrawl  # comment\n"
+    )
+
+    cfg = load_config()
+
+    assert cfg.firecrawl_api_key == "from-project-firecrawl"
+
+    from klaude_web.providers import ProviderRegistry
+
+    provider = ProviderRegistry(cfg).providers["firecrawl"]
+    assert provider.api_key() == "from-project-firecrawl"
+
+
+def test_exa_api_key_does_not_read_alternative_env_names(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    data_dir = tmp_path / "data"
+    config_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
+    monkeypatch.setattr(config_module, "SOURCE_ROOT", tmp_path)
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.setenv("EXA_KEY", "wrong")
+    monkeypatch.setenv("EXA_TOKEN", "wrong")
+
+    cfg = load_config()
+
+    assert cfg.exa_api_key == ""
 
 
 def test_load_config_reads_runtime_context_section(tmp_path, monkeypatch):
@@ -90,6 +275,8 @@ def test_load_config_reads_web_search_provider_sections(tmp_path, monkeypatch):
         "minimum_relevance = 0.7\n"
         "strict_entity_relevance = 0.85\n"
         "max_results_per_domain = 1\n"
+        "provider_order = ['exa', 'searxng']\n"
+        "allow_explicit_provider_fallback = true\n"
         "cache_enabled = false\n"
         "max_disambiguation_queries = 3\n"
         "minimum_confident_entity_score = 0.71\n"
@@ -140,6 +327,8 @@ def test_load_config_reads_web_search_provider_sections(tmp_path, monkeypatch):
     assert cfg.web_search.final_verification_threshold == 0.73
     assert cfg.web_search.strict_entity_relevance == 0.86
     assert cfg.web_search.max_results_per_domain == 1
+    assert cfg.web_search.provider_order[:2] == ["exa", "searxng"]
+    assert cfg.web_search.allow_explicit_provider_fallback is True
     assert cfg.web_search.cache_enabled is False
     assert cfg.web_search.max_disambiguation_queries == 3
     assert cfg.web_search.minimum_confident_entity_score == 0.71

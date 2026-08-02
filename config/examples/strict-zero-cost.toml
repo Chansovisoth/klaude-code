@@ -1,0 +1,38 @@
+# Strict keyless/zero-cost profile.
+#
+# This keeps web search on local/keyless providers unless you explicitly edit
+# the config and add provider keys in config/.env.
+
+[web]
+provider = "quality"
+
+[web.billing]
+mode = "strict_zero_cost"
+allow_paid_overage = false
+allow_auto_recharge = false
+
+[web.search]
+provider_order = ["ddgs", "searxng"]
+
+[web.providers.google]
+enabled = false
+
+[web.providers.parallel]
+enabled = false
+
+[web.providers.tavily]
+enabled = false
+
+[web.providers.exa]
+enabled = false
+
+[web.providers.firecrawl]
+enabled = false
+
+[web.providers.ddgs]
+enabled = true
+
+[web.providers.searxng]
+enabled = true
+last_resort_only = false
+automatic_merge = false

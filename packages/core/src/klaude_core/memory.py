@@ -316,6 +316,38 @@ class Memory:
                 out.append({"role": role, "content": content})
         return out
 
+    def delete_session(self, session_id: str) -> int:
+        session_id = session_id.strip()
+        if not session_id:
+            return 0
+        row = self.db.execute(
+            "SELECT COUNT(*) FROM turns WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        turns = int(row[0]) if row else 0
+        if turns:
+            self.db.execute("DELETE FROM turns WHERE session_id=?", (session_id,))
+            self.db.commit()
+        return turns
+
+    def session_counts(self) -> dict[str, int]:
+        row = self.db.execute(
+            "SELECT COUNT(DISTINCT session_id), COUNT(*) FROM turns"
+        ).fetchone()
+        return {
+            "sessions": int(row[0]) if row else 0,
+            "turns": int(row[1]) if row else 0,
+        }
+
+    def clear_sessions(self) -> dict[str, int]:
+        counts = self.session_counts()
+        sessions = counts["sessions"]
+        turns = counts["turns"]
+        if turns:
+            self.db.execute("DELETE FROM turns")
+            self.db.commit()
+        return {"sessions": sessions, "turns": turns}
+
     def session_tail(self, session_id: str, limit: int = 8) -> list[dict]:
         rows = self.db.execute(
             "SELECT role, content FROM turns WHERE session_id=? ORDER BY ts DESC LIMIT ?",

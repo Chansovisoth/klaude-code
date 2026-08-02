@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import email.utils
+import hashlib
 import importlib.util
 import json
 import math
@@ -113,6 +114,22 @@ class SearchLocationContext:
     explicit: bool = False
 
 
+@dataclass(frozen=True)
+class ProviderDirective:
+    provider: str | None
+    strict: bool
+    cleaned_user_query: str
+
+
+@dataclass(frozen=True)
+class QueryTermProvenance:
+    term: str
+    source: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"term": self.term, "source": self.source}
+
+
 @dataclass
 class SearchQuery:
     text: str
@@ -132,6 +149,9 @@ class SearchQuery:
     location_region: str = ""
     location_city_hint: str = ""
     location_explicit: bool = False
+    provider_preference: str | None = None
+    provider_strict: bool = False
+    query_provenance: list[QueryTermProvenance] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -384,6 +404,10 @@ class ProviderStatus:
     state: ProviderState
     reason: str
     api_key_env: str = ""
+    configured: bool = True
+    healthy: bool | None = None
+    priority: int = 999
+    unavailable_reason: str | None = None
     capabilities: ProviderCapabilities = field(default_factory=ProviderCapabilities)
     supported_intents: list[SearchIntent] = field(default_factory=list)
     timeout_seconds: int = 20
@@ -457,6 +481,58 @@ SENSITIVE_ENV_KEYS = (
     "SEARXNG_SECRET",
 )
 
+WEB_PROVIDER_NAMES = {
+    "google",
+    "parallel",
+    "tavily",
+    "exa",
+    "firecrawl",
+    "ddgs",
+    "searxng",
+}
+KEYED_FAILURE_STATES = {
+    ProviderState.AUTHENTICATION_FAILED,
+    ProviderState.BILLING_BLOCKED,
+    ProviderState.COOLDOWN,
+    ProviderState.DEGRADED,
+    ProviderState.QUOTA_EXHAUSTED,
+    ProviderState.RATE_LIMITED,
+    ProviderState.UNHEALTHY,
+}
+PROVIDER_ALIAS = {
+    "local": "searxng",
+    "searx": "searxng",
+    "searxng": "searxng",
+    "duckduckgo": "ddgs",
+    "duckduckgo_search": "ddgs",
+    "ddg": "ddgs",
+    "ddgs": "ddgs",
+    "google": "google",
+    "gemini": "google",
+    "parallel": "parallel",
+    "tavily": "tavily",
+    "exa": "exa",
+    "firecrawl": "firecrawl",
+}
+CONTROL_TEXT_PATTERNS = (
+    re.compile(r"(?i)\bClaude\.\s*Rules\b"),
+    re.compile(r"(?i)\bsystem\s+prompt\b"),
+    re.compile(r"(?i)\bdeveloper\s+message\b"),
+    re.compile(r"(?i)\btool\s+instructions?\b"),
+    re.compile(r"(?i)\bprovider\s+instructions?\b"),
+    re.compile(r"(?i)\bhidden\s+routing\s+notes?\b"),
+    re.compile(r"(?i)\bchain[- ]of[- ]thought\b"),
+    re.compile(r"(?i)\bscratchpad\b"),
+)
+ALLOWED_QUERY_PROVENANCE_SOURCES = {
+    "current_user_text",
+    "conversation_entity",
+    "explicit_location",
+    "inferred_location",
+    "relationship_expansion",
+    "official_domain",
+}
+
 PAID_PROVIDERS = {"google", "parallel", "tavily", "exa", "firecrawl"}
 PRIMARY_SOURCE_HINTS = {
     "docs.",
@@ -515,6 +591,11 @@ SCHOOL_TERMS = {
     "institutions",
     "education",
 }
+UNIVERSITY_TERMS = {"university", "universities"}
+COLLEGE_TERMS = {"college", "colleges"}
+SCHOOL_ONLY_TERMS = {"school", "schools", "academy", "academies"}
+EDUCATION_TERMS = SCHOOL_TERMS
+EDUCATION_RELATIONSHIPS = {"school", "university", "college", "education"}
 CAMBODIA_TERMS = {
     "cambodia",
     "cambodian",
@@ -645,6 +726,20 @@ def redact_secrets(text: object) -> str:
     return message
 
 
+def _api_key_fingerprint(api_key: str) -> str:
+    value = api_key.strip()
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
+
+
+def _provider_api_key_fingerprint(provider: SearchProvider) -> str:
+    api_key = getattr(provider, "api_key", None)
+    if not callable(api_key):
+        return ""
+    return _api_key_fingerprint(str(api_key() or ""))
+
+
 def _now_utc() -> datetime:
     return datetime.now(UTC)
 
@@ -692,8 +787,88 @@ def _provider_api_key(cfg: Config, name: str) -> str:
     return ""
 
 
+def parse_provider_directive(text: str) -> ProviderDirective:
+    cleaned = _remove_control_fragments(text)
+    provider: str | None = None
+    strict = False
+
+    def capture(value: str, *, is_strict: bool) -> str:
+        nonlocal provider, strict
+        normalized = _normalize_provider_name(value)
+        if normalized:
+            provider = normalized
+            strict = is_strict
+        return ""
+
+    cleaned = re.sub(
+        r"(?i)\bprovider\s*:\s*([a-z0-9_-]+)\b",
+        lambda match: capture(match.group(1), is_strict=True),
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?i)\b(?:using|with|via)\s+([a-z0-9_-]+)\b",
+        lambda match: capture(match.group(1), is_strict=True),
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?i)\bprefer\s+([a-z0-9_-]+)\b",
+        lambda match: capture(match.group(1), is_strict=False),
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?i)^\s*search\s+([a-z0-9_-]+)\s+for\b",
+        lambda match: f"search for{capture(match.group(1), is_strict=True)}",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?i)^\s*use\s+([a-z0-9_-]+)\s+to\s+search(?:\s+for)?\b",
+        lambda match: f"search for{capture(match.group(1), is_strict=True)}",
+        cleaned,
+    )
+    cleaned = sanitize_semantic_search_query(cleaned)
+    return ProviderDirective(provider, strict, _clean_sentence_spacing(cleaned))
+
+
+def sanitize_semantic_search_query(text: str) -> str:
+    cleaned = _remove_control_fragments(text)
+    provider_names = (
+        "google|gemini|parallel|tavily|exa|firecrawl|ddgs|ddg|"
+        "duckduckgo|searx|searxng|local"
+    )
+    cleaned = re.sub(
+        rf"(?i)\b(?:using|with|via)\s+(?:{provider_names})\b",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        rf"(?i)\bprovider\s*:\s*(?:{provider_names})\b",
+        " ",
+        cleaned,
+    )
+    return _clean_sentence_spacing(cleaned)
+
+
+def _remove_control_fragments(text: str) -> str:
+    cleaned = str(text or "")
+    for pattern in CONTROL_TEXT_PATTERNS:
+        cleaned = pattern.sub(" ", cleaned)
+    return _clean_sentence_spacing(cleaned)
+
+
+def _normalize_provider_name(value: str) -> str | None:
+    key = str(value or "").strip().lower().replace("-", "_")
+    return PROVIDER_ALIAS.get(key)
+
+
+def _clean_sentence_spacing(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    cleaned = re.sub(r"\s+([?.!,;:])", r"\1", cleaned)
+    cleaned = re.sub(r"(?:\s*\.\s*){2,}", ". ", cleaned)
+    return cleaned
+
+
 def classify_search_intent(query: str) -> SearchIntent:
-    cleaned = clean_search_query(query)
+    cleaned = clean_search_query(parse_provider_directive(query).cleaned_user_query)
     text = cleaned.lower()
     ambiguity = classify_ambiguity(query)
     if _looks_like_local_entity(text, cleaned):
@@ -736,9 +911,30 @@ def _looks_like_short_acronym(text: str) -> bool:
     return bool(re.fullmatch(r"[A-Z0-9]{2,6}", cleaned))
 
 
+def _education_relationship_for_terms(terms: set[str]) -> str:
+    if terms & UNIVERSITY_TERMS:
+        return "university"
+    if terms & COLLEGE_TERMS:
+        return "college"
+    if terms & SCHOOL_ONLY_TERMS:
+        return "school"
+    if terms & EDUCATION_TERMS:
+        return "education"
+    return "definition"
+
+
+def _relationship_query_term(relationship: str) -> str:
+    if relationship in {"university", "college", "school"}:
+        return relationship
+    if relationship == "education":
+        return "education"
+    return "organization"
+
+
 def classify_ambiguity(query: str) -> AmbiguityClassification:
-    cleaned = clean_search_query(query)
-    original = query.strip()
+    directive = parse_provider_directive(query)
+    cleaned = clean_search_query(directive.cleaned_user_query)
+    original = directive.cleaned_user_query.strip()
     tokens = re.findall(r"[A-Za-z0-9]+", cleaned)
     subject = tokens[0] if tokens else ""
     terms = set(_terms(original))
@@ -749,8 +945,8 @@ def classify_ambiguity(query: str) -> AmbiguityClassification:
     relationship = "definition"
     if re.search(r"(?i)^\s*where\s+(?:is|are|was|were)\b", original):
         relationship = "location"
-    elif terms & SCHOOL_TERMS:
-        relationship = "school"
+    elif terms & EDUCATION_TERMS:
+        relationship = _education_relationship_for_terms(terms)
     acronym_subjects = [
         token for token in tokens if re.fullmatch(r"[A-Z0-9]{2,5}", token)
     ]
@@ -961,20 +1157,53 @@ def _is_local_query(query: str, intent: SearchIntent) -> bool:
 
 
 def _infer_official_domains(query: str, intent: SearchIntent) -> list[str]:
+    text = clean_search_query(parse_provider_directive(query).cleaned_user_query).lower()
+    domains: list[str] = []
+    if "american intercon school" in text:
+        domains.append("ais.edu.kh")
     if intent not in {
         SearchIntent.RECENT_SOFTWARE,
         SearchIntent.TECHNICAL_DOCUMENTATION,
         SearchIntent.LOCAL_ENTITY,
     }:
-        return []
-    text = clean_search_query(query).lower()
-    domains: list[str] = []
+        return domains[:4]
     for key, candidates in TECH_DOMAIN_HINTS.items():
         if key in text:
             for domain in candidates:
                 if domain not in domains:
                     domains.append(domain)
     return domains[:4]
+
+
+def _query_term_provenance(
+    query_text: str,
+    include_domains: list[str],
+    *,
+    location: LocationDecision,
+) -> list[QueryTermProvenance]:
+    items: list[QueryTermProvenance] = []
+
+    def add(term: str, source: str) -> None:
+        if not term or source not in ALLOWED_QUERY_PROVENANCE_SOURCES:
+            return
+        if not any(item.term == term and item.source == source for item in items):
+            items.append(QueryTermProvenance(term, source))
+
+    if "american intercon school" in query_text.lower():
+        add("American Intercon School", "conversation_entity")
+    for word in ("established", "founded", "history", "anniversary"):
+        if re.search(rf"\b{word}\b", query_text, re.IGNORECASE):
+            add(word, "relationship_expansion")
+    if location.country_name:
+        add(
+            location.country_name,
+            "explicit_location" if location.explicit else "inferred_location",
+        )
+    for domain in include_domains:
+        add(domain, "official_domain")
+    if not items and query_text:
+        add(query_text, "current_user_text")
+    return items
 
 
 def build_search_query(
@@ -985,28 +1214,36 @@ def build_search_query(
     intent: SearchIntent | str | None = None,
     language: str | None = None,
     country: str | None = None,
+    provider_preference: str | None = None,
+    provider_strict: bool = False,
 ) -> SearchQuery:
-    detected = SearchIntent(intent) if intent else classify_search_intent(query)
-    ambiguity = classify_ambiguity(query)
+    directive = parse_provider_directive(query)
+    semantic_query = sanitize_semantic_search_query(directive.cleaned_user_query)
+    preference = _normalize_provider_name(provider_preference or "") or directive.provider
+    strict = bool(provider_strict or (directive.provider and directive.strict))
+    detected = SearchIntent(intent) if intent else classify_search_intent(semantic_query)
+    ambiguity = classify_ambiguity(semantic_query)
     location = _location_decision(
-        query,
+        semantic_query,
         cfg,
         ambiguity,
         detected,
         country=country,
     )
     resolved_country = location.country_code if location.applied else None
-    if not resolved_country and _is_local_query(query, detected):
+    if not resolved_country and _is_local_query(semantic_query, detected):
         resolved_country = cfg.runtime_context_location_country or None
-    location_context = _location_context_from_decision(location, cfg, query)
+    location_context = _location_context_from_decision(location, cfg, semantic_query)
+    query_text = clean_search_query(semantic_query)
+    include_domains = _infer_official_domains(semantic_query, detected)
     return SearchQuery(
-        text=clean_search_query(query),
+        text=query_text,
         intent=detected,
-        original_text=query,
+        original_text=semantic_query,
         language=language,
         country=resolved_country,
         freshness=_freshness_for_intent(detected),
-        include_domains=_infer_official_domains(query, detected),
+        include_domains=include_domains,
         result_limit=max_results,
         ambiguity_type=ambiguity.ambiguity_type,
         location_mode=location.mode,
@@ -1016,6 +1253,13 @@ def build_search_query(
         location_region=location_context.region or "",
         location_city_hint=location_context.city_hint or "",
         location_explicit=location_context.explicit,
+        provider_preference=preference,
+        provider_strict=strict,
+        query_provenance=_query_term_provenance(
+            query_text,
+            include_domains,
+            location=location,
+        ),
     )
 
 
@@ -1078,10 +1322,29 @@ def search_cache_ttl(query: SearchQuery) -> int:
 
 
 def search_cache_key(cfg: Config, query: SearchQuery) -> str:
+    provider_order = [name for name in cfg.web_search.provider_order if name in WEB_PROVIDER_NAMES]
     payload = {
         "query": query.text.lower(),
         "intent": query.intent.value,
         "provider": cfg.web_provider,
+        "provider_preference": query.provider_preference,
+        "provider_strict": query.provider_strict,
+        "provider_route": {
+            "order": provider_order,
+            "enabled": {
+                name: bool(cfg.web_providers.get(name).enabled)
+                for name in provider_order
+                if cfg.web_providers.get(name)
+            },
+            "configured": {
+                name: (
+                    bool(_provider_api_key(cfg, name))
+                    if name in PAID_PROVIDERS
+                    else True
+                )
+                for name in provider_order
+            },
+        },
         "strategy": cfg.web_search.strategy,
         "language": query.language,
         "country": query.country,
@@ -1094,7 +1357,7 @@ def search_cache_key(cfg: Config, query: SearchQuery) -> str:
         "exclude_domains": sorted(query.exclude_domains),
         "limit": query.result_limit,
     }
-    return "search_v6::" + json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return "search_v7::" + json.dumps(payload, sort_keys=True, ensure_ascii=False)
 
 
 def _retry_after_seconds(value: str | None, now: Callable[[], datetime]) -> float | None:
@@ -1112,8 +1375,8 @@ def _retry_after_seconds(value: str | None, now: Callable[[], datetime]) -> floa
 def _status_error_state(response: httpx.Response) -> ProviderState:
     if response.status_code == 401:
         return ProviderState.AUTHENTICATION_FAILED
-    if response.status_code == 402:
-        return ProviderState.BILLING_BLOCKED
+    if response.status_code in {402, 432, 433}:
+        return ProviderState.QUOTA_EXHAUSTED
     if response.status_code == 403:
         return ProviderState.AUTHENTICATION_FAILED
     if response.status_code == 429:
@@ -1225,6 +1488,7 @@ class ProviderStateStore:
         *,
         reported_search_count: int = 0,
         estimated_cost: float = 0.0,
+        api_key_fingerprint: str = "",
     ) -> None:
         data = self._load()
         state = dict(data.get(provider, {}))
@@ -1235,6 +1499,8 @@ class ProviderStateStore:
         state["estimated_cost"] = float(state.get("estimated_cost", 0.0)) + estimated_cost
         state["health_state"] = ProviderState.AVAILABLE.value
         state["consecutive_failures"] = 0
+        if api_key_fingerprint:
+            state["api_key_fingerprint"] = api_key_fingerprint
         state.pop("cooldown_until", None)
         data[provider] = _safe_state(state)
         self._save(data)
@@ -1247,11 +1513,14 @@ class ProviderStateStore:
         reset_at: datetime | None = None,
         cooldown_seconds: int = 300,
         transient: bool = False,
+        api_key_fingerprint: str = "",
     ) -> None:
         data = self._load()
         current = dict(data.get(provider, {}))
         current["health_state"] = state.value
         current["last_failure_at"] = self.now().isoformat()
+        if api_key_fingerprint:
+            current["api_key_fingerprint"] = api_key_fingerprint
         if state == ProviderState.QUOTA_EXHAUSTED:
             current["quota_exhausted_at"] = self.now().isoformat()
             current["expected_reset_time"] = reset_at.isoformat() if reset_at else None
@@ -1280,6 +1549,7 @@ def _safe_state(state: dict) -> dict:
         "health_state",
         "last_failure_at",
         "consecutive_failures",
+        "api_key_fingerprint",
     }
     return {key: value for key, value in state.items() if key in allowed}
 
@@ -1483,7 +1753,7 @@ class TavilyProvider(BaseProvider):
     capabilities = ProviderCapabilities(
         web_results=True,
         news=True,
-        extracted_content=True,
+        extracted_content=False,
         date_filtering=True,
     )
     supported_intents = {
@@ -1500,24 +1770,226 @@ class TavilyProvider(BaseProvider):
         SearchIntent.STABLE_FACT,
     }
 
+    def __init__(
+        self,
+        cfg: Config,
+        *,
+        sleep: Callable[[float], None] = time.sleep,
+        now: Callable[[], datetime] = _now_utc,
+    ):
+        super().__init__(cfg, sleep=sleep, now=now)
+        self.tavily_api_key = (cfg.tavily_api_key or "").strip()
+
+    def api_key(self) -> str:
+        return self.tavily_api_key
+
     def search(self, query: SearchQuery) -> SearchResponse:
         search_text = provider_primary_query(query)
-        depth = self.provider_config.default_depth
-        if query.intent in {SearchIntent.BROAD_RESEARCH, SearchIntent.BREAKING_NEWS}:
-            depth = "advanced"
-        data = self._post_json(
-            "https://api.tavily.com/search",
-            json_body={
-                "api_key": self.api_key(),
-                "query": search_text,
-                "search_depth": depth,
-                "max_results": query.result_limit,
-                "include_answer": False,
-                "topic": "news" if query.intent == SearchIntent.BREAKING_NEWS else "general",
-            },
-            timeout=self.provider_config.timeout_seconds,
+        depth = _tavily_search_depth(self.provider_config.default_depth)
+        topic = "news" if query.intent == SearchIntent.BREAKING_NEWS else "general"
+        payload: dict[str, Any] = {
+            "query": search_text,
+            "search_depth": depth,
+            "max_results": _tavily_result_limit(query.result_limit),
+            "include_answer": False,
+            "include_raw_content": False,
+            "include_images": False,
+            "include_image_descriptions": False,
+            "include_favicon": True,
+            "topic": topic,
+            "auto_parameters": False,
+            "safe_search": False,
+            "include_usage": True,
+        }
+        if query.include_domains:
+            payload["include_domains"] = query.include_domains[:300]
+        if query.exclude_domains:
+            payload["exclude_domains"] = query.exclude_domains[:150]
+        country = _tavily_country(query)
+        if topic == "general" and country:
+            payload["country"] = country
+        try:
+            data = self._post_json(
+                "https://api.tavily.com/search",
+                headers={
+                    "Authorization": f"Bearer {self.api_key()}",
+                    "Content-Type": "application/json",
+                },
+                json_body=payload,
+                timeout=self.provider_config.timeout_seconds,
+            )
+        except ProviderSearchError as exc:
+            raise _tavily_provider_error(exc, self.api_key()) from exc
+        return _tavily_search_response(self.name, query, data, depth=depth, topic=topic)
+
+
+def _tavily_search_depth(value: str) -> str:
+    return "advanced" if str(value).strip().lower() == "advanced" else "basic"
+
+
+def _tavily_result_limit(limit: int) -> int:
+    return max(1, min(int(limit or 5), 20))
+
+
+def _tavily_country(query: SearchQuery) -> str:
+    if query.location_country_name:
+        return query.location_country_name.lower()
+    if query.country:
+        return COUNTRY_NAMES.get(query.country.upper(), query.country).lower()
+    return ""
+
+
+def _tavily_redact(message: object, api_key: str = "") -> str:
+    safe = redact_secrets(message)
+    if api_key:
+        safe = safe.replace(api_key, "[redacted]")
+    return safe
+
+
+def _tavily_error_detail(response: httpx.Response, api_key: str = "") -> str:
+    detail: object = ""
+    try:
+        payload = response.json()
+    except ValueError:
+        detail = response.text[:500]
+    else:
+        if isinstance(payload, dict):
+            detail = payload.get("detail") or payload.get("error") or payload
+            if isinstance(detail, dict):
+                detail = detail.get("error") or detail.get("message") or detail
+    return _tavily_redact(detail, api_key).strip()
+
+
+def _tavily_provider_error(exc: ProviderSearchError, api_key: str) -> ProviderSearchError:
+    status = 0
+    detail = ""
+    cause = exc.__cause__
+    if isinstance(cause, httpx.HTTPStatusError):
+        status = cause.response.status_code
+        detail = _tavily_error_detail(cause.response, api_key)
+    message_detail = f": {detail}" if detail else ""
+    if status in {401, 403}:
+        return ProviderSearchError(
+            ProviderState.AUTHENTICATION_FAILED,
+            f"Tavily authentication failure (HTTP {status}){message_detail}",
+            transient=False,
         )
-        return _dict_items_response(self.name, query, data.get("results") or [])
+    if status in {402, 432, 433}:
+        return ProviderSearchError(
+            ProviderState.QUOTA_EXHAUSTED,
+            f"Tavily credit or plan limit exhausted (HTTP {status}){message_detail}",
+            transient=False,
+        )
+    if status == 429:
+        return ProviderSearchError(
+            ProviderState.RATE_LIMITED,
+            f"Tavily rate limiting (HTTP 429){message_detail}",
+            retry_at=exc.retry_at,
+            transient=exc.transient,
+        )
+    if status in {400, 422}:
+        return ProviderSearchError(
+            ProviderState.UNHEALTHY,
+            f"Tavily malformed request (HTTP {status}){message_detail}",
+            transient=False,
+        )
+    if status:
+        return ProviderSearchError(
+            exc.state,
+            f"Tavily request failed (HTTP {status}){message_detail}",
+            retry_at=exc.retry_at,
+            transient=exc.transient,
+        )
+    return ProviderSearchError(
+        exc.state,
+        f"Tavily request failed: {_tavily_redact(exc, api_key)}",
+        retry_at=exc.retry_at,
+        transient=exc.transient,
+    )
+
+
+def _tavily_result_metadata(item: dict) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for key in ("favicon", "images", "raw_content"):
+        if key in item:
+            metadata[key] = item.get(key)
+    metadata["raw_provider_result"] = {
+        key: value
+        for key, value in item.items()
+        if key not in {"content", "raw_content", "text", "body"}
+    }
+    return metadata
+
+
+def _tavily_search_response(
+    provider: str,
+    query: SearchQuery,
+    data: dict,
+    *,
+    depth: str,
+    topic: str,
+) -> SearchResponse:
+    items = data.get("results")
+    if not isinstance(items, list):
+        raise ProviderSearchError(
+            ProviderState.DEGRADED,
+            "Tavily malformed response: missing results list",
+            transient=True,
+        )
+    results: list[dict] = []
+    for index, item in enumerate(items[: _tavily_result_limit(query.result_limit)], 1):
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or item.get("href") or item.get("link") or "").strip()
+        if not url:
+            continue
+        title = str(item.get("title") or item.get("name") or url)
+        snippet = str(item.get("content") or item.get("snippet") or item.get("text") or "")
+        provider_score = item.get("score")
+        results.append(
+            SearchResult(
+                title=title,
+                url=url,
+                snippet=snippet,
+                provider=provider,
+                provider_rank=index,
+                domain=_domain(url),
+                published_at=_parse_datetime(
+                    item.get("published_date")
+                    or item.get("publishedDate")
+                    or item.get("published_at")
+                    or item.get("date")
+                ),
+                provider_score=(
+                    float(provider_score)
+                    if isinstance(provider_score, int | float)
+                    else None
+                ),
+                metadata={
+                    "matched_query": data.get("query") or query.text,
+                    "evidence_level": EvidenceLevel.SEARCH_SNIPPET.value,
+                    "untrusted_web_evidence": True,
+                    "tavily": _tavily_result_metadata(item),
+                },
+            ).to_dict()
+        )
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    credits = usage.get("credits") if isinstance(usage, dict) else None
+    provider_metadata = {
+        "search_depth": depth,
+        "topic": topic,
+        "response_time": data.get("response_time"),
+        "request_id": data.get("request_id"),
+        "usage": usage,
+        "usage_credits": credits,
+    }
+    return SearchResponse(
+        results=results,
+        queries_attempted=[str(data.get("query") or query.text)],
+        providers_attempted=[provider],
+        providers_succeeded=[provider] if results else [],
+        provider_metadata={provider: provider_metadata},
+    )
 
 
 class ExaProvider(BaseProvider):
@@ -1529,50 +2001,446 @@ class ExaProvider(BaseProvider):
         similar_pages=True,
         extracted_content=True,
     )
-    supported_intents = {
-        SearchIntent.SEMANTIC_DISCOVERY,
-        SearchIntent.ACADEMIC_RESEARCH,
-        SearchIntent.TECHNICAL_DOCUMENTATION,
-        SearchIntent.RECENT_SOFTWARE,
-        SearchIntent.BROAD_RESEARCH,
-    }
+    supported_intents = set(SearchIntent)
+
+    def __init__(
+        self,
+        cfg: Config,
+        *,
+        sleep: Callable[[float], None] = time.sleep,
+        now: Callable[[], datetime] = _now_utc,
+    ):
+        super().__init__(cfg, sleep=sleep, now=now)
+        self.exa_api_key = (cfg.exa_api_key or "").strip()
+
+    def api_key(self) -> str:
+        return self.exa_api_key
 
     def search(self, query: SearchQuery) -> SearchResponse:
         search_text = provider_primary_query(query)
-        results = exa_search(
-            self.cfg.exa_base_url,
-            self.api_key(),
-            search_text,
-            query.result_limit,
-            code_context=query.intent == SearchIntent.TECHNICAL_DOCUMENTATION,
-        )
+        try:
+            results = exa_search(
+                self.cfg.exa_base_url,
+                self.api_key(),
+                search_text,
+                query.result_limit,
+                code_context=query.intent == SearchIntent.TECHNICAL_DOCUMENTATION,
+            )
+        except httpx.HTTPStatusError as exc:
+            response = exc.response
+            state = _status_error_state(response)
+            status = response.status_code
+            if status in {401, 403}:
+                reason = f"Exa authentication failure (HTTP {status})"
+            elif status == 402:
+                reason = "Exa credit or budget exhaustion (HTTP 402)"
+            elif status == 429:
+                reason = "Exa rate limiting (HTTP 429)"
+            elif status in {400, 422}:
+                reason = f"Exa malformed request (HTTP {status})"
+            else:
+                reason = f"Exa request failed (HTTP {status})"
+            raise ProviderSearchError(
+                state,
+                reason,
+                transient=_retryable_http_status(status),
+            ) from exc
         return _dict_items_response(self.name, query, results)
 
 
 class FirecrawlProvider(BaseProvider):
     name = "firecrawl"
     requires_key = True
-    capabilities = ProviderCapabilities(web_results=True, extracted_content=True)
-    supported_intents = {
-        SearchIntent.CURRENT_FACT,
-        SearchIntent.RECENT_SOFTWARE,
-        SearchIntent.TECHNICAL_DOCUMENTATION,
-        SearchIntent.BROAD_RESEARCH,
-        SearchIntent.STABLE_FACT,
-    }
+    capabilities = ProviderCapabilities(
+        web_results=True,
+        news=True,
+        date_filtering=True,
+        country_filtering=True,
+        extracted_content=False,
+    )
+    supported_intents = set(SearchIntent)
+
+    def __init__(
+        self,
+        cfg: Config,
+        *,
+        sleep: Callable[[float], None] = time.sleep,
+        now: Callable[[], datetime] = _now_utc,
+    ):
+        super().__init__(cfg, sleep=sleep, now=now)
+        self.firecrawl_api_key = (cfg.firecrawl_api_key or "").strip()
+
+    def api_key(self) -> str:
+        return self.firecrawl_api_key
 
     def search(self, query: SearchQuery) -> SearchResponse:
         search_text = provider_primary_query(query)
-        data = self._post_json(
-            "https://api.firecrawl.dev/v1/search",
-            headers={
-                "Authorization": f"Bearer {self.api_key()}",
-                "Content-Type": "application/json",
-            },
-            json_body={"query": search_text, "limit": query.result_limit},
-            timeout=self.provider_config.timeout_seconds,
+        source = _firecrawl_source(query)
+        payload: dict[str, Any] = {
+            "query": _firecrawl_query(search_text),
+            "limit": _firecrawl_result_limit(query.result_limit),
+            "sources": [source],
+            "timeout": _firecrawl_timeout_ms(self.provider_config.timeout_seconds),
+            "ignoreInvalidURLs": True,
+        }
+        if query.include_domains:
+            domains = _firecrawl_domains(query.include_domains)[:50]
+            if domains:
+                payload["includeDomains"] = domains
+        elif query.exclude_domains:
+            domains = _firecrawl_domains(query.exclude_domains)[:50]
+            if domains:
+                payload["excludeDomains"] = domains
+        tbs = _firecrawl_tbs(query)
+        if tbs:
+            payload["tbs"] = tbs
+        country = _firecrawl_country(query)
+        if country:
+            payload["country"] = country
+        location = _firecrawl_location(query)
+        if location:
+            payload["location"] = location
+        try:
+            data = self._post_json(
+                "https://api.firecrawl.dev/v2/search",
+                headers={
+                    "Authorization": f"Bearer {self.api_key()}",
+                    "Content-Type": "application/json",
+                },
+                json_body=payload,
+                timeout=self.provider_config.timeout_seconds,
+            )
+        except ProviderSearchError as exc:
+            raise _firecrawl_provider_error(exc, self.api_key()) from exc
+        return _firecrawl_search_response(
+            self.name,
+            query,
+            data,
+            source=source,
+            request_query=payload["query"],
+            api_key=self.api_key(),
         )
-        return _dict_items_response(self.name, query, data.get("data") or data.get("results") or [])
+
+
+def _firecrawl_query(query: str) -> str:
+    return str(query or "").strip()[:500]
+
+
+def _firecrawl_result_limit(limit: int) -> int:
+    return max(1, min(int(limit or 5), 10))
+
+
+def _firecrawl_timeout_ms(timeout_seconds: int) -> int:
+    return max(1000, min(int(float(timeout_seconds or 20) * 1000), 60000))
+
+
+def _firecrawl_source(query: SearchQuery) -> str:
+    return "news" if query.intent == SearchIntent.BREAKING_NEWS else "web"
+
+
+def _firecrawl_domains(domains: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for value in domains:
+        parsed = urlparse(str(value).strip())
+        host = parsed.hostname or str(value).strip().split("/", 1)[0]
+        host = host.lower().removeprefix("www.")
+        if host and host not in normalized:
+            normalized.append(host)
+    return normalized
+
+
+def _firecrawl_tbs(query: SearchQuery) -> str:
+    if query.intent == SearchIntent.BREAKING_NEWS or query.freshness == "1d":
+        return "qdr:d"
+    if query.freshness == "30d":
+        return "qdr:m"
+    if query.freshness == "90d":
+        return "qdr:y"
+    return ""
+
+
+def _firecrawl_country(query: SearchQuery) -> str:
+    if query.country:
+        return query.country.upper()
+    if query.location_country_name:
+        return COUNTRY_ALIASES.get(query.location_country_name.lower(), "")
+    return ""
+
+
+def _firecrawl_location(query: SearchQuery) -> str:
+    if query.location_city_hint and query.location_country_name:
+        return f"{query.location_city_hint},{query.location_country_name}"
+    return query.location_country_name or ""
+
+
+def _firecrawl_redact(message: object, api_key: str = "") -> str:
+    safe = redact_secrets(message)
+    if api_key:
+        safe = safe.replace(api_key, "[redacted]")
+    return safe
+
+
+def _firecrawl_error_detail(response: httpx.Response, api_key: str = "") -> str:
+    detail: object = ""
+    try:
+        payload = response.json()
+    except ValueError:
+        detail = response.text[:500]
+    else:
+        if isinstance(payload, dict):
+            detail = (
+                payload.get("error")
+                or payload.get("message")
+                or payload.get("details")
+                or payload
+            )
+    return _firecrawl_redact(detail, api_key).strip()
+
+
+def _firecrawl_provider_error(
+    exc: ProviderSearchError,
+    api_key: str,
+) -> ProviderSearchError:
+    status = 0
+    detail = ""
+    cause = exc.__cause__
+    if isinstance(cause, httpx.HTTPStatusError):
+        status = cause.response.status_code
+        detail = _firecrawl_error_detail(cause.response, api_key)
+    message_detail = f": {detail}" if detail else ""
+    if status in {401, 403}:
+        return ProviderSearchError(
+            ProviderState.AUTHENTICATION_FAILED,
+            f"Firecrawl authentication failure (HTTP {status}){message_detail}",
+            transient=False,
+        )
+    if status == 402:
+        return ProviderSearchError(
+            ProviderState.QUOTA_EXHAUSTED,
+            f"Firecrawl credit or billing limit exhausted (HTTP 402){message_detail}",
+            transient=False,
+        )
+    if status == 429:
+        return ProviderSearchError(
+            ProviderState.RATE_LIMITED,
+            f"Firecrawl rate limiting (HTTP 429){message_detail}",
+            retry_at=exc.retry_at,
+            transient=exc.transient,
+        )
+    if status == 408:
+        return ProviderSearchError(
+            ProviderState.DEGRADED,
+            f"Firecrawl request timed out (HTTP 408){message_detail}",
+            transient=True,
+        )
+    if status in {400, 422}:
+        return ProviderSearchError(
+            ProviderState.UNHEALTHY,
+            f"Firecrawl malformed request (HTTP {status}){message_detail}",
+            transient=False,
+        )
+    if status >= 500:
+        return ProviderSearchError(
+            ProviderState.DEGRADED,
+            f"Firecrawl server error (HTTP {status}){message_detail}",
+            retry_at=exc.retry_at,
+            transient=True,
+        )
+    if status:
+        return ProviderSearchError(
+            exc.state,
+            f"Firecrawl request failed (HTTP {status}){message_detail}",
+            retry_at=exc.retry_at,
+            transient=exc.transient,
+        )
+    return ProviderSearchError(
+        exc.state,
+        f"Firecrawl request failed: {_firecrawl_redact(exc, api_key)}",
+        retry_at=exc.retry_at,
+        transient=exc.transient,
+    )
+
+
+def _firecrawl_unsuccessful_response(
+    data: dict,
+    api_key: str,
+) -> ProviderSearchError:
+    detail = data.get("error") or data.get("message") or data.get("details") or data
+    return ProviderSearchError(
+        ProviderState.UNHEALTHY,
+        f"Firecrawl unsuccessful response: {_firecrawl_redact(detail, api_key)}",
+        transient=False,
+    )
+
+
+def _firecrawl_result_items(data: dict, source: str) -> list[dict]:
+    payload = data.get("data")
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        preferred = payload.get(source)
+        if isinstance(preferred, list):
+            return [item for item in preferred if isinstance(item, dict)]
+        collected: list[dict] = []
+        for key in ("web", "news"):
+            values = payload.get(key)
+            if isinstance(values, list):
+                collected.extend(item for item in values if isinstance(item, dict))
+        return collected
+    results = data.get("results")
+    if isinstance(results, list):
+        return [item for item in results if isinstance(item, dict)]
+    return []
+
+
+def _firecrawl_response_counts(data: dict) -> dict[str, int]:
+    payload = data.get("data")
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        key: len(value)
+        for key, value in payload.items()
+        if key in {"web", "news", "images"} and isinstance(value, list)
+    }
+
+
+def _firecrawl_compact_text(value: object, *, limit: int = 1200) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "..."
+
+
+def _firecrawl_snippet(item: dict) -> str:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    for key in ("description", "snippet", "content", "text"):
+        value = item.get(key)
+        if value:
+            return _firecrawl_compact_text(value)
+    for key in ("description", "ogDescription", "twitterDescription"):
+        value = metadata.get(key)
+        if value:
+            return _firecrawl_compact_text(value)
+    return _firecrawl_compact_text(item.get("markdown") or item.get("html") or "")
+
+
+def _firecrawl_result_metadata(item: dict, source: str) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "source": source,
+        "category": item.get("category"),
+        "position": item.get("position"),
+        "markdown_available": bool(item.get("markdown")),
+        "html_available": bool(item.get("html") or item.get("rawHtml")),
+    }
+    if isinstance(item.get("metadata"), dict):
+        metadata["page_metadata"] = item.get("metadata")
+    if isinstance(item.get("links"), list):
+        metadata["links"] = item.get("links")[:25]
+    metadata["raw_provider_result"] = {
+        key: value
+        for key, value in item.items()
+        if key not in {"markdown", "html", "rawHtml", "content", "text", "body"}
+    }
+    return metadata
+
+
+def _firecrawl_published_at(item: dict) -> datetime | None:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    return _parse_datetime(
+        item.get("date")
+        or item.get("published_at")
+        or item.get("publishedDate")
+        or item.get("published_date")
+        or metadata.get("publishedTime")
+        or metadata.get("published_time")
+        or metadata.get("date")
+    )
+
+
+def _firecrawl_rank(item: dict, fallback: int) -> int:
+    try:
+        return int(item.get("position") or fallback)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _firecrawl_search_response(
+    provider: str,
+    query: SearchQuery,
+    data: dict,
+    *,
+    source: str,
+    request_query: str,
+    api_key: str,
+) -> SearchResponse:
+    if data.get("success") is False:
+        raise _firecrawl_unsuccessful_response(data, api_key)
+    payload = data.get("data")
+    if not isinstance(payload, dict | list) and not isinstance(data.get("results"), list):
+        raise ProviderSearchError(
+            ProviderState.DEGRADED,
+            "Firecrawl malformed response: missing result data",
+            transient=True,
+        )
+    if isinstance(payload, dict) and source in payload and not isinstance(
+        payload.get(source),
+        list,
+    ):
+        raise ProviderSearchError(
+            ProviderState.DEGRADED,
+            f"Firecrawl malformed response: {source} results are not a list",
+            transient=True,
+        )
+    items = _firecrawl_result_items(data, source)
+    if not items and isinstance(data.get("data"), dict):
+        counts = _firecrawl_response_counts(data)
+        if counts:
+            items = _firecrawl_result_items(data, "web" if source != "web" else "news")
+    results: list[dict] = []
+    for index, item in enumerate(items[: _firecrawl_result_limit(query.result_limit)], 1):
+        url = str(item.get("url") or item.get("sourceURL") or "").strip()
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        if not url:
+            url = str(metadata.get("sourceURL") or metadata.get("url") or "").strip()
+        if not url:
+            continue
+        title = str(item.get("title") or metadata.get("title") or url)
+        result = SearchResult(
+            title=title,
+            url=url,
+            snippet=_firecrawl_snippet(item),
+            provider=provider,
+            provider_rank=_firecrawl_rank(item, index),
+            domain=_domain(url),
+            published_at=_firecrawl_published_at(item),
+            provider_score=(
+                float(item["score"]) if isinstance(item.get("score"), int | float) else None
+            ),
+            metadata={
+                "matched_query": request_query or query.text,
+                "evidence_level": EvidenceLevel.SEARCH_SNIPPET.value,
+                "untrusted_web_evidence": True,
+                "firecrawl": _firecrawl_result_metadata(item, source),
+            },
+        )
+        results.append(result.to_dict())
+    credits = data.get("creditsUsed")
+    provider_metadata = {
+        "endpoint": "v2/search",
+        "source": source,
+        "request_id": data.get("id") or data.get("requestId"),
+        "warning": data.get("warning"),
+        "credits_used": credits,
+        "estimated_cost": float(credits) if isinstance(credits, int | float) else 0.0,
+        "response_counts": _firecrawl_response_counts(data),
+    }
+    return SearchResponse(
+        results=results,
+        queries_attempted=[request_query or query.text],
+        providers_attempted=[provider],
+        providers_succeeded=[provider] if results else [],
+        provider_metadata={provider: provider_metadata},
+    )
 
 
 class DDGSProvider(BaseProvider):
@@ -1845,6 +2713,12 @@ def provider_query_variants(query: SearchQuery, max_queries: int = 6) -> list[st
         if value and value not in variants:
             variants.append(value)
 
+    if _is_founding_history_query(query.original_text or query.text):
+        if _mentions_american_intercon_school(query.original_text or query.text):
+            add('site:ais.edu.kh "American Intercon School" established')
+            add('"American Intercon School" established Cambodia')
+            add('"American Intercon School" founded')
+            return variants[: min(max_queries, max(1, limit))]
     if query.include_domains:
         for domain in query.include_domains[:3]:
             add(f"site:{domain} {query.text}")
@@ -1869,16 +2743,18 @@ def provider_query_variants(query: SearchQuery, max_queries: int = 6) -> list[st
         add(f'"PIU" {country} university')
         add(f"PIU Computer Science {country}")
     if query.intent == SearchIntent.LOCAL_ENTITY:
+        relationship = classify_ambiguity(query.original_text or query.text).relationship
         for acronym in re.findall(r"\b[A-Z0-9]{2,8}\b", query.text):
             country = query.location_country_name or "Cambodia"
             city = query.location_city_hint
-            if set(_terms(query.original_text or query.text)) & SCHOOL_TERMS:
-                add(f"{acronym} school {country}")
+            if relationship in EDUCATION_RELATIONSHIPS:
+                relationship_term = _relationship_query_term(relationship)
+                add(f"{acronym} {relationship_term} {country}")
                 if city:
-                    add(f"{acronym} school {city}")
-                add(f'"{acronym}" {country} school')
-                add(f"{acronym} {country} school")
-                add(f"school abbreviated {acronym} in {country}")
+                    add(f"{acronym} {relationship_term} {city}")
+                add(f'"{acronym}" {country} {relationship_term}')
+                add(f"{acronym} {country} {relationship_term}")
+                add(f"{relationship_term} abbreviated {acronym} in {country}")
             else:
                 add(f"{acronym} organization {country}")
                 add(f"{acronym} {country}")
@@ -1894,15 +2770,20 @@ def provider_query_variants(query: SearchQuery, max_queries: int = 6) -> list[st
                 add(f"{subject} {query.location_country_name}")
                 add(f"{subject} organization {query.location_country_name}")
             add(f"{subject} location")
-        elif relationship == "school":
+        elif relationship in EDUCATION_RELATIONSHIPS:
+            relationship_term = _relationship_query_term(relationship)
             if query.location_country_name:
-                add(f"{subject} school {query.location_country_name}")
+                add(f"{subject} {relationship_term} {query.location_country_name}")
                 if query.location_city_hint:
-                    add(f"{subject} school {query.location_city_hint}")
-                add(f'"{subject}" {query.location_country_name} school')
-                add(f"{subject} {query.location_country_name} school")
-                add(f"school abbreviated {subject} in {query.location_country_name}")
-            add(f"{subject} school")
+                    add(f"{subject} {relationship_term} {query.location_city_hint}")
+                add(f'"{subject}" {query.location_country_name} {relationship_term}')
+                add(f"{subject} {query.location_country_name} {relationship_term}")
+                if re.fullmatch(r"[A-Z0-9]{2,8}", subject):
+                    add(
+                        f"{relationship_term} abbreviated {subject} "
+                        f"in {query.location_country_name}"
+                    )
+            add(f"{subject} {relationship_term}")
         else:
             add(f"What does {subject} stand for")
             add(f"{subject} meaning")
@@ -1913,6 +2794,30 @@ def provider_query_variants(query: SearchQuery, max_queries: int = 6) -> list[st
     for variant in expand_search_queries(query.text, max_queries=max_queries):
         add(variant)
     return variants[: min(max_queries, max(1, limit))]
+
+
+def _is_founding_history_query(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?i)\b("
+            r"how\s+long|"
+            r"operat(?:e|ed|es|ing)|"
+            r"founded|"
+            r"established|"
+            r"started|"
+            r"opened|"
+            r"history|"
+            r"anniversar(?:y|ies)|"
+            r"when\s+(?:did|was|were)"
+            r")\b",
+            text,
+        )
+    )
+
+
+def _mentions_american_intercon_school(text: str) -> bool:
+    lowered = text.lower()
+    return "american intercon school" in lowered
 
 
 def provider_primary_query(query: SearchQuery) -> str:
@@ -1953,8 +2858,11 @@ def _target_relationship(
     query: SearchQuery,
     ambiguity: AmbiguityClassification,
 ) -> str:
-    if query.intent == SearchIntent.LOCAL_ENTITY and ambiguity.relationship == "school":
-        return "school identity and location"
+    if (
+        query.intent == SearchIntent.LOCAL_ENTITY
+        and ambiguity.relationship in EDUCATION_RELATIONSHIPS
+    ):
+        return f"{_relationship_query_term(ambiguity.relationship)} identity and location"
     if _is_rhett_link_query(query.original_text or query.text):
         return "person identity"
     if query.intent == SearchIntent.EXACT_ENTITY:
@@ -1970,9 +2878,13 @@ def _preferred_source_types(
     query: SearchQuery,
     ambiguity: AmbiguityClassification,
 ) -> list[str]:
-    if query.intent == SearchIntent.LOCAL_ENTITY and ambiguity.relationship == "school":
+    if (
+        query.intent == SearchIntent.LOCAL_ENTITY
+        and ambiguity.relationship in EDUCATION_RELATIONSHIPS
+    ):
+        relationship_term = _relationship_query_term(ambiguity.relationship)
         return [
-            "official school website",
+            f"official {relationship_term} website",
             "official contact page",
             "education directory",
         ]
@@ -2258,14 +3170,42 @@ class ProviderRegistry:
         self.providers = {provider.name: provider for provider in (providers or default_providers)}
 
     def statuses(self, query: SearchQuery | None = None) -> list[ProviderStatus]:
-        return [self.status_for(name, query) for name in self.providers]
+        names = [*self._ordered_names(query.intent if query else SearchIntent.STABLE_FACT)]
+        names.extend(name for name in self.providers if name not in names)
+        return [self.status_for(name, query) for name in names if name in self.providers]
 
     def status_for(self, name: str, query: SearchQuery | None = None) -> ProviderStatus:
         provider = self.providers[name]
         cfg = self.cfg.web_providers.get(name)
         enabled = bool(cfg.enabled) if cfg else True
+        configured = provider.is_configured()
+        priority = self._priority_for(name, query.intent if query else SearchIntent.STABLE_FACT)
         state = self.state_store.get(name)
         stored_state = ProviderState(state.get("health_state", ProviderState.AVAILABLE.value))
+        current_key_fingerprint = (
+            _provider_api_key_fingerprint(provider)
+            if getattr(provider, "requires_key", False)
+            else ""
+        )
+        stored_key_fingerprint = str(state.get("api_key_fingerprint") or "")
+        if (
+            current_key_fingerprint
+            and stored_state in KEYED_FAILURE_STATES
+            and stored_key_fingerprint != current_key_fingerprint
+        ):
+            stored_state = ProviderState.AVAILABLE
+            state = {
+                key: value
+                for key, value in state.items()
+                if key
+                not in {
+                    "cooldown_until",
+                    "expected_reset_time",
+                    "quota_exhausted_at",
+                    "last_failure_at",
+                    "consecutive_failures",
+                }
+            }
         cooldown_until = _parse_datetime(state.get("cooldown_until"))
         quota_reset_at = _parse_datetime(state.get("expected_reset_time"))
         status = ProviderStatus(
@@ -2274,6 +3214,8 @@ class ProviderRegistry:
             state=ProviderState.AVAILABLE,
             reason="available",
             api_key_env=cfg.api_key_env if cfg else "",
+            configured=configured,
+            priority=priority,
             capabilities=provider.capabilities,
             supported_intents=sorted(provider.supported_intents, key=lambda item: item.value),
             timeout_seconds=cfg.timeout_seconds if cfg else 20,
@@ -2288,7 +3230,7 @@ class ProviderRegistry:
         elif not provider.dependency_available():
             status.state = ProviderState.UNHEALTHY
             status.reason = "dependency unavailable"
-        elif not provider.is_configured():
+        elif not configured:
             status.state = ProviderState.UNCONFIGURED
             status.reason = (
                 f"missing {status.api_key_env}" if status.api_key_env else "unconfigured"
@@ -2324,13 +3266,37 @@ class ProviderRegistry:
         if query and status.state == ProviderState.AVAILABLE and not provider.supports(query):
             status.state = ProviderState.DISABLED
             status.reason = f"unsupported for {query.intent.value}"
+        status.healthy = True if status.state == ProviderState.AVAILABLE else None
+        if status.state in {
+            ProviderState.DEGRADED,
+            ProviderState.RATE_LIMITED,
+            ProviderState.QUOTA_EXHAUSTED,
+            ProviderState.AUTHENTICATION_FAILED,
+            ProviderState.BILLING_BLOCKED,
+            ProviderState.UNHEALTHY,
+            ProviderState.COOLDOWN,
+        }:
+            status.healthy = False
+        status.unavailable_reason = (
+            None if status.state == ProviderState.AVAILABLE else status.reason
+        )
         return status
 
     def eligible_providers(
         self,
         query: SearchQuery,
+        *,
+        provider_override: str | None = None,
+        provider_strict: bool = False,
     ) -> tuple[list[SearchProvider], list[ProviderStatus]]:
         ordered = self._ordered_names(query.intent)
+        override = _normalize_provider_name(provider_override or query.provider_preference or "")
+        strict = bool(provider_strict or query.provider_strict)
+        if override:
+            if strict and not self.cfg.web_search.allow_explicit_provider_fallback:
+                ordered = [override]
+            else:
+                ordered = [override, *(name for name in ordered if name != override)]
         providers: list[SearchProvider] = []
         skipped: list[ProviderStatus] = []
         paid_slots = 0
@@ -2357,7 +3323,16 @@ class ProviderRegistry:
             return ["searxng"]
         if self.cfg.web_provider == "exa":
             return ["exa", "ddgs", "searxng"]
+        configured = [name for name in self.cfg.web_search.provider_order if name in self.providers]
+        if configured:
+            return configured
         return route_for_intent(intent)
+
+    def _priority_for(self, name: str, intent: SearchIntent) -> int:
+        try:
+            return self._ordered_names(intent).index(name)
+        except ValueError:
+            return 999
 
 
 def _billing_block_reason(cfg: Config) -> str:
@@ -2376,13 +3351,30 @@ def quality_search(
     max_results: int = 8,
     *,
     intent: SearchIntent | str | None = None,
+    provider: str | None = None,
+    provider_strict: bool = False,
     registry: ProviderRegistry | None = None,
 ) -> SearchResponse:
-    query = build_search_query(query_text, cfg, max_results, intent=intent)
-    search_plan = build_search_plan(query_text, cfg, max_results, intent=intent)
-    location_context = build_search_location_context(query_text, cfg, intent=intent)
+    directive = parse_provider_directive(query_text)
+    provider_preference = _normalize_provider_name(provider or "") or directive.provider
+    strict = bool(provider_strict or (directive.provider and directive.strict))
+    query_text = directive.cleaned_user_query
+    query = build_search_query(
+        query_text,
+        cfg,
+        max_results,
+        intent=intent,
+        provider_preference=provider_preference,
+        provider_strict=strict,
+    )
+    search_plan = build_search_plan(query.original_text, cfg, max_results, intent=intent)
+    location_context = build_search_location_context(query.original_text, cfg, intent=intent)
     registry = registry or ProviderRegistry(cfg)
-    providers, skipped = registry.eligible_providers(query)
+    providers, skipped = registry.eligible_providers(
+        query,
+        provider_override=provider_preference,
+        provider_strict=strict,
+    )
     max_provider_fallbacks = max(
         1,
         int(getattr(cfg.web_search.behavior, "max_provider_fallbacks", 4) or 4),
@@ -2432,9 +3424,24 @@ def quality_search(
         "ambiguity_type": query.ambiguity_type.value,
         "search_plan": search_plan.to_dict(),
         "planned_providers": [provider.name for provider in providers],
+        "provider_directive": {
+            "provider": provider_preference,
+            "strict": strict,
+        },
+        "query_provenance": [item.to_dict() for item in query.query_provenance],
     }
 
     if not providers:
+        for status in skipped:
+            if provider_preference and status.name != provider_preference:
+                continue
+            provider_attempts.append(
+                {
+                    "provider": status.name,
+                    "status": status.state.value,
+                    "reason": status.reason,
+                }
+            )
         warnings.extend(_skipped_warnings(query, skipped))
         warnings.append(
             SearchWarning(
@@ -2473,6 +3480,7 @@ def quality_search(
                 reset_at=exc.retry_at,
                 cooldown_seconds=provider.provider_config.cooldown_seconds,
                 transient=exc.transient,
+                api_key_fingerprint=_provider_api_key_fingerprint(provider),
             )
             continue
         except Exception as exc:
@@ -2497,6 +3505,7 @@ def quality_search(
                 ProviderState.DEGRADED,
                 cooldown_seconds=provider.provider_config.cooldown_seconds,
                 transient=True,
+                api_key_fingerprint=_provider_api_key_fingerprint(provider),
             )
             continue
 
@@ -2530,6 +3539,7 @@ def quality_search(
                 provider.name,
                 reported_search_count=_reported_search_count(response, provider.name),
                 estimated_cost=_estimated_cost(response, provider.name),
+                api_key_fingerprint=_provider_api_key_fingerprint(provider),
             )
             all_results.extend(scored)
             all_results = _rank_dedupe_and_diversify(query, all_results, cfg)
@@ -2762,6 +3772,9 @@ def evaluate_discovery_candidate(
     plausible = score >= threshold and lexical > 0 and (not requires_location or location > 0)
     if _is_social_profile(result) and entity_type < 0.75:
         plausible = False
+    incompatible_type = _explicit_education_type_conflict(query, result)
+    if incompatible_type:
+        plausible = False
     if not plausible:
         reasons = []
         if lexical <= 0:
@@ -2772,6 +3785,8 @@ def evaluate_discovery_candidate(
             reasons.append(f"discovery score {score:.2f} below {threshold:.2f}")
         if _is_social_profile(result) and entity_type < 0.75:
             reasons.append("social profile is not an organization candidate")
+        if incompatible_type:
+            reasons.append(incompatible_type)
         reason = "; ".join(reasons) or "not a plausible discovery candidate"
     else:
         reason = (
@@ -2781,6 +3796,21 @@ def evaluate_discovery_candidate(
     evaluation.plausible = plausible
     evaluation.reason = reason
     return evaluation
+
+
+def _explicit_education_type_conflict(query: SearchQuery, result: dict) -> str:
+    relationship = classify_ambiguity(query.original_text or query.text).relationship
+    if relationship != "university":
+        return ""
+    title = str(result.get("title", "")).lower()
+    parsed = urlparse(result.get("url", ""))
+    url_context = f"{parsed.netloc} {parsed.path}".lower()
+    strong_context = f"{title} {url_context}"
+    has_school = bool(re.search(r"\b(school|schools|academy|academies)\b", strong_context))
+    has_university = bool(re.search(r"\b(university|universities)\b", strong_context))
+    if has_school and not has_university:
+        return "school-only result conflicts with requested university"
+    return ""
 
 
 def evaluate_verification_candidate(
@@ -2862,6 +3892,18 @@ def _discovery_lexical_match(query: SearchQuery, result: dict) -> float:
 def _discovery_entity_type_hint(query: SearchQuery, result: dict) -> float:
     score = _organization_type_match(query, result)
     profile = _entity_profile_for_result(result)
+    relationship = classify_ambiguity(query.original_text or query.text).relationship
+    if relationship == "university":
+        if profile and profile.get("entity_type") == "university":
+            score = max(score, 0.9)
+        parsed = urlparse(result.get("url", ""))
+        path = parsed.path.lower()
+        domain = parsed.netloc.lower()
+        if "university" in path or "university" in domain:
+            score = max(score, 0.8)
+        if "school" in path or "school" in domain:
+            score = min(score, 0.35)
+        return max(0.0, min(1.0, score))
     if profile and profile.get("entity_type") == "school":
         score = max(score, 0.9)
     parsed = urlparse(result.get("url", ""))
@@ -2961,7 +4003,21 @@ def score_and_filter_results(
             else evidence_score.final_score
         )
         scored.append(item)
+    if query.include_domains:
+        return sorted(
+            scored,
+            key=lambda item: (
+                not _matches_include_domain(query, item),
+                int(item.get("fused_rank") or 999),
+            ),
+        )
     return scored
+
+
+def _matches_include_domain(query: SearchQuery, result: dict) -> bool:
+    domain = _domain(result.get("url", ""))
+    include_domains = {_domain(f"https://{value}") for value in query.include_domains}
+    return any(domain == item or domain.endswith(f".{item}") for item in include_domains)
 
 
 def cluster_entity_candidates(
@@ -3001,7 +4057,25 @@ def _entity_profile_for_result(result: dict) -> dict | None:
     text = _combined_result_text(result)
     lowered = text.lower()
     domain = _domain(result.get("url", ""))
-    if "american intercon school" in lowered or domain.endswith(".edu.kh"):
+    if "paragon international university" in lowered or domain in {
+        "paragoniu.edu.kh",
+        "www.paragoniu.edu.kh",
+    }:
+        return {
+            "canonical_name": "Paragon International University",
+            "aliases": ["Paragon", "Paragon International University", "PIU"],
+            "entity_type": "university",
+            "description": "a Cambodian university",
+            "country": "Cambodia",
+            "region": None,
+            "expansions": ["Paragon International University"],
+        }
+    if "american intercon school" in lowered or domain in {
+        "ais.edu.kh",
+        "www.ais.edu.kh",
+        "americanintercon.edu.kh",
+        "www.americanintercon.edu.kh",
+    }:
         return {
             "canonical_name": "American Intercon School",
             "aliases": ["AIS", "American Intercon School"],
@@ -3054,7 +4128,7 @@ def _candidate_relationship_match(
     relationship = classify_ambiguity(query.original_text or query.text).relationship
     if relationship == "location":
         return _location_match_score(query, result)
-    if relationship == "school":
+    if relationship in EDUCATION_RELATIONSHIPS:
         return _organization_type_match(query, result)
     if query.intent == SearchIntent.LOCAL_ENTITY:
         return max(_organization_type_match(query, result), _location_match_score(query, result))
@@ -3123,6 +4197,8 @@ def _candidate_authority_score(query: SearchQuery, result: dict) -> float:
 def _candidate_context_score(query: SearchQuery, profile: dict) -> float:
     text = (query.original_text or query.text).lower()
     entity_type = str(profile.get("entity_type") or "")
+    if "university" in text:
+        return 1.0 if entity_type == "university" else 0.0
     if "school" in text and entity_type == "school":
         return 1.0
     if {"maritime", "ship", "ships", "vessel", "navigation"} & set(_terms(text)):
@@ -3466,8 +4542,20 @@ def _has_definition_phrase(text: str) -> bool:
 def _organization_type_match(query: SearchQuery, result: dict) -> float:
     query_terms = set(_terms(query.text))
     result_terms = set(_terms(_combined_result_text(result)))
-    if query_terms & SCHOOL_TERMS and result_terms & SCHOOL_TERMS:
+    if query_terms & UNIVERSITY_TERMS:
+        if result_terms & UNIVERSITY_TERMS:
+            return 1.0
+        if result_terms & (SCHOOL_ONLY_TERMS | COLLEGE_TERMS):
+            return 0.2
+    if query_terms & COLLEGE_TERMS:
+        if result_terms & COLLEGE_TERMS:
+            return 1.0
+        if result_terms & (SCHOOL_ONLY_TERMS | UNIVERSITY_TERMS):
+            return 0.35
+    if query_terms & SCHOOL_ONLY_TERMS and result_terms & SCHOOL_ONLY_TERMS:
         return 1.0
+    if query_terms & EDUCATION_TERMS and result_terms & EDUCATION_TERMS:
+        return 0.75
     if result_terms & {"education", "student", "campus"}:
         return 0.55
     return 0.0
@@ -3563,6 +4651,13 @@ def _authority_scores(query: SearchQuery, result: dict) -> tuple[float, float]:
     include_domains = {_domain(f"https://{domain}") for domain in query.include_domains}
     if any(domain == item or domain.endswith(f".{item}") for item in include_domains):
         return 0.98, 1.0
+    if (
+        domain == "ais.edu.kh"
+        and _mentions_american_intercon_school(query.original_text or query.text)
+    ):
+        return 0.98, 1.0
+    if domain.endswith((".edu.kh", ".ac.kh")):
+        return 0.94, 0.95
     if domain.endswith(".gov") or domain.endswith(".edu"):
         return 0.92, 0.95
     if domain in {"github.com", "gitlab.com"} and (
@@ -3738,7 +4833,12 @@ def search_provider_statuses(cfg: Config) -> list[ProviderStatus]:
 
 
 def provider_status_detail(status: ProviderStatus) -> str:
-    parts = [status.reason]
+    parts = [
+        f"configured: {'yes' if status.configured else 'no'}",
+        f"enabled: {'yes' if status.enabled else 'no'}",
+        f"priority: {status.priority}",
+        status.reason,
+    ]
     if status.api_key_env and status.state == ProviderState.UNCONFIGURED:
         parts.append(f"set {status.api_key_env}")
     if status.cooldown_until:

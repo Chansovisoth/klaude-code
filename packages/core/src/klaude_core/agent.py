@@ -29,6 +29,21 @@ TOOL_ALIASES = {
     "internet_search": "web_search",
     "internet-search": "web_search",
 }
+WEB_PROVIDER_ALIASES = {
+    "local": "searxng",
+    "searx": "searxng",
+    "searxng": "searxng",
+    "duckduckgo": "ddgs",
+    "duckduckgo_search": "ddgs",
+    "ddg": "ddgs",
+    "ddgs": "ddgs",
+    "google": "google",
+    "gemini": "google",
+    "parallel": "parallel",
+    "tavily": "tavily",
+    "exa": "exa",
+    "firecrawl": "firecrawl",
+}
 RECOVERABLE_UNADVERTISED_TOOLS = {"web_search"}
 TEXT_TOOL_RE = re.compile(
     r"<function=(?P<name>[a-zA-Z_][\w-]*)>\s*(?P<body>.*?)</tool_call>",
@@ -46,22 +61,34 @@ TOOL_MARKUP_RE = re.compile(
 NO_INFO_RE = re.compile(
     r"(?i)\b("
     r"i (?:do not|don't) (?:have|know|see|find)|"
+    r"i (?:have not|haven't|was not|wasn't) (?:been able to )?find|"
     r"i cannot (?:find|access)|"
     r"i can't (?:find|access)|"
+    r"i (?:do not|don't) have (?:web|internet) access|"
+    r"i cannot perform (?:real-time )?(?:web|internet) searches|"
+    r"i can't perform (?:real-time )?(?:web|internet) searches|"
     r"there(?:'s| is) no (?:explicit )?(?:mention|evidence)|"
     r"no (?:explicit )?(?:mention|evidence)|"
     r"no (?:information|results|relevant)"
     r")\b"
 )
 PROMISE_TO_SEARCH_RE = re.compile(
-    r"(?i)\b(?:i(?:'ll| will)|let me|i need to)\s+"
-    r"(?:search|look up|check|research|find)\b"
+    r"(?i)\b("
+    r"(?:i(?:'ll| will)|let me|i need to)\s+"
+    r"(?:search|look up|check|research|find)|"
+    r"would you like me to\s+"
+    r"(?:search|look up|check|research|find)"
+    r")\b"
 )
 DIRECT_LOOKUP_RE = re.compile(
     r"(?i)^\s*(?:who|what|where|when)\s+(?:is|are|was|were)\b"
 )
 DIRECT_LOOKUP_SUBJECT_RE = re.compile(
     r"(?i)^\s*(?:who|what|where|when)\s+(?:is|are|was|were)\s+(?P<subject>.+?)\s*[?.!]*$"
+)
+ABOUT_SUBJECT_RE = re.compile(
+    r"(?i)^\s*(?:tell\s+me\s+about|more\s+about|information\s+about)\s+"
+    r"(?P<subject>.+?)\s*[?.!]*$"
 )
 PROFILE_LOOKUP_RE = re.compile(
     r"(?i)^\s*who\s+(?:is|are|was|were)\b"
@@ -73,6 +100,17 @@ RAW_RESULTS_RE = re.compile(
     r"(?i)\b(?:show|list|give|display|print|return)\b.*"
     r"\b(?:results?|sources?|links?)\b"
 )
+FORCE_RETRIEVAL_RE = re.compile(
+    r"(?i)\b("
+    r"look\s+it\s+up|"
+    r"search\s+for\s+it|"
+    r"check\s+the\s+web|"
+    r"find\s+out|"
+    r"verify\s+that|"
+    r"search\s+again|"
+    r"research\s+it"
+    r")\b"
+)
 SEARCH_REQUEST_RE = re.compile(
     r"(?i)^\s*(?:show|list|give|display|print|return|find|get)\s+"
     r"(?:me\s+)?(?:the\s+)?(?:(?:top|all)\s+)?(?:\d{1,3}\s+)?"
@@ -82,9 +120,24 @@ SEARCH_VERB_RE = re.compile(
     r"(?i)^\s*(?:search|look up|lookup|research|find)\s+"
     r"(?:the\s+web\s+)?(?:for\s+)?"
 )
-FOLLOWUP_PRONOUN_RE = re.compile(
-    r"(?i)\b(they|them|their|he|him|his|she|her|it|that person|this person)\b"
+POLITE_SEARCH_RE = re.compile(
+    r"(?i)^\s*(?:can|could|would)\s+you\s+(?:please\s+)?"
+    r"(?:search|look up|lookup|research|find)\b\s*"
+    r"(?:the\s+web\s+)?(?:for\s+)?"
 )
+CONTROL_TEXT_RE = re.compile(
+    r"(?i)\b("
+    r"Claude\.\s*Rules|system\s+prompt|developer\s+message|"
+    r"tool\s+instructions?|provider\s+instructions?|"
+    r"hidden\s+routing\s+notes?|chain[- ]of[- ]thought|scratchpad"
+    r")\b"
+)
+FOLLOWUP_PRONOUN_RE = re.compile(
+    r"(?i)\b(they|them|their|he|him|his|she|her|it|its|that person|this person)\b"
+)
+PERSON_PRONOUN_RE = re.compile(r"(?i)\b(he|him|his|she|her|that person|this person)\b")
+NEUTRAL_PRONOUN_RE = re.compile(r"(?i)\b(it|its)\b")
+PLURAL_PRONOUN_RE = re.compile(r"(?i)\b(they|them|their)\b")
 TOPIC_RE = re.compile(
     r"@[A-Za-z0-9_.-]{3,64}|"
     r"\b[A-Z][A-Za-z0-9_]*[A-Z][A-Za-z0-9_]*\b|"
@@ -122,6 +175,7 @@ TOPIC_ORG_WORDS = {
     "University",
 }
 TOPIC_ROLE_WORDS = {
+    "CS",
     "Computer",
     "Developer",
     "Engineer",
@@ -149,6 +203,7 @@ FOLLOWUP_DROP_WORDS = {
     "full",
     "get",
     "give",
+    "how",
     "in",
     "he",
     "her",
@@ -190,16 +245,30 @@ FOLLOWUP_DROP_WORDS = {
     "they",
     "this",
     "top",
+    "when",
+    "where",
     "what",
     "which",
+    "who",
+    "why",
 }
 FOLLOWUP_ACTIVITY_WORDS = {
     "channel",
     "channels",
+    "chair",
     "creator",
+    "cs",
+    "dean",
+    "department",
+    "dept",
+    "director",
+    "faculty",
     "game",
     "games",
     "here",
+    "head",
+    "leader",
+    "leadership",
     "minecraft",
     "academy",
     "area",
@@ -212,11 +281,19 @@ FOLLOWUP_ACTIVITY_WORDS = {
     "played",
     "plays",
     "roblox",
+    "science",
     "school",
     "stream",
     "streams",
     "university",
     "twitch",
+    "anniversary",
+    "established",
+    "founded",
+    "history",
+    "opened",
+    "operating",
+    "started",
     "upload",
     "uploads",
     "video",
@@ -224,6 +301,19 @@ FOLLOWUP_ACTIVITY_WORDS = {
     "youtube",
 }
 PLAY_WORDS = {"game", "games", "play", "played", "plays"}
+FOUNDING_CLAIM_RE = re.compile(
+    r"(?i)\b("
+    r"how\s+long|"
+    r"operat(?:e|ed|es|ing)|"
+    r"founded|"
+    r"established|"
+    r"started|"
+    r"opened|"
+    r"history|"
+    r"anniversar(?:y|ies)|"
+    r"when\s+(?:did|was|were)"
+    r")\b"
+)
 CASUAL_DIRECT_RE = re.compile(
     r"(?i)^\s*(?:"
     r"hi|hello|hey|how are you|who are you|who might you be|what are you|"
@@ -305,27 +395,65 @@ class UserIntentSegment:
     requires_retrieval: bool
 
 
+@dataclass(frozen=True)
+class ProviderDirective:
+    provider: str | None
+    strict: bool
+    cleaned_user_query: str
+
+
+class ClaimIntent(StrEnum):
+    IDENTITY = "identity"
+    LOCATION = "location"
+    FOUNDING_DATE = "founding_date"
+    DURATION = "duration"
+    LEADERSHIP = "leadership"
+    CONTACT = "contact"
+    HISTORY = "history"
+    OTHER = "other"
+
+
+@dataclass(frozen=True)
+class EvidenceGap:
+    requested_claim: str
+    supported_by_existing_evidence: bool
+    missing_fields: list[str]
+    requires_new_retrieval: bool
+
+
 @dataclass
 class ConversationEntity:
     mention: str
     canonical_name: str | None = None
+    entity_category: str | None = None
     entity_type: str | None = None
     location: str | None = None
+    official_domains: tuple[str, ...] = ()
     candidate_meanings: list[str] = field(default_factory=list)
     selected_meaning: str | None = None
     confidence: float = 0.0
     unresolved: bool = True
+    entity_id: str = ""
+    introduced_turn: int = 0
+    last_referenced_turn: int = 0
+    active: bool = True
 
 
 @dataclass
 class RetrievalConversationState:
     active_entities: list[ConversationEntity] = field(default_factory=list)
+    entity_history: list[ConversationEntity] = field(default_factory=list)
+    turn_index: int = 0
     last_user_goal: str | None = None
     last_standalone_query: str | None = None
     last_search_intent: str | None = None
+    last_claim_intent: ClaimIntent | None = None
+    pending_evidence_gap: EvidenceGap | None = None
     last_accepted_sources: list[str] = field(default_factory=list)
     rejected_interpretations: list[str] = field(default_factory=list)
     failed_urls: set[str] = field(default_factory=set)
+    last_subject_resolution: SubjectResolution | None = None
+    last_query_provenance: QueryProvenance | None = None
 
 
 @dataclass
@@ -337,6 +465,28 @@ class QueryRewrite:
     inferred_constraints: list[str] = field(default_factory=list)
     discarded_interpretations: list[str] = field(default_factory=list)
     confidence: float = 0.0
+
+
+@dataclass(frozen=True)
+class QueryProvenance:
+    original_text: str
+    resolved_subject: str | None
+    subject_source: str | None
+    previous_active_subject: str | None
+    topic_switched: bool
+    inherited_constraints: dict[str, str]
+    new_constraints: dict[str, str]
+    rejected_constraints: dict[str, str]
+    final_query: str
+
+
+@dataclass(frozen=True)
+class SubjectResolution:
+    subject: str
+    source: str | None
+    previous_active_subject: str | None
+    topic_switched: bool
+    ambiguous: bool = False
 
 
 class RetrievalDecision(StrEnum):
@@ -436,8 +586,86 @@ def _clean_tool_arg(value: Any, *, collapse_whitespace: bool = False) -> Any:
     return value
 
 
+def parse_provider_directive(text: str) -> ProviderDirective:
+    cleaned = _remove_control_text(text)
+    provider: str | None = None
+    strict = False
+
+    def capture(value: str, *, is_strict: bool) -> str:
+        nonlocal provider, strict
+        normalized = _normalize_provider_name(value)
+        if normalized:
+            provider = normalized
+            strict = is_strict
+        return ""
+
+    cleaned = re.sub(
+        r"(?i)\bprovider\s*:\s*([a-z0-9_-]+)\b",
+        lambda match: capture(match.group(1), is_strict=True),
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?i)\b(?:using|with|via)\s+([a-z0-9_-]+)\b",
+        lambda match: capture(match.group(1), is_strict=True),
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?i)\bprefer\s+([a-z0-9_-]+)\b",
+        lambda match: capture(match.group(1), is_strict=False),
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?i)^\s*search\s+([a-z0-9_-]+)\s+for\b",
+        lambda match: f"search for{capture(match.group(1), is_strict=True)}",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?i)^\s*use\s+([a-z0-9_-]+)\s+to\s+search(?:\s+for)?\b",
+        lambda match: f"search for{capture(match.group(1), is_strict=True)}",
+        cleaned,
+    )
+    cleaned = sanitize_search_query_control_text(cleaned)
+    return ProviderDirective(provider, strict, _compact_query_text(cleaned))
+
+
+def sanitize_search_query_control_text(text: str) -> str:
+    cleaned = _remove_control_text(text)
+    provider_names = (
+        "google|gemini|parallel|tavily|exa|firecrawl|ddgs|ddg|"
+        "duckduckgo|searx|searxng|local"
+    )
+    cleaned = re.sub(
+        rf"(?i)\b(?:using|with|via)\s+(?:{provider_names})\b",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        rf"(?i)\bprovider\s*:\s*(?:{provider_names})\b",
+        " ",
+        cleaned,
+    )
+    return _compact_query_text(cleaned)
+
+
+def _remove_control_text(text: str) -> str:
+    cleaned = CONTROL_TEXT_RE.sub(" ", str(text or ""))
+    return _compact_query_text(cleaned)
+
+
+def _normalize_provider_name(value: str) -> str | None:
+    key = str(value or "").strip().lower().replace("-", "_")
+    return WEB_PROVIDER_ALIASES.get(key)
+
+
+def _compact_query_text(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    cleaned = re.sub(r"\s+([?.!,;:])", r"\1", cleaned)
+    cleaned = re.sub(r"(?:\s*\.\s*){2,}", ". ", cleaned)
+    return cleaned
+
+
 def segment_user_input(user_message: str) -> list[UserIntentSegment]:
-    text = user_message.strip()
+    text = _remove_control_text(user_message.strip())
     if not text:
         return [UserIntentSegment("", "casual", False, False)]
     raw_parts = [
@@ -485,6 +713,8 @@ def _segment_intent(text: str) -> str:
         return "greeting" if normalized in {"hi", "hello", "hey"} else "casual"
     if COMMAND_REFERENCE_RE.search(text):
         return "command_help"
+    if _provider_directed_search_request(text):
+        return "web_lookup"
     if re.search(r"(?i)\b(file|repo|workspace|directory|git|commit|diff)\b", text):
         return "workspace_request"
     if re.search(r"(?i)\b(docs?|documentation|framework|api|library|code|godot|python)\b", text):
@@ -534,6 +764,8 @@ def _looks_like_unfamiliar_lookup(text: str) -> bool:
     if not stripped or len(stripped) > 80:
         return False
     lowered = stripped.lower()
+    if FOLLOWUP_PRONOUN_RE.search(stripped) or re.match(r"(?i)^\s*it(?:'|’)?s\b", stripped):
+        return False
     if CASUAL_DIRECT_RE.match(stripped) or COMMAND_REFERENCE_RE.search(stripped):
         return False
     if re.search(r"\b(how|why|can|should|would|could|write|create|make)\b", lowered):
@@ -633,6 +865,75 @@ def _fallback_search_call(
     return []
 
 
+def _model_planned_search_instruction(
+    user_message: str,
+    state: RetrievalConversationState | None,
+    search_queries: list[str],
+) -> str:
+    lines = [
+        "The automatic retrieval for this turn did not verify the user's request.",
+        (
+            "Issue one web_search tool call with a materially different targeted "
+            "query that you choose. Prefer official domains or role-specific "
+            "terms when they are relevant."
+        ),
+        "Do not repeat a near-duplicate of an earlier query.",
+        f"Current user request: {user_message}",
+    ]
+    entity = _active_resolved_entity(state) or _active_entity(state)
+    if entity:
+        name = _entity_search_name(entity)
+        lines.append(f"Active entity: {name}")
+        if entity.entity_type:
+            lines.append(f"Entity type: {entity.entity_type}")
+        if entity.location:
+            lines.append(f"Location: {entity.location}")
+        if entity.official_domains:
+            lines.append("Official domains: " + ", ".join(entity.official_domains))
+    if state and state.pending_evidence_gap:
+        lines.append(f"Evidence gap: {state.pending_evidence_gap.requested_claim}")
+    if search_queries:
+        lines.append("Queries already tried:")
+        lines.extend(f"- {query}" for query in search_queries[-4:])
+    return "\n".join(lines)
+
+
+def _recent_retrieval_was_weak(messages: list[dict[str, Any]]) -> bool:
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return False
+        if message.get("role") != "tool":
+            continue
+        tool_name = message.get("tool_name")
+        content = str(message.get("content", ""))
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        if tool_name == "fetch_url":
+            return not _useful_fetch_result(content)
+        if tool_name != "web_search":
+            continue
+        provider_metadata = (
+            metadata.get("provider_metadata")
+            if isinstance(metadata.get("provider_metadata"), dict)
+            else {}
+        )
+        accepted_count = metadata.get(
+            "accepted_result_count",
+            provider_metadata.get("accepted_result_count"),
+        )
+        if accepted_count == 0:
+            return True
+        results = metadata.get("search_results")
+        if isinstance(results, list):
+            return not results
+        lowered = content.lower()
+        return bool(
+            "none passed candidate discovery" in lowered
+            or "no search provider succeeded" in lowered
+            or "(no results)" in lowered
+        )
+    return False
+
+
 def _content_needs_retrieval(content: str) -> bool:
     return bool(NO_INFO_RE.search(content) or PROMISE_TO_SEARCH_RE.search(content))
 
@@ -681,6 +982,10 @@ def _initial_tool_calls(
     args: dict[str, Any] = {
         "query": plan.web_query or _planned_search_query(retrieval_message, messages)
     }
+    directive = parse_provider_directive(retrieval_message)
+    if directive.provider:
+        args["provider"] = directive.provider
+        args["provider_strict"] = directive.strict
     count = _requested_result_count(user_message)
     if count:
         args["max_results"] = count
@@ -690,9 +995,15 @@ def _initial_tool_calls(
 
 def _should_plan_search(user_message: str, messages: list[dict[str, Any]]) -> bool:
     user_message = _retrieval_message_from_segments(user_message)
+    if _provider_directed_search_request(user_message):
+        return True
+    if _is_force_retrieval_request(user_message) and _recent_topic(messages):
+        return True
     if _wants_raw_search_results(user_message):
         query = _search_query_from_request(user_message)
         return bool(query or _recent_topic(messages))
+    if _is_claim_verification_followup(user_message, messages):
+        return True
     if SEARCH_VERB_RE.search(user_message):
         return True
     if DIRECT_LOOKUP_RE.search(user_message):
@@ -709,14 +1020,18 @@ def _planned_search_query(user_message: str, messages: list[dict[str, Any]]) -> 
     query = _search_query_from_request(user_message)
     if _wants_raw_search_results(user_message):
         return query or user_message
-    if _looks_like_unfamiliar_lookup(query) and not DIRECT_LOOKUP_RE.search(query):
+    if (
+        _looks_like_unfamiliar_lookup(query)
+        and not DIRECT_LOOKUP_RE.search(query)
+        and not SEARCH_VERB_RE.search(user_message)
+    ):
         words = re.findall(r"[A-Za-z][A-Za-z0-9_.-]*", query)
         if len(words) == 1 and re.search(r"[a-z][A-Z]|[_@.]", words[0]):
             return query
         if len(words) <= 5:
             return f"Who is {query}"
     if _looks_like_followup_search(query) or _is_low_info_search_query(query):
-        topic = _recent_topic(messages)
+        topic = _refinement_anchor_topic(user_message, messages) or _recent_topic(messages)
         if topic:
             terms = _followup_detail_terms(query)
             return " ".join([topic, *_normalize_followup_terms(terms)]).strip()
@@ -724,9 +1039,19 @@ def _planned_search_query(user_message: str, messages: list[dict[str, Any]]) -> 
 
 
 def _search_query_from_request(user_message: str) -> str:
-    query = SEARCH_REQUEST_RE.sub("", user_message).strip()
+    directive = parse_provider_directive(user_message)
+    query = SEARCH_REQUEST_RE.sub("", directive.cleaned_user_query).strip()
+    query = POLITE_SEARCH_RE.sub("", query).strip()
     query = SEARCH_VERB_RE.sub("", query).strip()
+    query = sanitize_search_query_control_text(str(query))
     return _clean_tool_arg(query, collapse_whitespace=True).strip("?.!:;,")
+
+
+def _provider_directed_search_request(text: str) -> bool:
+    directive = parse_provider_directive(text)
+    if not directive.provider:
+        return False
+    return bool(re.search(r"(?i)\b(search|look\s+up|lookup|research|find)\b", text))
 
 
 def _requested_result_count(user_message: str) -> int | None:
@@ -743,7 +1068,83 @@ def _wants_raw_search_results(user_message: str) -> bool:
 def _should_prefetch_source(user_message: str) -> bool:
     if _wants_raw_search_results(user_message):
         return False
-    return bool(PROFILE_LOOKUP_RE.search(user_message) or _looks_like_followup_search(user_message))
+    return bool(
+        PROFILE_LOOKUP_RE.search(user_message)
+        or _looks_like_followup_search(user_message)
+        or _is_claim_verification_request(user_message)
+    )
+
+
+def _is_claim_verification_request(text: str) -> bool:
+    return _claim_intent_for_text(text) in {
+        ClaimIntent.FOUNDING_DATE,
+        ClaimIntent.DURATION,
+        ClaimIntent.LEADERSHIP,
+        ClaimIntent.HISTORY,
+    }
+
+
+def _claim_intent_for_text(text: str) -> ClaimIntent:
+    lowered = text.lower()
+    if re.search(r"\bhow\s+long\b|\boperat(?:e|ed|es|ing)\b", lowered):
+        return ClaimIntent.DURATION
+    if re.search(r"\bfounded|established|started|opened\b", lowered):
+        return ClaimIntent.FOUNDING_DATE
+    if re.search(r"\bhistory|anniversar(?:y|ies)\b", lowered):
+        return ClaimIntent.HISTORY
+    if re.search(
+        r"\b(head|chair|dean|director|leader|leadership|rector|principal)\b",
+        lowered,
+    ):
+        return ClaimIntent.LEADERSHIP
+    if re.search(r"\bwhere\s+(?:is|are|was|were)\b|\blocation|address|campus\b", lowered):
+        return ClaimIntent.LOCATION
+    return ClaimIntent.OTHER
+
+
+def _leadership_detail_terms(text: str) -> list[str]:
+    lowered = text.lower()
+    terms: list[str] = []
+    if re.search(r"\bcs\b|\bcomputer\s+science\b", lowered):
+        terms.extend(["Computer Science", "department"])
+    elif re.search(r"\bdepartments?\b|\bdept\b", lowered):
+        terms.append("department")
+    if re.search(r"\bfacult(?:y|ies)\b", lowered):
+        terms.append("faculty")
+
+    role_patterns = [
+        ("head", r"\bheads?\b"),
+        ("chair", r"\bchairs?\b|\bchairperson\b"),
+        ("dean", r"\bdeans?\b"),
+        ("director", r"\bdirectors?\b"),
+        ("rector", r"\brectors?\b"),
+        ("principal", r"\bprincipals?\b"),
+    ]
+    for label, pattern in role_patterns:
+        if re.search(pattern, lowered):
+            terms.append(label)
+            break
+    role_terms = {"head", "chair", "dean", "director", "rector", "principal"}
+    if not any(term in role_terms for term in terms):
+        terms.append("leadership")
+    return _dedupe_preserve(terms)
+
+
+def _is_force_retrieval_request(text: str) -> bool:
+    return bool(FORCE_RETRIEVAL_RE.search(text))
+
+
+def _is_claim_verification_followup(
+    user_message: str,
+    messages: list[dict[str, Any]],
+) -> bool:
+    if not _is_claim_verification_request(user_message):
+        return False
+    if not FOLLOWUP_PRONOUN_RE.search(user_message) and not _is_low_info_search_query(
+        _search_query_from_request(user_message)
+    ):
+        return False
+    return bool(_recent_topic(messages))
 
 
 def _fallback_search_query(user_message: str, messages: list[dict[str, Any]]) -> str:
@@ -769,7 +1170,18 @@ def _contextualize_tool_args(
     if tool_name in {"web_search", "code_search"}:
         query = str(args.get("query") or args.get("question") or "").strip()
         if query:
-            args["query"] = _contextual_search_query(query, user_message, messages, state)
+            query_directive = parse_provider_directive(query)
+            message_directive = parse_provider_directive(user_message)
+            directive = query_directive if query_directive.provider else message_directive
+            if tool_name == "web_search" and directive.provider:
+                args["provider"] = directive.provider
+                args["provider_strict"] = directive.strict
+            args["query"] = _contextual_search_query(
+                query_directive.cleaned_user_query,
+                user_message,
+                messages,
+                state,
+            )
     if tool_name == "fetch_url" and "url" in args:
         args["url"] = _clean_tool_arg(str(args["url"]), collapse_whitespace=True)
     return args
@@ -839,23 +1251,352 @@ def _runtime_location_from_messages(messages: list[dict[str, Any]]) -> dict[str,
     return location
 
 
-def _current_entity_constraints(
+def _entity_id_for_mention(mention: str) -> str:
+    cleaned = " ".join(re.findall(r"[a-z0-9]+", mention.lower()))
+    return cleaned.replace(" ", "_") or "entity"
+
+
+def _ensure_entity_defaults(entity: ConversationEntity) -> None:
+    if not entity.entity_id:
+        entity.entity_id = _entity_id_for_mention(
+            entity.canonical_name or entity.selected_meaning or entity.mention
+        )
+    if entity.entity_type in {"school", "university", "college", "training_center"}:
+        entity.entity_category = entity.entity_category or "education"
+
+
+def _entity_names(entity: ConversationEntity) -> set[str]:
+    values = {
+        entity.mention,
+        entity.canonical_name or "",
+        entity.selected_meaning or "",
+        *entity.candidate_meanings,
+    }
+    return {value.casefold() for value in values if value}
+
+
+def _ensure_entity_history(state: RetrievalConversationState | None) -> None:
+    if not state:
+        return
+    for entity in state.active_entities:
+        _ensure_entity_defaults(entity)
+        entity.active = True
+        if entity not in state.entity_history:
+            state.entity_history.append(entity)
+    active = next((entity for entity in state.entity_history if entity.active), None)
+    if active and (not state.active_entities or state.active_entities[0] is not active):
+        state.active_entities = [active]
+
+
+def _active_entity(state: RetrievalConversationState | None) -> ConversationEntity | None:
+    _ensure_entity_history(state)
+    if not state or not state.active_entities:
+        return None
+    return state.active_entities[0]
+
+
+def _find_entity(
+    state: RetrievalConversationState | None,
+    subject: str,
+) -> ConversationEntity | None:
+    _ensure_entity_history(state)
+    if not state:
+        return None
+    subject_key = subject.casefold()
+    for entity in state.entity_history:
+        if subject_key in _entity_names(entity):
+            return entity
+    return None
+
+
+def _activate_entity(
+    state: RetrievalConversationState,
+    subject: str,
+    *,
+    turn_index: int,
+) -> tuple[ConversationEntity, bool]:
+    _ensure_entity_history(state)
+    previous = _active_entity(state)
+    entity = _find_entity(state, subject)
+    if entity is None:
+        entity = ConversationEntity(
+            mention=subject,
+            candidate_meanings=_candidate_meanings_for_topic(subject),
+            confidence=0.45,
+            unresolved=True,
+            entity_id=_entity_id_for_mention(subject),
+            introduced_turn=turn_index,
+        )
+        state.entity_history.append(entity)
+    switched = bool(previous and previous is not entity)
+    for item in state.entity_history:
+        item.active = item is entity
+    entity.last_referenced_turn = turn_index
+    state.active_entities = [entity]
+    return entity, switched
+
+
+def _split_compound_subject(subject: str) -> list[str]:
+    cleaned = _clean_topic_candidate(subject)
+    cleaned = re.split(
+        r"(?i)\s+and\s+(?:its|their|his|her)\s+\w+",
+        cleaned,
+        maxsplit=1,
+    )[0]
+    has_acronym = bool(re.search(r"\b[A-Z0-9]{2,8}\b", cleaned))
+    separator = r"(?i)\s+(?:or|,)\s+"
+    if has_acronym:
+        separator = r"(?i)\s+(?:and|or|,)\s+"
+    parts = [
+        _clean_topic_candidate(part)
+        for part in re.split(separator, cleaned)
+    ]
+    return [
+        part
+        for part in parts
+        if part and not (len(part.split()) == 1 and _is_topic_noise(part))
+    ]
+
+
+def _explicit_subjects_from_text(text: str) -> list[str]:
+    subjects: list[str] = []
+
+    def referential(subject: str) -> bool:
+        terms = re.findall(r"[A-Za-z0-9_.-]+", subject.lower())
+        return bool(terms) and all(
+            term in FOLLOWUP_DROP_WORDS or term in {"it", "its", "they", "them", "their"}
+            for term in terms
+        )
+
+    def add(subject: str) -> None:
+        for part in _split_compound_subject(subject):
+            if referential(part):
+                continue
+            if part.casefold() not in {item.casefold() for item in subjects}:
+                subjects.append(part)
+
+    for pattern in (DIRECT_LOOKUP_SUBJECT_RE, ABOUT_SUBJECT_RE):
+        match = pattern.search(text)
+        if match:
+            add(match.group("subject"))
+            return subjects
+    request_subject = _search_query_from_request(text)
+    original_subject = _clean_tool_arg(text, collapse_whitespace=True).strip("?.!:;,")
+    if request_subject and request_subject != original_subject:
+        acronym_tokens = [
+            token
+            for token in re.findall(r"\b[A-Z0-9]{2,8}\b", request_subject)
+            if re.search(r"[A-Z]", token)
+        ]
+        if acronym_tokens:
+            for token in acronym_tokens:
+                add(token)
+        else:
+            add(request_subject)
+        return subjects
+    for token in re.findall(r"\b[A-Z0-9]{2,8}\b", text):
+        if not re.search(r"[A-Z]", token):
+            continue
+        add(token)
+    if (
+        not subjects
+        and not FOLLOWUP_PRONOUN_RE.search(text)
+        and not re.match(r"(?i)^\s*it(?:'|’)?s\b", text)
+        and _looks_like_unfamiliar_lookup(text)
+    ):
+        add(text)
+    return subjects
+
+
+def _explicit_subject_from_current_turn(text: str) -> str:
+    subjects = _explicit_subjects_from_text(text)
+    return subjects[0] if len(subjects) == 1 else ""
+
+
+def _pronoun_kind(text: str) -> str | None:
+    if PERSON_PRONOUN_RE.search(text):
+        return "person"
+    if NEUTRAL_PRONOUN_RE.search(text):
+        return "neutral"
+    if PLURAL_PRONOUN_RE.search(text):
+        return "plural"
+    return None
+
+
+def _type_from_subject_text(subject: str) -> str | None:
+    lowered = subject.lower()
+    if re.search(r"\buniversit(?:y|ies)\b", lowered):
+        return "university"
+    if re.search(r"\bcolleges?\b", lowered):
+        return "college"
+    if re.search(r"\btraining\s+cent(?:er|re)s?\b", lowered):
+        return "training_center"
+    if re.search(r"\b(schools?|academ(?:y|ies))\b", lowered):
+        return "school"
+    return None
+
+
+def _is_relationship_slot_subject(subject: str) -> bool:
+    text = _clean_tool_arg(subject, collapse_whitespace=True)
+    lowered = text.lower()
+    if not re.search(
+        r"\b("
+        r"head|chair|dean|director|leader|leadership|rector|principal|"
+        r"department|dept|faculty|cs|computer\s+science"
+        r")\b",
+        lowered,
+    ):
+        return False
+    if re.search(
+        r"\b(?:at|for)\s+[A-Z][A-Za-z0-9_.-]*(?:\s+[A-Z][A-Za-z0-9_.-]*){0,4}",
+        text,
+    ):
+        return False
+    if re.search(
+        r"\bof\s+(?!the\s+)?[A-Z][A-Za-z0-9_.-]*(?:\s+[A-Z][A-Za-z0-9_.-]*){0,4}"
+        r"\s+(?:University|School|Institute|College|Company|Bank|Organization)\b",
+        text,
+    ):
+        return False
+    return True
+
+
+def _entity_compatible_with_pronoun(
+    entity: ConversationEntity | None,
+    subject: str,
+    pronoun_kind: str | None,
+) -> bool:
+    if not pronoun_kind:
+        return True
+    entity_type = (entity.entity_type if entity else None) or _type_from_subject_text(subject)
+    if pronoun_kind == "person":
+        return entity_type == "person"
+    if pronoun_kind == "neutral":
+        return entity_type != "person"
+    if pronoun_kind == "plural":
+        return True
+    return True
+
+
+def _previous_explicit_user_subject(
+    messages: list[dict[str, Any]],
+    state: RetrievalConversationState | None,
+    pronoun_kind: str | None,
+) -> tuple[str, bool]:
+    for message in reversed(messages[:-1]):
+        if message.get("role") != "user":
+            continue
+        subjects = _explicit_subjects_from_text(str(message.get("content", "")))
+        compatible = [
+            subject
+            for subject in subjects
+            if _entity_compatible_with_pronoun(
+                _find_entity(state, subject),
+                subject,
+                pronoun_kind,
+            )
+        ]
+        if len(compatible) > 1:
+            return "", True
+        if compatible:
+            if pronoun_kind == "plural":
+                recent_topic = _recent_topic(messages)
+                if recent_topic and _candidate_matches_anchor(recent_topic, [compatible[0]]):
+                    return recent_topic, False
+            return compatible[0], False
+    return "", False
+
+
+def _resolve_subject_for_turn(
+    user_message: str,
+    messages: list[dict[str, Any]],
+    state: RetrievalConversationState | None = None,
+) -> SubjectResolution:
+    retrieval_message = _retrieval_message_from_segments(user_message)
+    previous_active = _active_entity(state)
+    previous_active_subject = previous_active.mention if previous_active else None
+    current_subjects = _explicit_subjects_from_text(retrieval_message)
+    if len(current_subjects) > 1:
+        return SubjectResolution(
+            "",
+            "current_explicit_subject",
+            previous_active_subject,
+            False,
+            ambiguous=True,
+        )
+    if current_subjects:
+        subject = current_subjects[0]
+        if previous_active and _is_relationship_slot_subject(subject):
+            return SubjectResolution(
+                previous_active.mention,
+                "active_entity",
+                previous_active_subject,
+                False,
+            )
+        return SubjectResolution(
+            subject,
+            "current_explicit_subject",
+            previous_active_subject,
+            bool(
+                previous_active_subject
+                and previous_active_subject.casefold() != subject.casefold()
+            ),
+        )
+    pronoun_kind = _pronoun_kind(retrieval_message)
+    previous_subject, ambiguous = _previous_explicit_user_subject(
+        messages,
+        state,
+        pronoun_kind,
+    )
+    if ambiguous:
+        return SubjectResolution(
+            "",
+            "previous_explicit_user_subject",
+            previous_active_subject,
+            False,
+            ambiguous=True,
+        )
+    if previous_subject:
+        return SubjectResolution(
+            previous_subject,
+            "previous_explicit_user_subject",
+            previous_active_subject,
+            bool(
+                previous_active_subject
+                and previous_active_subject.casefold() != previous_subject.casefold()
+            ),
+        )
+    if previous_active and _entity_compatible_with_pronoun(
+        previous_active,
+        previous_active.mention,
+        pronoun_kind,
+    ):
+        return SubjectResolution(
+            previous_active.mention,
+            "active_entity",
+            previous_active_subject,
+            False,
+        )
+    return SubjectResolution("", None, previous_active_subject, False)
+
+
+def _constraints_from_text(
     user_message: str,
     messages: list[dict[str, Any]],
 ) -> dict[str, str]:
-    recent_user_messages = (
-        str(message.get("content", ""))
-        for message in messages[-6:]
-        if message.get("role") == "user"
-    )
-    text = " ".join(
-        [
-            *recent_user_messages,
-            user_message,
-        ]
-    ).lower()
+    text = user_message.lower()
     constraints: dict[str, str] = {}
-    if re.search(r"\b(school|schools|academy|college|university)\b", text):
+    if re.search(r"\buniversit(?:y|ies)\b", text):
+        constraints["entity_category"] = "education"
+        constraints["entity_type"] = "university"
+    elif re.search(r"\bcolleges?\b", text):
+        constraints["entity_category"] = "education"
+        constraints["entity_type"] = "college"
+    elif re.search(r"\btraining\s+cent(?:er|re)s?\b", text):
+        constraints["entity_category"] = "education"
+        constraints["entity_type"] = "training_center"
+    elif re.search(r"\b(school|schools|academy|academies)\b", text):
+        constraints["entity_category"] = "education"
         constraints["entity_type"] = "school"
     if re.search(r"\b(cambodia|cambodian|phnom penh)\b", text):
         constraints["location"] = "Cambodia"
@@ -869,6 +1610,96 @@ def _current_entity_constraints(
     if local_reference and runtime_location.get("city_hint"):
         constraints["city_hint"] = runtime_location["city_hint"]
     return constraints
+
+
+def _apply_constraints_to_entity(
+    entity: ConversationEntity,
+    constraints: dict[str, str],
+    state: RetrievalConversationState | None = None,
+) -> None:
+    if constraints.get("entity_category"):
+        entity.entity_category = constraints["entity_category"]
+    if constraints.get("entity_type"):
+        entity.entity_type = constraints["entity_type"]
+        if entity.entity_type in {
+            "school",
+            "university",
+            "college",
+            "training_center",
+        }:
+            entity.entity_category = "education"
+        if state and entity.entity_type == "school":
+            state.rejected_interpretations = _dedupe_preserve(
+                [
+                    *state.rejected_interpretations,
+                    "Automatic Identification System",
+                    "AIS Inc office furniture",
+                ]
+            )
+        entity.confidence = max(entity.confidence, 0.72)
+    if constraints.get("location"):
+        entity.location = constraints["location"]
+        entity.confidence = max(entity.confidence, 0.78)
+    entity.unresolved = not (entity.entity_type and (entity.location or entity.canonical_name))
+    _resolve_known_entity_from_constraints(entity)
+
+
+def _current_entity_constraints(
+    user_message: str,
+    messages: list[dict[str, Any]],
+    state: RetrievalConversationState | None = None,
+) -> dict[str, str]:
+    constraints = _constraints_from_text(user_message, messages)
+    entity = _active_entity(state)
+    if entity and entity.entity_category and "entity_category" not in constraints:
+        constraints["entity_category"] = entity.entity_category
+    if entity and entity.entity_type and "entity_type" not in constraints:
+        constraints["entity_type"] = entity.entity_type
+    if entity and entity.location and "location" not in constraints:
+        constraints["location"] = entity.location
+    return constraints
+
+
+def _query_location_bias(
+    user_message: str,
+    messages: list[dict[str, Any]],
+    constraints: dict[str, str],
+    entity: ConversationEntity | None,
+) -> str:
+    if constraints.get("location"):
+        return ""
+    category = constraints.get("entity_category") or (entity.entity_category if entity else "")
+    entity_type = constraints.get("entity_type") or (entity.entity_type if entity else "")
+    if category != "education" and entity_type not in {
+        "school",
+        "university",
+        "college",
+        "training_center",
+    }:
+        return ""
+    runtime_location = _runtime_location_from_messages(messages)
+    return runtime_location.get("country", "")
+
+
+def _provenance_for_rewrite(
+    original: str,
+    resolution: SubjectResolution,
+    inherited_constraints: dict[str, str],
+    new_constraints: dict[str, str],
+    rejected_constraints: dict[str, str],
+    final_query: str,
+) -> QueryProvenance:
+    return QueryProvenance(
+        original_text=original,
+        resolved_subject=resolution.subject or None,
+        subject_source=resolution.source,
+        previous_active_subject=resolution.previous_active_subject,
+        topic_switched=resolution.topic_switched,
+        inherited_constraints=inherited_constraints,
+        new_constraints=new_constraints,
+        rejected_constraints=rejected_constraints,
+        final_query=final_query,
+    )
 
 
 def _metadata_result_for_url(url: str, messages: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -917,8 +1748,9 @@ def _fetch_rejected_by_recent_constraints(
     url: str,
     user_message: str,
     messages: list[dict[str, Any]],
+    state: RetrievalConversationState | None = None,
 ) -> str:
-    constraints = _current_entity_constraints(user_message, messages)
+    constraints = _current_entity_constraints(user_message, messages, state)
     if not constraints:
         return ""
     result = _metadata_result_for_url(url, messages)
@@ -946,6 +1778,59 @@ def _fetch_rejected_by_recent_constraints(
     return ""
 
 
+def _entity_constraint_map(entity: ConversationEntity | None) -> dict[str, str]:
+    if not entity:
+        return {}
+    constraints: dict[str, str] = {}
+    if entity.entity_category:
+        constraints["entity_category"] = entity.entity_category
+    if entity.entity_type:
+        constraints["entity_type"] = entity.entity_type
+    if entity.location:
+        constraints["location"] = entity.location
+    return constraints
+
+
+def _constraint_terms(constraints: dict[str, str], *, include_location: bool = True) -> list[str]:
+    terms: list[str] = []
+    entity_type = constraints.get("entity_type")
+    if entity_type:
+        terms.append(entity_type)
+    if include_location and constraints.get("location"):
+        terms.append(constraints["location"])
+    return terms
+
+
+def _rejected_stale_constraints(
+    state: RetrievalConversationState | None,
+    active_subject: str,
+    inherited_constraints: dict[str, str],
+    new_constraints: dict[str, str],
+) -> dict[str, str]:
+    if not state or not active_subject:
+        return {}
+    rejected: dict[str, str] = {}
+    for entity in state.entity_history:
+        if entity.active or entity.mention.casefold() == active_subject.casefold():
+            continue
+        for key, value in _entity_constraint_map(entity).items():
+            if inherited_constraints.get(key) == value or new_constraints.get(key) == value:
+                continue
+            rejected[key] = (
+                f"{value} from {entity.mention} ignored because it belongs "
+                "to an inactive entity"
+            )
+    return rejected
+
+
+def _store_query_provenance(
+    state: RetrievalConversationState | None,
+    provenance: QueryProvenance,
+) -> None:
+    if state is not None:
+        state.last_query_provenance = provenance
+
+
 def rewrite_followup_query(
     query: str,
     user_message: str,
@@ -954,24 +1839,166 @@ def rewrite_followup_query(
 ) -> QueryRewrite:
     original = _clean_tool_arg(query or user_message, collapse_whitespace=True)
     cleaned = _search_query_from_request(original)
-    topic = _active_entity_mention(state) or _recent_topic(messages)
-    constraints = _current_entity_constraints(user_message, messages)
+    retrieval_message = _retrieval_message_from_segments(user_message)
+    resolution = (
+        state.last_subject_resolution
+        if state
+        and state.last_subject_resolution
+        and state.last_user_goal == retrieval_message
+        else _resolve_subject_for_turn(user_message, messages, state)
+    )
+    if resolution.ambiguous:
+        provenance = _provenance_for_rewrite(
+            original,
+            resolution,
+            {},
+            _constraints_from_text(user_message, messages),
+            {},
+            "",
+        )
+        _store_query_provenance(state, provenance)
+        return QueryRewrite(original, "", confidence=0.0)
+    topic = resolution.subject or _recent_topic(messages)
+    resolved_entity = _find_entity(state, topic) if topic else None
+    if resolved_entity is None and state and resolution.source == "active_entity":
+        resolved_entity = _active_entity(state)
+    new_constraints = _constraints_from_text(user_message, messages)
+    if state and topic and resolved_entity is None and resolution.source:
+        resolved_entity, _ = _activate_entity(
+            state,
+            topic,
+            turn_index=state.turn_index or 1,
+        )
+    if resolved_entity and new_constraints:
+        _apply_constraints_to_entity(resolved_entity, new_constraints, state)
+    inherited_constraints = _entity_constraint_map(resolved_entity)
+    constraints = {**inherited_constraints, **new_constraints}
+    location_bias = _query_location_bias(user_message, messages, constraints, resolved_entity)
+    rejected_constraints = _rejected_stale_constraints(
+        state,
+        topic,
+        inherited_constraints,
+        new_constraints,
+    )
     explicit: list[str] = []
     inferred: list[str] = []
     discarded: list[str] = []
+    if constraints.get("entity_type"):
+        explicit.append(constraints["entity_type"])
     if constraints.get("entity_type") == "school":
-        explicit.append("school")
         discarded.extend(["Automatic Identification System", "AIS Inc office furniture"])
     if constraints.get("location") == "Cambodia":
         explicit.append("Cambodia")
+    elif location_bias:
+        inferred.append(location_bias)
     if state:
         discarded.extend(state.rejected_interpretations)
 
+    resolved = _active_resolved_entity(state)
+    force_retrieval = _is_force_retrieval_request(user_message)
+    intent = _claim_intent_for_text(f"{cleaned} {user_message}")
+    if (
+        resolved
+        and force_retrieval
+        and state
+        and state.last_claim_intent
+        in {ClaimIntent.FOUNDING_DATE, ClaimIntent.DURATION, ClaimIntent.HISTORY}
+    ):
+        intent = state.last_claim_intent
+    if resolved and intent in {
+        ClaimIntent.FOUNDING_DATE,
+        ClaimIntent.DURATION,
+        ClaimIntent.HISTORY,
+    }:
+        name = _entity_search_name(resolved)
+        location = resolved.location or constraints.get("location", "")
+        place = ""
+        if location and location.lower() not in name.lower():
+            place = f" in {location}"
+            inferred.append(location)
+        if resolved.entity_type:
+            inferred.append(resolved.entity_type)
+        return QueryRewrite(
+            original,
+            f"When was {name}{place} established?",
+            inherited_entities=[resolved.mention],
+            explicit_constraints=["founding date"],
+            inferred_constraints=_dedupe_preserve(inferred),
+            discarded_interpretations=_dedupe_preserve(discarded),
+            confidence=0.94,
+        )
+    if resolved and intent == ClaimIntent.LEADERSHIP:
+        name = _entity_search_name(resolved)
+        location = resolved.location or constraints.get("location", "")
+        detail_terms = _leadership_detail_terms(f"{cleaned} {user_message}")
+        standalone_terms: list[str]
+        inferred_constraints = list(inferred)
+        if _query_mentions_entity_or_domain(cleaned, resolved):
+            standalone_terms = [cleaned]
+            if location and location.lower() not in cleaned.lower():
+                standalone_terms.append(location)
+                inferred_constraints.append(location)
+            if name.lower() not in cleaned.lower() and not any(
+                domain.lower() in cleaned.lower() for domain in resolved.official_domains
+            ):
+                standalone_terms.append(name)
+        else:
+            standalone_terms = [name]
+            if location and location.lower() not in name.lower():
+                standalone_terms.append(location)
+                inferred_constraints.append(location)
+        for term in detail_terms:
+            if term.lower() not in " ".join(standalone_terms).lower():
+                standalone_terms.append(term)
+        if resolved.entity_type:
+            inferred_constraints.append(resolved.entity_type)
+        return QueryRewrite(
+            original,
+            " ".join(standalone_terms).strip(),
+            inherited_entities=[resolved.mention],
+            explicit_constraints=["leadership"],
+            inferred_constraints=_dedupe_preserve(inferred_constraints),
+            discarded_interpretations=_dedupe_preserve(discarded),
+            confidence=0.92,
+        )
+
     if not topic:
+        provenance = _provenance_for_rewrite(
+            original,
+            resolution,
+            inherited_constraints,
+            new_constraints,
+            rejected_constraints,
+            cleaned or original,
+        )
+        _store_query_provenance(state, provenance)
         return QueryRewrite(original, cleaned or original, confidence=0.35)
+    if resolution.source == "current_explicit_subject" and topic.lower() not in cleaned.lower():
+        terms = _constraint_terms(constraints)
+        if location_bias and location_bias.lower() not in {term.lower() for term in terms}:
+            terms.append(location_bias)
+        standalone = " ".join([topic, *_normalize_followup_terms(terms)]).strip()
+        provenance = _provenance_for_rewrite(
+            original,
+            resolution,
+            inherited_constraints,
+            new_constraints,
+            rejected_constraints,
+            standalone,
+        )
+        _store_query_provenance(state, provenance)
+        return QueryRewrite(
+            original,
+            standalone,
+            inherited_entities=[topic],
+            explicit_constraints=explicit,
+            inferred_constraints=inferred,
+            discarded_interpretations=_dedupe_preserve(discarded),
+            confidence=0.95,
+        )
     if topic.lower() in cleaned.lower():
         base = cleaned
-        if _looks_like_followup_search(cleaned):
+        if topic.casefold() != cleaned.casefold() and _looks_like_followup_search(cleaned):
             terms = [
                 term
                 for term in _followup_detail_terms(cleaned)
@@ -997,7 +2024,18 @@ def rewrite_followup_query(
         for constraint in explicit:
             if constraint.lower() not in " ".join(standalone_terms).lower():
                 standalone_terms.append(constraint)
+        if location_bias and location_bias.lower() not in " ".join(standalone_terms).lower():
+            standalone_terms.append(location_bias)
         standalone = " ".join(standalone_terms).strip()
+        provenance = _provenance_for_rewrite(
+            original,
+            resolution,
+            inherited_constraints,
+            new_constraints,
+            rejected_constraints,
+            standalone,
+        )
+        _store_query_provenance(state, provenance)
         return QueryRewrite(
             original,
             standalone,
@@ -1005,7 +2043,7 @@ def rewrite_followup_query(
             explicit_constraints=explicit,
             inferred_constraints=inferred,
             discarded_interpretations=_dedupe_preserve(discarded),
-            confidence=0.65,
+            confidence=0.82 if standalone != cleaned and (explicit or inferred) else 0.65,
         )
 
     if (
@@ -1013,7 +2051,17 @@ def rewrite_followup_query(
         or _looks_like_followup_search(cleaned)
         or _is_low_info_search_query(cleaned)
     ):
-        terms = _followup_detail_terms(cleaned)
+        term_source = cleaned
+        if (
+            resolution.source in {
+                "previous_explicit_user_subject",
+                "active_entity",
+            }
+            and topic.lower() not in cleaned.lower()
+            and FOLLOWUP_PRONOUN_RE.search(user_message)
+        ):
+            term_source = _search_query_from_request(user_message)
+        terms = _followup_detail_terms(term_source)
         terms.extend(_recent_disambiguation_terms(messages, topic, terms))
         if state:
             entity = state.active_entities[0] if state.active_entities else None
@@ -1030,7 +2078,18 @@ def rewrite_followup_query(
         for constraint in explicit:
             if constraint.lower() not in {term.lower() for term in terms}:
                 terms.append(constraint)
+        if location_bias and location_bias.lower() not in {term.lower() for term in terms}:
+            terms.append(location_bias)
         standalone = " ".join([topic, *_normalize_followup_terms(terms)]).strip()
+        provenance = _provenance_for_rewrite(
+            original,
+            resolution,
+            inherited_constraints,
+            new_constraints,
+            rejected_constraints,
+            standalone,
+        )
+        _store_query_provenance(state, provenance)
         return QueryRewrite(
             original,
             standalone,
@@ -1040,13 +2099,132 @@ def rewrite_followup_query(
             discarded_interpretations=_dedupe_preserve(discarded),
             confidence=0.88 if standalone != cleaned else 0.65,
         )
-    return QueryRewrite(original, cleaned or original, confidence=0.45)
+    final_query = cleaned or original
+    provenance = _provenance_for_rewrite(
+        original,
+        resolution,
+        inherited_constraints,
+        new_constraints,
+        rejected_constraints,
+        final_query,
+    )
+    _store_query_provenance(state, provenance)
+    return QueryRewrite(original, final_query, confidence=0.45)
 
 
 def _active_entity_mention(state: RetrievalConversationState | None) -> str:
-    if not state or not state.active_entities:
-        return ""
-    return state.active_entities[0].mention
+    entity = _active_entity(state)
+    return entity.mention if entity else ""
+
+
+def _active_resolved_entity(
+    state: RetrievalConversationState | None,
+) -> ConversationEntity | None:
+    entity = _active_entity(state)
+    if entity is None:
+        return None
+    if entity.unresolved:
+        return None
+    if not (entity.canonical_name or entity.mention):
+        return None
+    return entity
+
+
+def _entity_search_name(entity: ConversationEntity) -> str:
+    return entity.canonical_name or entity.selected_meaning or entity.mention
+
+
+def _known_official_domains(canonical_name: str) -> tuple[str, ...]:
+    if canonical_name.casefold() == "American Intercon School".casefold():
+        return ("ais.edu.kh",)
+    if canonical_name.casefold() == "Paragon International University".casefold():
+        return ("paragoniu.edu.kh",)
+    return ()
+
+
+def _query_mentions_entity_or_domain(query: str, entity: ConversationEntity) -> bool:
+    lowered = query.lower()
+    if any(name and name.lower() in lowered for name in _entity_names(entity)):
+        return True
+    return any(domain.lower() in lowered for domain in entity.official_domains)
+
+
+def _resolve_known_entity_from_constraints(entity: ConversationEntity) -> None:
+    if entity.mention.upper() != "AIS":
+        return
+    if entity.entity_type != "school" or entity.location != "Cambodia":
+        return
+    entity.canonical_name = "American Intercon School"
+    entity.selected_meaning = "American Intercon School"
+    entity.entity_category = "education"
+    entity.official_domains = _known_official_domains("American Intercon School")
+    entity.confidence = max(entity.confidence, 0.88)
+    entity.unresolved = False
+
+
+def _update_retrieval_state_from_tool_result(
+    state: RetrievalConversationState,
+    tool_name: str,
+    metadata: dict[str, Any],
+) -> None:
+    if tool_name == "fetch_url" and metadata.get("verified_dates"):
+        state.pending_evidence_gap = None
+        return
+    entity = _active_entity(state)
+    if tool_name != "web_search" or entity is None:
+        return
+    provider_metadata = metadata.get("provider_metadata")
+    if not isinstance(provider_metadata, dict):
+        provider_metadata = {}
+    candidates = provider_metadata.get("entity_candidates") or metadata.get(
+        "entity_candidates"
+    )
+    if not isinstance(candidates, list) or not candidates:
+        return
+    aliases = {
+        entity.mention.casefold(),
+        *(alias.casefold() for alias in entity.candidate_meanings),
+    }
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_aliases = {
+            str(alias).casefold()
+            for alias in candidate.get("aliases") or []
+            if str(alias).strip()
+        }
+        canonical = str(candidate.get("canonical_name") or "").strip()
+        if canonical:
+            candidate_aliases.add(canonical.casefold())
+        if aliases.isdisjoint(candidate_aliases):
+            continue
+        entity.canonical_name = canonical or entity.canonical_name
+        entity.selected_meaning = entity.canonical_name or entity.selected_meaning
+        entity.entity_type = str(candidate.get("entity_type") or entity.entity_type or "") or None
+        if entity.entity_type in {"school", "university", "college", "training_center"}:
+            entity.entity_category = "education"
+        entity.location = str(candidate.get("country") or entity.location or "") or None
+        domains = tuple(
+            str(domain).strip()
+            for domain in candidate.get("domains") or []
+            if str(domain).strip()
+        )
+        if entity.canonical_name:
+            domains = _dedupe_tuple([*domains, *_known_official_domains(entity.canonical_name)])
+        entity.official_domains = domains
+        entity.confidence = max(entity.confidence, float(candidate.get("score") or 0.0))
+        entity.unresolved = not bool(
+            entity.canonical_name and entity.entity_type and entity.location
+        )
+        return
+
+
+def _dedupe_tuple(values: list[str]) -> tuple[str, ...]:
+    result: list[str] = []
+    for value in values:
+        if value and value not in result:
+            result.append(value)
+    return tuple(result)
 
 
 def _dedupe_preserve(values: list[str]) -> list[str]:
@@ -1062,46 +2240,53 @@ def _update_retrieval_state_from_user(
     user_message: str,
     messages: list[dict[str, Any]],
 ) -> None:
+    state.turn_index += 1
     retrieval_message = _retrieval_message_from_segments(user_message)
-    topic = _recent_topic(messages) or _lookup_subject_from_text(retrieval_message)
-    if topic and (
-        not state.active_entities
-        or state.active_entities[0].mention.lower() != topic.lower()
-    ):
-        if _topic_changed(state, topic, retrieval_message):
-            state.active_entities.clear()
+    resolution = _resolve_subject_for_turn(user_message, messages, state)
+    state.last_user_goal = retrieval_message
+    state.last_subject_resolution = resolution
+    entity: ConversationEntity | None = None
+    if resolution.subject:
+        entity, switched = _activate_entity(
+            state,
+            resolution.subject,
+            turn_index=state.turn_index,
+        )
+        if switched:
             state.rejected_interpretations.clear()
             state.last_accepted_sources.clear()
             state.failed_urls.clear()
-        if not state.active_entities:
-            state.active_entities.append(
-                ConversationEntity(
-                    mention=topic,
-                    candidate_meanings=_candidate_meanings_for_topic(topic),
-                    confidence=0.45,
-                    unresolved=True,
-                )
-            )
-    constraints = _current_entity_constraints(user_message, messages)
-    if state.active_entities:
-        entity = state.active_entities[0]
-        if constraints.get("entity_type"):
-            entity.entity_type = constraints["entity_type"]
-            state.rejected_interpretations = _dedupe_preserve(
-                [
-                    *state.rejected_interpretations,
-                    "Automatic Identification System",
-                    "AIS Inc office furniture",
-                ]
-            )
-            entity.confidence = max(entity.confidence, 0.72)
-        if constraints.get("location"):
-            entity.location = constraints["location"]
-            entity.confidence = max(entity.confidence, 0.78)
-        entity.unresolved = not (entity.entity_type and entity.location)
-    state.last_user_goal = retrieval_message
+            state.last_claim_intent = None
+            state.pending_evidence_gap = None
+    elif not resolution.ambiguous:
+        entity = _active_entity(state)
+
+    constraints = _constraints_from_text(user_message, messages)
+    if entity:
+        _apply_constraints_to_entity(entity, constraints, state)
     rewrite = rewrite_followup_query(retrieval_message, user_message, messages, state)
     state.last_standalone_query = rewrite.standalone_query
+    claim_intent = _claim_intent_for_text(retrieval_message)
+    if claim_intent in {
+        ClaimIntent.FOUNDING_DATE,
+        ClaimIntent.DURATION,
+        ClaimIntent.HISTORY,
+    }:
+        state.last_claim_intent = claim_intent
+        state.pending_evidence_gap = EvidenceGap(
+            requested_claim="establishment date",
+            supported_by_existing_evidence=False,
+            missing_fields=["founding_date"],
+            requires_new_retrieval=True,
+        )
+    elif claim_intent == ClaimIntent.LEADERSHIP:
+        state.last_claim_intent = claim_intent
+        state.pending_evidence_gap = EvidenceGap(
+            requested_claim="leadership role",
+            supported_by_existing_evidence=False,
+            missing_fields=["person_name", "role"],
+            requires_new_retrieval=True,
+        )
     if rewrite.explicit_constraints:
         state.last_search_intent = " ".join(rewrite.explicit_constraints)
 
@@ -1121,14 +2306,7 @@ def _topic_changed(
 
 
 def _lookup_subject_from_text(text: str) -> str:
-    match = DIRECT_LOOKUP_SUBJECT_RE.search(text)
-    if match:
-        return _clean_topic_candidate(match.group("subject"))
-    for token in re.findall(r"\b[A-Z0-9]{2,8}\b", text):
-        return token
-    if _looks_like_unfamiliar_lookup(text):
-        return _clean_topic_candidate(text)
-    return ""
+    return _explicit_subject_from_current_turn(text)
 
 
 def _candidate_meanings_for_topic(topic: str) -> list[str]:
@@ -1147,9 +2325,16 @@ def _contextual_search_query(
     messages: list[dict[str, Any]],
     state: RetrievalConversationState | None = None,
 ) -> str:
-    raw_query = _clean_tool_arg(query, collapse_whitespace=True)
+    raw_query = _clean_tool_arg(
+        sanitize_search_query_control_text(query),
+        collapse_whitespace=True,
+    )
     query = _search_query_from_request(raw_query)
+    if _refinement_anchor_topic(user_message, messages):
+        query = _search_query_from_request(user_message)
     rewrite = rewrite_followup_query(query, user_message, messages, state)
+    if not rewrite.standalone_query and rewrite.confidence <= 0.0:
+        return ""
     if rewrite.standalone_query and rewrite.confidence >= 0.7:
         return rewrite.standalone_query
     topic = _recent_topic(messages)
@@ -1172,6 +2357,31 @@ def _contextual_search_query(
 
 def _is_low_info_search_query(text: str) -> bool:
     return not _followup_detail_terms(text)
+
+
+def _is_refinement_followup(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?i)\b("
+            r"i\s+meant|"
+            r"i\s+mean|"
+            r"actually|"
+            r"not\s+that|"
+            r"no,\s*|"
+            r"here|"
+            r"my\s+location|"
+            r"my\s+area"
+            r")\b",
+            text,
+        )
+    )
+
+
+def _refinement_anchor_topic(user_message: str, messages: list[dict[str, Any]]) -> str:
+    if not _is_refinement_followup(user_message):
+        return ""
+    anchors = _recent_lookup_subjects(messages)
+    return anchors[0] if anchors else ""
 
 
 def _looks_like_followup_search(text: str) -> bool:
@@ -1274,12 +2484,9 @@ def _recent_lookup_subjects(messages: list[dict[str, Any]]) -> list[str]:
     for message in reversed(messages[:-1]):
         if message.get("role") != "user":
             continue
-        match = DIRECT_LOOKUP_SUBJECT_RE.search(str(message.get("content", "")))
-        if not match:
-            continue
-        subject = _clean_topic_candidate(match.group("subject"))
-        if subject and subject.casefold() not in {item.casefold() for item in subjects}:
-            subjects.append(subject)
+        for subject in _explicit_subjects_from_text(str(message.get("content", ""))):
+            if subject.casefold() not in {item.casefold() for item in subjects}:
+                subjects.append(subject)
     return subjects
 
 
@@ -1419,6 +2626,7 @@ class Agent:
         system_prompt: str,
         max_steps: int = 20,
         tool_selector: ToolSelector | None = None,
+        ollama_options: dict[str, Any] | None = None,
     ):
         self.ollama = ollama
         self.model = model
@@ -1426,6 +2634,7 @@ class Agent:
         self.gate = gate
         self.max_steps = max_steps
         self.tool_selector = tool_selector
+        self.ollama_options = dict(ollama_options or {})
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         self.retrieval_state = RetrievalConversationState()
 
@@ -1451,8 +2660,10 @@ class Agent:
         used_tool_calls: set[str] = set()
         failed_fetch_urls: set[str] = set()
         seen_search_queries: set[str] = set()
+        search_queries_this_turn: list[str] = []
         search_call_count = 0
         fetch_attempt_count = 0
+        model_planned_search_requested = False
 
         def execute_tool_call(call: dict[str, Any]):
             nonlocal search_call_count, fetch_attempt_count
@@ -1484,7 +2695,7 @@ class Agent:
                 and name in {"web_search", "code_search"}
                 and not str(args.get("query", "")).strip()
             ):
-                return name, args, tool, "error: provide a search query or subject"
+                return name, args, tool, "error: provide a search query or subject", {}
             if name == "web_search":
                 query = str(args.get("query", ""))
                 if search_call_count >= MAX_TOTAL_SEARCH_CALLS:
@@ -1507,6 +2718,7 @@ class Agent:
                         {"duplicate_search_query": True},
                     )
                 seen_search_queries.add(_normalized_search_query(query))
+                search_queries_this_turn.append(query)
                 search_call_count += 1
             if name == "fetch_url":
                 url = str(args.get("url", ""))
@@ -1522,6 +2734,7 @@ class Agent:
                     url,
                     user_message,
                     self.messages,
+                    self.retrieval_state,
                 )
                 if rejection:
                     return (
@@ -1616,6 +2829,11 @@ class Agent:
             yield AgentEvent(
                 "tool_result",
                 {"tool": name, "result": result, "metadata": metadata},
+            )
+            _update_retrieval_state_from_tool_result(
+                self.retrieval_state,
+                name,
+                metadata,
             )
             tool_message = {"role": "tool", "tool_name": name, "content": result}
             if metadata:
@@ -1717,7 +2935,15 @@ class Agent:
 
         for _step in range(self.max_steps):
             try:
-                msg = self.ollama.chat(self.model, self.messages, tools=schemas)
+                if self.ollama_options:
+                    msg = self.ollama.chat(
+                        self.model,
+                        self.messages,
+                        tools=schemas,
+                        options=self.ollama_options,
+                    )
+                else:
+                    msg = self.ollama.chat(self.model, self.messages, tools=schemas)
             except Exception as e:  # surface, don't crash the session
                 yield AgentEvent("error", {"message": str(e)})
                 return
@@ -1739,6 +2965,30 @@ class Agent:
                 )
 
             if not tool_calls:
+                if (
+                    "web_search" in selected_tools
+                    and "web_search" in used_tools
+                    and not model_planned_search_requested
+                    and search_call_count < MAX_TOTAL_SEARCH_CALLS
+                    and _content_needs_retrieval(content)
+                    and (
+                        self.retrieval_state.pending_evidence_gap is not None
+                        or _recent_retrieval_was_weak(self.messages)
+                    )
+                ):
+                    model_planned_search_requested = True
+                    self.messages.append(
+                        {
+                            "role": "tool",
+                            "tool_name": "retrieval_controller",
+                            "content": _model_planned_search_instruction(
+                                retrieval_message,
+                                self.retrieval_state,
+                                search_queries_this_turn,
+                            ),
+                        }
+                    )
+                    continue
                 if used_tools and PROMISE_TO_SEARCH_RE.search(content):
                     recent_tool_content = next(
                         (
@@ -1777,6 +3027,11 @@ class Agent:
                 yield AgentEvent(
                     "tool_result",
                     {"tool": name, "result": result, "metadata": metadata},
+                )
+                _update_retrieval_state_from_tool_result(
+                    self.retrieval_state,
+                    name,
+                    metadata,
                 )
                 tool_message = {"role": "tool", "tool_name": name, "content": result}
                 if metadata:

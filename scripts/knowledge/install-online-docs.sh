@@ -3,7 +3,25 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DOCS_FILE="${KLAUDE_ONLINE_DOCS_FILE:-$PROJECT_ROOT/online-docs.txt}"
+if [[ -n "${KLAUDE_HOME:-}" ]]; then
+    DEFAULT_CONFIG_DIR="$KLAUDE_HOME/config"
+else
+    KLAUDE_HOME="$PROJECT_ROOT/.klaude"
+    DEFAULT_CONFIG_DIR="$PROJECT_ROOT/config"
+fi
+KLAUDE_CONFIG_DIR="${KLAUDE_CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
+KLAUDE_DATA_DIR="${KLAUDE_DATA_DIR:-$KLAUDE_HOME/data}"
+export KLAUDE_HOME KLAUDE_CONFIG_DIR KLAUDE_DATA_DIR
+
+DEFAULT_DOCS_FILE="$KLAUDE_CONFIG_DIR/online-docs.txt"
+if [[ ! -f "$DEFAULT_DOCS_FILE" ]]; then
+    if [[ -f "$PROJECT_ROOT/online-docs.txt" ]]; then
+        DEFAULT_DOCS_FILE="$PROJECT_ROOT/online-docs.txt"
+    else
+        DEFAULT_DOCS_FILE="$PROJECT_ROOT/config/examples/online-docs.txt"
+    fi
+fi
+DOCS_FILE="${KLAUDE_ONLINE_DOCS_FILE:-$DEFAULT_DOCS_FILE}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 LOG_ROOT="${KLAUDE_LOG_DIR:-$PROJECT_ROOT/logs}"
 LOG_DIR="$LOG_ROOT/knowledge/online-docs"

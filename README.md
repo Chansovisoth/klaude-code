@@ -1,6 +1,6 @@
 # klaude-code
 
-A local-first AI coding agent. The agent, models, memory, and knowledge base run on your machine by default: Ollama for models, SearXNG for web search, LanceDB for documentation you teach yourself. Optional providers such as Exa, Hugging Face, or a remote Crawl4AI endpoint can use API keys when you choose to enable them.
+A local-first AI coding agent. The agent, models, memory, and knowledge base run on your machine by default: Ollama for models, SearXNG for web search, LanceDB for documentation you teach yourself. Optional providers such as Exa, Tavily, Hugging Face, or a remote Crawl4AI endpoint can use API keys when you choose to enable them.
 
 ```
 you> add input validation to the signup route
@@ -17,7 +17,7 @@ done — committed on branch klaude/20260712-1430
 
 - **Codes with you**: reads, edits, greps, runs shell commands — each destructive action behind a y/n/always permission gate.
 - **Learns documentation**: `klaude learn https://nextjs.org/docs -l nextjs` scrapes, chunks, embeds, and stores docs in a named library. For multi-page sites, `klaude crawl https://docs.example -l docs` politely follows same-domain links and stores a refreshable docs source. The agent then answers from *your* knowledge base before touching the web (hybrid BM25 + vector + rerank retrieval).
-- **Searches the web privately**: self-hosted SearXNG (70+ engines, no keys, no limits) + a clean-markdown fetch cascade. Optional providers such as Exa can be enabled with API keys in `.env`.
+- **Searches the web privately**: self-hosted SearXNG (70+ engines, no keys, no limits) + a clean-markdown fetch cascade. Optional providers such as Exa and Tavily can be enabled with API keys in `config/.env`.
 - **Git-native**: never touches your branch. Works on `klaude/<task>`, one commit per edit — review everything with `git diff`, or in VS Code's Source Control panel, and revert any single action.
 - **Remembers you**: `klaude remember "we use Tailwind"` — durable facts injected into every session.
 - **Plugs in anywhere**: the knowledge and web layers are also MCP servers, usable from OpenCode, Cline, Claude Code, or any MCP client.
@@ -44,7 +44,7 @@ uv run klaude chat  # or: uv tool install --editable apps/cli && klaude chat
 | `klaude docs add react https://react.dev/llms.txt -l react` | install refreshable `llms.txt` docs |
 | `klaude crawl https://docs.example -l docs --sitemap --include '*/docs/*'` | crawl same-domain docs pages into a refreshable library |
 | `klaude docs update react` | refresh installed docs and snapshot old files if changed |
-| `klaude docs update --online` | update sources listed in `online-docs.txt`, skipping unchanged indexing |
+| `klaude docs update --online` | update sources listed in the configured online docs file, skipping unchanged indexing |
 | `klaude import-skill crawl4ai-skill.zip -l crawl4ai` | install a skill package and index its text |
 | `klaude query "…" -l nextjs` | inspect raw retrieval from a library (no LLM) |
 | `klaude libraries` | list learned libraries |
@@ -71,6 +71,10 @@ without asking the model to summarize it.
 `logs/knowledge/online-docs/` by default. Set `KLAUDE_LOG_DIR` to store logs
 somewhere else. Failed `learn` commands are saved separately for retry.
 
+Config examples live in `config/examples/`. Local editable config lives right
+beside it in `config/config.toml`, `config/.env`, `config/searxng.env`,
+and `config/online-docs.txt`.
+
 ## Architecture
 
 ```
@@ -84,18 +88,25 @@ terminal TUI ──► agent engine (loop · router · permission gate)
               MCP plugin servers
 ```
 
-Monorepo (`uv` workspace): `packages/core` (engine), `packages/knowledge`, `packages/web`, `packages/tools_local`, `apps/cli`. Data lives in `~/.local/share/klaude/`, config in `~/.config/klaude/config.toml`.
+Monorepo (`uv` workspace): `packages/core` (engine), `packages/knowledge`, `packages/web`, `packages/tools_local`, `apps/cli`. Source checkouts keep local editable config in visible `config/`: `config/config.toml`, `config/.env`, `config/searxng.env`, and `config/online-docs.txt`. Runtime data stays in gitignored `.klaude/data/`. Set `KLAUDE_CONFIG_DIR` or `KLAUDE_DATA_DIR` to override those locations; set `KLAUDE_HOME` to relocate both under one custom home. Installed packages outside a source checkout fall back to `~/.config/klaude/` and `~/.local/share/klaude/`.
+
+Ollama daemon settings stay with the Ollama launcher itself, such as systemd,
+Docker Compose, or `ollama run` parameters. Klaude only owns request tuning for
+the chat calls it sends: `config/config.toml` has `[ollama.options]`. For
+example, `num_thread = 8` asks Ollama to use all 8 logical CPU threads for
+Klaude chat requests, while GPU placement remains Ollama's automatic CUDA
+behavior unless you explicitly set `num_gpu`.
 
 Imported documentation and assistant skills are permanent user data, not repo
 files:
 
 ```text
-~/.local/share/klaude/docs-sources/<name>/
+.klaude/data/docs-sources/<name>/
   manifest.json
   current/            # active llms.txt-linked docs or crawled pages
   snapshots/          # timestamped previous current/ trees
 
-~/.local/share/klaude/skills/<name>/
+.klaude/data/skills/<name>/
   manifest.json
   source.zip          # when imported from a zip
   current/            # active SKILL.md, references, scripts, docs
@@ -164,7 +175,14 @@ And because klaude commits every edit on its own branch, VS Code's built-in diff
 
 ## Secrets
 
-All service secrets live in a gitignored `.env` file (generated by the installer from `.env.example`, `chmod 600`). Tracked config files never contain credentials — `deploy/searxng/settings.yml` is safe to commit and share as-is. Add future service tokens to `.env`, never to yaml/toml.
+All service secrets live in gitignored `config/.env` (generated by the installer from `config/examples/.env.example`, `chmod 600`). A root `.env` is still ignored as a legacy compatibility input, but new installs copy or generate secrets under `config/`. Tracked config files never contain credentials. Add future service tokens to `config/.env`, never to yaml/toml.
+
+Container service env is kept narrow. SearXNG reads only `config/searxng.env`;
+it should not receive search-provider API keys.
+
+Do not put Ollama chat options such as `num_thread` or `num_ctx` in `.env`.
+Those belong in `config/config.toml` under `[ollama.options]`. Ollama daemon
+environment variables belong in Ollama's own service or container configuration.
 
 Optional provider keys use the `PROVIDER_API_KEY` pattern:
 
@@ -181,8 +199,41 @@ CRAWL4AI_API_KEY=...
 Klaude uses relevance-first provider routing for web search. Configured
 providers are tried according to query intent, missing optional keys are skipped
 quietly, DDGS is the preferred keyless fallback when installed, and SearXNG is
-the final fallback. Search/fetch evidence remains temporary and is not written
-to memory or learned libraries.
+the final fallback. Tavily is an optional hosted Search provider: queries leave
+your machine, free monthly credits are limited, and Klaude falls back to other
+providers when Tavily is missing, invalid, rate-limited, unavailable, or out of
+credits. Search/fetch evidence remains temporary and is not written to memory or
+learned libraries.
+
+Tavily integration status:
+
+- Implemented: `web_search` can use Tavily Search through the provider router.
+- Postponed: Tavily Extract, Crawl, Map, and Research are not exposed as Klaude
+  tools. `fetch_url` keeps using Klaude's local direct/Crawl4AI/trafilatura
+  cascade, and `crawl_site` keeps using Klaude's bounded same-domain crawler.
+- Disable Tavily by leaving `TAVILY_API_KEY` empty or setting
+  `[web.providers.tavily] enabled = false` in `config/config.toml`.
+- Test Tavily without exposing secrets with
+  `uv run klaude search "test query using Tavily" -n 3`.
+
+Firecrawl integration status:
+
+- Implemented: `web_search` can use Firecrawl Search through the provider
+  router. Klaude uses Firecrawl's v2 Search API and does not request scraped
+  page content for every result.
+- Postponed: Firecrawl Scrape, Crawl, Map, Monitor, Parse, Interact, and
+  Research are not exposed as Klaude tools. `fetch_url` keeps using Klaude's
+  local direct/Crawl4AI/trafilatura cascade, and `crawl_site` keeps using
+  Klaude's bounded same-domain crawler.
+- Disable Firecrawl by leaving `FIRECRAWL_API_KEY` empty or setting
+  `[web.providers.firecrawl] enabled = false` in
+  `config/config.toml`.
+- Test Firecrawl without exposing secrets with
+  `uv run klaude search "test query using Firecrawl" -n 3`.
+
+Codex MCP access to Tavily or Firecrawl is separate from Klaude-code native
+integration. MCP tools configured for this Codex coding session do not
+automatically make those providers available to Klaude's Ollama models.
 
 Billing is conservative by default:
 
@@ -197,14 +248,14 @@ To force a legacy provider for compatibility, set `[web] provider = "local"` for
 SearXNG-only search or `provider = "exa"` for Exa-only search.
 
 Hugging Face Hub lookup is separate from web search and works against public
-models, datasets, and Spaces by default. Add `HUGGINGFACE_API_KEY` to `.env`
+models, datasets, and Spaces by default. Add `HUGGINGFACE_API_KEY` to `config/.env`
 when you want authenticated Hub access.
 
 ## Optional: JS-heavy scraping tier
 
 ```bash
 docker compose --profile heavy up -d   # starts Crawl4AI
-# then in ~/.config/klaude/config.toml:
+# then in config/config.toml:
 # [services] crawl4ai_url = "http://localhost:11235"
 ```
 

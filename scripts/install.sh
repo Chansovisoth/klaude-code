@@ -109,14 +109,52 @@ case "$OLLAMA_MODE" in
     ;;
 esac
 
-# 3. docker services ------------------------------------------------------
-# secrets live in .env (gitignored), generated from .env.example on first run
-if [ ! -f .env ]; then
-  say "generating .env with secrets"
-  KEY=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-  sed "s/^SEARXNG_SECRET=.*/SEARXNG_SECRET=${KEY}/" .env.example > .env
-  chmod 600 .env
+# 3. local runtime/config home -----------------------------------------------
+if [ -n "${KLAUDE_HOME:-}" ]; then
+  DEFAULT_CONFIG_DIR="$KLAUDE_HOME/config"
+else
+  KLAUDE_HOME="$PWD/.klaude"
+  DEFAULT_CONFIG_DIR="$PWD/config"
 fi
+KLAUDE_CONFIG_DIR="${KLAUDE_CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
+KLAUDE_DATA_DIR="${KLAUDE_DATA_DIR:-$KLAUDE_HOME/data}"
+export KLAUDE_HOME KLAUDE_CONFIG_DIR KLAUDE_DATA_DIR
+
+mkdir -p "$KLAUDE_CONFIG_DIR" "$KLAUDE_DATA_DIR"
+
+ENV_FILE="$KLAUDE_CONFIG_DIR/.env"
+ENV_EXAMPLE="config/examples/.env.example"
+if [ ! -f "$ENV_FILE" ]; then
+  if [ -f .env ]; then
+    say "copying existing root .env to ${ENV_FILE}"
+    cp .env "$ENV_FILE"
+  else
+    say "installing provider secrets template at ${ENV_FILE}"
+    cp "$ENV_EXAMPLE" "$ENV_FILE"
+  fi
+  chmod 600 "$ENV_FILE"
+fi
+
+SEARXNG_ENV_FILE="$KLAUDE_CONFIG_DIR/searxng.env"
+SEARXNG_ENV_EXAMPLE="config/examples/searxng.env"
+if [ ! -f "$SEARXNG_ENV_FILE" ]; then
+  say "installing SearXNG service environment at ${SEARXNG_ENV_FILE}"
+  SEARXNG_SECRET_VALUE=$(awk -F= '/^SEARXNG_SECRET=/ { sub(/[[:space:]]*#.*/, "", $2); gsub(/[[:space:]]/, "", $2); print $2; exit }' "$ENV_FILE" || true)
+  if [ -z "$SEARXNG_SECRET_VALUE" ]; then
+    SEARXNG_SECRET_VALUE=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+  fi
+  sed "s/^SEARXNG_SECRET=.*/SEARXNG_SECRET=${SEARXNG_SECRET_VALUE}/" "$SEARXNG_ENV_EXAMPLE" > "$SEARXNG_ENV_FILE"
+  chmod 600 "$SEARXNG_ENV_FILE"
+fi
+
+ONLINE_DOCS_FILE="$KLAUDE_CONFIG_DIR/online-docs.txt"
+ONLINE_DOCS_EXAMPLE="config/examples/online-docs.txt"
+if [ ! -f "$ONLINE_DOCS_FILE" ] && [ -f "$ONLINE_DOCS_EXAMPLE" ]; then
+  say "installing online docs list at ${ONLINE_DOCS_FILE}"
+  cp "$ONLINE_DOCS_EXAMPLE" "$ONLINE_DOCS_FILE"
+fi
+
+# 4. docker services ------------------------------------------------------
 if command -v docker >/dev/null 2>&1; then
   if [ "$OLLAMA_MODE" = "docker" ]; then
     say "starting searxng + ollama (docker compose --profile selfhosted up -d)"
@@ -138,11 +176,11 @@ else
   warn "docker not found -- web search will not work until you install it"
 fi
 
-# 4. python workspace ---------------------------------------------------------
+# 5. python workspace ---------------------------------------------------------
 say "syncing python workspace (uv sync)"
 uv sync
 
-# 5. models by hardware tier ---------------------------------------------------
+# 6. models by hardware tier ---------------------------------------------------
 if [ "$NO_MODELS" = "1" ]; then
   say "skipping model pulls"
 else
@@ -164,10 +202,16 @@ else
   done
 fi
 
-# 6. config + verify -----------------------------------------------------------
-mkdir -p "$HOME/.config/klaude"
-CFG="$HOME/.config/klaude/config.toml"
-[ -f "$CFG" ] || cp config/config.example.toml "$CFG"
+# 7. config + verify -----------------------------------------------------------
+CFG="$KLAUDE_CONFIG_DIR/config.toml"
+if [ ! -f "$CFG" ]; then
+  if [ -f "$HOME/.config/klaude/config.toml" ]; then
+    say "copying existing user config to ${CFG}"
+    cp "$HOME/.config/klaude/config.toml" "$CFG"
+  else
+    cp config/examples/config.toml "$CFG"
+  fi
+fi
 if [ "$OLLAMA_URL" != "http://localhost:11434" ]; then
   say "writing ollama_url = ${OLLAMA_URL} to ${CFG}"
   if grep -q '^\[services\]' "$CFG"; then

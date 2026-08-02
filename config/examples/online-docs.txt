@@ -1,4 +1,4 @@
-# ADD MORE DOCS LINKS TO THE LIST IF NEEDED
+# Tracked starter list. Copy to .klaude/config/online-docs.txt for local edits.
 
 # ============================================================
 # NEXT.JS

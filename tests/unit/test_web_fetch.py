@@ -1,5 +1,5 @@
 import httpx
-from klaude_web.fetch import fetch_page
+from klaude_web.fetch import fetch_page, fetch_page_detailed
 
 
 class FakeResponse:
@@ -24,6 +24,9 @@ def test_fetch_page_returns_plain_text_without_extraction(monkeypatch):
     assert fetch_page("https://react.dev/llms.txt") == (
         "# React docs\n\nhttps://react.dev/learn.md"
     )
+    detailed = fetch_page_detailed("https://react.dev/llms.txt")
+    assert detailed.provider == "direct"
+    assert detailed.successful_provider == "direct"
 
 
 def test_fetch_page_falls_back_for_html(monkeypatch):
@@ -36,6 +39,9 @@ def test_fetch_page_falls_back_for_html(monkeypatch):
     monkeypatch.setattr(trafilatura, "extract", lambda *args, **kwargs: "# Hello\n\nWorld")
 
     assert "Hello" in fetch_page("https://example.test")
+    detailed = fetch_page_detailed("https://example.test")
+    assert detailed.provider == "trafilatura"
+    assert detailed.attempted_providers == ("direct", "trafilatura")
 
 
 def test_fetch_page_preserves_html_metadata(monkeypatch):
@@ -80,3 +86,6 @@ def test_fetch_page_sends_crawl4ai_api_key(monkeypatch):
     monkeypatch.setattr("klaude_web.fetch.httpx.post", fake_post)
 
     assert fetch_page("https://example.test", "http://crawl.test", "secret") == "# Crawled"
+    detailed = fetch_page_detailed("https://example.test", "http://crawl.test", "secret")
+    assert detailed.provider == "crawl4ai"
+    assert detailed.attempted_providers == ("direct", "crawl4ai")

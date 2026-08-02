@@ -8,7 +8,7 @@ from klaude_core import Config
 from .cache import TTLCache
 from .crawler import crawl_site as crawl_site_pages
 from .exa import exa_fetch, exa_search
-from .fetch import fetch_page
+from .fetch import fetch_page_detailed
 from .huggingface import hub_repo_details, hub_repo_readme, hub_repo_search
 from .providers import (
     SearchIntent,
@@ -37,27 +37,56 @@ class Web:
         max_results: int = 8,
         *,
         intent: SearchIntent | str | None = None,
+        provider: str | None = None,
+        provider_strict: bool = False,
     ) -> SearchResponse:
         original_query = query
-        search_query = build_search_query(original_query, self.cfg, max_results, intent=intent)
+        search_query = build_search_query(
+            original_query,
+            self.cfg,
+            max_results,
+            intent=intent,
+            provider_preference=provider,
+            provider_strict=provider_strict,
+        )
+        provider = provider or search_query.provider_preference
+        provider_strict = bool(provider_strict or search_query.provider_strict)
         key = search_cache_key(self.cfg, search_query)
         if self.cfg.web_search.cache_enabled:
             hit = self.cache.get(key)
             if hit is not None:
                 return SearchResponse(**hit)
-        response = self._search_uncached_detailed(original_query, max_results, intent=intent)
+        response = self._search_uncached_detailed(
+            original_query,
+            max_results,
+            intent=intent,
+            provider=provider,
+            provider_strict=provider_strict,
+        )
         if self.cfg.web_search.cache_enabled:
             self.cache.set(key, response.to_dict(), search_cache_ttl(search_query))
         return response
 
     def fetch(self, url: str) -> str:
+        return str(self.fetch_detailed(url).get("content", ""))
+
+    def fetch_detailed(self, url: str) -> dict:
         key = f"page::{self.cfg.web_provider}::{url}"
         hit = self.cache.get(key)
         if hit is not None:
-            return hit
-        text = self._fetch_uncached(url)
-        self.cache.set(key, text, PAGE_TTL)
-        return text
+            if isinstance(hit, dict) and "content" in hit:
+                return hit
+            return {
+                "content": str(hit),
+                "provider": "cache",
+                "provider_label": "cache",
+                "attempted_providers": [],
+                "successful_providers": [],
+                "cache_hit": True,
+            }
+        result = self._fetch_uncached_detailed(url)
+        self.cache.set(key, result, PAGE_TTL)
+        return result
 
     def code_search(self, query: str, max_results: int = 8) -> list[dict]:
         key = f"code_search_v2::{self.cfg.web_provider}::{query}::{max_results}"
@@ -185,54 +214,119 @@ class Web:
         max_results: int,
         *,
         intent: SearchIntent | str | None = None,
+        provider: str | None = None,
+        provider_strict: bool = False,
     ) -> SearchResponse:
+        search_query = build_search_query(query, self.cfg, max_results, intent=intent)
+        semantic_query = search_query.text
+        if provider:
+            return quality_search(
+                self.cfg,
+                query,
+                max_results,
+                intent=intent,
+                provider=provider,
+                provider_strict=provider_strict,
+            )
         if (
             self.cfg.web_search.strategy == "quality"
             and self.cfg.web_provider in {"quality", "auto"}
         ):
-            return quality_search(self.cfg, query, max_results, intent=intent)
+            return quality_search(
+                self.cfg,
+                query,
+                max_results,
+                intent=intent,
+                provider=provider,
+                provider_strict=provider_strict,
+            )
         if self.cfg.web_provider == "quality":
-            return quality_search(self.cfg, query, max_results, intent=intent)
+            return quality_search(
+                self.cfg,
+                query,
+                max_results,
+                intent=intent,
+                provider=provider,
+                provider_strict=provider_strict,
+            )
         if self.cfg.web_provider == "exa":
             return SearchResponse(
-                results=exa_search(self.cfg.exa_base_url, self.cfg.exa_api_key, query, max_results),
+                results=exa_search(
+                    self.cfg.exa_base_url,
+                    self.cfg.exa_api_key,
+                    semantic_query,
+                    max_results,
+                ),
                 warnings=[],
-                queries_attempted=[query],
+                queries_attempted=[semantic_query],
                 queries_failed=[],
                 providers_attempted=["exa"],
                 providers_succeeded=["exa"],
             )
         try:
-            return searx_search_detailed(self.cfg.searxng_url, query, max_results)
+            return searx_search_detailed(self.cfg.searxng_url, semantic_query, max_results)
         except Exception:
             if self.cfg.web_provider == "auto" and self.cfg.exa_api_key:
                 return SearchResponse(
                     results=exa_search(
                         self.cfg.exa_base_url,
                         self.cfg.exa_api_key,
-                        query,
+                        semantic_query,
                         max_results,
                     ),
                     warnings=[
                         {
-                            "query": query,
+                            "query": semantic_query,
                             "error_type": "SearXNGFallback",
                             "message": "used Exa fallback",
                         }
                     ],
-                    queries_attempted=[query],
-                    queries_failed=[query],
+                    queries_attempted=[semantic_query],
+                    queries_failed=[semantic_query],
                     providers_attempted=["searxng", "exa"],
                     providers_succeeded=["exa"],
                 )
             raise
 
     def _fetch_uncached(self, url: str) -> str:
+        return str(self._fetch_uncached_detailed(url).get("content", ""))
+
+    def _fetch_uncached_detailed(self, url: str) -> dict:
         if self.cfg.web_provider == "exa":
-            return exa_fetch(self.cfg.exa_base_url, self.cfg.exa_api_key, url)
+            return {
+                "content": exa_fetch(self.cfg.exa_base_url, self.cfg.exa_api_key, url),
+                "provider": "exa",
+                "provider_label": "exa",
+                "attempted_providers": ["exa"],
+                "successful_providers": ["exa"],
+            }
         try:
-            return fetch_page(url, self.cfg.crawl4ai_url, self.cfg.crawl4ai_api_key)
+            fetched = fetch_page_detailed(
+                url,
+                self.cfg.crawl4ai_url,
+                self.cfg.crawl4ai_api_key,
+            )
+            return {
+                "content": fetched.content,
+                "provider": fetched.provider,
+                "provider_label": fetched.provider,
+                "attempted_providers": list(fetched.attempted_providers),
+                "successful_providers": (
+                    [fetched.successful_provider] if fetched.successful_provider else []
+                ),
+            }
         except Exception:
             if self.cfg.web_provider == "auto" and self.cfg.exa_api_key:
-                return exa_fetch(self.cfg.exa_base_url, self.cfg.exa_api_key, url)
+                attempted = ["direct"]
+                if self.cfg.crawl4ai_url:
+                    attempted.append("crawl4ai")
+                attempted.extend(["trafilatura", "exa"])
+                return {
+                    "content": exa_fetch(self.cfg.exa_base_url, self.cfg.exa_api_key, url),
+                    "provider": "exa",
+                    "provider_label": "exa",
+                    "attempted_providers": attempted,
+                    "successful_providers": ["exa"],
+                    "fallback_used": True,
+                }
             raise

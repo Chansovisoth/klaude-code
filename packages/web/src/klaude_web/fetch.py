@@ -7,6 +7,7 @@ pure-Python HTML fallback.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
 
@@ -21,6 +22,14 @@ TEXT_CONTENT_TYPES = {
     "text/plain",
     "text/xml",
 }
+
+
+@dataclass(frozen=True)
+class FetchPageResult:
+    content: str
+    provider: str
+    attempted_providers: tuple[str, ...] = ()
+    successful_provider: str | None = None
 
 
 class _MetadataParser(HTMLParser):
@@ -154,21 +163,48 @@ def _trafilatura(url: str) -> str:
     return text.strip()
 
 
-def fetch_page(url: str, crawl4ai_url: str = "", crawl4ai_api_key: str = "") -> str:
+def fetch_page_detailed(
+    url: str,
+    crawl4ai_url: str = "",
+    crawl4ai_api_key: str = "",
+) -> FetchPageResult:
     errors: list[str] = []
+    attempted: list[str] = []
     try:
+        attempted.append("direct")
         direct_text = _direct_text_fetch(url)
         if direct_text is not None:
-            return direct_text
+            return FetchPageResult(
+                direct_text,
+                "direct",
+                tuple(attempted),
+                "direct",
+            )
     except Exception as e:
         errors.append(f"direct text: {e}")
     if crawl4ai_url:
         try:
-            return _crawl4ai(crawl4ai_url, url, crawl4ai_api_key)
+            attempted.append("crawl4ai")
+            return FetchPageResult(
+                _crawl4ai(crawl4ai_url, url, crawl4ai_api_key),
+                "crawl4ai",
+                tuple(attempted),
+                "crawl4ai",
+            )
         except Exception as e:
             errors.append(f"crawl4ai: {e}")
     try:
-        return _trafilatura(url)
+        attempted.append("trafilatura")
+        return FetchPageResult(
+            _trafilatura(url),
+            "trafilatura",
+            tuple(attempted),
+            "trafilatura",
+        )
     except Exception as e:
         errors.append(f"trafilatura: {e}")
     raise RuntimeError(f"all fetch tiers failed for {url}: " + " | ".join(errors))
+
+
+def fetch_page(url: str, crawl4ai_url: str = "", crawl4ai_api_key: str = "") -> str:
+    return fetch_page_detailed(url, crawl4ai_url, crawl4ai_api_key).content

@@ -39,12 +39,14 @@ from difflib import get_close_matches
 from enum import StrEnum
 from importlib import resources
 from pathlib import Path
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
 import typer
 from klaude_core import Agent, Memory, Ollama, PermissionGate, Tool, load_config
-from klaude_core.config import CONFIG_DIR
+from klaude_core.config import CONFIG_DIR, SOURCE_ROOT
+from klaude_core.dates import find_establishment_date, operating_duration_since
 from klaude_core.memory import explicit_memory_candidate, is_sensitive_memory
 from klaude_core.runtime_context import (
     collect_runtime_context,
@@ -68,6 +70,11 @@ memory_app = typer.Typer(
     invoke_without_command=True,
 )
 app.add_typer(memory_app, name="memory")
+sessions_app = typer.Typer(
+    help="Manage previous conversation sessions.",
+    invoke_without_command=True,
+)
+app.add_typer(sessions_app, name="sessions")
 console = Console()
 _RUNTIME_CONTEXT_NOTICE_SHOWN = False
 DEFAULT_COMMAND_REFERENCE_WIDTH = 100
@@ -204,6 +211,20 @@ CLI_COMMANDS = (
     ),
     CommandSpec("sessions", CommandSurface.CLI, "sessions", "List recent conversation sessions."),
     CommandSpec(
+        "sessions-delete",
+        CommandSurface.CLI,
+        "sessions delete SESSION_ID",
+        "Delete one previous conversation session after confirmation.",
+        aliases=("delete session", "session delete"),
+    ),
+    CommandSpec(
+        "sessions-clear",
+        CommandSurface.CLI,
+        "sessions clear",
+        "Delete all previous conversation sessions after confirmation.",
+        aliases=("clear sessions", "delete all sessions"),
+    ),
+    CommandSpec(
         "session-search",
         CommandSurface.CLI,
         "session-search",
@@ -260,13 +281,13 @@ DOCS_COMMANDS = (
         "docs-update-online",
         CommandSurface.DOCS,
         "docs update --online",
-        "Update sources listed in online-docs.txt.",
+        "Update sources listed in the configured online docs file.",
     ),
     CommandSpec(
         "docs-update-all",
         CommandSurface.DOCS,
         "docs update --all",
-        "Refresh docs sources and process online-docs.txt.",
+        "Refresh docs sources and process the configured online docs file.",
         aliases=("update all docs", "refresh all docs"),
     ),
 )
@@ -568,6 +589,17 @@ def _apply_runtime_context_to_search_config(cfg, runtime_result) -> None:
         cfg.runtime_context.location.configured_region = location.region
 
 
+def _append_tool_capabilities(runtime_text: str, *, web_search_available: bool) -> str:
+    capabilities = (
+        "<tool_capabilities machine_generated=\"true\">\n"
+        f"- web_search_available: {'true' if web_search_available else 'false'}\n"
+        "</tool_capabilities>"
+    )
+    if runtime_text.strip():
+        return f"{runtime_text.rstrip()}\n{capabilities}"
+    return capabilities
+
+
 def _maybe_show_runtime_context_note(result) -> None:
     global _RUNTIME_CONTEXT_NOTICE_SHOWN
     if _RUNTIME_CONTEXT_NOTICE_SHOWN or not result:
@@ -637,6 +669,12 @@ def _auth_label(value: str) -> str:
     return "configured" if value else "not configured"
 
 
+def _ollama_options_label(options: dict) -> str:
+    if not options:
+        return "default"
+    return ",".join(f"{key}={options[key]}" for key in sorted(options))
+
+
 def _count_status(label: str, count: int) -> str:
     return f"{count} {label}" if count else "none"
 
@@ -678,27 +716,56 @@ def _format_ambiguity_summary(metadata: dict) -> str:
     if not debug.get("ambiguity_detected") and len(candidates) <= 1:
         return ""
 
+    top = candidates[0]
     location = str(debug.get("location_country") or "").strip()
+    top_country = str(top.get("country") or "").strip()
+    top_context = " ".join(
+        [
+            str(top.get("canonical_name") or ""),
+            str(top.get("description") or ""),
+            " ".join(str(domain) for domain in top.get("domains") or []),
+        ]
+    )
+    location_matches_top = bool(
+        location
+        and (
+            (top_country and location.casefold() == top_country.casefold())
+            or location.casefold() in top_context.casefold()
+            or (
+                location.casefold() == "cambodia"
+                and re.search(r"\b(cambodian|phnom penh|\.kh)\b", top_context, re.I)
+            )
+        )
+    )
     location_bits = []
-    if location and debug.get("location_mode") == "bias":
+    if location and debug.get("location_mode") == "bias" and location_matches_top:
         location_bits.append(f"Based on the approximate {location} context")
-    elif location:
+    elif location and debug.get("location_mode") != "bias":
         location_bits.append(f"Based on the explicit {location} context")
     prefix = (
         f"{location_bits[0]}, the most relevant candidate is"
         if location_bits
         else "The most relevant candidate is"
     )
-    top = candidates[0]
     lines = [
         '"{}" can refer to several things.'.format(
             (top.get("aliases") or [top.get("canonical_name", "this term")])[0]
-        ),
-        (
-            f"{prefix} {top.get('canonical_name', '')}"
-            f" - {top.get('description', 'a supported entity')}."
-        ),
+        )
     ]
+    if (
+        location
+        and debug.get("location_mode") == "bias"
+        and not location_matches_top
+    ):
+        lines.append(
+            f"I did not identify a clearly {location}-specific candidate from the "
+            "retrieved results."
+        )
+        prefix = "The top retrieved candidate is"
+    lines.append(
+        f"{prefix} {top.get('canonical_name', '')}"
+        f" - {top.get('description', 'a supported entity')}."
+    )
     other = [candidate for candidate in candidates[1:4] if candidate.get("canonical_name")]
     if other:
         lines.append("Other credible meanings:")
@@ -830,6 +897,13 @@ def _search_execution_metadata(response, configured_provider: str | None = None)
     if not successful:
         successful = result_providers
     returned = _stable_web_search_providers(provider_metadata.get("providers_returned"))
+    provider_attempts = provider_metadata.get("provider_attempts", [])
+    if not attempted and provider_attempts:
+        attempted = _stable_web_search_providers(
+            attempt.get("provider")
+            for attempt in provider_attempts
+            if isinstance(attempt, dict)
+        )
     if not attempted:
         attempted = successful or returned
     if not attempted and configured_provider:
@@ -856,7 +930,6 @@ def _search_execution_metadata(response, configured_provider: str | None = None)
         else 0
     )
     fallback_used = bool(successful and first_success_index > 0)
-    provider_attempts = provider_metadata.get("provider_attempts", [])
     if not provider_attempts and successful:
         provider_attempts = [
             {
@@ -882,38 +955,76 @@ def _search_execution_metadata(response, configured_provider: str | None = None)
         "display_lines": provider_metadata.get("display_lines", []),
         "result_count": provider_metadata.get("result_count"),
         "plausible_candidate_count": provider_metadata.get("plausible_candidate_count"),
+        "provider_directive": provider_metadata.get("provider_directive"),
+        "query_provenance": provider_metadata.get("query_provenance", []),
     }
 
 
-def _web_search_start_metadata(web, query: str, max_results: int = 12) -> dict:
+def _web_search_start_metadata(
+    web,
+    query: str,
+    max_results: int = 12,
+    *,
+    provider: str = "",
+    provider_strict: bool = False,
+) -> dict:
     requested = _bounded_result_count(max_results, 12)
     try:
-        from klaude_web.providers import ProviderRegistry, build_search_query
+        from klaude_web.providers import (
+            ProviderRegistry,
+            build_search_query,
+            parse_provider_directive,
+        )
 
-        search_query = build_search_query(query, web.cfg, requested)
+        directive = parse_provider_directive(query)
+        provider = provider or directive.provider or ""
+        provider_strict = bool(provider_strict or (directive.provider and directive.strict))
+        search_query = build_search_query(
+            query,
+            web.cfg,
+            requested,
+            provider_preference=provider,
+            provider_strict=provider_strict,
+        )
         registry = ProviderRegistry(web.cfg)
-        providers, _skipped = registry.eligible_providers(search_query)
+        providers, _skipped = registry.eligible_providers(
+            search_query,
+            provider_override=provider,
+            provider_strict=provider_strict,
+        )
         planned = _stable_web_search_providers(provider.name for provider in providers)
     except Exception:
         planned = []
         search_query = None
-    provider = planned[0] if planned else "none"
+    provider = provider or (planned[0] if planned else "none")
     return {
         "tool": "web_search",
         "canonical_tool": "web_search",
         "provider": provider,
         "active_provider": provider,
         "provider_label": "" if provider == "none" else provider,
-        "attempted_providers": planned[:1],
+        "attempted_providers": [provider] if provider != "none" else planned[:1],
         "successful_providers": [],
         "fallback_used": False,
         "query": getattr(search_query, "text", query),
     }
 
 
-def _web_search_tool_result(web, query: str, max_results: int = 12) -> dict:
+def _web_search_tool_result(
+    web,
+    query: str,
+    max_results: int = 12,
+    *,
+    provider: str = "",
+    provider_strict: bool = False,
+) -> dict:
     requested = _bounded_result_count(max_results, 12)
-    response = web.search_detailed(query, requested)
+    response = web.search_detailed(
+        query,
+        requested,
+        provider=provider or None,
+        provider_strict=provider_strict,
+    )
     execution = _search_execution_metadata(response, web.cfg.web_provider)
     return {
         "content": _format_search_response(response, requested),
@@ -932,8 +1043,24 @@ def _web_search_tool_result(web, query: str, max_results: int = 12) -> dict:
 
 
 def _fetch_url_tool_result(web, url: str) -> dict:
-    content = web.fetch(url)[:15_000]
-    metadata: dict[str, object] = {"url": url}
+    if hasattr(web, "fetch_detailed"):
+        fetched = web.fetch_detailed(url)
+        content = str(fetched.get("content", ""))[:15_000]
+        provider = str(fetched.get("provider") or fetched.get("provider_label") or "")
+        metadata: dict[str, object] = {
+            "url": url,
+            "provider": provider,
+            "provider_label": str(fetched.get("provider_label") or provider),
+            "attempted_providers": fetched.get("attempted_providers") or [],
+            "successful_providers": fetched.get("successful_providers") or (
+                [provider] if provider else []
+            ),
+            "fallback_used": bool(fetched.get("fallback_used", False)),
+            "cache_hit": bool(fetched.get("cache_hit", False)),
+        }
+    else:
+        content = web.fetch(url)[:15_000]
+        metadata = {"url": url}
     try:
         from klaude_web.providers import classify_fetch_outcome, targeted_same_domain_links
 
@@ -966,9 +1093,45 @@ def _fetch_url_tool_result(web, url: str) -> dict:
                 relationship="school identity and location",
                 max_pages=max_pages,
             )
+        domain = urlparse(url).netloc.lower().removeprefix("www.")
+        established = find_establishment_date(content)
+        if outcome.status == "ok" and established and domain in {
+            "ais.edu.kh",
+            "americanintercon.edu.kh",
+        }:
+            as_of = datetime.now(ZoneInfo("Asia/Phnom_Penh")).date()
+            duration = operating_duration_since(established, as_of)
+            metadata["verified_dates"] = [
+                {
+                    "claim": "established",
+                    "date": established.isoformat(),
+                    "as_of": as_of.isoformat(),
+                    "completed_years": duration.completed_years,
+                    "approximate_duration": duration.approximate_label,
+                    "next_anniversary": duration.next_anniversary.isoformat(),
+                    "source_url": url,
+                }
+            ]
+            content = (
+                f"{content}\n\nVerified date calculation:\n"
+                f"- Established: {established:%B} {established.day}, {established.year}\n"
+                f"- As of {as_of.isoformat()}: about {duration.approximate_label}\n"
+                f"- Next anniversary: {duration.next_anniversary.isoformat()}"
+            )
     except Exception:
         metadata.setdefault("verification_links", [])
     return {"content": content, "metadata": metadata}
+
+
+def _fetch_url_display_lines(metadata: dict, result: str) -> list[str]:
+    provider = str(metadata.get("provider_label") or metadata.get("provider") or "").lower()
+    allowed = {"direct", "crawl4ai", "trafilatura", "exa", "cache"}
+    label = f" [{provider}]" if provider in allowed else ""
+    preview = result[:200].replace("\n", " ")
+    lines = [f"-> fetch_url{label}"]
+    if preview:
+        lines.append(f"   {preview}")
+    return lines
 
 
 def _query_knowledge_tool_result(
@@ -1444,18 +1607,30 @@ def _select_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
 
     evidence_words = (
         "channel",
+        "chair",
         "creator",
+        "cs",
+        "dean",
+        "department",
+        "dept",
+        "director",
+        "faculty",
         "fortnite",
         "game",
         "games",
         "gamer",
         "gaming",
+        "head",
         "hypixel",
+        "leader",
+        "leadership",
         "minecraft",
         "play",
         "played",
         "plays",
+        "rector",
         "roblox",
+        "science",
         "stream",
         "streams",
         "streamer",
@@ -1557,6 +1732,20 @@ def _select_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
         "research more",
     )
     if not selected and any(word in text for word in followup_lookup):
+        add("query_knowledge", "web_search", "fetch_url")
+
+    claim_followup_words = (
+        "how long",
+        "operating",
+        "operated",
+        "founded",
+        "established",
+        "started",
+        "opened",
+        "history",
+        "anniversary",
+    )
+    if not selected and any(word in text for word in claim_followup_words):
         add("query_knowledge", "web_search", "fetch_url")
 
     local_entity_words = (
@@ -1725,13 +1914,14 @@ def _summarize_recent_memory(agent: Agent, memory: Memory, session_id: str, requ
         f"User request: {request}\n\nRecent conversation:\n{context}"
     )
     try:
-        msg = agent.ollama.chat(
-            agent.model,
-            [
-                {"role": "system", "content": "You distill safe durable memories."},
-                {"role": "user", "content": prompt},
-            ],
-        )
+        messages = [
+            {"role": "system", "content": "You distill safe durable memories."},
+            {"role": "user", "content": prompt},
+        ]
+        if getattr(agent, "ollama_options", None):
+            msg = agent.ollama.chat(agent.model, messages, options=agent.ollama_options)
+        else:
+            msg = agent.ollama.chat(agent.model, messages)
     except Exception:
         return ""
     fact = " ".join(str(msg.get("content", "")).strip().split())
@@ -1807,6 +1997,10 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, object
     web = Web(cfg)
     kn = Knowledge(cfg, ollama)
     runtime_text = render_runtime_context(runtime_result.context, cfg) if runtime_result else ""
+    runtime_text = _append_tool_capabilities(
+        runtime_text,
+        web_search_available=cfg.permissions.get("web_search", "allow") != "deny",
+    )
     S = {"type": "string"}
     tools += [
         Tool(
@@ -1833,15 +2027,27 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, object
                 "type": "object",
                 "properties": {
                     "query": S,
+                    "provider": S,
+                    "provider_strict": {"type": "boolean"},
                     "max_results": {"type": "integer", "minimum": 1, "maximum": 50},
                 },
                 "required": ["query"],
             },
-            lambda query, max_results=12: _web_search_tool_result(web, query, max_results),
+            lambda query, max_results=12, provider="", provider_strict=False: (
+                _web_search_tool_result(
+                    web,
+                    query,
+                    max_results,
+                    provider=provider,
+                    provider_strict=provider_strict,
+                )
+            ),
             start_metadata=lambda args: _web_search_start_metadata(
                 web,
                 str(args.get("query", "")),
                 _bounded_result_count(args.get("max_results", 12), 12),
+                provider=str(args.get("provider", "")),
+                provider_strict=bool(args.get("provider_strict", False)),
             ),
         ),
         Tool(
@@ -2015,6 +2221,7 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, object
         _system_prompt(memory, runtime_text),
         max_steps=cfg.max_agent_steps,
         tool_selector=_select_tool_names,
+        ollama_options=cfg.ollama_options,
     )
     def refreshed_system_prompt() -> str:
         refreshed_runtime = _runtime_context_result(cfg, workdir)
@@ -2114,7 +2321,14 @@ def _render(agent: Agent, memory: Memory, session_id: str, user_msg: str) -> str
         elif event.kind == "tool_start":
             if event.payload["tool"] == "web_search":
                 pending_tool_start_metadata["web_search"] = event.payload.get("metadata") or {}
-            if event.payload["tool"] not in {"web_search", "list_commands", "query_knowledge"}:
+            if event.payload["tool"] == "fetch_url":
+                pending_tool_start_metadata["fetch_url"] = event.payload.get("metadata") or {}
+            if event.payload["tool"] not in {
+                "web_search",
+                "fetch_url",
+                "list_commands",
+                "query_knowledge",
+            }:
                 _print_trace(f"-> {event.payload['tool']}")
         elif event.kind == "tool_result":
             if (event.payload.get("metadata") or {}).get("suppress_user_output"):
@@ -2135,6 +2349,14 @@ def _render(agent: Agent, memory: Memory, session_id: str, user_msg: str) -> str
                     event.payload.get("metadata") or {},
                     event.payload["result"],
                 ):
+                    _print_trace(line)
+                continue
+            if event.payload.get("tool") == "fetch_url":
+                metadata = {
+                    **pending_tool_start_metadata.pop("fetch_url", {}),
+                    **(event.payload.get("metadata") or {}),
+                }
+                for line in _fetch_url_display_lines(metadata, event.payload["result"]):
                     _print_trace(line)
                 continue
             preview = event.payload["result"][:200].replace("\n", " ")
@@ -2200,7 +2422,21 @@ def _online_docs_file() -> Path:
     override = os.environ.get("KLAUDE_ONLINE_DOCS_FILE")
     if override:
         return Path(override).expanduser()
-    return Path(__file__).resolve().parents[4] / "online-docs.txt"
+    project_root = SOURCE_ROOT or Path(__file__).resolve().parents[4]
+    candidates = [
+        CONFIG_DIR / "online-docs.txt",
+        project_root / "online-docs.txt",
+        project_root / "config" / "examples" / "online-docs.txt",
+    ]
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate.expanduser())
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.exists():
+            return candidate
+    return CONFIG_DIR / "online-docs.txt"
 
 
 def _iter_online_docs_entries(path: Path) -> list[tuple[str, str, str]]:
@@ -2574,13 +2810,13 @@ def docs_update(
     all_sources: bool = typer.Option(
         False,
         "--all",
-        help="update installed docs sources and online-docs.txt",
+        help="update installed docs sources and the configured online docs file",
     ),
     online_docs: bool = typer.Option(
         False,
         "--online",
         "--online-docs",
-        help="update sources listed in online-docs.txt",
+        help="update sources listed in the configured online docs file",
     ),
     max_pages: int = typer.Option(-1, "--max-pages", help="page cap; default per source"),
 ):
@@ -2607,12 +2843,12 @@ def docs_update(
             console.print(
                 "[yellow]no refreshable docs sources installed[/]\n"
                 "Use `klaude docs add ...` / `klaude crawl ...` for managed docs "
-                "sources, or run `klaude docs update --online` for online-docs.txt."
+                "sources, or run `klaude docs update --online` for the online docs list."
             )
         else:
             console.print(
                 "[red]provide a docs source name, use --sources for managed docs, "
-                "--online for online-docs.txt, or --all for both[/]"
+                "--online for the online docs list, or --all for both[/]"
             )
         raise typer.Exit(1)
     _update_managed_docs_sources(cfg, targets, max_pages)
@@ -2841,7 +3077,7 @@ def models():
         console.print(f"  {m}{tag}")
     console.print(
         "\n[dim]use any of these:  klaude chat --model NAME   or  /model NAME in chat\n"
-        "make one permanent in ~/.config/klaude/config.toml under [models.override][/]"
+        "make one permanent in config/config.toml under [models.override][/]"
     )
 
 
@@ -2930,10 +3166,65 @@ def memory_search(query: str, n: int = typer.Option(8, "-n")):
     console.print(_format_session_hits(_memory_store().search_sessions(query, n)))
 
 
-@app.command()
-def sessions(n: int = typer.Option(10, "-n")):
+@sessions_app.callback(invoke_without_command=True)
+def sessions_root(ctx: typer.Context, n: int = typer.Option(10, "-n")):
     """List recent conversation sessions."""
-    console.print(_format_recent_sessions(_memory_store().recent_sessions(n)))
+    if ctx.invoked_subcommand is None:
+        console.print(_format_recent_sessions(_memory_store().recent_sessions(n)))
+
+
+@sessions_app.command("delete")
+def sessions_delete(
+    session_id: str,
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Delete without prompting for confirmation.",
+    ),
+):
+    """Delete one previous conversation session."""
+    memory = _memory_store()
+    turns = len(memory.load_session(session_id))
+    if not turns:
+        console.print(f"[dim]removed 0 sessions; no session matched {session_id}[/]")
+        return
+    if not yes and not typer.confirm(
+        f"Delete session {session_id} ({turns} turns)?",
+        default=False,
+    ):
+        console.print("[dim]aborted[/]")
+        return
+    removed_turns = memory.delete_session(session_id)
+    console.print(f"[green]removed session {session_id} ({removed_turns} turns)[/]")
+
+
+@sessions_app.command("clear")
+def sessions_clear(
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Delete all sessions without prompting for confirmation.",
+    ),
+):
+    """Delete all previous conversation sessions."""
+    memory = _memory_store()
+    counts = memory.session_counts()
+    if counts["turns"] == 0:
+        console.print("[dim](no previous sessions)[/]")
+        return
+    if not yes:
+        if not typer.confirm(
+            f"Delete all {counts['sessions']} sessions ({counts['turns']} turns)?",
+            default=False,
+        ):
+            console.print("[dim]aborted[/]")
+            return
+    counts = memory.clear_sessions()
+    console.print(
+        f"[green]removed {counts['sessions']} sessions ({counts['turns']} turns)[/]"
+    )
 
 
 @app.command("session-search")
@@ -3036,7 +3327,10 @@ def status():
     modes.add_row(
         "web search",
         _web_mode(cfg, "web_search"),
-        f"strategy={cfg.web_search.strategy}; provider={cfg.web_provider}",
+        (
+            f"strategy={cfg.web_search.strategy}; provider={cfg.web_provider}; "
+            f"provider_order={','.join(cfg.web_search.provider_order)}"
+        ),
     )
     modes.add_row(
         "search billing",
@@ -3143,11 +3437,12 @@ def status():
         "on",
         (
             f"tier={cfg.tier}; coder={cfg.models.get('coder', '')}; "
-            f"embed={cfg.models.get('embed', '')}"
+            f"embed={cfg.models.get('embed', '')}; "
+            f"ollama_options={_ollama_options_label(cfg.ollama_options)}"
         ),
     )
     modes.add_row("data", "on", str(cfg.data_dir))
-    modes.add_row("config", "on", str(CONFIG_DIR / "config.toml"))
+    modes.add_row("config", "on", str(cfg.config_file))
     console.print(modes)
 
     tool_rows = Table(title="Agent Tool Permissions", show_header=True, header_style="bold")

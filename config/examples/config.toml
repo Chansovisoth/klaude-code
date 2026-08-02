@@ -1,4 +1,4 @@
-# Copy to ~/.config/klaude/config.toml and edit. Everything has defaults;
+# Copy to config/config.toml and edit. Everything has defaults;
 # an empty file (or no file) works out of the box.
 
 [models]
@@ -6,16 +6,27 @@
 # [models.override]
 # coder = "qwen3-coder:30b"
 
+[ollama.options]
+# Sent with each /api/chat request. On an 8-thread CPU, num_thread = 6 is
+# about 75% of logical threads and num_thread = 8 asks Ollama to use all
+# logical threads. Ollama's own guidance often favors physical cores for best
+# throughput, so benchmark 4/6/8 if you are tuning carefully. Leave num_gpu
+# unset for Ollama's automatic CUDA/GPU placement; set num_gpu = 0 only if you
+# need CPU-only debugging.
+# num_ctx = 8192
+# num_thread = 8
+# num_gpu = 999
+
 [services]
 # ollama_url  = "http://localhost:11434"
 # searxng_url = "http://localhost:8888"
 # crawl4ai_url = "http://localhost:11235"   # uncomment if running the heavy profile
-# Prefer CRAWL4AI_API_KEY in .env when your Crawl4AI server requires auth.
+# Prefer CRAWL4AI_API_KEY in config/.env when your Crawl4AI server requires auth.
 
 [web]
 # quality = relevance-first provider routing; SearXNG is last-resort fallback
 # local   = explicit SearXNG/local fetch compatibility mode
-# exa     = explicit Exa compatibility mode; requires EXA_API_KEY in .env
+# exa     = explicit Exa compatibility mode; requires EXA_API_KEY in config/.env
 # auto    = quality routing with compatibility naming
 # provider = "quality"
 
@@ -85,6 +96,8 @@
 [web.providers.tavily]
 # enabled = true
 # api_key_env = "TAVILY_API_KEY"
+# Search only. Extract/Crawl/Map/Research are not exposed as Klaude tools.
+# Keep "basic" for conservative credit use; "advanced" may cost more credits.
 # default_depth = "basic"
 
 [web.providers.exa]
@@ -94,6 +107,8 @@
 [web.providers.firecrawl]
 # enabled = true
 # api_key_env = "FIRECRAWL_API_KEY"
+# Search only. Scrape/Crawl/Map/Monitor/Research are not exposed as Klaude tools.
+# Native Firecrawl search uses the v2 API and caps ordinary provider attempts.
 
 [web.providers.ddgs]
 # enabled = true
@@ -104,7 +119,7 @@
 # automatic_merge = false
 
 [huggingface]
-# Public Hub lookup works without a key. Prefer HUGGINGFACE_API_KEY in .env for
+# Public Hub lookup works without a key. Prefer HUGGINGFACE_API_KEY in config/.env for
 # authenticated access instead of storing secrets in this file.
 # base_url = "https://huggingface.co"
 

@@ -9,6 +9,8 @@ from klaude_web.providers import (
     AmbiguityType,
     DiscoveryEvaluation,
     EvidenceLevel,
+    ExaProvider,
+    FirecrawlProvider,
     LocationMode,
     ProviderCapabilities,
     ProviderRegistry,
@@ -18,7 +20,9 @@ from klaude_web.providers import (
     SearchIntent,
     SearchQuery,
     SearXNGProvider,
+    TavilyProvider,
     VerificationEvaluation,
+    _api_key_fingerprint,
     build_search_location_context,
     build_search_plan,
     build_search_query,
@@ -29,11 +33,14 @@ from klaude_web.providers import (
     evaluate_search_result,
     evaluate_verification_candidate,
     evidence_is_sufficient,
+    parse_provider_directive,
     provider_query_variants,
     quality_search,
     request_json_with_retries,
     resolve_acronym_from_text,
+    sanitize_semantic_search_query,
     score_and_filter_results,
+    search_cache_key,
     search_cache_ttl,
     targeted_same_domain_links,
 )
@@ -148,6 +155,57 @@ def test_clean_search_query_removes_lookup_wrapper():
     assert clean_search_query("search the web for FlazeSlayer") == "FlazeSlayer"
 
 
+def test_provider_directive_is_extracted_from_query_text():
+    directive = parse_provider_directive(
+        "Search for American Intercon School Cambodia using Exa."
+    )
+
+    assert directive.provider == "exa"
+    assert directive.strict is True
+    assert directive.cleaned_user_query == "Search for American Intercon School Cambodia."
+
+
+def test_provider_directive_and_control_text_are_not_search_terms():
+    cfg = Config()
+    query = build_search_query(
+        "site:ais.edu.kh Claude. Rules AIS American Intercon School Cambodia using Exa school",
+        cfg,
+        5,
+    )
+
+    assert query.provider_preference == "exa"
+    assert query.provider_strict is True
+    assert "using Exa" not in query.text
+    assert "Claude. Rules" not in query.text
+    assert "provider instructions" not in sanitize_semantic_search_query(
+        "American Intercon School provider instructions using Exa"
+    )
+
+
+def test_query_provenance_uses_only_allowed_sources():
+    cfg = Config()
+    query = build_search_query(
+        "When was American Intercon School in Cambodia established?",
+        cfg,
+        5,
+    )
+
+    sources = {item.source for item in query.query_provenance}
+
+    assert sources
+    assert sources <= {
+        "current_user_text",
+        "conversation_entity",
+        "explicit_location",
+        "inferred_location",
+        "relationship_expansion",
+        "official_domain",
+    }
+    assert "system_prompt" not in sources
+    assert "tool_description" not in sources
+    assert "provider_directive" not in sources
+
+
 def test_expand_search_queries_fans_out_handle_and_activity_queries():
     queries = expand_search_queries("FlazeSlayer Minecraft", max_queries=8)
 
@@ -240,13 +298,36 @@ def test_domain_and_local_context_resolve_ambiguous_acronym_shape():
     assert maritime.country is None
 
 
+def test_search_cache_key_changes_when_exa_configuration_changes(monkeypatch):
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    without_exa = Config()
+    with_exa = Config()
+    with_exa.exa_api_key = "secret-exa-key"
+
+    first = search_cache_key(without_exa, build_search_query("what is AIS", without_exa, 12))
+    second = search_cache_key(with_exa, build_search_query("what is AIS", with_exa, 12))
+
+    assert first.startswith("search_v7::")
+    assert second.startswith("search_v7::")
+    assert first != second
+    assert "secret-exa-key" not in second
+
+
 def test_web_facade_preserves_original_query_for_relationship_detection():
     cfg = Config()
     cfg.web_search.cache_enabled = False
     seen = {}
 
     class FakeWeb(Web):
-        def _search_uncached_detailed(self, query, max_results, *, intent=None):
+        def _search_uncached_detailed(
+            self,
+            query,
+            max_results,
+            *,
+            intent=None,
+            provider=None,
+            provider_strict=False,
+        ):
             structured = build_search_query(query, cfg, max_results, intent=intent)
             seen["ambiguity_type"] = structured.ambiguity_type
             seen["original_text"] = structured.original_text
@@ -260,6 +341,44 @@ def test_web_facade_preserves_original_query_for_relationship_detection():
 
     assert seen["ambiguity_type"] == AmbiguityType.PLACE_OR_ORGANIZATION
     assert seen["original_text"] == "where is AIS?"
+
+
+def test_web_facade_passes_explicit_provider_to_quality_search(monkeypatch):
+    cfg = Config()
+    cfg.web_provider = "quality"
+    cfg.web_search.cache_enabled = False
+    seen = {}
+
+    def fake_quality_search(
+        cfg_arg,
+        query,
+        max_results,
+        *,
+        intent=None,
+        provider=None,
+        provider_strict=False,
+    ):
+        seen["query"] = query
+        seen["provider"] = provider
+        seen["provider_strict"] = provider_strict
+        return SearchResponse(
+            results=[],
+            providers_attempted=[provider],
+            providers_succeeded=[],
+        )
+
+    monkeypatch.setattr("klaude_web.facade.quality_search", fake_quality_search)
+    web = object.__new__(Web)
+    web.cfg = cfg
+    web.cache = None
+
+    web.search_detailed("AIS", 5, provider="exa", provider_strict=True)
+
+    assert seen == {
+        "query": "AIS",
+        "provider": "exa",
+        "provider_strict": True,
+    }
 
 
 def test_runtime_location_softly_boosts_ambiguous_local_candidate():
@@ -384,6 +503,49 @@ def test_local_school_plan_uses_bounded_location_enriched_queries():
     assert plan.target_entity == "AIS"
     assert plan.target_relationship == "school identity and location"
     assert plan.max_queries == 3
+
+
+def test_local_university_plan_preserves_university_relationship():
+    cfg = _cfg_with_cambodia_location()
+    query = build_search_query("Paragon university Cambodia", cfg, 8)
+    plan = build_search_plan("Paragon university Cambodia", cfg, 8)
+    variants = provider_query_variants(query, max_queries=4)
+
+    assert classify_ambiguity("Paragon university Cambodia").relationship == "university"
+    assert variants[0] == "Paragon university Cambodia"
+    assert all("school" not in variant.lower() for variant in variants)
+    assert plan.primary_query == "Paragon university Cambodia"
+    assert plan.target_relationship == "university identity and location"
+    assert "official university website" in plan.preferred_source_types
+
+
+def test_university_query_rejects_school_only_candidate():
+    cfg = _cfg_with_cambodia_location()
+    query = build_search_query("Paragon university Cambodia", cfg, 5)
+    school = {
+        "title": "Paragon International School Cambodia",
+        "url": "https://www.paragonisc.edu.kh/",
+        "snippet": (
+            "Paragon International School Cambodia is a CIS accredited school "
+            "in Phnom Penh. It prepares students for university."
+        ),
+        "provider": "exa",
+        "provider_rank": 1,
+    }
+    university = {
+        "title": "Paragon International University",
+        "url": "https://paragoniu.edu.kh/about",
+        "snippet": (
+            "Paragon International University is a university in Phnom Penh, "
+            "Cambodia offering undergraduate and graduate programs."
+        ),
+        "provider": "exa",
+        "provider_rank": 2,
+    }
+
+    scored = score_and_filter_results(query, [school, university], cfg)
+
+    assert [result["title"] for result in scored] == ["Paragon International University"]
 
 
 def test_candidate_discovery_threshold_is_lower_than_final_verification():
@@ -983,6 +1145,776 @@ def test_quality_search_attempts_google_first_when_configured():
     assert calls == ["google"]
 
 
+def test_exa_status_reflects_configured_key_and_priority():
+    cfg = Config()
+    cfg.exa_api_key = "configured-exa"
+    cfg.web_search.provider_order = ["searxng", "exa"]
+    registry = ProviderRegistry(cfg, state_store=ProviderStateStore(None))
+    statuses = {status.name: status for status in registry.statuses()}
+
+    assert statuses["exa"].configured is True
+    assert statuses["exa"].enabled is True
+    assert statuses["exa"].state == ProviderState.AVAILABLE
+    assert statuses["exa"].priority == 1
+
+
+def test_exa_status_is_unconfigured_without_key(monkeypatch):
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    cfg = Config()
+    registry = ProviderRegistry(cfg, state_store=ProviderStateStore(None))
+    statuses = {status.name: status for status in registry.statuses()}
+
+    assert statuses["exa"].configured is False
+    assert statuses["exa"].state == ProviderState.UNCONFIGURED
+    assert statuses["exa"].unavailable_reason == "missing EXA_API_KEY"
+
+
+def test_exa_provider_receives_stripped_configured_key(monkeypatch):
+    monkeypatch.setenv("EXA_API_KEY", "wrong-env-value")
+    cfg = Config()
+    cfg.exa_api_key = "  configured-exa  "
+
+    provider = ExaProvider(cfg)
+
+    assert provider.api_key() == "configured-exa"
+
+
+def test_exa_provider_does_not_read_alternative_env_names(monkeypatch):
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.setenv("EXA_KEY", "wrong")
+    monkeypatch.setenv("EXA_TOKEN", "wrong")
+    cfg = Config()
+
+    provider = ExaProvider(cfg)
+
+    assert provider.api_key() == ""
+    assert provider.is_configured() is False
+
+
+def test_reconstructed_exa_provider_receives_updated_config():
+    first_cfg = Config()
+    first_cfg.exa_api_key = "first-key"
+    second_cfg = Config()
+    second_cfg.exa_api_key = "second-key"
+
+    first = ExaProvider(first_cfg)
+    second = ExaProvider(second_cfg)
+
+    assert first.api_key() == "first-key"
+    assert second.api_key() == "second-key"
+
+
+def test_tavily_status_is_unconfigured_without_key(monkeypatch):
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    cfg = Config()
+    registry = ProviderRegistry(cfg, state_store=ProviderStateStore(None))
+    statuses = {status.name: status for status in registry.statuses()}
+
+    assert statuses["tavily"].configured is False
+    assert statuses["tavily"].state == ProviderState.UNCONFIGURED
+    assert statuses["tavily"].unavailable_reason == "missing TAVILY_API_KEY"
+
+
+def test_tavily_provider_receives_stripped_configured_key(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "wrong-env-value")
+    cfg = Config()
+    cfg.tavily_api_key = "  configured-tavily  "
+
+    provider = TavilyProvider(cfg)
+
+    assert provider.api_key() == "configured-tavily"
+
+
+def test_tavily_search_uses_bearer_header_and_bounded_request(monkeypatch):
+    cfg = Config()
+    cfg.tavily_api_key = "secret-tavily-key"
+    cfg.web_providers["tavily"].timeout_seconds = 11
+    cfg.web_providers["tavily"].default_depth = "advanced"
+    provider = TavilyProvider(cfg)
+    query = build_search_query("American Intercon School Cambodia", cfg, 50)
+    query.include_domains = ["ais.edu.kh"]
+    query.exclude_domains = ["facebook.com"]
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return httpx.Response(
+            200,
+            json={
+                "query": "American Intercon School Cambodia",
+                "results": [
+                    {
+                        "title": "American Intercon School",
+                        "url": "https://ais.edu.kh/",
+                        "content": "American Intercon School is in Cambodia.",
+                        "score": 0.92,
+                        "published_date": "2026-08-01T00:00:00Z",
+                        "favicon": "https://ais.edu.kh/favicon.ico",
+                    }
+                ],
+                "response_time": "0.4",
+                "usage": {"credits": 2},
+                "request_id": "request-1",
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("klaude_web.providers.httpx.post", fake_post)
+
+    response = provider.search(query)
+
+    assert calls == [
+        {
+            "url": "https://api.tavily.com/search",
+            "headers": {
+                "Authorization": "Bearer secret-tavily-key",
+                "Content-Type": "application/json",
+            },
+            "json": {
+                "query": "site:ais.edu.kh American Intercon School Cambodia",
+                "search_depth": "advanced",
+                "max_results": 20,
+                "include_answer": False,
+                "include_raw_content": False,
+                "include_images": False,
+                "include_image_descriptions": False,
+                "include_favicon": True,
+                "topic": "general",
+                "auto_parameters": False,
+                "safe_search": False,
+                "include_usage": True,
+                "include_domains": ["ais.edu.kh"],
+                "exclude_domains": ["facebook.com"],
+                "country": "cambodia",
+            },
+            "timeout": 11,
+        }
+    ]
+    assert "api_key" not in calls[0]["json"]
+    assert response.providers_attempted == ["tavily"]
+    assert response.providers_succeeded == ["tavily"]
+    assert response.results[0]["provider"] == "tavily"
+    assert response.results[0]["provider_score"] == 0.92
+    assert response.results[0]["published_at"].startswith("2026-08-01")
+    assert response.results[0]["metadata"]["tavily"]["favicon"] == (
+        "https://ais.edu.kh/favicon.ico"
+    )
+    assert response.provider_metadata["tavily"]["usage_credits"] == 2
+    assert response.provider_metadata["tavily"]["request_id"] == "request-1"
+
+
+def test_tavily_default_search_depth_stays_basic_for_news(monkeypatch):
+    cfg = Config()
+    cfg.tavily_api_key = "secret-tavily-key"
+    provider = TavilyProvider(cfg)
+    query = build_search_query("latest Cambodia education news", cfg, 5)
+    query.intent = SearchIntent.BREAKING_NEWS
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append(json)
+        return httpx.Response(
+            200,
+            json={"query": json["query"], "results": []},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("klaude_web.providers.httpx.post", fake_post)
+
+    provider.search(query)
+
+    assert calls[0]["search_depth"] == "basic"
+    assert calls[0]["topic"] == "news"
+    assert calls[0]["auto_parameters"] is False
+
+
+def test_tavily_search_passes_country_only_for_general_topic(monkeypatch):
+    cfg = Config()
+    cfg.tavily_api_key = "secret-tavily-key"
+    cfg.runtime_context.location.configured_country = "KH"
+    provider = TavilyProvider(cfg)
+    query = build_search_query("AIS school near me", cfg, 5)
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append(json)
+        return httpx.Response(
+            200,
+            json={"query": json["query"], "results": []},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("klaude_web.providers.httpx.post", fake_post)
+
+    provider.search(query)
+
+    assert calls[0]["country"] == "cambodia"
+
+
+@pytest.mark.parametrize(
+    ("status_code", "state", "reason"),
+    [
+        (400, ProviderState.UNHEALTHY, "malformed request"),
+        (401, ProviderState.AUTHENTICATION_FAILED, "authentication failure"),
+        (429, ProviderState.RATE_LIMITED, "rate limiting"),
+        (432, ProviderState.QUOTA_EXHAUSTED, "credit or plan limit exhausted"),
+        (433, ProviderState.QUOTA_EXHAUSTED, "credit or plan limit exhausted"),
+        (500, ProviderState.DEGRADED, "request failed"),
+    ],
+)
+def test_tavily_http_errors_are_classified_and_redacted(
+    monkeypatch,
+    status_code,
+    state,
+    reason,
+):
+    cfg = Config()
+    cfg.tavily_api_key = "secret-tavily-key"
+    provider = TavilyProvider(cfg)
+    query = build_search_query("American Intercon School Cambodia", cfg, 5)
+
+    def fake_post(url, headers, json, timeout):
+        response = httpx.Response(
+            status_code,
+            json={"detail": {"error": f"{reason} secret-tavily-key"}},
+            request=httpx.Request("POST", url),
+        )
+        return response
+
+    monkeypatch.setattr("klaude_web.providers.httpx.post", fake_post)
+
+    with pytest.raises(ProviderSearchError) as exc_info:
+        provider.search(query)
+
+    assert exc_info.value.state == state
+    assert reason in str(exc_info.value).lower()
+    assert "secret-tavily-key" not in str(exc_info.value)
+
+
+def test_tavily_timeout_is_retryable_and_redacted(monkeypatch):
+    cfg = Config()
+    cfg.tavily_api_key = "secret-tavily-key"
+    cfg.web_search.max_attempts_per_provider = 1
+    provider = TavilyProvider(cfg)
+    query = build_search_query("American Intercon School Cambodia", cfg, 5)
+
+    def fake_post(url, headers, json, timeout):
+        raise httpx.TimeoutException("timeout secret-tavily-key")
+
+    monkeypatch.setattr("klaude_web.providers.httpx.post", fake_post)
+
+    with pytest.raises(ProviderSearchError) as exc_info:
+        provider.search(query)
+
+    assert exc_info.value.state == ProviderState.DEGRADED
+    assert exc_info.value.transient is True
+    assert "timeout" in str(exc_info.value).lower()
+    assert "secret-tavily-key" not in str(exc_info.value)
+
+
+def test_tavily_malformed_success_response_falls_back_to_next_provider():
+    cfg = Config()
+    cfg.tavily_api_key = "configured-tavily"
+    cfg.web_search.provider_order = ["tavily", "ddgs"]
+    tavily = FakeProvider(
+        "tavily",
+        error=ProviderSearchError(
+            ProviderState.DEGRADED,
+            "Tavily malformed response: missing results list",
+            transient=True,
+        ),
+    )
+    ddgs = FakeProvider(
+        "ddgs",
+        results=[
+            {
+                "title": "Python Packaging User Guide",
+                "url": "https://packaging.python.org/",
+                "snippet": "Official Python packaging documentation.",
+            }
+        ],
+    )
+
+    response = quality_search(
+        cfg,
+        "Python packaging documentation",
+        5,
+        registry=_registry(cfg, [tavily, ddgs]),
+    )
+
+    assert response.providers_attempted == ["tavily", "ddgs"]
+    assert response.providers_succeeded == ["ddgs"]
+    assert response.provider_metadata["provider_attempts"][0]["provider"] == "tavily"
+    assert response.provider_metadata["provider_attempts"][0]["status"] == "degraded"
+
+
+def test_firecrawl_status_is_unconfigured_without_key(monkeypatch):
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    cfg = Config()
+    registry = ProviderRegistry(cfg, state_store=ProviderStateStore(None))
+    statuses = {status.name: status for status in registry.statuses()}
+
+    assert statuses["firecrawl"].configured is False
+    assert statuses["firecrawl"].state == ProviderState.UNCONFIGURED
+    assert statuses["firecrawl"].unavailable_reason == "missing FIRECRAWL_API_KEY"
+
+
+def test_firecrawl_provider_receives_stripped_configured_key(monkeypatch):
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "wrong-env-value")
+    cfg = Config()
+    cfg.firecrawl_api_key = "  configured-firecrawl  "
+
+    provider = FirecrawlProvider(cfg)
+
+    assert provider.api_key() == "configured-firecrawl"
+
+
+def test_firecrawl_search_uses_v2_bearer_request_and_normalizes_web_results(
+    monkeypatch,
+):
+    cfg = Config()
+    cfg.firecrawl_api_key = "secret-firecrawl-key"
+    cfg.runtime_context.location.configured_country = "KH"
+    cfg.web_providers["firecrawl"].timeout_seconds = 12
+    provider = FirecrawlProvider(cfg)
+    query = build_search_query("American Intercon School Cambodia", cfg, 50)
+    query.include_domains = ["ais.edu.kh"]
+    query.exclude_domains = ["facebook.com"]
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "web": [
+                        {
+                            "title": "American Intercon School",
+                            "url": "https://ais.edu.kh/",
+                            "description": "American Intercon School is in Cambodia.",
+                            "markdown": "# American Intercon School",
+                            "metadata": {
+                                "sourceURL": "https://ais.edu.kh/",
+                                "statusCode": 200,
+                            },
+                            "position": 2,
+                        }
+                    ]
+                },
+                "warning": "minor warning",
+                "id": "fc-search-1",
+                "creditsUsed": 2,
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("klaude_web.providers.httpx.post", fake_post)
+
+    response = provider.search(query)
+
+    assert calls == [
+        {
+            "url": "https://api.firecrawl.dev/v2/search",
+            "headers": {
+                "Authorization": "Bearer secret-firecrawl-key",
+                "Content-Type": "application/json",
+            },
+            "json": {
+                "query": "site:ais.edu.kh American Intercon School Cambodia",
+                "limit": 10,
+                "sources": ["web"],
+                "timeout": 12000,
+                "ignoreInvalidURLs": True,
+                "includeDomains": ["ais.edu.kh"],
+                "country": "KH",
+                "location": "Phnom Penh,Cambodia",
+            },
+            "timeout": 12,
+        }
+    ]
+    assert "api_key" not in calls[0]["json"]
+    assert "scrapeOptions" not in calls[0]["json"]
+    assert "excludeDomains" not in calls[0]["json"]
+    assert response.providers_attempted == ["firecrawl"]
+    assert response.providers_succeeded == ["firecrawl"]
+    assert response.results[0]["provider"] == "firecrawl"
+    assert response.results[0]["provider_rank"] == 2
+    assert response.results[0]["snippet"] == "American Intercon School is in Cambodia."
+    assert response.results[0]["metadata"]["firecrawl"]["markdown_available"] is True
+    assert response.provider_metadata["firecrawl"]["endpoint"] == "v2/search"
+    assert response.provider_metadata["firecrawl"]["credits_used"] == 2
+    assert response.provider_metadata["firecrawl"]["estimated_cost"] == 2.0
+    assert response.provider_metadata["firecrawl"]["response_counts"] == {"web": 1}
+
+
+def test_firecrawl_search_uses_news_source_for_breaking_news(monkeypatch):
+    cfg = Config()
+    cfg.firecrawl_api_key = "secret-firecrawl-key"
+    provider = FirecrawlProvider(cfg)
+    query = build_search_query("latest Cambodia education news", cfg, 5)
+    query.intent = SearchIntent.BREAKING_NEWS
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append(json)
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "news": [
+                        {
+                            "title": "Cambodia education update",
+                            "url": "https://example.test/news",
+                            "snippet": "New education update in Cambodia.",
+                            "date": "2026-08-02T00:00:00Z",
+                            "position": 1,
+                        }
+                    ]
+                },
+                "creditsUsed": 2,
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("klaude_web.providers.httpx.post", fake_post)
+
+    response = provider.search(query)
+
+    assert calls[0]["sources"] == ["news"]
+    assert calls[0]["tbs"] == "qdr:d"
+    assert response.results[0]["published_at"].startswith("2026-08-02")
+    assert response.results[0]["metadata"]["firecrawl"]["source"] == "news"
+
+
+def test_firecrawl_legacy_list_response_still_normalizes_description(monkeypatch):
+    cfg = Config()
+    cfg.firecrawl_api_key = "secret-firecrawl-key"
+    provider = FirecrawlProvider(cfg)
+    query = build_search_query("Firecrawl docs", cfg, 5)
+
+    def fake_post(url, headers, json, timeout):
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": [
+                    {
+                        "title": "Firecrawl Docs",
+                        "url": "https://docs.firecrawl.dev/",
+                        "description": "Official Firecrawl documentation.",
+                    }
+                ],
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("klaude_web.providers.httpx.post", fake_post)
+
+    response = provider.search(query)
+
+    assert response.results[0]["snippet"] == "Official Firecrawl documentation."
+
+
+@pytest.mark.parametrize(
+    ("status_code", "state", "reason"),
+    [
+        (400, ProviderState.UNHEALTHY, "malformed request"),
+        (401, ProviderState.AUTHENTICATION_FAILED, "authentication failure"),
+        (402, ProviderState.QUOTA_EXHAUSTED, "credit or billing limit exhausted"),
+        (408, ProviderState.DEGRADED, "request timed out"),
+        (429, ProviderState.RATE_LIMITED, "rate limiting"),
+        (500, ProviderState.DEGRADED, "server error"),
+    ],
+)
+def test_firecrawl_http_errors_are_classified_and_redacted(
+    monkeypatch,
+    status_code,
+    state,
+    reason,
+):
+    cfg = Config()
+    cfg.firecrawl_api_key = "secret-firecrawl-key"
+    cfg.web_search.max_attempts_per_provider = 1
+    provider = FirecrawlProvider(cfg)
+    query = build_search_query("American Intercon School Cambodia", cfg, 5)
+
+    def fake_post(url, headers, json, timeout):
+        return httpx.Response(
+            status_code,
+            json={"error": f"{reason} secret-firecrawl-key"},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("klaude_web.providers.httpx.post", fake_post)
+
+    with pytest.raises(ProviderSearchError) as exc_info:
+        provider.search(query)
+
+    assert exc_info.value.state == state
+    assert reason in str(exc_info.value).lower()
+    assert "secret-firecrawl-key" not in str(exc_info.value)
+
+
+def test_firecrawl_timeout_is_retryable_and_redacted(monkeypatch):
+    cfg = Config()
+    cfg.firecrawl_api_key = "secret-firecrawl-key"
+    cfg.web_search.max_attempts_per_provider = 1
+    provider = FirecrawlProvider(cfg)
+    query = build_search_query("American Intercon School Cambodia", cfg, 5)
+
+    def fake_post(url, headers, json, timeout):
+        raise httpx.TimeoutException("timeout secret-firecrawl-key")
+
+    monkeypatch.setattr("klaude_web.providers.httpx.post", fake_post)
+
+    with pytest.raises(ProviderSearchError) as exc_info:
+        provider.search(query)
+
+    assert exc_info.value.state == ProviderState.DEGRADED
+    assert exc_info.value.transient is True
+    assert "timeout" in str(exc_info.value).lower()
+    assert "secret-firecrawl-key" not in str(exc_info.value)
+
+
+def test_firecrawl_malformed_success_response_falls_back_to_next_provider(
+    monkeypatch,
+):
+    cfg = Config()
+    cfg.firecrawl_api_key = "configured-firecrawl"
+    cfg.web_search.provider_order = ["firecrawl", "ddgs"]
+    firecrawl = FirecrawlProvider(cfg)
+
+    def fake_post_json(*args, **kwargs):
+        return {"success": True, "data": {"web": "not-a-list"}}
+
+    monkeypatch.setattr(firecrawl, "_post_json", fake_post_json)
+    ddgs = FakeProvider(
+        "ddgs",
+        results=[
+            {
+                "title": "Python Packaging User Guide",
+                "url": "https://packaging.python.org/",
+                "snippet": "Official Python packaging documentation.",
+            }
+        ],
+    )
+
+    response = quality_search(
+        cfg,
+        "Python packaging documentation",
+        5,
+        registry=_registry(cfg, [firecrawl, ddgs]),
+    )
+
+    assert response.providers_attempted == ["firecrawl", "ddgs"]
+    assert response.providers_succeeded == ["ddgs"]
+    assert response.provider_metadata["provider_attempts"][0]["provider"] == "firecrawl"
+    assert response.provider_metadata["provider_attempts"][0]["status"] == "degraded"
+
+
+def test_exa_failure_without_key_fingerprint_does_not_block_configured_key():
+    cfg = Config()
+    cfg.exa_api_key = "current-exa-key"
+    store = ProviderStateStore(None)
+    store.record_failure("exa", ProviderState.DEGRADED)
+
+    registry = ProviderRegistry(cfg, state_store=store)
+    status = registry.status_for("exa")
+
+    assert status.state == ProviderState.AVAILABLE
+
+
+def test_exa_failure_for_old_key_does_not_block_updated_key():
+    cfg = Config()
+    cfg.exa_api_key = "current-exa-key"
+    store = ProviderStateStore(None)
+    store.record_failure(
+        "exa",
+        ProviderState.AUTHENTICATION_FAILED,
+        api_key_fingerprint=_api_key_fingerprint("old-exa-key"),
+    )
+
+    registry = ProviderRegistry(cfg, state_store=store)
+    status = registry.status_for("exa")
+
+    assert status.state == ProviderState.AVAILABLE
+
+
+def test_exa_failure_for_same_key_still_blocks_provider():
+    cfg = Config()
+    cfg.exa_api_key = "current-exa-key"
+    store = ProviderStateStore(None)
+    store.record_failure(
+        "exa",
+        ProviderState.AUTHENTICATION_FAILED,
+        api_key_fingerprint=_api_key_fingerprint(cfg.exa_api_key),
+    )
+
+    registry = ProviderRegistry(cfg, state_store=store)
+    status = registry.status_for("exa")
+
+    assert status.state == ProviderState.AUTHENTICATION_FAILED
+
+
+def test_provider_priority_is_configurable_and_can_place_exa_before_searxng():
+    cfg = Config()
+    cfg.exa_api_key = "configured-exa"
+    cfg.web_search.provider_order = ["exa", "searxng"]
+    registry = _registry(
+        cfg,
+        [
+            FakeProvider("exa", configured=True),
+            FakeProvider("searxng", configured=True),
+        ],
+    )
+    query = build_search_query("American Intercon School Cambodia", cfg, 5)
+
+    providers, _skipped = registry.eligible_providers(query)
+
+    assert [provider.name for provider in providers[:2]] == ["exa", "searxng"]
+
+
+def test_explicit_exa_request_selects_exa_and_cleans_query():
+    cfg = Config()
+    cfg.exa_api_key = "configured-exa"
+    calls = []
+    exa = FakeProvider(
+        "exa",
+        results=[
+            {
+                "title": "American Intercon School",
+                "url": "https://ais.edu.kh/",
+                "snippet": "American Intercon School Cambodia.",
+            }
+        ],
+        calls=calls,
+    )
+    searxng = FakeProvider("searxng", results=[], calls=calls)
+
+    response = quality_search(
+        cfg,
+        "Search for American Intercon School Cambodia using Exa.",
+        5,
+        registry=_registry(cfg, [exa, searxng]),
+    )
+
+    assert response.providers_attempted == ["exa"]
+    assert calls == ["exa"]
+    assert exa.query_calls[0].provider_preference == "exa"
+    assert exa.query_calls[0].provider_strict is True
+    assert exa.query_calls[0].text == "American Intercon School Cambodia"
+    assert "using Exa" not in exa.query_calls[0].text
+
+
+def test_strict_exa_failure_does_not_fall_back_to_searxng():
+    cfg = Config()
+    cfg.exa_api_key = "configured-exa"
+    calls = []
+    exa = FakeProvider(
+        "exa",
+        error=ProviderSearchError(
+            ProviderState.AUTHENTICATION_FAILED,
+            "Exa authentication failed",
+        ),
+        calls=calls,
+    )
+    searxng = FakeProvider(
+        "searxng",
+        results=[
+            {
+                "title": "Fallback result",
+                "url": "https://example.test",
+                "snippet": "Should not be used.",
+            }
+        ],
+        calls=calls,
+    )
+
+    response = quality_search(
+        cfg,
+        "American Intercon School Cambodia using Exa",
+        5,
+        registry=_registry(cfg, [exa, searxng]),
+    )
+
+    assert response.providers_attempted == ["exa"]
+    assert response.providers_succeeded == []
+    assert calls == ["exa"]
+    assert response.provider_metadata["provider_attempts"][0]["provider"] == "exa"
+    assert "authentication failed" in response.provider_metadata["provider_attempts"][0][
+        "reason"
+    ].lower()
+
+
+def test_exa_401_is_classified_as_authentication_failure(monkeypatch):
+    cfg = Config()
+    cfg.exa_api_key = "secret-exa-key"
+    provider = ExaProvider(cfg)
+    query = build_search_query("American Intercon School Cambodia", cfg, 5)
+
+    def fake_exa_search(*args, **kwargs):
+        request = httpx.Request("POST", "https://api.exa.ai/search")
+        response = httpx.Response(401, request=request)
+        raise httpx.HTTPStatusError(
+            "401 Unauthorized secret-exa-key",
+            request=request,
+            response=response,
+        )
+
+    monkeypatch.setattr("klaude_web.providers.exa_search", fake_exa_search)
+
+    with pytest.raises(ProviderSearchError) as exc_info:
+        provider.search(query)
+
+    assert exc_info.value.state == ProviderState.AUTHENTICATION_FAILED
+    assert "authentication failure" in str(exc_info.value).lower()
+    assert "secret-exa-key" not in str(exc_info.value)
+
+
+def test_exa_auth_failure_falls_back_for_automatic_search():
+    cfg = Config()
+    cfg.exa_api_key = "configured-exa"
+    cfg.web_search.provider_order = ["exa", "ddgs"]
+    calls = []
+    exa = FakeProvider(
+        "exa",
+        error=ProviderSearchError(
+            ProviderState.AUTHENTICATION_FAILED,
+            "Exa authentication failure",
+        ),
+        calls=calls,
+    )
+    ddgs = FakeProvider(
+        "ddgs",
+        results=[
+            {
+                "title": "American Intercon School",
+                "url": "https://ais.edu.kh/",
+                "snippet": "American Intercon School Cambodia.",
+            }
+        ],
+        calls=calls,
+    )
+
+    response = quality_search(
+        cfg,
+        "American Intercon School Cambodia",
+        5,
+        registry=_registry(cfg, [exa, ddgs]),
+    )
+
+    assert response.providers_attempted == ["exa", "ddgs"]
+    assert response.providers_succeeded == ["ddgs"]
+    assert calls == ["exa", "ddgs"]
+    assert response.provider_metadata["provider_attempts"][0]["provider"] == "exa"
+    assert response.provider_metadata["provider_attempts"][0]["status"] == (
+        ProviderState.AUTHENTICATION_FAILED.value
+    )
+
+
 def test_quality_search_skips_google_when_key_missing():
     cfg = Config()
     calls = []
@@ -1421,14 +2353,19 @@ def test_invalid_credentials_are_not_retried():
 def test_quota_exhaustion_disables_provider_until_reset():
     cfg = _cfg_with_google()
     reset = datetime(2026, 8, 2, tzinfo=UTC)
-    store = ProviderStateStore(None)
+
+    def now():
+        return datetime(2026, 8, 1, tzinfo=UTC)
+
+    store = ProviderStateStore(None, now=now)
     store.record_failure(
         "google",
         ProviderState.QUOTA_EXHAUSTED,
         reset_at=reset,
+        api_key_fingerprint=_api_key_fingerprint(cfg.gemini_api_key),
     )
 
-    status = ProviderRegistry(cfg, state_store=store).status_for("google")
+    status = ProviderRegistry(cfg, state_store=store, now=now).status_for("google")
 
     assert status.state == ProviderState.QUOTA_EXHAUSTED
 
@@ -1446,8 +2383,21 @@ def test_temporary_failures_place_provider_in_cooldown_and_recover_after():
 
     cfg = _cfg_with_google()
     store = ProviderStateStore(None, now=parsed_now)
-    store.record_failure("google", ProviderState.DEGRADED, transient=True, cooldown_seconds=300)
-    store.record_failure("google", ProviderState.DEGRADED, transient=True, cooldown_seconds=300)
+    fingerprint = _api_key_fingerprint(cfg.gemini_api_key)
+    store.record_failure(
+        "google",
+        ProviderState.DEGRADED,
+        transient=True,
+        cooldown_seconds=300,
+        api_key_fingerprint=fingerprint,
+    )
+    store.record_failure(
+        "google",
+        ProviderState.DEGRADED,
+        transient=True,
+        cooldown_seconds=300,
+        api_key_fingerprint=fingerprint,
+    )
 
     registry = ProviderRegistry(cfg, state_store=store, now=parsed_now)
     assert registry.status_for("google").state == ProviderState.COOLDOWN
@@ -1835,6 +2785,71 @@ def test_local_entity_provider_variants_keep_acronym_and_location():
 
     assert "AIS school Cambodia" in variants
     assert "AIS Cambodia school" in variants
+
+
+def test_resolved_school_founding_variants_use_official_domain_first():
+    cfg = Config()
+    query = build_search_query(
+        "When was American Intercon School in Cambodia established?",
+        cfg,
+        5,
+    )
+
+    variants = provider_query_variants(query, max_queries=3)
+
+    assert variants == [
+        'site:ais.edu.kh "American Intercon School" established',
+        '"American Intercon School" established Cambodia',
+        '"American Intercon School" founded',
+    ]
+    assert all("AIS school Cambodia" not in variant for variant in variants)
+
+
+def test_resolved_school_founding_ranking_prefers_official_site():
+    cfg = Config()
+    query = build_search_query(
+        "When was American Intercon School in Cambodia established?",
+        cfg,
+        5,
+    )
+    official = {
+        "title": "American Intercon School - History",
+        "url": "https://ais.edu.kh/history",
+        "snippet": "American Intercon School was established on October 10, 2005.",
+        "provider": "searxng",
+        "provider_rank": 2,
+    }
+    third_party = {
+        "title": "Elite Education Magazine - American Intercon School",
+        "url": "https://eliteeducationmagazine.com/american-intercon-school-profile",
+        "snippet": "A profile of American Intercon School in Cambodia.",
+        "provider": "searxng",
+        "provider_rank": 1,
+    }
+
+    scored = score_and_filter_results(query, [third_party, official], cfg)
+
+    assert scored[0]["url"] == "https://ais.edu.kh/history"
+
+
+def test_other_ais_school_founding_date_does_not_contaminate_resolved_entity():
+    cfg = Config()
+    query = build_search_query(
+        "When was American Intercon School in Cambodia established?",
+        cfg,
+        5,
+    )
+    other_school = {
+        "title": "Advance International School history",
+        "url": "https://advance-school.example/history",
+        "snippet": "Advance International School, also called AIS, opened in 2020.",
+        "provider": "searxng",
+        "provider_rank": 1,
+    }
+
+    scored = score_and_filter_results(query, [other_school], cfg)
+
+    assert scored == []
 
 
 def test_school_name_query_variants_use_acronym_and_runtime_location():

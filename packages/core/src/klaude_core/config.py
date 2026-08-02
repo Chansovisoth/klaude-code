@@ -1,6 +1,8 @@
 """klaude-code configuration.
 
-Precedence: ~/.config/klaude/config.toml overrides built-in defaults.
+Source checkouts keep editable config in visible config/ and runtime data in
+gitignored .klaude/data. Installed packages fall back to XDG-style user
+config/data paths unless overridden.
 Hardware tiers map to model presets so the same repo runs on any machine.
 """
 
@@ -10,9 +12,72 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
-CONFIG_DIR = Path(os.environ.get("KLAUDE_CONFIG_DIR", Path.home() / ".config" / "klaude"))
-DATA_DIR = Path(os.environ.get("KLAUDE_DATA_DIR", Path.home() / ".local" / "share" / "klaude"))
+
+def _discover_source_root() -> Path | None:
+    for parent in Path(__file__).resolve().parents:
+        if (
+            (parent / "pyproject.toml").is_file()
+            and (parent / "apps" / "cli").exists()
+            and (parent / "packages" / "core").exists()
+        ):
+            return parent
+    return None
+
+
+SOURCE_ROOT = _discover_source_root()
+LEGACY_CONFIG_DIR = Path.home() / ".config" / "klaude"
+LEGACY_DATA_DIR = Path.home() / ".local" / "share" / "klaude"
+
+
+def _resolve_klaude_home() -> Path | None:
+    override = os.environ.get("KLAUDE_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if SOURCE_ROOT is not None:
+        return SOURCE_ROOT / ".klaude"
+    return None
+
+
+KLAUDE_HOME = _resolve_klaude_home()
+
+
+def _resolve_config_dir() -> Path:
+    override = os.environ.get("KLAUDE_CONFIG_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    explicit_home = os.environ.get("KLAUDE_HOME", "").strip()
+    if explicit_home:
+        return Path(explicit_home).expanduser() / "config"
+    if SOURCE_ROOT is not None:
+        return SOURCE_ROOT / "config"
+    return LEGACY_CONFIG_DIR
+
+
+def _resolve_data_dir() -> Path:
+    override = os.environ.get("KLAUDE_DATA_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    explicit_home = os.environ.get("KLAUDE_HOME", "").strip()
+    if explicit_home:
+        return Path(explicit_home).expanduser() / "data"
+    if KLAUDE_HOME is not None:
+        return KLAUDE_HOME / "data"
+    return LEGACY_DATA_DIR
+
+
+CONFIG_DIR = _resolve_config_dir()
+DATA_DIR = _resolve_data_dir()
+DEFAULT_WEB_PROVIDER_ORDER = [
+    "google",
+    "parallel",
+    "exa",
+    "ddgs",
+    "tavily",
+    "firecrawl",
+    "searxng",
+]
 
 TIER_PRESETS: dict[str, dict[str, str]] = {
     # <=8 GB RAM, no usable GPU
@@ -54,24 +119,83 @@ def detect_tier() -> str:
     return "lite"
 
 
-def _env_paths() -> tuple[Path, Path]:
-    return (Path.cwd() / ".env", CONFIG_DIR / ".env")
+def _dedupe_paths(paths: list[Path]) -> tuple[Path, ...]:
+    seen: set[str] = set()
+    deduped: list[Path] = []
+    for path in paths:
+        key = str(path.expanduser())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+    return tuple(deduped)
+
+
+def _env_paths() -> tuple[Path, ...]:
+    paths = [CONFIG_DIR / ".env"]
+    if SOURCE_ROOT is not None:
+        paths.append(SOURCE_ROOT / ".env")
+    else:
+        paths.append(Path.cwd() / ".env")
+    return _dedupe_paths(paths)
+
+
+def _parse_env_value(value: str) -> str:
+    raw = value.strip()
+    if not raw:
+        return ""
+    if raw[0] in {"'", '"'}:
+        quote = raw[0]
+        chars: list[str] = []
+        escaped = False
+        for char in raw[1:]:
+            if escaped:
+                chars.append(char)
+                escaped = False
+                continue
+            if quote == '"' and char == "\\":
+                escaped = True
+                continue
+            if char == quote:
+                break
+            chars.append(char)
+        return "".join(chars)
+    for index, char in enumerate(raw):
+        if char == "#" and (index == 0 or raw[index - 1].isspace()):
+            return raw[:index].strip()
+    return raw
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = _parse_env_value(value)
+        if key:
+            values[key] = value
+    return values
 
 
 def _load_env_files() -> None:
     """Load simple KEY=VALUE entries without adding a runtime dependency."""
     for path in _env_paths():
-        if not path.exists():
-            continue
-        for raw_line in path.read_text().splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
+        for key, value in _parse_env_file(path).items():
             if key and key not in os.environ:
                 os.environ[key] = value
+
+
+def _dotenv_value(name: str) -> str:
+    for path in _env_paths():
+        value = _parse_env_file(path).get(name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _env_value(name: str, default: str = "") -> str:
@@ -156,6 +280,8 @@ class WebVerificationConfig:
 class WebSearchConfig:
     strategy: str = "quality"
     stop_when_sufficient: bool = True
+    provider_order: list[str] = field(default_factory=lambda: list(DEFAULT_WEB_PROVIDER_ORDER))
+    allow_explicit_provider_fallback: bool = False
     skip_unconfigured_providers: bool = True
     fallback_on_quota: bool = True
     fallback_on_unavailable: bool = True
@@ -192,6 +318,11 @@ class WebProviderConfig:
     local_request_limit: int = 950
 
 
+@dataclass
+class OllamaConfig:
+    options: dict[str, Any] = field(default_factory=dict)
+
+
 def _default_web_providers() -> dict[str, WebProviderConfig]:
     return {
         "google": WebProviderConfig(api_key_env="GEMINI_API_KEY"),
@@ -223,6 +354,7 @@ class Config:
     huggingface_api_key: str = ""
     huggingface_base_url: str = "https://huggingface.co"
     models: dict[str, str] = field(default_factory=dict)
+    ollama: OllamaConfig = field(default_factory=OllamaConfig)
     # permission policy per tool: ask | allow | deny
     permissions: dict[str, str] = field(default_factory=dict)
     max_agent_steps: int = 20
@@ -238,6 +370,14 @@ class Config:
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     web_verification: WebVerificationConfig = field(default_factory=WebVerificationConfig)
     web_providers: dict[str, WebProviderConfig] = field(default_factory=_default_web_providers)
+
+    @property
+    def config_dir(self) -> Path:
+        return CONFIG_DIR
+
+    @property
+    def config_file(self) -> Path:
+        return self.config_dir / "config.toml"
 
     @property
     def data_dir(self) -> Path:
@@ -279,6 +419,10 @@ class Config:
     @property
     def runtime_context_cache_file(self) -> Path:
         return self.data_dir / "runtime-context.json"
+
+    @property
+    def ollama_options(self) -> dict[str, Any]:
+        return dict(self.ollama.options)
 
     @property
     def web_provider_state_file(self) -> Path:
@@ -374,7 +518,7 @@ def load_config() -> Config:
     _load_env_files()
     cfg = Config()
     user: dict = {}
-    path = CONFIG_DIR / "config.toml"
+    path = cfg.config_file
     if path.exists():
         with open(path, "rb") as f:
             user = tomllib.load(f)
@@ -383,6 +527,17 @@ def load_config() -> Config:
     preset = dict(TIER_PRESETS.get(cfg.tier, TIER_PRESETS["standard"]))
     preset.update(user.get("models", {}).get("override", {}))
     cfg.models = preset
+
+    ollama = user.get("ollama", {})
+    ollama_options = ollama.get("options", {})
+    if isinstance(ollama_options, dict):
+        for name in ("num_ctx", "num_thread", "num_gpu"):
+            value = ollama_options.get(name)
+            if value is None:
+                continue
+            parsed = int(value)
+            if parsed > 0 or (name == "num_gpu" and parsed == 0):
+                cfg.ollama.options[name] = parsed
 
     services = user.get("services", {})
     cfg.ollama_url = services.get("ollama_url", cfg.ollama_url)
@@ -421,6 +576,27 @@ def load_config() -> Config:
         raise ValueError("web.search.strategy must be one of: quality, legacy")
     cfg.web_search.stop_when_sufficient = bool(
         search.get("stop_when_sufficient", cfg.web_search.stop_when_sufficient)
+    )
+    provider_order = search.get("provider_order", cfg.web_search.provider_order)
+    if isinstance(provider_order, list):
+        known_providers = set(cfg.web_providers)
+        ordered = [
+            str(provider).strip().lower()
+            for provider in provider_order
+            if str(provider).strip().lower() in known_providers
+        ]
+        if ordered:
+            missing = [
+                provider
+                for provider in cfg.web_search.provider_order
+                if provider not in ordered
+            ]
+            cfg.web_search.provider_order = [*ordered, *missing]
+    cfg.web_search.allow_explicit_provider_fallback = bool(
+        search.get(
+            "allow_explicit_provider_fallback",
+            cfg.web_search.allow_explicit_provider_fallback,
+        )
     )
     cfg.web_search.skip_unconfigured_providers = bool(
         search.get("skip_unconfigured_providers", cfg.web_search.skip_unconfigured_providers)
@@ -594,19 +770,33 @@ def load_config() -> Config:
         "parallel_api_key",
         _env_value("PARALLEL_API_KEY", cfg.parallel_api_key),
     )
-    cfg.tavily_api_key = web.get(
-        "tavily_api_key",
-        _env_value("TAVILY_API_KEY", cfg.tavily_api_key),
-    )
-    cfg.firecrawl_api_key = web.get(
-        "firecrawl_api_key",
-        _env_value("FIRECRAWL_API_KEY", cfg.firecrawl_api_key),
-    )
+    cfg.tavily_api_key = str(
+        web.get(
+            "tavily_api_key",
+            _dotenv_value("TAVILY_API_KEY")
+            or _env_value("TAVILY_API_KEY", cfg.tavily_api_key),
+        )
+        or ""
+    ).strip()
+    cfg.firecrawl_api_key = str(
+        web.get(
+            "firecrawl_api_key",
+            _dotenv_value("FIRECRAWL_API_KEY")
+            or _env_value("FIRECRAWL_API_KEY", cfg.firecrawl_api_key),
+        )
+        or ""
+    ).strip()
     cfg.searxng_secret = web.get(
         "searxng_secret",
         _env_value("SEARXNG_SECRET", cfg.searxng_secret),
     )
-    cfg.exa_api_key = web.get("exa_api_key", _env_value("EXA_API_KEY", cfg.exa_api_key))
+    cfg.exa_api_key = str(
+        web.get(
+            "exa_api_key",
+            _dotenv_value("EXA_API_KEY") or _env_value("EXA_API_KEY", cfg.exa_api_key),
+        )
+        or ""
+    ).strip()
     cfg.exa_base_url = web.get("exa_base_url", cfg.exa_base_url)
 
     huggingface = user.get("huggingface", {})

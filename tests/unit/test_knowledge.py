@@ -900,6 +900,740 @@ def test_followup_at_my_location_does_not_need_country_from_user():
     assert query == "AIS school Cambodia"
 
 
+def test_phase1_entity_state_switches_ais_to_paragon_without_constraint_leak():
+    from klaude_core import Agent, PermissionGate, Tool
+
+    queries = []
+
+    class FakeOllama:
+        def chat(self, model, messages, tools=None):
+            return {"role": "assistant", "content": "ok"}
+
+    def web_search(query):
+        queries.append(query)
+        metadata = {
+            "search_results": [
+                {
+                    "title": query,
+                    "url": "https://example.test/",
+                    "snippet": query,
+                }
+            ]
+        }
+        if "AIS" in query:
+            metadata["provider_metadata"] = {
+                "entity_candidates": [
+                    {
+                        "canonical_name": "American Intercon School",
+                        "aliases": ["AIS", "American Intercon School"],
+                        "entity_type": "school",
+                        "country": "Cambodia",
+                        "domains": ["ais.edu.kh"],
+                        "score": 0.91,
+                    }
+                ]
+            }
+        return {"content": f"found {query}", "metadata": metadata}
+
+    tool = Tool(
+        "web_search",
+        "Search the web.",
+        {"type": "object", "properties": {"query": {"type": "string"}}},
+        web_search,
+    )
+    system_prompt = (
+        '<runtime_context machine_generated="true">\n'
+        "- Timezone: Asia/Phnom_Penh\n"
+        "- Approximate country: Cambodia\n"
+        "</runtime_context>"
+    )
+    agent = Agent(
+        FakeOllama(),
+        "fake-model",
+        [tool],
+        PermissionGate({"web_search": "allow"}, lambda tool, detail: "y"),
+        system_prompt,
+        tool_selector=lambda _message, _tools: ["web_search"],
+    )
+
+    list(agent.run("What is AIS?"))
+    list(agent.run("It's a school."))
+    list(agent.run("What is Paragon?"))
+    final_events = list(agent.run("It's a university."))
+
+    state = agent.retrieval_state
+    ais = next(entity for entity in state.entity_history if entity.mention == "AIS")
+    paragon = next(entity for entity in state.entity_history if entity.mention == "Paragon")
+    final_query = final_events[0].payload["args"]["query"]
+    provenance = state.last_query_provenance
+
+    assert ais.active is False
+    assert ais.entity_category == "education"
+    assert ais.entity_type == "school"
+    assert ais.location == "Cambodia"
+    assert paragon.active is True
+    assert paragon.entity_category == "education"
+    assert paragon.entity_type == "university"
+    assert paragon.location is None
+    assert final_query == "Paragon university Cambodia"
+    assert "Paragon" in final_query
+    assert "AIS" not in final_query
+    assert "school" not in final_query.lower()
+    assert queries[-1] == "Paragon university Cambodia"
+    assert provenance is not None
+    assert provenance.resolved_subject == "Paragon"
+    assert provenance.subject_source == "previous_explicit_user_subject"
+    assert "entity_type" in provenance.rejected_constraints
+    assert "school from AIS" in provenance.rejected_constraints["entity_type"]
+    assert "system prompt" not in repr(provenance).lower()
+    assert "api_key" not in repr(provenance).lower()
+
+
+def test_phase1_explicit_current_subject_beats_stale_query_state():
+    from klaude_core.agent import (
+        ConversationEntity,
+        RetrievalConversationState,
+        _contextual_search_query,
+    )
+
+    state = RetrievalConversationState(
+        active_entities=[
+            ConversationEntity(
+                mention="AIS",
+                canonical_name="American Intercon School",
+                entity_category="education",
+                entity_type="school",
+                location="Cambodia",
+                unresolved=False,
+            )
+        ]
+    )
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "What is AIS?"},
+        {"role": "assistant", "content": "AIS is American Intercon School in Cambodia."},
+        {"role": "user", "content": "What is Paragon?"},
+    ]
+
+    query = _contextual_search_query(
+        "AIS school Cambodia",
+        "What is Paragon?",
+        messages,
+        state,
+    )
+
+    assert query == "Paragon"
+    assert "AIS" not in query
+    assert state.last_query_provenance is not None
+    assert state.last_query_provenance.subject_source == "current_explicit_subject"
+    assert state.last_query_provenance.topic_switched is True
+
+
+def test_phase1_pronoun_resolution_uses_compatible_referents_only():
+    from klaude_core.agent import (
+        RetrievalConversationState,
+        _resolve_subject_for_turn,
+        _update_retrieval_state_from_user,
+    )
+
+    state = RetrievalConversationState()
+    messages = [{"role": "system", "content": "system"}]
+    messages.append(
+        {"role": "user", "content": "Tell me about Paragon University and its founder."}
+    )
+    _update_retrieval_state_from_user(state, messages[-1]["content"], messages)
+    messages.append({"role": "assistant", "content": "Paragon University has a founder."})
+    messages.append({"role": "user", "content": "How old is he?"})
+
+    person_resolution = _resolve_subject_for_turn("How old is he?", messages, state)
+
+    assert person_resolution.subject == ""
+    assert person_resolution.source is None
+    assert state.active_entities[0].mention == "Paragon University"
+    assert state.active_entities[0].entity_type == "university"
+
+    neutral_resolution = _resolve_subject_for_turn("Where is it?", messages, state)
+
+    assert neutral_resolution.subject == "Paragon University"
+    assert neutral_resolution.source == "previous_explicit_user_subject"
+
+    ambiguous_messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "What is AIS and Paragon?"},
+        {"role": "assistant", "content": "Both are organizations."},
+        {"role": "user", "content": "Where is it?"},
+    ]
+
+    ambiguous = _resolve_subject_for_turn("Where is it?", ambiguous_messages, state)
+
+    assert ambiguous.ambiguous is True
+    assert ambiguous.subject == ""
+
+
+def test_resolved_ais_operating_followup_uses_canonical_establishment_query():
+    from klaude_core.agent import (
+        ConversationEntity,
+        RetrievalConversationState,
+        rewrite_followup_query,
+    )
+
+    state = RetrievalConversationState(
+        active_entities=[
+            ConversationEntity(
+                mention="AIS",
+                canonical_name="American Intercon School",
+                entity_type="school",
+                location="Cambodia",
+                official_domains=("ais.edu.kh",),
+                selected_meaning="American Intercon School",
+                confidence=0.92,
+                unresolved=False,
+            )
+        ]
+    )
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "AIS school in Cambodia"},
+        {
+            "role": "assistant",
+            "content": "AIS means American Intercon School in Cambodia.",
+        },
+        {"role": "user", "content": "how long have they been operating?"},
+    ]
+
+    rewrite = rewrite_followup_query(
+        "how long have they been operating?",
+        "how long have they been operating?",
+        messages,
+        state,
+    )
+
+    assert rewrite.standalone_query == (
+        "When was American Intercon School in Cambodia established?"
+    )
+    assert "AIS school Cambodia" not in rewrite.standalone_query
+    assert rewrite.explicit_constraints == ["founding date"]
+
+
+def test_recent_topic_prefers_user_anchor_over_previous_result_summary():
+    from klaude_core.agent import _contextual_search_query
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                '<runtime_context machine_generated="true">\n'
+                "- Timezone: Asia/Phnom_Penh\n"
+                "- Approximate country: Cambodia\n"
+                "</runtime_context>"
+            ),
+        },
+        {"role": "user", "content": "where is Paragon"},
+        {
+            "role": "tool",
+            "tool_name": "web_search",
+            "content": "Found Paragon Indiana.",
+        },
+        {"role": "assistant", "content": "Paragon could mean Paragon, Indiana."},
+        {"role": "user", "content": "i meant a university here"},
+    ]
+
+    query = _contextual_search_query(
+        "i meant a university here",
+        "i meant a university here",
+        messages,
+    )
+
+    assert query == "Paragon university Cambodia"
+    assert "Indiana" not in query
+
+
+def test_leadership_followup_uses_active_university_context():
+    from klaude_core.agent import (
+        ConversationEntity,
+        RetrievalConversationState,
+        _contextual_search_query,
+    )
+
+    state = RetrievalConversationState(
+        active_entities=[
+            ConversationEntity(
+                mention="Paragon",
+                canonical_name="Paragon International University",
+                entity_category="education",
+                entity_type="university",
+                location="Cambodia",
+                official_domains=("paragoniu.edu.kh",),
+                unresolved=False,
+            )
+        ]
+    )
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "where is Paragon"},
+        {
+            "role": "assistant",
+            "content": "Paragon means Paragon International University in Cambodia.",
+        },
+        {"role": "user", "content": "who is the head of CS department?"},
+    ]
+
+    query = _contextual_search_query(
+        "who is the head of CS department?",
+        "who is the head of CS department?",
+        messages,
+        state,
+    )
+
+    assert query == (
+        "Paragon International University Cambodia Computer Science department head"
+    )
+    assert "AIS" not in query
+    assert "Software" not in query
+
+
+def test_agent_claim_verification_followup_searches_and_fetches_official_page():
+    from klaude_core import Agent, PermissionGate, Tool
+
+    queries = []
+    fetched_urls = []
+
+    class FakeOllama:
+        def chat(self, model, messages, tools=None):
+            return {"role": "assistant", "content": "Verified from the official page."}
+
+    def web_search(query):
+        queries.append(query)
+        return {
+            "content": "Found 1 relevant result.",
+            "metadata": {
+                "provider": "searxng",
+                "search_results": [
+                    {
+                        "title": "American Intercon School - History",
+                        "url": "https://ais.edu.kh/history",
+                        "snippet": (
+                            "American Intercon School was established on "
+                            "October 10, 2005 in Cambodia."
+                        ),
+                    }
+                ],
+                "provider_metadata": {
+                    "entity_candidates": [
+                        {
+                            "canonical_name": "American Intercon School",
+                            "aliases": ["AIS", "American Intercon School"],
+                            "entity_type": "school",
+                            "country": "Cambodia",
+                            "domains": ["ais.edu.kh"],
+                            "score": 0.91,
+                        }
+                    ]
+                },
+            },
+        }
+
+    def fetch_url(url):
+        fetched_urls.append(url)
+        return {
+            "content": (
+                "American Intercon School was established on October 10, 2005 "
+                "in Phnom Penh, Cambodia."
+            ),
+            "metadata": {},
+        }
+
+    tools = [
+        Tool(
+            "web_search",
+            "Search the web.",
+            {"type": "object", "properties": {"query": {"type": "string"}}},
+            web_search,
+        ),
+        Tool(
+            "fetch_url",
+            "Fetch a page.",
+            {"type": "object", "properties": {"url": {"type": "string"}}},
+            fetch_url,
+        ),
+    ]
+    agent = Agent(
+        FakeOllama(),
+        "fake-model",
+        tools,
+        PermissionGate({"web_search": "allow", "fetch_url": "allow"}, lambda tool, detail: "y"),
+        "system",
+        tool_selector=lambda _message, _tools: ["web_search", "fetch_url"],
+    )
+
+    list(agent.run("AIS school in Cambodia"))
+    list(agent.run("how long have they been operating?"))
+
+    assert queries[-1] == "When was American Intercon School in Cambodia established?"
+    assert queries[-1] != "AIS school Cambodia"
+    assert fetched_urls[-1] == "https://ais.edu.kh/history"
+
+
+def test_agent_allows_model_planned_search_after_weak_scripted_search():
+    from klaude_core import Agent, PermissionGate, Tool
+    from klaude_core.agent import ConversationEntity
+
+    queries = []
+
+    class FakeOllama:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, model, messages, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                assert messages[-1]["role"] == "tool"
+                assert messages[-1]["tool_name"] == "web_search"
+                return {
+                    "role": "assistant",
+                    "content": (
+                        "I haven't been able to find the current head of the "
+                        "CS department."
+                    ),
+                }
+            if self.calls == 2:
+                assert messages[-1]["tool_name"] == "retrieval_controller"
+                assert "Queries already tried:" in messages[-1]["content"]
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "web_search",
+                                "arguments": {
+                                    "query": (
+                                        'site:paragoniu.edu.kh "Computer Science" '
+                                        "department head"
+                                    )
+                                },
+                            }
+                        }
+                    ],
+                }
+            return {"role": "assistant", "content": "Verified from the official site."}
+
+    def web_search(query):
+        queries.append(query)
+        if query.startswith("site:paragoniu.edu.kh"):
+            return {
+                "content": "Found 1 relevant result.",
+                "metadata": {
+                    "provider": "exa",
+                    "search_results": [
+                        {
+                            "title": "Computer Science - Paragon International University",
+                            "url": "https://www.paragoniu.edu.kh/computer-science/",
+                            "snippet": "Computer Science department leadership page.",
+                        }
+                    ],
+                },
+            }
+        return {
+            "content": "No search provider succeeded.",
+            "metadata": {
+                "provider": "none",
+                "search_results": [],
+                "provider_metadata": {
+                    "accepted_result_count": 0,
+                    "provider_attempts": [
+                        {
+                            "provider": "exa",
+                            "status": "no_candidate_results",
+                            "reason": "returned 12 results; none passed candidate discovery",
+                        }
+                    ],
+                },
+            },
+        }
+
+    tool = Tool(
+        "web_search",
+        "Search the web.",
+        {"type": "object", "properties": {"query": {"type": "string"}}},
+        web_search,
+    )
+    agent = Agent(
+        FakeOllama(),
+        "fake-model",
+        [tool],
+        PermissionGate({"web_search": "allow"}, lambda tool, detail: "y"),
+        "system",
+        tool_selector=lambda _message, _tools: ["web_search"],
+    )
+    entity = ConversationEntity(
+        mention="Paragon",
+        canonical_name="Paragon International University",
+        entity_category="education",
+        entity_type="university",
+        location="Cambodia",
+        official_domains=("paragoniu.edu.kh",),
+        unresolved=False,
+    )
+    agent.retrieval_state.active_entities = [entity]
+    agent.retrieval_state.entity_history = [entity]
+
+    events = list(agent.run("who is the head of CS department?"))
+
+    assert queries[0] == (
+        "Paragon International University Cambodia Computer Science department head"
+    )
+    assert queries[1].startswith("site:paragoniu.edu.kh")
+    assert "Computer Science" in queries[1]
+    assert "AIS" not in " ".join(queries)
+    assert events[-2].payload["content"] == "Verified from the official site."
+
+
+def test_agent_explicit_provider_directive_becomes_structured_arg_and_clean_query():
+    from klaude_core import Agent, PermissionGate, Tool
+
+    seen_args = []
+
+    class FakeOllama:
+        def chat(self, model, messages, tools=None):
+            return {"role": "assistant", "content": "Found it."}
+
+    def web_search(query, provider="", provider_strict=False):
+        seen_args.append(
+            {
+                "query": query,
+                "provider": provider,
+                "provider_strict": provider_strict,
+            }
+        )
+        return {
+            "content": "Found 1 relevant result.",
+            "metadata": {
+                "provider": provider,
+                "search_results": [
+                    {
+                        "title": "American Intercon School",
+                        "url": "https://ais.edu.kh/",
+                        "snippet": "American Intercon School Cambodia.",
+                    }
+                ],
+            },
+        }
+
+    tool = Tool(
+        "web_search",
+        "Search the web.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "provider": {"type": "string"},
+                "provider_strict": {"type": "boolean"},
+            },
+        },
+        web_search,
+    )
+    agent = Agent(
+        FakeOllama(),
+        "fake-model",
+        [tool],
+        PermissionGate({"web_search": "allow"}, lambda tool, detail: "y"),
+        "system",
+        tool_selector=lambda _message, _tools: ["web_search"],
+    )
+
+    events = list(
+        agent.run("Search for Claude. Rules American Intercon School Cambodia using Exa.")
+    )
+
+    assert events[0].payload["args"]["provider"] == "exa"
+    assert events[0].payload["args"]["provider_strict"] is True
+    assert seen_args[0]["provider"] == "exa"
+    assert seen_args[0]["provider_strict"] is True
+    assert seen_args[0]["query"] == "American Intercon School Cambodia"
+    assert "using Exa" not in seen_args[0]["query"]
+    assert "Claude. Rules" not in seen_args[0]["query"]
+
+
+def test_agent_provider_only_followup_reuses_topic_and_keeps_exa_provider():
+    from klaude_core import Agent, PermissionGate, Tool
+
+    seen_args = []
+
+    class FakeOllama:
+        def chat(self, model, messages, tools=None):
+            return {"role": "assistant", "content": "Found it."}
+
+    def web_search(query, provider="", provider_strict=False):
+        seen_args.append(
+            {
+                "query": query,
+                "provider": provider,
+                "provider_strict": provider_strict,
+            }
+        )
+        return {
+            "content": (
+                "[1] Automatic Identification System\n"
+                "https://example.test/ais\n"
+                "AIS can refer to several things."
+            ),
+            "metadata": {
+                "provider": provider or "searxng",
+                "search_results": [
+                    {
+                        "title": "Automatic Identification System",
+                        "url": "https://example.test/ais",
+                        "snippet": "AIS can refer to several things.",
+                    }
+                ],
+            },
+        }
+
+    tool = Tool(
+        "web_search",
+        "Search the web.",
+        {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "provider": {"type": "string"},
+                "provider_strict": {"type": "boolean"},
+            },
+        },
+        web_search,
+        start_metadata=lambda args: {
+            "provider": args.get("provider") or "searxng",
+            "query": args.get("query"),
+        },
+    )
+    agent = Agent(
+        FakeOllama(),
+        "fake-model",
+        [tool],
+        PermissionGate({"web_search": "allow"}, lambda tool, detail: "y"),
+        "system",
+        tool_selector=lambda _message, _tools: ["web_search"],
+    )
+
+    list(agent.run("what is AIS?"))
+    use_events = list(agent.run("use exa to search"))
+    can_events = list(agent.run("can you search using exa"))
+
+    assert seen_args[1] == {
+        "query": "AIS",
+        "provider": "exa",
+        "provider_strict": True,
+    }
+    assert use_events[0].payload["provider"] == "exa"
+    assert use_events[0].payload["args"]["provider"] == "exa"
+    assert use_events[0].payload["args"]["query"] == "AIS"
+    assert seen_args[2] == {
+        "query": "AIS",
+        "provider": "exa",
+        "provider_strict": True,
+    }
+    assert can_events[0].payload["provider"] == "exa"
+    assert can_events[0].payload["args"]["provider"] == "exa"
+    assert can_events[0].payload["args"]["query"] == "AIS"
+
+
+def test_look_it_up_inherits_pending_foundation_evidence_gap():
+    from klaude_core.agent import (
+        ClaimIntent,
+        ConversationEntity,
+        EvidenceGap,
+        RetrievalConversationState,
+        _contextual_search_query,
+        _should_plan_search,
+    )
+
+    state = RetrievalConversationState(
+        active_entities=[
+            ConversationEntity(
+                mention="AIS",
+                canonical_name="American Intercon School",
+                entity_type="school",
+                location="Cambodia",
+                official_domains=("ais.edu.kh",),
+                confidence=0.95,
+                unresolved=False,
+            )
+        ],
+        last_claim_intent=ClaimIntent.DURATION,
+        pending_evidence_gap=EvidenceGap(
+            requested_claim="establishment date",
+            supported_by_existing_evidence=False,
+            missing_fields=["founding_date"],
+            requires_new_retrieval=True,
+        ),
+    )
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "AIS school in Cambodia"},
+        {
+            "role": "assistant",
+            "content": "AIS means American Intercon School in Cambodia.",
+        },
+        {"role": "user", "content": "how long has it been operating?"},
+        {"role": "assistant", "content": "I could not verify the founding date yet."},
+        {"role": "user", "content": "look it up"},
+    ]
+
+    assert _should_plan_search("look it up", messages) is True
+    query = _contextual_search_query("look it up", "look it up", messages, state)
+
+    assert query == "When was American Intercon School in Cambodia established?"
+    assert query != "AIS school Cambodia"
+
+
+def test_web_unavailable_claim_triggers_registered_web_search_tool():
+    from klaude_core import Agent, PermissionGate, Tool
+
+    calls = []
+
+    class FakeOllama:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, model, messages, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "role": "assistant",
+                    "content": "I cannot perform real-time web searches.",
+                }
+            assert messages[-1]["role"] == "tool"
+            return {"role": "assistant", "content": "I searched instead."}
+
+    def web_search(query):
+        calls.append(query)
+        return {
+            "content": "Found 1 relevant result.",
+            "metadata": {"provider": "searxng", "search_results": []},
+        }
+
+    tool = Tool(
+        "web_search",
+        "Search the web.",
+        {"type": "object", "properties": {"query": {"type": "string"}}},
+        web_search,
+    )
+    agent = Agent(
+        FakeOllama(),
+        "fake-model",
+        [tool],
+        PermissionGate({"web_search": "allow"}, lambda tool, detail: "y"),
+        "system",
+        tool_selector=lambda _message, _tools: ["web_search"],
+    )
+
+    events = list(agent.run("tell me the current public result for AIS"))
+
+    assert calls
+    assert events[-2].payload["content"] == "I searched instead."
+
+
 def test_segment_user_input_keeps_greeting_and_lookup_intents():
     from klaude_core.agent import segment_user_input
 
@@ -2231,6 +2965,32 @@ def test_agent_tool_selection_handles_command_then_casual_turns():
     assert command_events[-2].payload["content"].startswith("Usage: klaude")
     assert casual_events[0].payload["content"] == "Hi! I'm Klaude."
     assert seen_tools == [["list_commands"], []]
+
+
+def test_agent_passes_ollama_options_to_chat():
+    from klaude_core import Agent, PermissionGate
+
+    class CapturingOllama:
+        def __init__(self):
+            self.options = None
+
+        def chat(self, model, messages, tools=None, options=None):
+            self.options = options
+            return {"role": "assistant", "content": "done"}
+
+    ollama = CapturingOllama()
+    agent = Agent(
+        ollama,
+        "fake-model",
+        [],
+        PermissionGate({}, lambda tool, detail: "y"),
+        "system",
+        ollama_options={"num_ctx": 8192, "num_thread": 6},
+    )
+
+    list(agent.run("hi"))
+
+    assert ollama.options == {"num_ctx": 8192, "num_thread": 6}
 
 
 def test_unknown_text_form_tool_call_produces_clean_tool_error():

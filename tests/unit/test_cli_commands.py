@@ -9,6 +9,7 @@ from klaude_cli.main import (
     LIST_COMMANDS_TOOL_DESCRIPTION,
     WEATHER_TOOL_DESCRIPTION,
     CommandSurface,
+    _append_tool_capabilities,
     _apply_runtime_context_to_search_config,
     _bounded_result_count,
     _command_reference_context,
@@ -40,9 +41,11 @@ from klaude_cli.main import (
     is_complete_command_reference_request,
     iter_command_specs,
     resolve_command_help_request,
+    sessions_clear,
+    sessions_delete,
     system_info,
 )
-from klaude_core import AgentEvent, Tool
+from klaude_core import Agent, AgentEvent, PermissionGate, Tool
 from klaude_core.config import DEFAULT_PERMISSIONS, Config
 from klaude_core.memory import Memory
 from klaude_core.runtime_context import (
@@ -123,11 +126,56 @@ def test_typer_commands_and_registry_do_not_silently_diverge():
     }
     typer_names.update(group.name for group in app.registered_groups)
     registry_names = {
-        spec.usage
+        spec.usage.split()[0]
         for spec in iter_command_specs(CommandSurface.CLI)
     }
 
     assert registry_names == typer_names
+
+
+def test_sessions_subcommands_are_in_canonical_registry():
+    sessions_group = next(group for group in app.registered_groups if group.name == "sessions")
+    typer_usages = {
+        f"sessions {command.name or command.callback.__name__.replace('_', '-')}"
+        for command in sessions_group.typer_instance.registered_commands
+    }
+    registry_usages = {
+        spec.usage
+        for spec in iter_command_specs(CommandSurface.CLI)
+        if spec.usage.startswith("sessions ")
+    }
+
+    assert registry_usages == {
+        "sessions delete SESSION_ID",
+        "sessions clear",
+    }
+    assert typer_usages == {"sessions delete", "sessions clear"}
+
+
+def test_session_delete_and_clear_commands_require_confirmation(tmp_path, monkeypatch):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    memory.log_turn("s1", "user", "first")
+    memory.log_turn("s1", "assistant", "reply")
+    memory.log_turn("s2", "user", "second")
+    prompts = []
+    answers = [False, True]
+
+    def fake_confirm(prompt, default=False):
+        prompts.append(prompt)
+        return answers.pop(0)
+
+    monkeypatch.setattr("klaude_cli.main._memory_store", lambda: memory)
+    monkeypatch.setattr("klaude_cli.main.typer.confirm", fake_confirm)
+
+    sessions_delete("s1", yes=False)
+    assert memory.session_counts() == {"sessions": 2, "turns": 3}
+    assert prompts[-1] == "Delete session s1 (2 turns)?"
+
+    sessions_delete("s1", yes=False)
+    assert memory.session_counts() == {"sessions": 1, "turns": 1}
+
+    sessions_clear(yes=True)
+    assert memory.session_counts() == {"sessions": 0, "turns": 0}
 
 
 def test_command_reference_excludes_invented_commands():
@@ -150,7 +198,7 @@ def test_command_reference_wraps_narrow_and_aligns_wide():
     wide = format_command_reference(width=120)
     narrow = format_command_reference(width=40)
 
-    assert "  chat                 Interactive agent session" in wide
+    assert "  chat                        Interactive agent session" in wide
     assert "  huggingface-details\n      Print Hugging Face Hub" in narrow
     assert "docs add NAME URL -l LIBRARYInstall" not in wide
     assert (
@@ -423,6 +471,49 @@ def test_render_shows_web_search_provider_from_structured_metadata(monkeypatch):
     rendered = _printed_plain(printed)
     assert "-> web_search [ddgs]" in rendered
     assert "-> web_search\n" not in rendered
+
+
+def test_render_shows_fetch_url_provider_from_structured_metadata(monkeypatch):
+    printed = []
+    turns = []
+
+    class FakeAgent:
+        def run(self, user_msg):
+            yield AgentEvent(
+                "tool_start",
+                {
+                    "tool": "fetch_url",
+                    "args": {"url": "https://example.test/"},
+                },
+            )
+            yield AgentEvent(
+                "tool_result",
+                {
+                    "tool": "fetch_url",
+                    "result": "# Example\n\nFetched body.",
+                    "metadata": {
+                        "provider": "trafilatura",
+                        "provider_label": "trafilatura",
+                        "successful_providers": ["trafilatura"],
+                    },
+                },
+            )
+            yield AgentEvent("text", {"content": "Fetched it."})
+
+    class FakeMemory:
+        def log_turn(self, session_id, role, content):
+            turns.append((session_id, role, content))
+
+    monkeypatch.setattr(
+        "klaude_cli.main.console.print",
+        lambda *args, **kwargs: printed.append((args, kwargs)),
+    )
+
+    _render(FakeAgent(), FakeMemory(), "session-1", "fetch https://example.test/")
+
+    rendered = _printed_plain(printed)
+    assert "-> fetch_url [trafilatura]" in rendered
+    assert "-> fetch_url\n" not in rendered
 
 
 def test_natural_language_command_reference_uses_direct_renderer(monkeypatch):
@@ -845,6 +936,152 @@ def test_tool_selector_exposes_web_for_followup_lookup():
     assert selected == ["query_knowledge", "web_search", "fetch_url"]
 
 
+def test_tool_selector_exposes_web_for_claim_verification_followup():
+    tools = {
+        name: Tool(
+            name,
+            f"{name}.",
+            {"type": "object", "properties": {}, "required": []},
+            lambda: "",
+        )
+        for name in ("query_knowledge", "web_search", "fetch_url")
+    }
+
+    selected = _select_tool_names("how long has it been operating?", tools)
+
+    assert selected == ["query_knowledge", "web_search", "fetch_url"]
+
+
+def test_tool_selector_exposes_web_for_department_leadership_followup():
+    tools = {
+        name: Tool(
+            name,
+            f"{name}.",
+            {"type": "object", "properties": {}, "required": []},
+            lambda: "",
+        )
+        for name in ("query_knowledge", "web_search", "fetch_url")
+    }
+
+    selected = _select_tool_names("head of CS department?", tools)
+
+    assert selected == ["query_knowledge", "web_search", "fetch_url"]
+
+
+def test_chat_selector_searches_resolved_university_duration_followup():
+    queries = []
+    fetched_urls = []
+
+    class FakeOllama:
+        def chat(self, model, messages, tools=None):
+            return {"role": "assistant", "content": "answer"}
+
+    def web_search(query):
+        queries.append(query)
+        if "university" not in query.lower():
+            return {
+                "content": "Found Paragon Indiana.",
+                "metadata": {
+                    "search_results": [
+                        {
+                            "title": "Paragon, Indiana",
+                            "url": "https://en.wikipedia.org/wiki/Paragon,_Indiana",
+                            "snippet": "Paragon is a town in Indiana.",
+                        }
+                    ],
+                    "provider_metadata": {"entity_candidates": []},
+                },
+            }
+        return {
+            "content": "Found Paragon International University.",
+            "metadata": {
+                "search_results": [
+                    {
+                        "title": "Home - Paragon International University",
+                        "url": "https://www.paragoniu.edu.kh/",
+                        "snippet": (
+                            "Paragon International University is among the top "
+                            "universities in Cambodia."
+                        ),
+                    }
+                ],
+                "provider_metadata": {
+                    "entity_candidates": [
+                        {
+                            "canonical_name": "Paragon International University",
+                            "aliases": [
+                                "Paragon",
+                                "Paragon International University",
+                                "PIU",
+                            ],
+                            "entity_type": "university",
+                            "country": "Cambodia",
+                            "domains": ["paragoniu.edu.kh"],
+                            "score": 0.92,
+                        }
+                    ]
+                },
+            },
+        }
+
+    def fetch_url(url):
+        fetched_urls.append(url)
+        return {
+            "content": (
+                "Paragon International University is among the top universities "
+                "in Cambodia."
+            ),
+            "metadata": {},
+        }
+
+    tools = [
+        Tool(
+            "web_search",
+            "Search the web.",
+            {"type": "object", "properties": {"query": {"type": "string"}}},
+            web_search,
+        ),
+        Tool(
+            "fetch_url",
+            "Fetch a page.",
+            {"type": "object", "properties": {"url": {"type": "string"}}},
+            fetch_url,
+        ),
+    ]
+    system_prompt = (
+        '<runtime_context machine_generated="true">\n'
+        "- Timezone: Asia/Phnom_Penh\n"
+        "- Approximate country: Cambodia\n"
+        "</runtime_context>"
+    )
+    agent = Agent(
+        FakeOllama(),
+        "fake-model",
+        tools,
+        PermissionGate(
+            {"web_search": "allow", "fetch_url": "allow"},
+            lambda tool, detail: "y",
+        ),
+        system_prompt,
+        tool_selector=_select_tool_names,
+    )
+
+    list(agent.run("where is Paragon"))
+    list(agent.run("i meant a university here"))
+    list(agent.run("how long has it been operating?"))
+
+    assert queries == [
+        "where is Paragon",
+        "Paragon university Cambodia",
+        "When was Paragon International University in Cambodia established?",
+    ]
+    assert all("Indiana university" not in query for query in queries)
+    assert fetched_urls == [
+        "https://www.paragoniu.edu.kh/",
+        "https://www.paragoniu.edu.kh/",
+    ]
+
+
 def test_tool_selector_exposes_web_for_requested_result_list():
     tools = {
         name: Tool(
@@ -950,6 +1187,75 @@ def test_format_search_response_includes_ambiguity_summary_without_precise_locat
     assert "American Intercon School" in formatted
     assert "Automatic Identification System" in formatted
     assert "physically in" not in formatted
+
+
+def test_format_search_response_does_not_overstate_inferred_location_mismatch():
+    class FakeResponse:
+        results = [
+            {
+                "title": "Advanced Info Service",
+                "url": "https://www.ais.th/",
+                "snippet": "Advanced Info Service is a Thai mobile network operator.",
+            }
+        ]
+        warnings = []
+        provider_metadata = {
+            "ambiguity": {
+                "ambiguity_detected": True,
+                "location_mode": "bias",
+                "location_country": "Cambodia",
+                "is_ambiguous": True,
+            },
+            "entity_candidates": [
+                {
+                    "canonical_name": "Advanced Info Service",
+                    "aliases": ["AIS"],
+                    "description": "a Thai telecommunications company",
+                    "country": "Thailand",
+                },
+                {
+                    "canonical_name": "Automatic Identification System",
+                    "aliases": ["AIS"],
+                    "description": "a maritime vessel tracking system",
+                },
+            ],
+        }
+
+    formatted = _format_search_response(FakeResponse(), requested=5)
+
+    assert "I did not identify a clearly Cambodia-specific candidate" in formatted
+    assert "The top retrieved candidate is Advanced Info Service" in formatted
+    assert "Based on the approximate Cambodia context" not in formatted
+
+
+def test_tool_capabilities_context_marks_web_search_available():
+    text = _append_tool_capabilities("runtime", web_search_available=True)
+
+    assert "web_search_available: true" in text
+
+
+def test_web_search_display_lines_show_exa_provider_label():
+    lines = _web_search_display_lines(
+        {
+            "provider": "exa",
+            "provider_label": "exa",
+            "successful_providers": ["exa"],
+            "attempted_providers": ["exa"],
+            "search_results": [
+                {
+                    "title": "American Intercon School",
+                    "url": "https://ais.edu.kh/",
+                    "snippet": "American Intercon School Cambodia.",
+                    "provider": "exa",
+                }
+            ],
+            "display_lines": ["Query: American Intercon School Cambodia"],
+        },
+        "Found 1 relevant result.",
+    )
+
+    assert lines[0] == "-> web_search [exa]"
+    assert lines[1] == "   Query: American Intercon School Cambodia"
 
 
 def test_bounded_result_count_limits_search_requests():
@@ -1442,6 +1748,38 @@ def test_online_docs_file_honors_environment_override(tmp_path, monkeypatch):
     assert _online_docs_file() == docs_file
 
 
+def test_online_docs_file_prefers_config_dir_copy(tmp_path, monkeypatch):
+    config_dir = tmp_path / ".klaude" / "config"
+    project_root = tmp_path / "project"
+    config_dir.mkdir(parents=True)
+    project_root.mkdir()
+    configured_docs = config_dir / "online-docs.txt"
+    root_docs = project_root / "online-docs.txt"
+    configured_docs.write_text("uv run klaude learn https://example.test/a -l a\n")
+    root_docs.write_text("uv run klaude learn https://example.test/b -l b\n")
+
+    monkeypatch.delenv("KLAUDE_ONLINE_DOCS_FILE", raising=False)
+    monkeypatch.setattr("klaude_cli.main.CONFIG_DIR", config_dir)
+    monkeypatch.setattr("klaude_cli.main.SOURCE_ROOT", project_root)
+
+    assert _online_docs_file() == configured_docs
+
+
+def test_online_docs_file_falls_back_to_tracked_example(tmp_path, monkeypatch):
+    config_dir = tmp_path / ".klaude" / "config"
+    project_root = tmp_path / "project"
+    config_dir.mkdir(parents=True)
+    (project_root / "config" / "examples").mkdir(parents=True)
+    example_docs = project_root / "config" / "examples" / "online-docs.txt"
+    example_docs.write_text("uv run klaude learn https://example.test/a -l a\n")
+
+    monkeypatch.delenv("KLAUDE_ONLINE_DOCS_FILE", raising=False)
+    monkeypatch.setattr("klaude_cli.main.CONFIG_DIR", config_dir)
+    monkeypatch.setattr("klaude_cli.main.SOURCE_ROOT", project_root)
+
+    assert _online_docs_file() == example_docs
+
+
 def test_update_online_docs_continues_after_failed_source(tmp_path, monkeypatch):
     docs_file = tmp_path / "online-docs.txt"
     docs_file.write_text(
@@ -1537,8 +1875,23 @@ def test_shell_online_docs_script_delegates_to_cli_parser():
     script_path = Path(__file__).resolve().parents[2] / "scripts/knowledge/install-online-docs.sh"
     script = script_path.read_text()
 
+    assert "$KLAUDE_CONFIG_DIR/online-docs.txt" in script
+    assert "$PROJECT_ROOT/config/examples/online-docs.txt" in script
     assert "uv run klaude docs update --online" in script
     assert "read -r -a" not in script
+
+
+def test_install_script_uses_visible_config_and_data_only_klaude_home():
+    script_path = Path(__file__).resolve().parents[2] / "scripts/install.sh"
+    script = script_path.read_text()
+
+    assert 'DEFAULT_CONFIG_DIR="$PWD/config"' in script
+    assert 'ENV_FILE="$KLAUDE_CONFIG_DIR/.env"' in script
+    assert 'ENV_EXAMPLE="config/examples/.env.example"' in script
+    assert 'SEARXNG_ENV_FILE="$KLAUDE_CONFIG_DIR/searxng.env"' in script
+    assert 'SEARXNG_ENV_EXAMPLE="config/examples/searxng.env"' in script
+    assert 'KLAUDE_DATA_DIR="${KLAUDE_DATA_DIR:-$KLAUDE_HOME/data}"' in script
+    assert ".klaude/config" not in script
 
 
 def test_weather_tool_description_matches_single_location_capability():

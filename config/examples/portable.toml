@@ -1,0 +1,23 @@
+# Portable source-checkout defaults.
+#
+# When this repo is run from source, Klaude already uses:
+# - config/config.toml
+# - config/.env
+# - config/online-docs.txt
+# - .klaude/data/
+#
+# Copy this file to config/config.toml only if you want an explicit
+# local config file with the default layout.
+
+[models]
+# tier = "full"
+
+[web]
+provider = "quality"
+
+[web.search]
+provider_order = ["google", "parallel", "exa", "ddgs", "tavily", "firecrawl", "searxng"]
+
+[permissions]
+# run_shell = "ask"
+# edit_file = "ask"
