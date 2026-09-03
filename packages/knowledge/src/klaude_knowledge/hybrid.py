@@ -67,10 +67,25 @@ def _rrf(ranked_lists: list[list[dict]]) -> list[dict]:
         for rank, hit in enumerate(hits):
             hid = hit["id"]
             scores[hid] = scores.get(hid, 0.0) + 1.0 / (RRF_K + rank + 1)
-            if hid not in by_id or hit.get("source"):
-                by_id[hid] = hit
+            if hid not in by_id:
+                by_id[hid] = dict(hit)
+            else:
+                # Preserve signals from every backend. Replacing a dense hit
+                # with its lexical twin loses the evidence that both agreed.
+                for key, value in hit.items():
+                    if value is None:
+                        continue
+                    if value == "" and by_id[hid].get(key):
+                        continue
+                    by_id[hid][key] = value
     order = sorted(scores, key=scores.get, reverse=True)
-    return [by_id[h] for h in order]
+    merged = []
+    for rank, hid in enumerate(order, 1):
+        hit = by_id[hid]
+        hit["rrf_score"] = scores[hid]
+        hit["rrf_rank"] = rank
+        merged.append(hit)
+    return merged
 
 
 class Knowledge:
@@ -230,7 +245,16 @@ class Knowledge:
                 hit["vector_similarity"] = round(vector_similarity, 3)
                 hit["route_reason"] = route.reason
                 accepted.append(hit)
-        accepted.sort(key=lambda item: item.get("relevance_score", 0), reverse=True)
+        if any(hit.get("rerank_rank") is not None for hit in accepted):
+            accepted.sort(
+                key=lambda item: (
+                    item.get("rerank_rank") is None,
+                    int(item.get("rerank_rank") or 10**9),
+                    -float(item.get("relevance_score", 0)),
+                )
+            )
+        else:
+            accepted.sort(key=lambda item: item.get("relevance_score", 0), reverse=True)
         return accepted[:k]
 
     def query(self, question: str, collection: str = "", k: int = 6) -> list[dict]:
@@ -257,7 +281,14 @@ class Knowledge:
                 passages=[{"id": i, "text": h["text"]} for i, h in enumerate(merged)],
             )
             ranked = self._reranker.rerank(req)
-            merged = [merged[r["id"]] for r in ranked]
+            reranked = []
+            for rank, result in enumerate(ranked, 1):
+                hit = merged[int(result["id"])]
+                hit["rerank_rank"] = rank
+                if result.get("score") is not None:
+                    hit["rerank_score"] = float(result["score"])
+                reranked.append(hit)
+            merged = reranked
 
         return self._accepted_hits(question, route, merged, k)
 

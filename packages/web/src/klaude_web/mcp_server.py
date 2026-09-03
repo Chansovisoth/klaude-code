@@ -42,7 +42,7 @@ def main() -> None:
 
     @mcp.tool()
     def web_search(query: str, max_results: int = 8) -> str:
-        """Search the web via the configured provider. Returns title/url/snippet JSON."""
+        """Search for source leads; inspect snippets, then fetch only promising pages."""
         return json.dumps(
             _search_execution_payload(web.search_detailed(query, max_results)),
             ensure_ascii=False,
@@ -102,8 +102,8 @@ def main() -> None:
 
     @mcp.tool()
     def fetch_url(url: str) -> str:
-        """Fetch a web page as clean markdown through the configured provider."""
-        return web.fetch(url)[:20_000]
+        """Read one public page as bounded, untrusted external evidence."""
+        return json.dumps(web.fetch_detailed(url), ensure_ascii=False, indent=1)
 
     @mcp.tool()
     def crawl_site(

@@ -28,6 +28,7 @@ from klaude_web.providers import (
     build_search_query,
     classify_ambiguity,
     classify_fetch_outcome,
+    classify_search_intent,
     cluster_entity_candidates,
     evaluate_discovery_candidate,
     evaluate_search_result,
@@ -298,6 +299,64 @@ def test_domain_and_local_context_resolve_ambiguous_acronym_shape():
     assert maritime.country is None
 
 
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("latest research papers on agentic retrieval", SearchIntent.ACADEMIC_RESEARCH),
+        ("current analysis of retrieval augmented generation", SearchIntent.BROAD_RESEARCH),
+        ("latest React API documentation", SearchIntent.RECENT_SOFTWARE),
+        ("current president of Cambodia", SearchIntent.CURRENT_FACT),
+        ("paper sizes", SearchIntent.BROAD_TOPIC),
+        ("study at Paragon University", SearchIntent.EXACT_ENTITY),
+    ],
+)
+def test_freshness_qualifiers_preserve_the_underlying_search_intent(query, expected):
+    assert classify_search_intent(query) == expected
+
+
+@pytest.mark.parametrize(
+    ("query_text", "result"),
+    [
+        (
+            "2026 study of agentic retrieval",
+            {
+                "title": "A 2026 Study of Agentic Retrieval",
+                "url": "https://arxiv.org/abs/2601.12345",
+                "snippet": "A research study of retrieval for search agents.",
+            },
+        ),
+        (
+            "latest React API documentation",
+            {
+                "title": "React API Reference",
+                "url": "https://react.dev/reference/react",
+                "snippet": "The current official React API documentation.",
+            },
+        ),
+        (
+            "Python packaging documentation",
+            {
+                "title": "Python Packaging User Guide",
+                "url": "https://packaging.python.org/en/latest/",
+                "snippet": "Official Python packaging documentation.",
+            },
+        ),
+    ],
+)
+def test_research_and_documentation_results_are_discovery_leads(query_text, result):
+    cfg = Config()
+    query = build_search_query(query_text, cfg, 5)
+    results = score_and_filter_results(
+        query,
+        [{**result, "provider": "mock", "provider_rank": 1}],
+        cfg,
+    )
+
+    assert results
+    assert results[0]["metadata"]["candidate_source"] is True
+    assert results[0]["metadata"]["final_answer_evidence"] is False
+
+
 def test_search_cache_key_changes_when_exa_configuration_changes(monkeypatch):
     monkeypatch.delenv("EXA_API_KEY", raising=False)
     without_exa = Config()
@@ -307,8 +366,8 @@ def test_search_cache_key_changes_when_exa_configuration_changes(monkeypatch):
     first = search_cache_key(without_exa, build_search_query("what is AIS", without_exa, 12))
     second = search_cache_key(with_exa, build_search_query("what is AIS", with_exa, 12))
 
-    assert first.startswith("search_v7::")
-    assert second.startswith("search_v7::")
+    assert first.startswith("search_v8::")
+    assert second.startswith("search_v8::")
     assert first != second
     assert "secret-exa-key" not in second
 
@@ -341,6 +400,105 @@ def test_web_facade_preserves_original_query_for_relationship_detection():
 
     assert seen["ambiguity_type"] == AmbiguityType.PLACE_OR_ORGANIZATION
     assert seen["original_text"] == "where is AIS?"
+
+
+def test_web_facade_does_not_cache_failed_search_responses():
+    cfg = Config()
+    calls = []
+
+    class RecordingCache:
+        def __init__(self):
+            self.values = {}
+            self.set_calls = []
+
+        def get(self, key):
+            return self.values.get(key)
+
+        def set(self, key, value, ttl):
+            self.set_calls.append((key, value, ttl))
+            self.values[key] = value
+
+    class FakeWeb(Web):
+        def _search_uncached_detailed(
+            self,
+            query,
+            max_results,
+            *,
+            intent=None,
+            provider=None,
+            provider_strict=False,
+        ):
+            calls.append(query)
+            return SearchResponse(
+                results=[],
+                providers_attempted=["exa"],
+                providers_succeeded=[],
+                provider_metadata={"accepted_result_count": 0},
+            )
+
+    web = object.__new__(FakeWeb)
+    web.cfg = cfg
+    web.cache = RecordingCache()
+
+    web.search_detailed("python packaging", 5)
+    web.search_detailed("python packaging", 5)
+
+    assert len(calls) == 2
+    assert web.cache.set_calls == []
+
+
+def test_web_facade_ignores_previously_cached_failed_search_response():
+    cfg = Config()
+    calls = []
+
+    class RecordingCache:
+        def __init__(self):
+            self.value = SearchResponse(
+                results=[],
+                providers_attempted=["exa"],
+                providers_succeeded=[],
+                provider_metadata={"accepted_result_count": 0},
+            ).to_dict()
+
+        def get(self, _key):
+            return self.value
+
+        def set(self, _key, value, _ttl):
+            self.value = value
+
+    class FakeWeb(Web):
+        def _search_uncached_detailed(
+            self,
+            query,
+            max_results,
+            *,
+            intent=None,
+            provider=None,
+            provider_strict=False,
+        ):
+            calls.append(query)
+            return SearchResponse(
+                results=[
+                    {
+                        "title": "Python Packaging User Guide",
+                        "url": "https://packaging.python.org/",
+                        "snippet": "Official Python packaging documentation.",
+                    }
+                ],
+                providers_attempted=["exa"],
+                providers_succeeded=["exa"],
+                provider_metadata={"accepted_result_count": 1},
+            )
+
+    web = object.__new__(FakeWeb)
+    web.cfg = cfg
+    web.cache = RecordingCache()
+
+    response = web.search_detailed("python packaging", 5)
+
+    assert calls
+    assert response.results
+    assert web.cache.value["results"]
 
 
 def test_web_facade_passes_explicit_provider_to_quality_search(monkeypatch):
@@ -1074,6 +1232,282 @@ def test_broad_topical_search_still_returns_related_results(monkeypatch):
     monkeypatch.setattr("klaude_web.search.httpx.get", fake_get)
 
     assert searx_search("http://searx.test", "python packaging", 5)
+
+
+def test_category_discovery_keeps_multiple_source_leads_without_exact_entity_match():
+    cfg = Config()
+    provider = FakeProvider(
+        "tavily",
+        results=[
+            {
+                "title": "Regional Startup Ecosystem Report",
+                "url": "https://ecosystem.example/cambodia-report",
+                "snippet": (
+                    "A Cambodia startup ecosystem overview featuring Asteron Labs, "
+                    "Mekong Byte, and Nova River Technologies."
+                ),
+            },
+            {
+                "title": "Top Emerging Companies in Cambodia",
+                "url": "https://companies.example/emerging-cambodia",
+                "snippet": "Profiles of growing companies and founders in Cambodia.",
+            },
+            {
+                "title": "Asteron Labs",
+                "url": "https://asteron.example/",
+                "snippet": "A Cambodian technology startup building developer tools.",
+            },
+            {
+                "title": "Cambodia beach travel guide",
+                "url": "https://travel.example/cambodia",
+                "snippet": "Hotels, beaches, and tourist itineraries in Cambodia.",
+            },
+        ],
+    )
+
+    response = quality_search(
+        cfg,
+        "show me some startups in Cambodia",
+        8,
+        registry=_registry(cfg, [provider]),
+    )
+
+    assert provider.query_calls[0].intent == SearchIntent.BROAD_TOPIC
+    assert provider.query_calls[0].category_discovery is True
+    assert {result["url"] for result in response.results} == {
+        "https://ecosystem.example/cambodia-report",
+        "https://companies.example/emerging-cambodia",
+        "https://asteron.example/",
+    }
+    assert all(
+        result["metadata"]["candidate_source"] is True
+        and result["metadata"]["final_answer_evidence"] is False
+        for result in response.results
+    )
+    assert response.provider_metadata["rejection_reasons"]["category_mismatch"] == 1
+
+
+@pytest.mark.parametrize(
+    ("query_text", "title", "snippet"),
+    [
+        (
+            "find restaurants in Bangkok",
+            "Bangkok Dining Guide",
+            "Independent reviews of restaurants and cafes across Bangkok.",
+        ),
+        (
+            "list universities in Singapore",
+            "Singapore Higher Education Directory",
+            "A directory of universities and colleges in Singapore.",
+        ),
+        (
+            "show AI companies in Malaysia",
+            "Malaysia AI Industry Landscape",
+            "Profiles of artificial intelligence companies and startups in Malaysia.",
+        ),
+        (
+            "find Rust game engines",
+            "Open source game engines for Rust",
+            "A comparison of Rust game engine projects and their communities.",
+        ),
+        (
+            "find open source note taking apps",
+            "Open source notes software directory",
+            "Compare note taking apps and open source software projects.",
+        ),
+    ],
+)
+def test_synthetic_category_discovery_generalizes(query_text, title, snippet):
+    cfg = Config()
+    query = build_search_query(query_text, cfg, 5)
+    results = score_and_filter_results(
+        query,
+        [
+            {
+                "title": title,
+                "url": "https://directory.example/relevant",
+                "snippet": snippet,
+                "provider": "ddgs",
+                "provider_rank": 1,
+            },
+            {
+                "title": "Unrelated celebrity gossip",
+                "url": "https://noise.example/unrelated",
+                "snippet": "Entertainment rumors and red carpet photos.",
+                "provider": "ddgs",
+                "provider_rank": 2,
+            },
+        ],
+        cfg,
+    )
+
+    assert query.category_discovery is True
+    assert [result["url"] for result in results] == [
+        "https://directory.example/relevant"
+    ]
+
+
+def test_exact_synthetic_entity_query_remains_strict():
+    cfg = Config()
+    query = build_search_query("Asteron Labs", cfg, 5)
+    results = score_and_filter_results(
+        query,
+        [
+            {
+                "title": "Asteron Labs - Official Site",
+                "url": "https://asteron.example/",
+                "snippet": "Official information about Asteron Labs.",
+                "provider": "ddgs",
+                "provider_rank": 1,
+            },
+            {
+                "title": "Asteron Observatory",
+                "url": "https://astronomy.example/asteron",
+                "snippet": "An unrelated astronomy project.",
+                "provider": "ddgs",
+                "provider_rank": 2,
+            },
+        ],
+        cfg,
+    )
+
+    assert query.intent == SearchIntent.EXACT_ENTITY
+    assert query.category_discovery is False
+    assert [result["url"] for result in results] == ["https://asteron.example/"]
+
+
+def test_light_filter_diagnostics_report_duplicates_and_malformed_urls():
+    cfg = Config()
+    provider = FakeProvider(
+        "ddgs",
+        results=[
+            {
+                "title": "Mekong Byte startup profile",
+                "url": "https://directory.example/mekong?utm_source=feed",
+                "snippet": "Mekong Byte is a Cambodia startup.",
+            },
+            {
+                "title": "Mekong Byte duplicate",
+                "url": "https://www.directory.example/mekong",
+                "snippet": "A Cambodian startup profile.",
+            },
+            {
+                "title": "Unsafe result",
+                "url": "javascript:alert(1)",
+                "snippet": "Cambodia startup.",
+            },
+        ],
+    )
+
+    response = quality_search(
+        cfg,
+        "Cambodian startups",
+        5,
+        registry=_registry(cfg, [provider]),
+    )
+
+    assert len(response.results) == 1
+    assert response.provider_metadata["result_count"] == 3
+    assert response.provider_metadata["post_light_filter_count"] == 1
+    assert response.provider_metadata["duplicate_count"] == 1
+    assert response.provider_metadata["rejection_reasons"] == {
+        "duplicate_url": 1,
+        "malformed_url": 1,
+    }
+
+
+def test_category_discovery_uses_one_provider_query_strategy(monkeypatch):
+    cfg = Config()
+    query = build_search_query("Cambodian startups", cfg, 8)
+    calls = []
+
+    def fake_searx(_base_url, q, max_results, *, relevance_filter=True):
+        calls.append((q, max_results, relevance_filter))
+        return SearchResponse(
+            results=[
+                {
+                    "title": "Cambodia Startup Ecosystem",
+                    "url": "https://ecosystem.example/cambodia",
+                    "snippet": "A directory of Cambodian startups and founders.",
+                }
+            ],
+            queries_attempted=[q],
+            providers_attempted=["searxng"],
+            providers_succeeded=["searxng"],
+        )
+
+    monkeypatch.setattr("klaude_web.providers.searx_search_detailed", fake_searx)
+
+    response = SearXNGProvider(cfg).search(query)
+
+    assert response.results
+    assert calls == [("Cambodian startups", 8, False)]
+
+
+def test_identical_cross_provider_result_sets_are_detected_and_deduplicated():
+    cfg = Config()
+    cfg.web_search.provider_order = ["tavily", "ddgs"]
+    shared = [
+        {
+            "title": "Cambodia Startup Ecosystem",
+            "url": "https://ecosystem.example/cambodia",
+            "snippet": "A directory of Cambodian startups and founders.",
+        }
+    ]
+    tavily = FakeProvider("tavily", results=shared)
+    ddgs = FakeProvider("ddgs", results=shared)
+
+    response = quality_search(
+        cfg,
+        "Cambodian startups",
+        8,
+        registry=_registry(cfg, [tavily, ddgs]),
+    )
+
+    assert response.providers_attempted == ["tavily", "ddgs"]
+    assert len(response.results) == 1
+    assert response.provider_metadata["provider_attempts"][1][
+        "repeated_result_set_of"
+    ] == "tavily"
+    assert response.provider_metadata["provider_attempts"][1][
+        "result_set_similarity"
+    ] == 1.0
+
+
+def test_synthetic_provider_network_failure_falls_back_cleanly():
+    cfg = Config()
+    cfg.web_search.provider_order = ["tavily", "ddgs"]
+    first = FakeProvider(
+        "tavily",
+        error=ProviderSearchError(
+            ProviderState.DEGRADED,
+            "synthetic network timeout",
+            transient=True,
+        ),
+    )
+    second = FakeProvider(
+        "ddgs",
+        results=[
+            {
+                "title": "Nova River Technologies startup profile",
+                "url": "https://directory.example/nova-river",
+                "snippet": "A Cambodian startup and software company.",
+            }
+        ],
+    )
+
+    response = quality_search(
+        cfg,
+        "Cambodian startups",
+        5,
+        registry=_registry(cfg, [first, second]),
+    )
+
+    assert response.providers_attempted == ["tavily", "ddgs"]
+    assert response.providers_succeeded == ["ddgs"]
+    assert [result["url"] for result in response.results] == [
+        "https://directory.example/nova-river"
+    ]
 
 
 def test_one_searx_fanout_failure_preserves_other_results(monkeypatch):
@@ -2370,6 +2804,48 @@ def test_quota_exhaustion_disables_provider_until_reset():
     assert status.state == ProviderState.QUOTA_EXHAUSTED
 
 
+def test_rate_limit_enters_cooldown_on_first_failure_and_recovers_after_reset():
+    current = [datetime(2026, 8, 1, tzinfo=UTC)]
+    reset = datetime(2026, 8, 1, 0, 5, tzinfo=UTC)
+    cfg = _cfg_with_google()
+    store = ProviderStateStore(None, now=lambda: current[0])
+    store.record_failure(
+        "google",
+        ProviderState.RATE_LIMITED,
+        reset_at=reset,
+        api_key_fingerprint=_api_key_fingerprint(cfg.gemini_api_key),
+    )
+    registry = ProviderRegistry(cfg, state_store=store, now=lambda: current[0])
+
+    assert registry.status_for("google").state == ProviderState.COOLDOWN
+
+    current[0] = reset
+    assert registry.status_for("google").state == ProviderState.AVAILABLE
+
+
+def test_provider_success_clears_stale_failure_and_reset_metadata():
+    now = datetime(2026, 8, 1, tzinfo=UTC)
+    cfg = _cfg_with_google()
+    fingerprint = _api_key_fingerprint(cfg.gemini_api_key)
+    store = ProviderStateStore(None, now=lambda: now)
+    store.record_failure(
+        "google",
+        ProviderState.RATE_LIMITED,
+        reset_at=datetime(2026, 8, 2, tzinfo=UTC),
+        api_key_fingerprint=fingerprint,
+    )
+
+    store.record_success("google", api_key_fingerprint=fingerprint)
+
+    state = store.get("google")
+    assert state["health_state"] == ProviderState.AVAILABLE.value
+    assert state["consecutive_failures"] == 0
+    assert "cooldown_until" not in state
+    assert "expected_reset_time" not in state
+    assert "last_failure_at" not in state
+    assert "last_failure_state" not in state
+
+
 def test_temporary_failures_place_provider_in_cooldown_and_recover_after():
     current = [httpx.Headers({"date": "Sat, 01 Aug 2026 00:00:00 GMT"}).get("date")]
 
@@ -2404,6 +2880,103 @@ def test_temporary_failures_place_provider_in_cooldown_and_recover_after():
 
     current[0] = "Sat, 01 Aug 2026 00:06:00 GMT"
     assert registry.status_for("google").state == ProviderState.AVAILABLE
+
+
+def test_one_temporary_failure_does_not_remove_provider_from_next_search():
+    cfg = _cfg_with_google()
+    store = ProviderStateStore(None)
+    store.record_failure(
+        "google",
+        ProviderState.DEGRADED,
+        transient=True,
+        cooldown_seconds=300,
+        api_key_fingerprint=_api_key_fingerprint(cfg.gemini_api_key),
+    )
+
+    status = ProviderRegistry(cfg, state_store=store).status_for("google")
+
+    assert status.state == ProviderState.AVAILABLE
+
+
+def test_stale_legacy_degraded_state_recovers_without_manual_state_reset():
+    current = datetime(2026, 9, 3, tzinfo=UTC)
+    cfg = _cfg_with_google()
+    store = ProviderStateStore(None, now=lambda: current)
+    store._memory = {
+        "google": {
+            "health_state": ProviderState.DEGRADED.value,
+            "consecutive_failures": 1,
+            "last_failure_at": "2026-08-30T12:40:54+00:00",
+            "api_key_fingerprint": _api_key_fingerprint(cfg.gemini_api_key),
+        }
+    }
+
+    status = ProviderRegistry(
+        cfg,
+        state_store=store,
+        now=lambda: current,
+    ).status_for("google")
+
+    assert status.state == ProviderState.AVAILABLE
+
+
+def test_stale_failure_does_not_count_toward_a_new_cooldown_window():
+    current = datetime(2026, 9, 3, tzinfo=UTC)
+    cfg = _cfg_with_google()
+    store = ProviderStateStore(None, now=lambda: current)
+    store._memory = {
+        "google": {
+            "health_state": ProviderState.DEGRADED.value,
+            "consecutive_failures": 1,
+            "last_failure_at": "2026-08-30T12:40:54+00:00",
+            "api_key_fingerprint": _api_key_fingerprint(cfg.gemini_api_key),
+        }
+    }
+
+    store.record_failure(
+        "google",
+        ProviderState.DEGRADED,
+        transient=True,
+        cooldown_seconds=300,
+        api_key_fingerprint=_api_key_fingerprint(cfg.gemini_api_key),
+    )
+
+    assert store.get("google")["consecutive_failures"] == 1
+    assert ProviderRegistry(
+        cfg,
+        state_store=store,
+        now=lambda: current,
+    ).status_for("google").state == ProviderState.AVAILABLE
+
+
+def test_failure_from_replaced_api_key_does_not_count_toward_cooldown():
+    now = datetime(2026, 9, 3, tzinfo=UTC)
+    cfg = _cfg_with_google()
+    store = ProviderStateStore(None, now=lambda: now)
+    store.record_failure(
+        "google",
+        ProviderState.DEGRADED,
+        transient=True,
+        cooldown_seconds=300,
+        api_key_fingerprint=_api_key_fingerprint("old-google-key"),
+    )
+
+    store.record_failure(
+        "google",
+        ProviderState.DEGRADED,
+        transient=True,
+        cooldown_seconds=300,
+        api_key_fingerprint=_api_key_fingerprint(cfg.gemini_api_key),
+    )
+
+    state = store.get("google")
+    assert state["consecutive_failures"] == 1
+    assert state["api_key_fingerprint"] == _api_key_fingerprint(cfg.gemini_api_key)
+    assert ProviderRegistry(
+        cfg,
+        state_store=store,
+        now=lambda: now,
+    ).status_for("google").state == ProviderState.AVAILABLE
 
 
 def test_weak_relevance_falls_back_without_marking_provider_unhealthy():
@@ -2442,7 +3015,9 @@ def test_weak_relevance_falls_back_without_marking_provider_unhealthy():
     )
 
     assert response.providers_succeeded == ["ddgs"]
-    assert store.get("google") == {}
+    assert store.get("google")["health_state"] == ProviderState.AVAILABLE.value
+    assert store.get("google")["consecutive_failures"] == 0
+    assert store.get("google")["request_count"] == 1
 
 
 def test_equivalent_urls_are_deduplicated():

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Make provider health recoverable: a single operational failure no longer
+  disables later searches, repeated failures enter a timed cooldown, stale
+  legacy failures expire, and successful low-relevance responses still prove
+  the provider is healthy.
+- Stop caching empty or failed web searches, ignore previously cached failures,
+  and preserve academic, research, and documentation intent when queries also
+  contain freshness terms such as `latest`, `current`, or a year.
+- Preserve dense and lexical backend evidence during reciprocal-rank fusion,
+  expose RRF/reranker provenance, and keep the optional reranker's final order.
+- Add a bounded single-agent web research loop with per-turn structured state,
+  model-directed search/refine/fetch decisions, configurable action/search/fetch/
+  per-domain/failure budgets, graceful best-effort exhaustion, duplicate-query and
+  duplicate-fetch prevention, and compact action traces.
+- Separate web source discovery from page reading with runtime-generated search
+  result/source IDs, selective `fetch_url`, canonical URL/content deduplication,
+  structured failures, public-network redirect validation, bounded extraction,
+  and an explicit untrusted-web-content boundary.
+- Add conservative local-first search-query typo correction and entity-name
+  learning with RapidFuzz, a compact SQLite alias cache, correction provenance,
+  protected short acronyms/proper names, and an optional keyless Wikidata
+  fallback that fails safely when offline or ambiguous.
+
 ## v0.2.0-alpha.2 - 2026-08-02
 
 Second preview release focused on durable storage invariants, retrieval quality,
@@ -24,7 +46,7 @@ provider observability, project-local configuration, and chat behavior.
   extract/crawl/research features out of Klaude's tool surface for now.
 - Improve ambiguous acronym and local-entity lookup behavior with softer
   candidate discovery, fetched-page verification, location-aware query planning,
-  and model-chosen fallback queries when automatic retrieval is weak.
+  and model-chosen search queries.
 - Improve follow-up entity state so user corrections, entity type changes, and
   claim verification queries do not reuse incompatible earlier meanings.
 - Improve command discovery with a canonical command registry, deterministic

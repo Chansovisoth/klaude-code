@@ -20,6 +20,10 @@ SEARCH_VERB_PREFIX_RE = re.compile(
     r"(?i)^\s*(?:search|look up|lookup|research|find)\s+"
     r"(?:the\s+web\s+)?(?:for\s+)?"
 )
+DISCOVERY_REQUEST_PREFIX_RE = re.compile(
+    r"(?i)^\s*(?:show|list|give|display|return|recommend|suggest)\s+"
+    r"(?:me\s+)?(?:the\s+)?(?:(?:some|several|a\s+few|top|best)\s+)?"
+)
 STOP_WORDS = {
     "a",
     "all",
@@ -47,7 +51,9 @@ STOP_WORDS = {
     "results",
     "return",
     "search",
+    "several",
     "show",
+    "some",
     "source",
     "sources",
     "tell",
@@ -153,6 +159,7 @@ def clean_search_query(query: str) -> str:
     cleaned = RESULT_LIST_PREFIX_RE.sub("", cleaned).strip()
     cleaned = LOOKUP_PREFIX_RE.sub("", cleaned).strip()
     cleaned = SEARCH_VERB_PREFIX_RE.sub("", cleaned).strip()
+    cleaned = DISCOVERY_REQUEST_PREFIX_RE.sub("", cleaned).strip()
     cleaned = cleaned.strip(" \t\r\n?.!:;\"'")
     return cleaned or query.strip()
 

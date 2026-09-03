@@ -18,6 +18,7 @@ done — committed on branch klaude/20260712-1430
 - **Codes with you**: reads, edits, greps, runs shell commands — each destructive action behind a y/n/always permission gate.
 - **Learns documentation**: `klaude learn https://nextjs.org/docs -l nextjs` scrapes, chunks, embeds, and stores docs in a named library. For multi-page sites, `klaude crawl https://docs.example -l docs` politely follows same-domain links and stores a refreshable docs source. The agent then answers from *your* knowledge base before touching the web (hybrid BM25 + vector + rerank retrieval).
 - **Searches the web privately**: self-hosted SearXNG (70+ engines, no keys, no limits) + a clean-markdown fetch cascade. Optional providers such as Exa and Tavily can be enabled with API keys in `config/.env`.
+- **Learns names locally**: RapidFuzz corrects conservative country, software, and entity-name typos against stable vocabulary and a compact local SQLite cache. An optional keyless Wikidata fallback can teach Klaude new canonical names and aliases without making search depend on Wikimedia.
 - **Git-native**: never touches your branch. Works on `klaude/<task>`, one commit per edit — review everything with `git diff`, or in VS Code's Source Control panel, and revert any single action.
 - **Remembers you**: `klaude remember "we use Tailwind"` — durable facts injected into every session.
 - **Plugs in anywhere**: the knowledge and web layers are also MCP servers, usable from OpenCode, Cline, Claude Code, or any MCP client.
@@ -88,7 +89,20 @@ terminal TUI ──► agent engine (loop · router · permission gate)
               MCP plugin servers
 ```
 
-Monorepo (`uv` workspace): `packages/core` (engine), `packages/knowledge`, `packages/web`, `packages/tools_local`, `apps/cli`. Source checkouts keep local editable config in visible `config/`: `config/config.toml`, `config/.env`, `config/searxng.env`, and `config/online-docs.txt`. Runtime data stays in gitignored `.klaude/data/`. Set `KLAUDE_CONFIG_DIR` or `KLAUDE_DATA_DIR` to override those locations; set `KLAUDE_HOME` to relocate both under one custom home. Installed packages outside a source checkout fall back to `~/.config/klaude/` and `~/.local/share/klaude/`.
+Monorepo (`uv` workspace): `packages/core` (engine), `packages/knowledge`, `packages/web`, `packages/tools_local`, `apps/cli`. Source checkouts keep local editable config in visible `config/`: `config/config.toml`, `config/.env`, `config/searxng.env`, and `config/online-docs.txt`. Runtime data stays in gitignored `.klaude/data/`, including the learned name cache at `.klaude/data/entities.sqlite`. Set `KLAUDE_CONFIG_DIR` or `KLAUDE_DATA_DIR` to override those locations; set `KLAUDE_HOME` to relocate both under one custom home. Installed packages outside a source checkout fall back to `~/.config/klaude/` and `~/.local/share/klaude/`.
+
+Search-query normalization preserves the original text, normalized text, and
+per-correction provenance. The fast path is entirely local: stable structured
+vocabulary, SQLite aliases, and RapidFuzz. To opt into the free online fallback
+for unresolved probable names, use:
+
+```toml
+[entities.wikimedia]
+enabled = true
+```
+
+Only the minimal candidate name is sent to Wikidata. Timeouts, outages, and
+ambiguous results are ignored safely; ordinary search continues unchanged.
 
 Ollama daemon settings stay with the Ollama launcher itself, such as systemd,
 Docker Compose, or `ollama run` parameters. Klaude only owns request tuning for
@@ -204,6 +218,15 @@ your machine, free monthly credits are limited, and Klaude falls back to other
 providers when Tavily is missing, invalid, rate-limited, unavailable, or out of
 credits. Search/fetch evidence remains temporary and is not written to memory or
 learned libraries.
+
+In chat, ordinary browsing is a bounded model-directed loop: Klaude searches
+for source leads, inspects snippets, selectively reads promising pages, and can
+refine the query around the most important missing information. The runtime
+prevents repeated equivalent searches and canonical duplicate fetches, keeps a
+compact per-turn action/source trace, and enforces the configurable
+`[web.search.behavior]` action, search, fetch, per-domain, and consecutive-failure
+budgets. When a budget is exhausted, Klaude answers from the evidence already
+gathered and identifies material uncertainty instead of discarding the work.
 
 Tavily integration status:
 

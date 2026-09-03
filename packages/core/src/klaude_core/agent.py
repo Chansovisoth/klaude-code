@@ -15,7 +15,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from .entities import structured_domains_for_text
 from .ollama import Ollama
 from .permissions import PermissionDenied, PermissionGate
 
@@ -80,9 +82,7 @@ PROMISE_TO_SEARCH_RE = re.compile(
     r"(?:search|look up|check|research|find)"
     r")\b"
 )
-DIRECT_LOOKUP_RE = re.compile(
-    r"(?i)^\s*(?:who|what|where|when)\s+(?:is|are|was|were)\b"
-)
+DIRECT_LOOKUP_RE = re.compile(r"(?i)^\s*(?:who|what|where|when)\s+(?:is|are|was|were)\b")
 DIRECT_LOOKUP_SUBJECT_RE = re.compile(
     r"(?i)^\s*(?:who|what|where|when)\s+(?:is|are|was|were)\s+(?P<subject>.+?)\s*[?.!]*$"
 )
@@ -90,12 +90,7 @@ ABOUT_SUBJECT_RE = re.compile(
     r"(?i)^\s*(?:tell\s+me\s+about|more\s+about|information\s+about)\s+"
     r"(?P<subject>.+?)\s*[?.!]*$"
 )
-PROFILE_LOOKUP_RE = re.compile(
-    r"(?i)^\s*who\s+(?:is|are|was|were)\b"
-)
-RESULT_COUNT_RE = re.compile(
-    r"(?i)\b(\d{1,3})\s+(?:search\s+)?(?:results?|sources?|links?)\b"
-)
+RESULT_COUNT_RE = re.compile(r"(?i)\b(\d{1,3})\s+(?:search\s+)?(?:results?|sources?|links?)\b")
 RAW_RESULTS_RE = re.compile(
     r"(?i)\b(?:show|list|give|display|print|return)\b.*"
     r"\b(?:results?|sources?|links?)\b"
@@ -148,7 +143,6 @@ NAME_PHRASE_RE = re.compile(
     r"(?:\s+[A-Z][a-z][A-Za-z0-9_.-]*){1,3}\b"
 )
 SEARCH_RESULT_TITLE_RE = re.compile(r"^\[\d+\]\s+(?P<title>.+?)\s*$")
-URL_RE = re.compile(r"https?://[^\s<>\])}]+")
 TOPIC_SKIP = {
     "GitHub",
     "Minecraft",
@@ -255,20 +249,14 @@ FOLLOWUP_DROP_WORDS = {
 FOLLOWUP_ACTIVITY_WORDS = {
     "channel",
     "channels",
-    "chair",
     "creator",
     "cs",
-    "dean",
     "department",
     "dept",
-    "director",
     "faculty",
     "game",
     "games",
     "here",
-    "head",
-    "leader",
-    "leadership",
     "minecraft",
     "academy",
     "area",
@@ -301,6 +289,37 @@ FOLLOWUP_ACTIVITY_WORDS = {
     "youtube",
 }
 PLAY_WORDS = {"game", "games", "play", "played", "plays"}
+LEADERSHIP_ROLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("chairman", re.compile(r"\b(?:chairman|chairmen)\b", re.IGNORECASE)),
+    ("chairwoman", re.compile(r"\b(?:chairwoman|chairwomen)\b", re.IGNORECASE)),
+    ("chairperson", re.compile(r"\bchairpersons?\b", re.IGNORECASE)),
+    ("chair", re.compile(r"\bchairs?\b", re.IGNORECASE)),
+    ("president", re.compile(r"\bpresidents?\b", re.IGNORECASE)),
+    ("principal", re.compile(r"\bprincipals?\b", re.IGNORECASE)),
+    ("director", re.compile(r"\bdirectors?\b", re.IGNORECASE)),
+    ("dean", re.compile(r"\bdeans?\b", re.IGNORECASE)),
+    ("rector", re.compile(r"\brectors?\b", re.IGNORECASE)),
+    ("head", re.compile(r"\bheads?\b", re.IGNORECASE)),
+    ("leader", re.compile(r"\bleaders?\b", re.IGNORECASE)),
+)
+LEADERSHIP_CONCEPT_RE = re.compile(r"\bleadership\b", re.IGNORECASE)
+ATTRIBUTE_SLOT_WORDS = {
+    "address",
+    "anniversaries",
+    "anniversary",
+    "campus",
+    "established",
+    "founded",
+    "history",
+    "location",
+    "main",
+    "opened",
+    "operate",
+    "operated",
+    "operates",
+    "operating",
+    "started",
+}
 FOUNDING_CLAIM_RE = re.compile(
     r"(?i)\b("
     r"how\s+long|"
@@ -335,8 +354,14 @@ COMMAND_REFERENCE_RE = re.compile(
     r"\bcli usage\b"
     r")"
 )
-MAX_TOTAL_SEARCH_CALLS = 6
-MAX_FETCH_ATTEMPTS = 4
+FETCH_TRACKING_QUERY_KEYS = {
+    "fbclid",
+    "gclid",
+    "igshid",
+    "mc_cid",
+    "mc_eid",
+    "ref_src",
+}
 
 
 @dataclass
@@ -385,6 +410,212 @@ class ToolExecutionCompleted:
     fallback_used: bool = False
     accepted_result_count: int = 0
     warning: str | None = None
+
+
+@dataclass(frozen=True)
+class WebResearchBudget:
+    """Hard per-turn bounds for ordinary single-agent web research."""
+
+    max_web_actions: int = 6
+    max_search_calls: int = 3
+    max_fetch_calls: int = 4
+    max_pages_per_domain: int = 2
+    max_consecutive_failures: int = 3
+    repeated_query_similarity: float = 0.90
+
+    def bounded(self) -> WebResearchBudget:
+        return WebResearchBudget(
+            max_web_actions=max(1, int(self.max_web_actions)),
+            max_search_calls=max(1, int(self.max_search_calls)),
+            max_fetch_calls=max(1, int(self.max_fetch_calls)),
+            max_pages_per_domain=max(1, int(self.max_pages_per_domain)),
+            max_consecutive_failures=max(1, int(self.max_consecutive_failures)),
+            repeated_query_similarity=max(
+                0.0,
+                min(1.0, float(self.repeated_query_similarity)),
+            ),
+        )
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "max_web_actions": self.max_web_actions,
+            "max_search_calls": self.max_search_calls,
+            "max_fetch_calls": self.max_fetch_calls,
+            "max_pages_per_domain": self.max_pages_per_domain,
+            "max_consecutive_failures": self.max_consecutive_failures,
+        }
+
+
+@dataclass
+class ResearchActionTrace:
+    index: int
+    action: str
+    status: str
+    purpose: str = ""
+    query: str = ""
+    url: str = ""
+    result_count: int | None = None
+    source_id: str | None = None
+    providers: tuple[str, ...] = ()
+    detail: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "index": self.index,
+            "action": self.action,
+            "status": self.status,
+        }
+        for key in ("purpose", "query", "url"):
+            value = getattr(self, key)
+            if value:
+                result[key] = value
+        if self.result_count is not None:
+            result["result_count"] = self.result_count
+        if self.source_id:
+            result["source_id"] = self.source_id
+        if self.providers:
+            result["providers"] = list(self.providers)
+        if self.detail:
+            result["detail"] = self.detail
+        return result
+
+
+@dataclass
+class ResearchAssessment:
+    """Functional task status only; never private reasoning or chain-of-thought."""
+
+    sufficient: bool = False
+    missing_information: list[str] = field(default_factory=list)
+    useful_source_ids: list[str] = field(default_factory=list)
+    next_action_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sufficient": self.sufficient,
+            "missing_information": list(self.missing_information),
+            "useful_source_ids": list(self.useful_source_ids),
+            "next_action_reason": self.next_action_reason,
+        }
+
+
+@dataclass
+class AgenticSearchState:
+    """Observable orchestration state for one active web-research turn."""
+
+    user_request: str
+    budget: WebResearchBudget
+    search_attempts: list[dict[str, Any]] = field(default_factory=list)
+    fetched_urls: dict[str, str | None] = field(default_factory=dict)
+    search_result_ids: list[str] = field(default_factory=list)
+    fetched_source_ids: list[str] = field(default_factory=list)
+    current_source_ids: list[str] = field(default_factory=list)
+    tool_failures: list[dict[str, str]] = field(default_factory=list)
+    unresolved_information: list[str] = field(default_factory=list)
+    actions: list[ResearchActionTrace] = field(default_factory=list)
+    result_sets: list[frozenset[str]] = field(default_factory=list, repr=False)
+    domain_fetch_counts: dict[str, int] = field(default_factory=dict)
+    web_actions_used: int = 0
+    search_calls_used: int = 0
+    fetch_calls_used: int = 0
+    consecutive_failures: int = 0
+    duplicate_actions_prevented: int = 0
+    exhausted_reason: str | None = None
+    assessment: ResearchAssessment = field(default_factory=ResearchAssessment)
+
+    @property
+    def web_activity_stopped(self) -> bool:
+        return bool(
+            self.exhausted_reason
+            or self.web_actions_used >= self.budget.max_web_actions
+            or self.consecutive_failures >= self.budget.max_consecutive_failures
+        )
+
+    def budgets_dict(self) -> dict[str, int]:
+        return {
+            "web_actions_used": self.web_actions_used,
+            "max_web_actions": self.budget.max_web_actions,
+            "search_calls_used": self.search_calls_used,
+            "max_search_calls": self.budget.max_search_calls,
+            "fetch_calls_used": self.fetch_calls_used,
+            "max_fetch_calls": self.budget.max_fetch_calls,
+        }
+
+    def add_gap(self, gap: str) -> None:
+        value = " ".join(str(gap or "").split())[:240]
+        if value and value not in self.unresolved_information:
+            self.unresolved_information.append(value)
+        self.assessment.missing_information = self.unresolved_information[-3:]
+        if value:
+            self.assessment.next_action_reason = value
+
+    def add_source(self, source_id: str, *, fetched: bool = False) -> None:
+        if source_id and source_id not in self.current_source_ids:
+            self.current_source_ids.append(source_id)
+        if fetched and source_id not in self.fetched_source_ids:
+            self.fetched_source_ids.append(source_id)
+        if not fetched and source_id not in self.search_result_ids:
+            self.search_result_ids.append(source_id)
+        if fetched and source_id not in self.assessment.useful_source_ids:
+            self.assessment.useful_source_ids.append(source_id)
+
+    def mark_failure(self, action: str, reason: str) -> None:
+        self.consecutive_failures += 1
+        self.tool_failures.append({"action": action, "reason": " ".join(str(reason).split())[:240]})
+        if self.consecutive_failures >= self.budget.max_consecutive_failures:
+            self.exhausted_reason = "max_consecutive_failures"
+
+    def mark_success(self) -> None:
+        self.consecutive_failures = 0
+
+    def add_action(self, action: str, status: str, **kwargs: Any) -> ResearchActionTrace:
+        trace = ResearchActionTrace(
+            index=len(self.actions) + 1,
+            action=action,
+            status=status,
+            **kwargs,
+        )
+        self.actions.append(trace)
+        return trace
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "user_request": self.user_request,
+            "search_attempts": [dict(item) for item in self.search_attempts],
+            "fetched_urls": list(self.fetched_urls),
+            "search_result_ids": list(self.search_result_ids),
+            "fetched_source_ids": list(self.fetched_source_ids),
+            "current_source_ids": list(self.current_source_ids),
+            "tool_failures": list(self.tool_failures),
+            "unresolved_information": list(self.unresolved_information),
+            "actions": [action.to_dict() for action in self.actions],
+            "budgets": self.budgets_dict(),
+            "duplicate_actions_prevented": self.duplicate_actions_prevented,
+            "sources_registered": len(self.current_source_ids),
+            "consecutive_failures": self.consecutive_failures,
+            "exhausted_reason": self.exhausted_reason,
+            "assessment": self.assessment.to_dict(),
+        }
+
+    def model_summary(self) -> str:
+        budgets = self.budgets_dict()
+        status = "stopped" if self.web_activity_stopped else "available"
+        source_ids = ", ".join(self.fetched_source_ids) or "none"
+        gaps = "; ".join(self.unresolved_information[-3:]) or "none recorded"
+        return (
+            "<web_research_state>\n"
+            f"web actions: {budgets['web_actions_used']}/{budgets['max_web_actions']}\n"
+            f"search calls: {budgets['search_calls_used']}/{budgets['max_search_calls']}\n"
+            f"fetch calls: {budgets['fetch_calls_used']}/{budgets['max_fetch_calls']}\n"
+            f"search leads registered: {len(self.search_result_ids)}\n"
+            f"sources read: {source_ids}\n"
+            f"important gaps: {gaps}\n"
+            f"web activity: {status}\n"
+            "</web_research_state>\n"
+            "Assess whether the available evidence is sufficient. If it is, answer now. "
+            "If not, identify the single most important missing fact and issue one "
+            "meaningfully different web_search or selective fetch_url call with a short "
+            "purpose. Do not expose private reasoning."
+        )
 
 
 @dataclass
@@ -574,10 +805,7 @@ def _clean_tool_arg(value: Any, *, collapse_whitespace: bool = False) -> Any:
             cleaned = " ".join(cleaned.split())
         return cleaned
     if isinstance(value, list):
-        return [
-            _clean_tool_arg(item, collapse_whitespace=collapse_whitespace)
-            for item in value
-        ]
+        return [_clean_tool_arg(item, collapse_whitespace=collapse_whitespace) for item in value]
     if isinstance(value, dict):
         return {
             key: _clean_tool_arg(item, collapse_whitespace=collapse_whitespace)
@@ -631,8 +859,7 @@ def parse_provider_directive(text: str) -> ProviderDirective:
 def sanitize_search_query_control_text(text: str) -> str:
     cleaned = _remove_control_text(text)
     provider_names = (
-        "google|gemini|parallel|tavily|exa|firecrawl|ddgs|ddg|"
-        "duckduckgo|searx|searxng|local"
+        "google|gemini|parallel|tavily|exa|firecrawl|ddgs|ddg|duckduckgo|searx|searxng|local"
     )
     cleaned = re.sub(
         rf"(?i)\b(?:using|with|via)\s+(?:{provider_names})\b",
@@ -668,11 +895,7 @@ def segment_user_input(user_message: str) -> list[UserIntentSegment]:
     text = _remove_control_text(user_message.strip())
     if not text:
         return [UserIntentSegment("", "casual", False, False)]
-    raw_parts = [
-        part.strip()
-        for part in re.split(r"(?:\n+|(?<=[?.!])\s+)", text)
-        if part.strip()
-    ]
+    raw_parts = [part.strip() for part in re.split(r"(?:\n+|(?<=[?.!])\s+)", text) if part.strip()]
     parts: list[str] = []
     for part in raw_parts or [text]:
         prefix = re.match(
@@ -838,7 +1061,11 @@ def _fallback_search_call(
     used_tool_calls: set[str],
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Give local models one more retrieval step before a no-info answer."""
+    """Give local models one search step before a no-info answer.
+
+    Page selection remains a model decision: this deterministic fallback never
+    turns a search lead into an automatic fetch.
+    """
     if not _content_needs_retrieval(content):
         return []
 
@@ -855,13 +1082,6 @@ def _fallback_search_call(
             }
         ]
 
-    if "fetch_url" in selected_tools:
-        url = _recent_search_result_url(messages)
-        if url:
-            args = {"url": url}
-            key = _tool_call_key("fetch_url", args)
-            if key not in used_tool_calls:
-                return [{"function": {"name": "fetch_url", "arguments": args}}]
     return []
 
 
@@ -947,10 +1167,7 @@ def _initial_tool_calls(
     plan = _retrieval_plan_for_message(retrieval_message)
     calls: list[dict[str, Any]] = []
 
-    if (
-        "search_sessions" in selected_tools
-        and plan.decision == RetrievalDecision.MEMORY_OR_SESSION
-    ):
+    if "search_sessions" in selected_tools and plan.decision == RetrievalDecision.MEMORY_OR_SESSION:
         calls.append(
             {
                 "function": {
@@ -960,11 +1177,10 @@ def _initial_tool_calls(
             }
         )
 
-    if (
-        "query_knowledge" in selected_tools
-        and plan.decision
-        in {RetrievalDecision.LOCAL_KNOWLEDGE, RetrievalDecision.LOCAL_THEN_WEB}
-    ):
+    if "query_knowledge" in selected_tools and plan.decision in {
+        RetrievalDecision.LOCAL_KNOWLEDGE,
+        RetrievalDecision.LOCAL_THEN_WEB,
+    }:
         calls.append(
             {
                 "function": {
@@ -1065,16 +1281,6 @@ def _wants_raw_search_results(user_message: str) -> bool:
     return bool(RESULT_COUNT_RE.search(user_message) or RAW_RESULTS_RE.search(user_message))
 
 
-def _should_prefetch_source(user_message: str) -> bool:
-    if _wants_raw_search_results(user_message):
-        return False
-    return bool(
-        PROFILE_LOOKUP_RE.search(user_message)
-        or _looks_like_followup_search(user_message)
-        or _is_claim_verification_request(user_message)
-    )
-
-
 def _is_claim_verification_request(text: str) -> bool:
     return _claim_intent_for_text(text) in {
         ClaimIntent.FOUNDING_DATE,
@@ -1082,6 +1288,13 @@ def _is_claim_verification_request(text: str) -> bool:
         ClaimIntent.LEADERSHIP,
         ClaimIntent.HISTORY,
     }
+
+
+def _leadership_role(text: str) -> str | None:
+    for role, pattern in LEADERSHIP_ROLE_PATTERNS:
+        if pattern.search(text):
+            return role
+    return None
 
 
 def _claim_intent_for_text(text: str) -> ClaimIntent:
@@ -1092,10 +1305,7 @@ def _claim_intent_for_text(text: str) -> ClaimIntent:
         return ClaimIntent.FOUNDING_DATE
     if re.search(r"\bhistory|anniversar(?:y|ies)\b", lowered):
         return ClaimIntent.HISTORY
-    if re.search(
-        r"\b(head|chair|dean|director|leader|leadership|rector|principal)\b",
-        lowered,
-    ):
+    if _leadership_role(text) or LEADERSHIP_CONCEPT_RE.search(text):
         return ClaimIntent.LEADERSHIP
     if re.search(r"\bwhere\s+(?:is|are|was|were)\b|\blocation|address|campus\b", lowered):
         return ClaimIntent.LOCATION
@@ -1112,20 +1322,10 @@ def _leadership_detail_terms(text: str) -> list[str]:
     if re.search(r"\bfacult(?:y|ies)\b", lowered):
         terms.append("faculty")
 
-    role_patterns = [
-        ("head", r"\bheads?\b"),
-        ("chair", r"\bchairs?\b|\bchairperson\b"),
-        ("dean", r"\bdeans?\b"),
-        ("director", r"\bdirectors?\b"),
-        ("rector", r"\brectors?\b"),
-        ("principal", r"\bprincipals?\b"),
-    ]
-    for label, pattern in role_patterns:
-        if re.search(pattern, lowered):
-            terms.append(label)
-            break
-    role_terms = {"head", "chair", "dean", "director", "rector", "principal"}
-    if not any(term in role_terms for term in terms):
+    role = _leadership_role(text)
+    if role:
+        terms.append(role)
+    else:
         terms.append("leadership")
     return _dedupe_preserve(terms)
 
@@ -1201,13 +1401,15 @@ def _normalized_search_query(value: str) -> str:
         "about",
     }
     return " ".join(
-        token
-        for token in re.findall(r"[a-z0-9]+", value.lower())
-        if token not in ignored
+        token for token in re.findall(r"[a-z0-9]+", value.lower()) if token not in ignored
     )
 
 
-def _too_similar_to_seen_query(query: str, seen: set[str]) -> bool:
+def _too_similar_to_seen_query(
+    query: str,
+    seen: set[str],
+    similarity_threshold: float = 0.90,
+) -> bool:
     normalized = _normalized_search_query(query)
     if not normalized:
         return False
@@ -1222,9 +1424,163 @@ def _too_similar_to_seen_query(query: str, seen: set[str]) -> bool:
             len(normalized_terms),
             len(previous_terms),
         )
-        if overlap >= 0.90:
+        if overlap >= similarity_threshold:
             return True
     return False
+
+
+def _search_attempt_fingerprint(args: dict[str, Any]) -> str:
+    query = _normalized_search_query(str(args.get("query") or ""))
+    provider = str(args.get("provider") or "auto").strip().casefold()
+    options = {
+        key: value
+        for key, value in args.items()
+        if key not in {"query", "provider", "purpose", "missing_information"}
+    }
+    return json.dumps(
+        {"query": query, "provider": provider, "options": options},
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _same_search_strategy(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    similarity_threshold: float = 0.90,
+) -> bool:
+    left_provider = str(left.get("provider") or "auto").strip().casefold()
+    right_provider = str(right.get("provider") or "auto").strip().casefold()
+    if left_provider != right_provider:
+        return False
+    left_options = {
+        key: value
+        for key, value in left.items()
+        if key not in {"query", "provider", "purpose", "missing_information"}
+    }
+    right_options = {
+        key: value
+        for key, value in right.items()
+        if key not in {"query", "provider", "purpose", "missing_information"}
+    }
+    if left_options != right_options:
+        return False
+    return _too_similar_to_seen_query(
+        str(left.get("query") or ""),
+        {_normalized_search_query(str(right.get("query") or ""))},
+        similarity_threshold,
+    )
+
+
+def _search_attempt_was_seen(
+    args: dict[str, Any],
+    previous_attempts: list[dict[str, Any]],
+    similarity_threshold: float = 0.90,
+) -> bool:
+    fingerprint = _search_attempt_fingerprint(args)
+    return any(
+        fingerprint == _search_attempt_fingerprint(previous)
+        or _same_search_strategy(args, previous, similarity_threshold)
+        for previous in previous_attempts
+    )
+
+
+def _search_result_urls(metadata: dict[str, Any]) -> frozenset[str]:
+    results = metadata.get("search_results")
+    if not isinstance(results, list):
+        return frozenset()
+    urls: set[str] = set()
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        url = str(result.get("url") or "").strip().casefold().rstrip("/")
+        if url:
+            urls.add(url)
+    return frozenset(urls)
+
+
+def _near_duplicate_result_set(
+    current: frozenset[str],
+    previous_sets: list[frozenset[str]],
+) -> tuple[bool, float]:
+    if not current:
+        return False, 0.0
+    for previous in previous_sets:
+        if not previous:
+            continue
+        similarity = len(current & previous) / len(current | previous)
+        if similarity >= 0.85:
+            return True, round(similarity, 4)
+    return False, 0.0
+
+
+def _canonical_fetch_attempt_key(value: str) -> str:
+    """Normalize public URLs for per-turn duplicate-fetch prevention."""
+    raw = _clean_tool_arg(value, collapse_whitespace=True).strip()
+    try:
+        parsed = urlparse(raw)
+        scheme = parsed.scheme.casefold()
+        host = (parsed.hostname or "").casefold().removeprefix("www.")
+        if scheme not in {"http", "https"} or not host:
+            return raw.casefold().rstrip("/")
+        port = parsed.port
+        if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
+            host = f"{host}:{port}"
+        path = parsed.path or "/"
+        if path != "/":
+            path = path.rstrip("/") or "/"
+        query = urlencode(
+            sorted(
+                (key, item)
+                for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+                if key.casefold() not in FETCH_TRACKING_QUERY_KEYS
+                and not key.casefold().startswith("utm_")
+            ),
+            doseq=True,
+        )
+        return urlunparse((scheme, host, path, "", query, ""))
+    except (TypeError, ValueError):
+        return raw.casefold().rstrip("/")
+
+
+def _fetch_domain(value: str) -> str:
+    try:
+        return (urlparse(value).hostname or "").casefold().removeprefix("www.")
+    except ValueError:
+        return ""
+
+
+def _research_purpose(name: str, args: dict[str, Any]) -> str:
+    purpose = " ".join(str(args.get("purpose") or "").split())[:160]
+    if purpose:
+        return purpose
+    if name == "web_search":
+        return "Find relevant source leads for the current information gap"
+    if name == "fetch_url":
+        return "Read a promising source whose snippet is insufficient"
+    return ""
+
+
+def _tool_result_failed(
+    name: str,
+    result: str,
+    metadata: dict[str, Any],
+) -> tuple[bool, str]:
+    lowered = result.strip().casefold()
+    if lowered.startswith(("tool error:", "permission denied:", "error:")):
+        return True, result.strip()[:240]
+    if name == "fetch_url":
+        if metadata.get("status") == "failed" or not _useful_fetch_result(result):
+            failure = metadata.get("failure")
+            if isinstance(failure, dict):
+                return True, str(failure.get("reason") or "fetch failed")[:240]
+            return True, result.strip()[:240] or "fetch failed"
+    if name == "web_search":
+        results = metadata.get("search_results")
+        if isinstance(results, list) and not results:
+            return True, "search returned no usable source leads"
+    return False, ""
 
 
 def _runtime_location_from_messages(messages: list[dict[str, Any]]) -> dict[str, str]:
@@ -1347,14 +1703,9 @@ def _split_compound_subject(subject: str) -> list[str]:
     separator = r"(?i)\s+(?:or|,)\s+"
     if has_acronym:
         separator = r"(?i)\s+(?:and|or|,)\s+"
-    parts = [
-        _clean_topic_candidate(part)
-        for part in re.split(separator, cleaned)
-    ]
+    parts = [_clean_topic_candidate(part) for part in re.split(separator, cleaned)]
     return [
-        part
-        for part in parts
-        if part and not (len(part.split()) == 1 and _is_topic_noise(part))
+        part for part in parts if part and not (len(part.split()) == 1 and _is_topic_noise(part))
     ]
 
 
@@ -1439,12 +1790,30 @@ def _type_from_subject_text(subject: str) -> str | None:
 def _is_relationship_slot_subject(subject: str) -> bool:
     text = _clean_tool_arg(subject, collapse_whitespace=True)
     lowered = text.lower()
-    if not re.search(
-        r"\b("
-        r"head|chair|dean|director|leader|leadership|rector|principal|"
-        r"department|dept|faculty|cs|computer\s+science"
-        r")\b",
-        lowered,
+    claim_intent = _claim_intent_for_text(text)
+    attribute_terms = [
+        term.lower()
+        for term in re.findall(r"[A-Za-z0-9_.-]+", text)
+        if term.lower() not in FOLLOWUP_DROP_WORDS
+    ]
+    attribute_slot = claim_intent in {
+        ClaimIntent.FOUNDING_DATE,
+        ClaimIntent.DURATION,
+        ClaimIntent.HISTORY,
+        ClaimIntent.LOCATION,
+    } and (
+        bool(FOLLOWUP_PRONOUN_RE.search(text))
+        or bool(attribute_terms)
+        and all(term in ATTRIBUTE_SLOT_WORDS for term in attribute_terms)
+    )
+    if not (
+        _leadership_role(text)
+        or LEADERSHIP_CONCEPT_RE.search(text)
+        or attribute_slot
+        or re.search(
+            r"\b(department|dept|faculty|cs|computer\s+science)\b",
+            lowered,
+        )
     ):
         return False
     if re.search(
@@ -1499,6 +1868,16 @@ def _previous_explicit_user_subject(
         if len(compatible) > 1:
             return "", True
         if compatible:
+            active = _active_entity(state)
+            if active and _candidate_matches_anchor(
+                compatible[0],
+                [
+                    active.mention,
+                    active.canonical_name or "",
+                    active.selected_meaning or "",
+                ],
+            ):
+                return active.mention, False
             if pronoun_kind == "plural":
                 recent_topic = _recent_topic(messages)
                 if recent_topic and _candidate_matches_anchor(recent_topic, [compatible[0]]):
@@ -1538,8 +1917,7 @@ def _resolve_subject_for_turn(
             "current_explicit_subject",
             previous_active_subject,
             bool(
-                previous_active_subject
-                and previous_active_subject.casefold() != subject.casefold()
+                previous_active_subject and previous_active_subject.casefold() != subject.casefold()
             ),
         )
     pronoun_kind = _pronoun_kind(retrieval_message)
@@ -1726,24 +2104,6 @@ def _recent_fetch_verification_link(url: str, messages: list[dict[str, Any]]) ->
     return False
 
 
-def _verification_links_from_metadata(
-    metadata: dict[str, Any],
-    failed_urls: set[str],
-    *,
-    limit: int = 3,
-) -> list[str]:
-    links = metadata.get("verification_links") or []
-    candidates: list[str] = []
-    for link in links:
-        url = str(link or "").strip().rstrip(".,")
-        if not url or url in failed_urls or url in candidates:
-            continue
-        candidates.append(url)
-        if len(candidates) >= limit:
-            break
-    return candidates
-
-
 def _fetch_rejected_by_recent_constraints(
     url: str,
     user_message: str,
@@ -1817,8 +2177,7 @@ def _rejected_stale_constraints(
             if inherited_constraints.get(key) == value or new_constraints.get(key) == value:
                 continue
             rejected[key] = (
-                f"{value} from {entity.mention} ignored because it belongs "
-                "to an inactive entity"
+                f"{value} from {entity.mention} ignored because it belongs to an inactive entity"
             )
     return rejected
 
@@ -1842,9 +2201,7 @@ def rewrite_followup_query(
     retrieval_message = _retrieval_message_from_segments(user_message)
     resolution = (
         state.last_subject_resolution
-        if state
-        and state.last_subject_resolution
-        and state.last_user_goal == retrieval_message
+        if state and state.last_subject_resolution and state.last_user_goal == retrieval_message
         else _resolve_subject_for_turn(user_message, messages, state)
     )
     if resolution.ambiguous:
@@ -1961,6 +2318,36 @@ def rewrite_followup_query(
             discarded_interpretations=_dedupe_preserve(discarded),
             confidence=0.92,
         )
+    if (
+        resolved
+        and intent == ClaimIntent.LOCATION
+        and re.search(
+            r"(?i)\b(where\s+(?:is|are|was|were)|address|campus|campuses)\b",
+            f"{cleaned} {user_message}",
+        )
+    ):
+        name = _entity_search_name(resolved)
+        location = resolved.location or constraints.get("location", "")
+        standalone_terms = [name]
+        inferred_constraints = list(inferred)
+        if location and location.lower() not in name.lower():
+            standalone_terms.append(location)
+            inferred_constraints.append(location)
+        detail_terms = _followup_detail_terms(f"{cleaned} {user_message}")
+        for term in detail_terms or ["location"]:
+            if term.lower() not in " ".join(standalone_terms).lower():
+                standalone_terms.append(term)
+        if resolved.entity_type:
+            inferred_constraints.append(resolved.entity_type)
+        return QueryRewrite(
+            original,
+            " ".join(standalone_terms).strip(),
+            inherited_entities=[resolved.mention],
+            explicit_constraints=["location"],
+            inferred_constraints=_dedupe_preserve(inferred_constraints),
+            discarded_interpretations=_dedupe_preserve(discarded),
+            confidence=0.92,
+        )
 
     if not topic:
         provenance = _provenance_for_rewrite(
@@ -2000,9 +2387,7 @@ def rewrite_followup_query(
         base = cleaned
         if topic.casefold() != cleaned.casefold() and _looks_like_followup_search(cleaned):
             terms = [
-                term
-                for term in _followup_detail_terms(cleaned)
-                if term.lower() != topic.lower()
+                term for term in _followup_detail_terms(cleaned) if term.lower() != topic.lower()
             ]
             normalized_terms = _normalize_followup_terms(terms)
             if constraints.get("location"):
@@ -2053,7 +2438,8 @@ def rewrite_followup_query(
     ):
         term_source = cleaned
         if (
-            resolution.source in {
+            resolution.source
+            in {
                 "previous_explicit_user_subject",
                 "active_entity",
             }
@@ -2065,14 +2451,18 @@ def rewrite_followup_query(
         terms.extend(_recent_disambiguation_terms(messages, topic, terms))
         if state:
             entity = state.active_entities[0] if state.active_entities else None
-            if entity and entity.entity_type and entity.entity_type not in {
-                term.lower() for term in terms
-            }:
+            if (
+                entity
+                and entity.entity_type
+                and entity.entity_type not in {term.lower() for term in terms}
+            ):
                 inferred.append(entity.entity_type)
                 terms.append(entity.entity_type)
-            if entity and entity.location and entity.location.lower() not in {
-                term.lower() for term in terms
-            }:
+            if (
+                entity
+                and entity.location
+                and entity.location.lower() not in {term.lower() for term in terms}
+            ):
                 inferred.append(entity.location)
                 terms.append(entity.location)
         for constraint in explicit:
@@ -2135,11 +2525,7 @@ def _entity_search_name(entity: ConversationEntity) -> str:
 
 
 def _known_official_domains(canonical_name: str) -> tuple[str, ...]:
-    if canonical_name.casefold() == "American Intercon School".casefold():
-        return ("ais.edu.kh",)
-    if canonical_name.casefold() == "Paragon International University".casefold():
-        return ("paragoniu.edu.kh",)
-    return ()
+    return structured_domains_for_text(canonical_name)
 
 
 def _query_mentions_entity_or_domain(query: str, entity: ConversationEntity) -> bool:
@@ -2176,22 +2562,23 @@ def _update_retrieval_state_from_tool_result(
     provider_metadata = metadata.get("provider_metadata")
     if not isinstance(provider_metadata, dict):
         provider_metadata = {}
-    candidates = provider_metadata.get("entity_candidates") or metadata.get(
-        "entity_candidates"
-    )
+    candidates = provider_metadata.get("entity_candidates") or metadata.get("entity_candidates")
     if not isinstance(candidates, list) or not candidates:
         return
     aliases = {
         entity.mention.casefold(),
         *(alias.casefold() for alias in entity.candidate_meanings),
     }
+    aliases.update(
+        token.casefold()
+        for token in re.findall(r"\b[A-Z0-9]{2,8}\b", entity.mention)
+        if re.search(r"[A-Z]", token)
+    )
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
         candidate_aliases = {
-            str(alias).casefold()
-            for alias in candidate.get("aliases") or []
-            if str(alias).strip()
+            str(alias).casefold() for alias in candidate.get("aliases") or [] if str(alias).strip()
         }
         canonical = str(candidate.get("canonical_name") or "").strip()
         if canonical:
@@ -2205,9 +2592,7 @@ def _update_retrieval_state_from_tool_result(
             entity.entity_category = "education"
         entity.location = str(candidate.get("country") or entity.location or "") or None
         domains = tuple(
-            str(domain).strip()
-            for domain in candidate.get("domains") or []
-            if str(domain).strip()
+            str(domain).strip() for domain in candidate.get("domains") or [] if str(domain).strip()
         )
         if entity.canonical_name:
             domains = _dedupe_tuple([*domains, *_known_official_domains(entity.canonical_name)])
@@ -2387,10 +2772,16 @@ def _refinement_anchor_topic(user_message: str, messages: list[dict[str, Any]]) 
 def _looks_like_followup_search(text: str) -> bool:
     if FOLLOWUP_PRONOUN_RE.search(text):
         return True
+    if _claim_intent_for_text(text) in {
+        ClaimIntent.LEADERSHIP,
+    }:
+        return True
     words = [word.lower() for word in re.findall(r"[A-Za-z0-9_.-]+", text)]
     useful = [word for word in words if word not in FOLLOWUP_DROP_WORDS]
-    return bool(useful) and len(useful) <= 6 and any(
-        word in FOLLOWUP_ACTIVITY_WORDS for word in useful
+    return (
+        bool(useful)
+        and len(useful) <= 6
+        and any(word in FOLLOWUP_ACTIVITY_WORDS for word in useful)
     )
 
 
@@ -2410,11 +2801,7 @@ def _normalize_followup_terms(terms: list[str]) -> list[str]:
     drop_generic_location = bool(
         lowered & {"school", "schools", "academy", "college", "university", "cambodia"}
     )
-    add_games = bool(
-        lowered & PLAY_WORDS
-        and "games" not in lowered
-        and not specific_activity
-    )
+    add_games = bool(lowered & PLAY_WORDS and "games" not in lowered and not specific_activity)
     if add_games:
         normalized.append("games")
     for term in terms:
@@ -2551,49 +2938,6 @@ def _candidate_matches_anchor(candidate: str, anchors: list[str]) -> bool:
     return False
 
 
-def _recent_search_result_candidates(
-    messages: list[dict[str, Any]],
-    failed_urls: set[str] | None = None,
-    limit: int = 4,
-) -> list[str]:
-    failed_urls = failed_urls or set()
-    for message in reversed(messages):
-        if message.get("role") != "tool" or message.get("tool_name") != "web_search":
-            continue
-        metadata = message.get("metadata") or {}
-        results = metadata.get("search_results") or []
-        candidates: list[str] = []
-        seen_domains: set[str] = set()
-        duplicate_domain: list[str] = []
-        for result in results:
-            url = str(result.get("url", "")).strip().rstrip(".,")
-            if not url or url in failed_urls:
-                continue
-            domain = re.sub(r"^www\.", "", re.sub(r"^https?://", "", url).split("/", 1)[0])
-            if domain in seen_domains:
-                duplicate_domain.append(url)
-            else:
-                seen_domains.add(domain)
-                candidates.append(url)
-            if len(candidates) >= limit:
-                return candidates
-        candidates.extend(url for url in duplicate_domain if url not in candidates)
-        if candidates:
-            return candidates[:limit]
-        for line in str(message.get("content", "")).splitlines():
-            match = URL_RE.search(line)
-            if match:
-                url = match.group(0).rstrip(".,")
-                if url not in failed_urls:
-                    return [url]
-    return []
-
-
-def _recent_search_result_url(messages: list[dict[str, Any]]) -> str:
-    candidates = _recent_search_result_candidates(messages)
-    return candidates[0] if candidates else ""
-
-
 def _useful_fetch_result(result: str) -> bool:
     stripped = result.strip()
     if not stripped or stripped.startswith(("tool error:", "permission denied:")):
@@ -2616,6 +2960,36 @@ def _unnecessary_command_reference_call(user_message: str) -> bool:
     return bool(CASUAL_DIRECT_RE.search(user_message))
 
 
+def _runtime_error_message(error: Exception) -> str:
+    """Turn known local-runtime failures into an actionable, non-destructive hint."""
+    message = str(error)
+    lowered = message.lower()
+    if "cuda" in lowered and "illegal memory access" in lowered:
+        return (
+            "Ollama's GPU runner crashed (CUDA illegal memory access). "
+            "Restart the Ollama service before retrying, or set "
+            "[ollama.options] num_gpu = 0 to isolate the model on CPU."
+        )
+    return message
+
+
+def _controller_message(content: str) -> dict[str, str]:
+    """Return valid in-band guidance, never a fabricated tool result."""
+    return {"role": "system", "content": content}
+
+
+def _stopped_at_output_limit(metadata: object) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    reason = str(metadata.get("done_reason") or "").strip().lower()
+    return reason in {"length", "max_tokens", "token_limit", "limit"}
+
+
+def _unfinished_fenced_code(content: str) -> bool:
+    """Conservatively identify a response cut off inside a Markdown code block."""
+    return content.count("```") % 2 == 1
+
+
 class Agent:
     def __init__(
         self,
@@ -2625,18 +2999,25 @@ class Agent:
         gate: PermissionGate,
         system_prompt: str,
         max_steps: int = 20,
+        max_code_continuations: int = 2,
         tool_selector: ToolSelector | None = None,
         ollama_options: dict[str, Any] | None = None,
+        ollama_think: bool | str | None = None,
+        web_research_budget: WebResearchBudget | None = None,
     ):
         self.ollama = ollama
         self.model = model
         self.tools = {t.name: t for t in tools}
         self.gate = gate
         self.max_steps = max_steps
+        self.max_code_continuations = max(0, min(3, max_code_continuations))
         self.tool_selector = tool_selector
         self.ollama_options = dict(ollama_options or {})
+        self.ollama_think = ollama_think
+        self.web_research_budget = (web_research_budget or WebResearchBudget()).bounded()
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         self.retrieval_state = RetrievalConversationState()
+        self.last_web_research_state: AgenticSearchState | None = None
 
     def set_system_prompt(self, system_prompt: str) -> None:
         if self.messages and self.messages[0].get("role") == "system":
@@ -2644,29 +3025,102 @@ class Agent:
         else:
             self.messages.insert(0, {"role": "system", "content": system_prompt})
 
+    def _compact_history(self, tool_schemas: list[dict[str, Any]]) -> None:
+        """Keep a new request within the configured context window.
+
+        Entity state is retained separately, making stale transcript prose a
+        safer thing to drop than letting Ollama silently truncate messages.
+        This runs only at a user-turn boundary, never between a tool call and
+        its result.
+        """
+        if len(self.messages) <= 2:
+            return
+        num_ctx = int(self.ollama_options.get("num_ctx", 8192))
+        output_reserve = int(self.ollama_options.get("num_predict", 2048))
+        input_budget = max(8_000, (num_ctx - max(1_024, output_reserve)) * 4)
+        fixed = self.messages[0]
+        used = len(str(fixed.get("content", ""))) + len(str(tool_schemas))
+        retained: list[dict[str, Any]] = []
+        for message in reversed(self.messages[1:]):
+            cost = len(str(message.get("content", ""))) + 96
+            if retained and used + cost > input_budget:
+                break
+            retained.append(message)
+            used += cost
+        self.messages = [fixed, *reversed(retained)]
+
     def run(self, user_message: str):
         """Generator of AgentEvent — clients iterate and render."""
         self.messages.append({"role": "user", "content": user_message})
         _update_retrieval_state_from_user(self.retrieval_state, user_message, self.messages)
-        retrieval_message = _retrieval_message_from_segments(user_message)
         selected_tools = self.tools
         if self.tool_selector is not None:
             selected_names = self.tool_selector(user_message, self.tools)
             selected_tools = {
                 name: self.tools[name] for name in selected_names if name in self.tools
             }
-        schemas = [t.schema() for t in selected_tools.values()]
         used_tools: set[str] = set()
         used_tool_calls: set[str] = set()
-        failed_fetch_urls: set[str] = set()
-        seen_search_queries: set[str] = set()
         search_queries_this_turn: list[str] = []
-        search_call_count = 0
-        fetch_attempt_count = 0
-        model_planned_search_requested = False
+        web_stop_instruction_sent = False
+        empty_response_retried = False
+        code_continuations = 0
+        continued_content: list[str] = []
+        research = AgenticSearchState(user_message, self.web_research_budget)
+        self.last_web_research_state = research
+
+        def active_schemas() -> list[dict[str, Any]]:
+            schemas: list[dict[str, Any]] = []
+            for name, tool in selected_tools.items():
+                if name in {"web_search", "fetch_url"} and research.web_activity_stopped:
+                    continue
+                if name == "web_search" and (
+                    research.search_calls_used >= research.budget.max_search_calls
+                ):
+                    continue
+                if name == "fetch_url" and (
+                    research.fetch_calls_used >= research.budget.max_fetch_calls
+                ):
+                    continue
+                schemas.append(tool.schema())
+            return schemas
+
+        def attach_research_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+            enriched = dict(metadata)
+            enriched["web_research"] = research.to_dict()
+            return enriched
+
+        def research_tool_content(name: str, result: str) -> str:
+            if name not in {"web_search", "fetch_url"}:
+                return result
+            return f"{result}\n\n{research.model_summary()}"
+
+        def finish_payload() -> dict[str, Any]:
+            if not research.actions and not research.web_actions_used:
+                return {}
+            return {"web_research": research.to_dict()}
+
+        def record_finish(content: str, *, best_effort: bool = False) -> None:
+            if not research.actions and not research.web_actions_used:
+                return
+            research.assessment.sufficient = bool(
+                content.strip() and not best_effort and not _content_needs_retrieval(content)
+            )
+            if research.assessment.sufficient:
+                research.assessment.next_action_reason = None
+            if best_effort:
+                research.assessment.next_action_reason = (
+                    "Web activity stopped; answer from gathered evidence and state uncertainty"
+                )
+            research.add_action(
+                "finish",
+                "best_effort" if best_effort else "success",
+                detail=research.exhausted_reason,
+            )
+
+        self._compact_history(active_schemas())
 
         def execute_tool_call(call: dict[str, Any]):
-            nonlocal search_call_count, fetch_attempt_count
             fn = call.get("function", {})
             original_name = fn.get("name", "")
             name = canonical_tool_name(original_name, set(self.tools))
@@ -2686,6 +3140,10 @@ class Agent:
                     self.messages,
                     self.retrieval_state,
                 )
+            if name in {"web_search", "fetch_url"}:
+                missing_information = str(args.get("missing_information") or "")
+                if missing_information.strip():
+                    research.add_gap(missing_information)
 
             tool = selected_tools.get(name)
             if tool is None and name in RECOVERABLE_UNADVERTISED_TOOLS:
@@ -2698,37 +3156,157 @@ class Agent:
                 return name, args, tool, "error: provide a search query or subject", {}
             if name == "web_search":
                 query = str(args.get("query", ""))
-                if search_call_count >= MAX_TOTAL_SEARCH_CALLS:
+                purpose = _research_purpose(name, args)
+                if research.web_activity_stopped:
+                    research.add_action(
+                        "search",
+                        "budget_exhausted",
+                        purpose=purpose,
+                        query=query,
+                        detail=research.exhausted_reason or "web activity stopped",
+                    )
                     return (
                         name,
                         args,
                         tool,
-                        (
-                            "search budget reached; use the previous result or "
-                            "state what could not be verified"
-                        ),
-                        {"retrieval_budget_exhausted": True},
+                        "web research budget exhausted; use gathered evidence "
+                        "and state uncertainty",
+                        attach_research_metadata({"retrieval_budget_exhausted": True}),
                     )
-                if _too_similar_to_seen_query(query, seen_search_queries):
+                if research.search_calls_used >= research.budget.max_search_calls:
+                    research.add_gap(
+                        "Search-call budget reached; use existing leads or fetched evidence."
+                    )
+                    research.add_action(
+                        "search",
+                        "budget_exhausted",
+                        purpose=purpose,
+                        query=query,
+                        detail="max_search_calls",
+                    )
                     return (
                         name,
                         args,
                         tool,
-                        f"skipped near-duplicate search query: {query}",
-                        {"duplicate_search_query": True},
+                        "search-call budget reached; use previous results or "
+                        "fetch an existing lead",
+                        attach_research_metadata({"retrieval_budget_exhausted": True}),
                     )
-                seen_search_queries.add(_normalized_search_query(query))
+                if _search_attempt_was_seen(
+                    args,
+                    research.search_attempts,
+                    research.budget.repeated_query_similarity,
+                ):
+                    research.duplicate_actions_prevented += 1
+                    research.mark_failure("search", "repeated equivalent search strategy")
+                    research.add_gap(
+                        "The repeated query adds no new search strategy; refine "
+                        "the information gap."
+                    )
+                    research.add_action(
+                        "search",
+                        "duplicate_prevented",
+                        purpose=purpose,
+                        query=query,
+                        detail="equivalent query already attempted",
+                    )
+                    return (
+                        name,
+                        args,
+                        tool,
+                        f"skipped repeated search strategy: {query}",
+                        {
+                            "duplicate_search_query": True,
+                            "duplicate_search_strategy": True,
+                            "search_attempt_fingerprint": _search_attempt_fingerprint(args),
+                            "web_research": research.to_dict(),
+                        },
+                    )
+                research.search_attempts.append(dict(args))
                 search_queries_this_turn.append(query)
-                search_call_count += 1
+                research.web_actions_used += 1
+                research.search_calls_used += 1
             if name == "fetch_url":
                 url = str(args.get("url", ""))
-                if fetch_attempt_count >= MAX_FETCH_ATTEMPTS:
+                purpose = _research_purpose(name, args)
+                canonical_url = _canonical_fetch_attempt_key(url)
+                domain = _fetch_domain(url)
+                if research.web_activity_stopped:
+                    research.add_action(
+                        "fetch",
+                        "budget_exhausted",
+                        purpose=purpose,
+                        url=url,
+                        detail=research.exhausted_reason or "web activity stopped",
+                    )
                     return (
                         name,
                         args,
                         tool,
-                        "fetch budget reached; use accepted search evidence instead",
-                        {"retrieval_budget_exhausted": True},
+                        "web research budget exhausted; use gathered evidence "
+                        "and state uncertainty",
+                        attach_research_metadata({"retrieval_budget_exhausted": True}),
+                    )
+                if research.fetch_calls_used >= research.budget.max_fetch_calls:
+                    research.add_gap(
+                        "Fetch-call budget reached; answer from sources already "
+                        "read and search leads."
+                    )
+                    research.add_action(
+                        "fetch",
+                        "budget_exhausted",
+                        purpose=purpose,
+                        url=url,
+                        detail="max_fetch_calls",
+                    )
+                    return (
+                        name,
+                        args,
+                        tool,
+                        "fetch-call budget reached; use sources already read",
+                        attach_research_metadata({"retrieval_budget_exhausted": True}),
+                    )
+                if canonical_url in research.fetched_urls:
+                    source_id = research.fetched_urls.get(canonical_url)
+                    research.duplicate_actions_prevented += 1
+                    research.mark_failure("fetch", "canonical URL already fetched")
+                    research.add_action(
+                        "fetch",
+                        "duplicate_prevented",
+                        purpose=purpose,
+                        url=url,
+                        source_id=source_id,
+                        detail="canonical URL already fetched",
+                    )
+                    suffix = f" as {source_id}" if source_id else ""
+                    return (
+                        name,
+                        args,
+                        tool,
+                        f"skipped duplicate fetch; this canonical URL was already read{suffix}",
+                        attach_research_metadata({"duplicate_fetch": True, "source_id": source_id}),
+                    )
+                if domain and (
+                    research.domain_fetch_counts.get(domain, 0)
+                    >= research.budget.max_pages_per_domain
+                ):
+                    research.mark_failure("fetch", f"per-domain page limit reached for {domain}")
+                    research.add_gap(
+                        f"Per-domain page limit reached for {domain}; choose another source domain."
+                    )
+                    research.add_action(
+                        "fetch",
+                        "domain_budget_exhausted",
+                        purpose=purpose,
+                        url=url,
+                        detail=domain,
+                    )
+                    return (
+                        name,
+                        args,
+                        tool,
+                        f"per-domain fetch budget reached for {domain}; choose another source",
+                        attach_research_metadata({"domain_budget_exhausted": True}),
                     )
                 rejection = _fetch_rejected_by_recent_constraints(
                     url,
@@ -2737,14 +3315,28 @@ class Agent:
                     self.retrieval_state,
                 )
                 if rejection:
+                    research.mark_failure("fetch", rejection)
+                    research.add_action(
+                        "fetch",
+                        "rejected",
+                        purpose=purpose,
+                        url=url,
+                        detail=rejection,
+                    )
                     return (
                         name,
                         args,
                         tool,
                         f"skipped fetch: {rejection}",
-                        {"rejected_fetch_candidate": True},
+                        attach_research_metadata({"rejected_fetch_candidate": True}),
                     )
-                fetch_attempt_count += 1
+                research.fetched_urls[canonical_url] = None
+                if domain:
+                    research.domain_fetch_counts[domain] = (
+                        research.domain_fetch_counts.get(domain, 0) + 1
+                    )
+                research.web_actions_used += 1
+                research.fetch_calls_used += 1
             key = _tool_call_key(name, args if isinstance(args, dict) else {})
             if key in used_tool_calls:
                 return (
@@ -2757,6 +3349,16 @@ class Agent:
             used_tool_calls.add(key)
 
             if call.get("parse_status") == "malformed":
+                if name in {"web_search", "fetch_url"}:
+                    research.mark_failure(name, "malformed text-form tool call")
+                    research.add_action(
+                        "search" if name == "web_search" else "fetch",
+                        "invalid",
+                        purpose=_research_purpose(name, args),
+                        query=str(args.get("query", "")),
+                        url=str(args.get("url", "")),
+                        detail="malformed text-form tool call",
+                    )
                 return (
                     name,
                     args,
@@ -2765,6 +3367,8 @@ class Agent:
                     {},
                 )
             if tool is None:
+                if name in {"web_search", "fetch_url"}:
+                    research.mark_failure(name, "unknown web tool")
                 return name, args, tool, f"error: unknown tool '{original_name}'", {}
             if name == "list_commands" and _unnecessary_command_reference_call(user_message):
                 return (
@@ -2785,38 +3389,127 @@ class Agent:
                     start_metadata = tool.start_metadata(args)
                 except Exception:
                     start_metadata = {}
-            start_payload = {"tool": name, "args": args}
+            start_payload: dict[str, Any] = {"tool": name, "args": args}
             if start_metadata:
                 start_payload["metadata"] = start_metadata
                 start_payload["provider"] = start_metadata.get("provider")
                 start_payload["query"] = start_metadata.get("query") or args.get("query")
-                start_payload["fallback_used"] = bool(
-                    start_metadata.get("fallback_used", False)
-                )
+                start_payload["fallback_used"] = bool(start_metadata.get("fallback_used", False))
+            if name in {"web_search", "fetch_url"} and start_metadata:
+                start_payload["metadata"]["purpose"] = _research_purpose(name, args)
+                start_payload["metadata"]["web_research"] = research.to_dict()
             yield AgentEvent("tool_start", start_payload)
             try:
                 self.gate.check(name, tool.detail(args))
-                result = tool.fn(**args)
+                execution_args = dict(args)
+                execution_args.pop("purpose", None)
+                execution_args.pop("missing_information", None)
+                result = tool.fn(**execution_args)
             except PermissionDenied as e:
                 result = f"permission denied: {e}"
             except Exception as e:
                 result = f"tool error: {type(e).__name__}: {e}"
 
-            metadata = {}
+            metadata: dict[str, Any] = {}
             if isinstance(result, dict) and "content" in result:
-                metadata = (
-                    result.get("metadata")
-                    if isinstance(result.get("metadata"), dict)
-                    else {}
-                )
+                raw_metadata = result.get("metadata")
+                metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
                 result = result.get("content", "")
+            if name == "web_search":
+                metadata = dict(metadata)
+                result_urls = _search_result_urls(metadata)
+                duplicate_set, similarity = _near_duplicate_result_set(
+                    result_urls,
+                    research.result_sets,
+                )
+                if duplicate_set:
+                    metadata["duplicate_result_set"] = True
+                    metadata["result_set_similarity"] = similarity
+                    metadata["search_attempt_fingerprint"] = _search_attempt_fingerprint(args)
+                    research.duplicate_actions_prevented += 1
+                    research.add_gap(
+                        "The latest search returned substantially the same sources; "
+                        "try a different angle or stop."
+                    )
+                if result_urls:
+                    research.result_sets.append(result_urls)
             result = str(result)
             if len(result) > 12000:  # keep small-model context healthy
                 result = result[:12000] + "\n...[truncated]"
+            if name in {"web_search", "fetch_url"}:
+                failed, failure_reason = _tool_result_failed(name, result, metadata)
+                purpose = _research_purpose(name, args)
+                trace_status = "failed" if failed else "success"
+                if name == "web_search" and metadata.get("duplicate_result_set"):
+                    trace_status = "duplicate_result_set"
+                providers = tuple(
+                    str(value)
+                    for value in (
+                        metadata.get("successful_providers")
+                        or metadata.get("providers_succeeded")
+                        or []
+                    )
+                    if value
+                )
+                if name == "web_search":
+                    results = metadata.get("search_results")
+                    count = len(results) if isinstance(results, list) else None
+                    if isinstance(results, list):
+                        for item in results:
+                            if isinstance(item, dict):
+                                result_id = str(item.get("result_id") or "")
+                                if result_id:
+                                    research.add_source(result_id)
+                    research.add_action(
+                        "search",
+                        trace_status,
+                        purpose=purpose,
+                        query=str(args.get("query", "")),
+                        result_count=count,
+                        providers=providers,
+                        detail=failure_reason or None,
+                    )
+                else:
+                    source_id = str(metadata.get("source_id") or "") or None
+                    final_url = str(
+                        metadata.get("canonical_url")
+                        or metadata.get("final_url")
+                        or args.get("url", "")
+                    )
+                    research.add_action(
+                        "fetch",
+                        trace_status,
+                        purpose=purpose,
+                        url=final_url,
+                        source_id=source_id,
+                        providers=providers,
+                        detail=failure_reason or None,
+                    )
+                    canonical_requested = _canonical_fetch_attempt_key(str(args.get("url", "")))
+                    if source_id and not failed:
+                        research.fetched_urls[canonical_requested] = source_id
+                        research.fetched_urls[_canonical_fetch_attempt_key(final_url)] = source_id
+                        research.add_source(source_id, fetched=True)
+                if failed:
+                    research.mark_failure(name, failure_reason)
+                    research.add_gap(
+                        "The last web action failed; use another source or a different strategy."
+                    )
+                else:
+                    research.mark_success()
+                if research.web_actions_used >= research.budget.max_web_actions:
+                    research.exhausted_reason = "max_web_actions"
+                    research.add_gap(
+                        "Web-action budget exhausted; answer from gathered evidence "
+                        "and state remaining uncertainty."
+                    )
+                metadata = attach_research_metadata(metadata)
             return name, args, tool, result, metadata
 
         planned_results: list[str] = []
-        for call in _initial_tool_calls(retrieval_message, selected_tools, self.messages):
+        # Retrieval is model-led. The host enforces tool safety and budgets but
+        # never synthesizes a search or knowledge query from the user's words.
+        for call in ():
             name, args, tool, result, metadata = yield from execute_tool_call(call)
             if tool is not None and tool.return_direct:
                 self.messages.append({"role": "assistant", "content": result})
@@ -2836,116 +3529,42 @@ class Agent:
                 metadata,
             )
             tool_message = {"role": "tool", "tool_name": name, "content": result}
+            tool_message["content"] = research_tool_content(name, result)
             if metadata:
                 tool_message["metadata"] = metadata
             self.messages.append(tool_message)
             if name == "web_search" and _wants_raw_search_results(user_message):
                 planned_results.append(result)
-            if (
-                name == "web_search"
-                and "fetch_url" in selected_tools
-                and _should_prefetch_source(user_message)
-            ):
-                for url in _recent_search_result_candidates(self.messages, failed_fetch_urls):
-                    fetch_call = {
-                        "function": {"name": "fetch_url", "arguments": {"url": url}}
-                    }
-                    fetch_name, _fetch_args, fetch_tool, fetch_result, fetch_metadata = (
-                        yield from execute_tool_call(fetch_call)
-                    )
-                    if fetch_tool is not None and fetch_tool.return_direct:
-                        self.messages.append({"role": "assistant", "content": fetch_result})
-                        payload = {"content": fetch_result}
-                        if fetch_metadata:
-                            payload["metadata"] = fetch_metadata
-                        yield AgentEvent("text", payload)
-                        yield AgentEvent("done", {})
-                        return
-                    yield AgentEvent(
-                        "tool_result",
-                        {
-                            "tool": fetch_name,
-                            "result": fetch_result,
-                            "metadata": fetch_metadata,
-                        },
-                    )
-                    fetch_message = {
-                        "role": "tool",
-                        "tool_name": fetch_name,
-                        "content": fetch_result,
-                    }
-                    if fetch_metadata:
-                        fetch_message["metadata"] = fetch_metadata
-                    self.messages.append(fetch_message)
-                    if _useful_fetch_result(fetch_result):
-                        for linked_url in _verification_links_from_metadata(
-                            fetch_metadata,
-                            failed_fetch_urls,
-                        ):
-                            linked_call = {
-                                "function": {
-                                    "name": "fetch_url",
-                                    "arguments": {"url": linked_url},
-                                }
-                            }
-                            (
-                                linked_name,
-                                _linked_args,
-                                linked_tool,
-                                linked_result,
-                                linked_metadata,
-                            ) = yield from execute_tool_call(linked_call)
-                            if linked_tool is not None and linked_tool.return_direct:
-                                self.messages.append(
-                                    {"role": "assistant", "content": linked_result}
-                                )
-                                payload = {"content": linked_result}
-                                if linked_metadata:
-                                    payload["metadata"] = linked_metadata
-                                yield AgentEvent("text", payload)
-                                yield AgentEvent("done", {})
-                                return
-                            yield AgentEvent(
-                                "tool_result",
-                                {
-                                    "tool": linked_name,
-                                    "result": linked_result,
-                                    "metadata": linked_metadata,
-                                },
-                            )
-                            linked_message = {
-                                "role": "tool",
-                                "tool_name": linked_name,
-                                "content": linked_result,
-                            }
-                            if linked_metadata:
-                                linked_message["metadata"] = linked_metadata
-                            self.messages.append(linked_message)
-                            if not _useful_fetch_result(linked_result):
-                                failed_fetch_urls.add(linked_url)
-                        break
-                    failed_fetch_urls.add(url)
 
         if planned_results:
             content = "\n\n".join(planned_results)
             self.messages.append({"role": "assistant", "content": content})
+            record_finish(content)
             yield AgentEvent("text", {"content": content})
-            yield AgentEvent("done", {})
+            yield AgentEvent("done", finish_payload())
             return
 
         for _step in range(self.max_steps):
             try:
-                if self.ollama_options:
+                if self.ollama_options or self.ollama_think is not None:
+                    chat_kwargs: dict[str, Any] = {
+                        "tools": active_schemas(),
+                        "options": self.ollama_options,
+                    }
+                    # `think` is a newer Ollama API field.  Do not send an
+                    # explicit null: lightweight compatible clients commonly
+                    # accept `options` but have not added this parameter.
+                    if self.ollama_think is not None:
+                        chat_kwargs["think"] = self.ollama_think
+                    msg = self.ollama.chat(self.model, self.messages, **chat_kwargs)
+                else:
                     msg = self.ollama.chat(
                         self.model,
                         self.messages,
-                        tools=schemas,
-                        options=self.ollama_options,
+                        tools=active_schemas(),
                     )
-                else:
-                    msg = self.ollama.chat(self.model, self.messages, tools=schemas)
             except Exception as e:  # surface, don't crash the session
-                yield AgentEvent("error", {"message": str(e)})
+                yield AgentEvent("error", {"message": _runtime_error_message(e)})
                 return
 
             self.messages.append(msg)
@@ -2955,41 +3574,36 @@ class Agent:
             )
 
             if not tool_calls:
-                tool_calls = _fallback_search_call(
-                    retrieval_message,
-                    content,
-                    selected_tools,
-                    used_tools,
-                    used_tool_calls,
-                    self.messages,
-                )
-
-            if not tool_calls:
-                if (
-                    "web_search" in selected_tools
-                    and "web_search" in used_tools
-                    and not model_planned_search_requested
-                    and search_call_count < MAX_TOTAL_SEARCH_CALLS
-                    and _content_needs_retrieval(content)
-                    and (
-                        self.retrieval_state.pending_evidence_gap is not None
-                        or _recent_retrieval_was_weak(self.messages)
-                    )
-                ):
-                    model_planned_search_requested = True
+                if not content.strip() and not empty_response_retried:
+                    empty_response_retried = True
                     self.messages.append(
-                        {
-                            "role": "tool",
-                            "tool_name": "retrieval_controller",
-                            "content": _model_planned_search_instruction(
-                                retrieval_message,
-                                self.retrieval_state,
-                                search_queries_this_turn,
-                            ),
-                        }
+                        _controller_message(
+                            "The previous turn contained neither an answer nor a tool call. "
+                            "Respond to the user now, or call one available tool if it is "
+                            "necessary. Do not emit an empty message."
+                        )
                     )
                     continue
-                if used_tools and PROMISE_TO_SEARCH_RE.search(content):
+                if (
+                    research.web_activity_stopped
+                    and not web_stop_instruction_sent
+                    and (not content.strip() or PROMISE_TO_SEARCH_RE.search(content))
+                ):
+                    web_stop_instruction_sent = True
+                    self.messages.append(
+                        _controller_message(
+                            f"{research.model_summary()}\n"
+                            "Web activity has stopped. Do not call or promise another "
+                            "web action. Give the best-supported answer now and state "
+                            "material uncertainty."
+                        )
+                    )
+                    continue
+                if (
+                    used_tools
+                    and not research.web_activity_stopped
+                    and PROMISE_TO_SEARCH_RE.search(content)
+                ):
                     recent_tool_content = next(
                         (
                             str(message.get("content", ""))
@@ -2999,19 +3613,45 @@ class Agent:
                         "",
                     )
                     self.messages.append(
-                        {
-                            "role": "tool",
-                            "tool_name": "retrieval_controller",
-                            "content": (
-                                f"{recent_tool_content}\n\n"
-                                "Retrieval already ran for this turn. Answer from the "
-                                "available tool results instead of promising another search."
-                            ),
-                        }
+                        _controller_message(
+                            f"{recent_tool_content}\n\n"
+                            "Retrieval already ran for this turn. Answer from the "
+                            "available tool results instead of promising another search."
+                        )
                     )
                     continue
+                if not content.strip():
+                    stage = " after web research" if research.web_actions_used else ""
+                    yield AgentEvent(
+                        "error",
+                        {
+                            "message": (
+                                f"model returned an empty response{stage}; "
+                                "try again or choose a different model"
+                            )
+                        },
+                    )
+                    return
+                completion_metadata = getattr(self.ollama, "last_chat_metadata", None)
+                if (
+                    code_continuations < self.max_code_continuations
+                    and _stopped_at_output_limit(completion_metadata)
+                    and _unfinished_fenced_code(content)
+                ):
+                    code_continuations += 1
+                    continued_content.append(content)
+                    self.messages.append(
+                        _controller_message(
+                            "Your previous answer stopped at the output limit inside a fenced "
+                            "code block. Continue exactly from the cutoff. Do not repeat prior "
+                            "text, do not add an opening fence, and close the existing fence."
+                        )
+                    )
+                    continue
+                content = "".join([*continued_content, content])
+                record_finish(content, best_effort=research.web_activity_stopped)
                 yield AgentEvent("text", {"content": content})
-                yield AgentEvent("done", {})
+                yield AgentEvent("done", finish_payload())
                 return
 
             for call in tool_calls:
@@ -3034,8 +3674,41 @@ class Agent:
                     metadata,
                 )
                 tool_message = {"role": "tool", "tool_name": name, "content": result}
+                tool_message["content"] = research_tool_content(name, result)
                 if metadata:
                     tool_message["metadata"] = metadata
                 self.messages.append(tool_message)
 
+        if research.web_actions_used:
+            research.exhausted_reason = research.exhausted_reason or "max_agent_steps"
+            research.add_gap(
+                "Agent step budget exhausted; provide a best-effort answer from gathered evidence."
+            )
+            self.messages.append(
+                _controller_message(
+                    f"{research.model_summary()}\n"
+                    "The agent step budget is exhausted. Do not call another web tool. "
+                    "Give the best-supported answer now and state material uncertainty."
+                )
+            )
+            try:
+                if self.ollama_options or self.ollama_think is not None:
+                    final_kwargs: dict[str, Any] = {
+                        "tools": [],
+                        "options": self.ollama_options,
+                    }
+                    if self.ollama_think is not None:
+                        final_kwargs["think"] = self.ollama_think
+                    final_msg = self.ollama.chat(self.model, self.messages, **final_kwargs)
+                else:
+                    final_msg = self.ollama.chat(self.model, self.messages, tools=[])
+                self.messages.append(final_msg)
+                final_content = str(final_msg.get("content", "")).strip()
+                if final_content:
+                    record_finish(final_content, best_effort=True)
+                    yield AgentEvent("text", {"content": final_content})
+                    yield AgentEvent("done", finish_payload())
+                    return
+            except Exception:
+                pass
         yield AgentEvent("error", {"message": f"step budget ({self.max_steps}) exhausted"})

@@ -262,9 +262,24 @@ class WebSearchLocationConfig:
 class WebSearchBehaviorConfig:
     max_query_rewrites: int = 3
     max_provider_fallbacks: int = 4
+    max_web_actions: int = 6
+    max_search_calls: int = 3
+    max_fetch_calls: int = 4
+    max_pages_per_domain: int = 2
+    max_consecutive_failures: int = 3
+    # Compatibility fields for older config files. The agentic loop uses the
+    # explicit fields above; provider routing still reads max_query_rewrites.
     max_total_search_calls: int = 6
     max_fetch_attempts: int = 4
     max_repeated_query_similarity: float = 0.90
+
+
+@dataclass
+class EntityResolutionConfig:
+    wikimedia_enabled: bool = False
+    wikimedia_timeout_seconds: float = 3.0
+    wikimedia_max_results: int = 5
+    metadata_refresh_days: int = 90
 
 
 @dataclass
@@ -277,6 +292,15 @@ class WebVerificationConfig:
 
 
 @dataclass
+class WebFetchConfig:
+    timeout_seconds: float = 30.0
+    max_download_bytes: int = 2_000_000
+    max_content_characters: int = 20_000
+    max_redirects: int = 5
+    cache_ttl_seconds: int = 24 * 3600
+
+
+@dataclass
 class WebSearchConfig:
     strategy: str = "quality"
     stop_when_sufficient: bool = True
@@ -286,6 +310,7 @@ class WebSearchConfig:
     fallback_on_quota: bool = True
     fallback_on_unavailable: bool = True
     fallback_on_low_relevance: bool = True
+    strict_result_filtering: bool = False
     return_unrelated_results: bool = False
     max_provider_attempts: int = 3
     max_results_per_domain: int = 2
@@ -321,6 +346,7 @@ class WebProviderConfig:
 @dataclass
 class OllamaConfig:
     options: dict[str, Any] = field(default_factory=dict)
+    think: bool | str | None = None
 
 
 def _default_web_providers() -> dict[str, WebProviderConfig]:
@@ -358,6 +384,7 @@ class Config:
     # permission policy per tool: ask | allow | deny
     permissions: dict[str, str] = field(default_factory=dict)
     max_agent_steps: int = 20
+    max_code_continuations: int = 2
     retrieval_k: int = 6
     snapshot_retention: int = 3
     crawl_max_depth: int = 2
@@ -366,8 +393,10 @@ class Config:
     crawl_delay_max: float = 5.0
     crawl_respect_robots: bool = True
     runtime_context: RuntimeContextConfig = field(default_factory=RuntimeContextConfig)
+    entity_resolution: EntityResolutionConfig = field(default_factory=EntityResolutionConfig)
     web_billing: WebBillingConfig = field(default_factory=WebBillingConfig)
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
+    web_fetch: WebFetchConfig = field(default_factory=WebFetchConfig)
     web_verification: WebVerificationConfig = field(default_factory=WebVerificationConfig)
     web_providers: dict[str, WebProviderConfig] = field(default_factory=_default_web_providers)
 
@@ -413,6 +442,10 @@ class Config:
         return self.data_dir / "sessions.db"
 
     @property
+    def entities_db(self) -> Path:
+        return self.data_dir / "entities.sqlite"
+
+    @property
     def memory_file(self) -> Path:
         return self.data_dir / "memory.md"
 
@@ -423,6 +456,11 @@ class Config:
     @property
     def ollama_options(self) -> dict[str, Any]:
         return dict(self.ollama.options)
+
+    def ollama_think_for_model(self, model: str) -> bool | str | None:
+        if self.ollama.think is not None:
+            return self.ollama.think
+        return False if model.strip().lower().startswith("qwen3.5") else None
 
     @property
     def web_provider_state_file(self) -> Path:
@@ -529,9 +567,14 @@ def load_config() -> Config:
     cfg.models = preset
 
     ollama = user.get("ollama", {})
+    think = ollama.get("think")
+    if isinstance(think, bool):
+        cfg.ollama.think = think
+    elif isinstance(think, str) and think.lower() in {"low", "medium", "high"}:
+        cfg.ollama.think = think.lower()
     ollama_options = ollama.get("options", {})
     if isinstance(ollama_options, dict):
-        for name in ("num_ctx", "num_thread", "num_gpu"):
+        for name in ("num_ctx", "num_thread", "num_gpu", "num_predict"):
             value = ollama_options.get(name)
             if value is None:
                 continue
@@ -576,6 +619,9 @@ def load_config() -> Config:
         raise ValueError("web.search.strategy must be one of: quality, legacy")
     cfg.web_search.stop_when_sufficient = bool(
         search.get("stop_when_sufficient", cfg.web_search.stop_when_sufficient)
+    )
+    cfg.web_search.strict_result_filtering = bool(
+        search.get("strict_result_filtering", cfg.web_search.strict_result_filtering)
     )
     provider_order = search.get("provider_order", cfg.web_search.provider_order)
     if isinstance(provider_order, list):
@@ -715,6 +761,57 @@ def load_config() -> Config:
             cfg.web_search.behavior.max_provider_fallbacks,
         )
     )
+    cfg.web_search.behavior.max_web_actions = max(
+        1,
+        int(
+            search_behavior.get(
+                "max_web_actions",
+                cfg.web_search.behavior.max_web_actions,
+            )
+        ),
+    )
+    legacy_search_calls = search_behavior.get("max_total_search_calls")
+    cfg.web_search.behavior.max_search_calls = max(
+        1,
+        int(
+            search_behavior.get(
+                "max_search_calls",
+                legacy_search_calls
+                if legacy_search_calls is not None
+                else cfg.web_search.behavior.max_search_calls,
+            )
+        ),
+    )
+    legacy_fetch_calls = search_behavior.get("max_fetch_attempts")
+    cfg.web_search.behavior.max_fetch_calls = max(
+        1,
+        int(
+            search_behavior.get(
+                "max_fetch_calls",
+                legacy_fetch_calls
+                if legacy_fetch_calls is not None
+                else cfg.web_search.behavior.max_fetch_calls,
+            )
+        ),
+    )
+    cfg.web_search.behavior.max_pages_per_domain = max(
+        1,
+        int(
+            search_behavior.get(
+                "max_pages_per_domain",
+                cfg.web_search.behavior.max_pages_per_domain,
+            )
+        ),
+    )
+    cfg.web_search.behavior.max_consecutive_failures = max(
+        1,
+        int(
+            search_behavior.get(
+                "max_consecutive_failures",
+                cfg.web_search.behavior.max_consecutive_failures,
+            )
+        ),
+    )
     cfg.web_search.behavior.max_total_search_calls = int(
         search_behavior.get(
             "max_total_search_calls",
@@ -731,6 +828,44 @@ def load_config() -> Config:
         search_behavior.get(
             "max_repeated_query_similarity",
             cfg.web_search.behavior.max_repeated_query_similarity,
+        )
+    )
+
+    fetch = web.get("fetch", {})
+    cfg.web_fetch.timeout_seconds = max(0.1, float(
+        fetch.get("timeout_seconds", cfg.web_fetch.timeout_seconds)
+    ))
+    cfg.web_fetch.max_download_bytes = max(1, int(
+        fetch.get("max_download_bytes", cfg.web_fetch.max_download_bytes)
+    ))
+    cfg.web_fetch.max_content_characters = max(1, int(
+        fetch.get("max_content_characters", cfg.web_fetch.max_content_characters)
+    ))
+    cfg.web_fetch.max_redirects = max(0, int(
+        fetch.get("max_redirects", cfg.web_fetch.max_redirects)
+    ))
+    cfg.web_fetch.cache_ttl_seconds = max(0, int(
+        fetch.get("cache_ttl_seconds", cfg.web_fetch.cache_ttl_seconds)
+    ))
+
+    entities = user.get("entities", {})
+    wikimedia = entities.get("wikimedia", {})
+    cfg.entity_resolution.wikimedia_enabled = bool(
+        wikimedia.get("enabled", cfg.entity_resolution.wikimedia_enabled)
+    )
+    cfg.entity_resolution.wikimedia_timeout_seconds = float(
+        wikimedia.get(
+            "timeout_seconds",
+            cfg.entity_resolution.wikimedia_timeout_seconds,
+        )
+    )
+    cfg.entity_resolution.wikimedia_max_results = int(
+        wikimedia.get("max_results", cfg.entity_resolution.wikimedia_max_results)
+    )
+    cfg.entity_resolution.metadata_refresh_days = int(
+        entities.get(
+            "metadata_refresh_days",
+            cfg.entity_resolution.metadata_refresh_days,
         )
     )
 
@@ -810,6 +945,9 @@ def load_config() -> Config:
 
     agent = user.get("agent", {})
     cfg.max_agent_steps = int(agent.get("max_steps", cfg.max_agent_steps))
+    cfg.max_code_continuations = max(
+        0, min(3, int(agent.get("max_code_continuations", cfg.max_code_continuations)))
+    )
     cfg.retrieval_k = int(agent.get("retrieval_k", cfg.retrieval_k))
 
     knowledge = user.get("knowledge", {})

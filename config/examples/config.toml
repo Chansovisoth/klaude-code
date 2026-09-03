@@ -16,6 +16,18 @@
 # num_ctx = 8192
 # num_thread = 8
 # num_gpu = 999
+# num_predict = 4096  # output-token ceiling; raise for deliberately long code
+
+# Top-level Ollama reasoning control, separate from runtime options. Set false
+# for responsive small Qwen chat/tool use; use true or low/medium/high when a
+# thinking-capable model should deliberate before responding.
+# [ollama]
+# think = false
+
+[agent]
+# Continue a response only when Ollama reports an output-length stop inside an
+# unfinished fenced code block.  Limited to avoid loops with weak local models.
+# max_code_continuations = 2
 
 [services]
 # ollama_url  = "http://localhost:11434"
@@ -39,6 +51,8 @@
 [web.search]
 # strategy = "quality"
 # stop_when_sufficient = true
+# Return all safe SERP leads by default. Enable only for strict entity lookups.
+# strict_result_filtering = false
 # skip_unconfigured_providers = true
 # fallback_on_quota = true
 # fallback_on_unavailable = true
@@ -74,9 +88,26 @@
 [web.search.behavior]
 # max_query_rewrites = 3
 # max_provider_fallbacks = 4
+# Ordinary single-agent browsing budgets. Search and fetch also share the
+# max_web_actions ceiling, so the model should stop as soon as evidence is enough.
+# max_web_actions = 6
+# max_search_calls = 3
+# max_fetch_calls = 4
+# max_pages_per_domain = 2
+# max_consecutive_failures = 3
+# Legacy aliases remain accepted for existing installations:
 # max_total_search_calls = 6
 # max_fetch_attempts = 4
 # max_repeated_query_similarity = 0.90
+
+[web.fetch]
+# Bounds for the untrusted public-page fetch tool. Redirect targets are
+# revalidated and only public HTTP(S) URLs are allowed.
+# timeout_seconds = 30
+# max_download_bytes = 2000000
+# max_content_characters = 20000
+# max_redirects = 5
+# cache_ttl_seconds = 86400
 
 [web.verification]
 # max_domains = 2
@@ -136,6 +167,16 @@
 # delay_min = 2.0
 # delay_max = 5.0
 # respect_robots = true
+
+# Entity names and typo correction are local-first. Wikimedia is an optional,
+# keyless fallback for unresolved probable names; only the minimal name phrase is sent.
+[entities]
+metadata_refresh_days = 90
+
+[entities.wikimedia]
+enabled = false
+timeout_seconds = 3
+max_results = 5
 
 [runtime_context]
 # Collected at model startup and refreshed before each model run. Fastfetch is

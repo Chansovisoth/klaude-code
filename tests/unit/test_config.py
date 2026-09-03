@@ -48,13 +48,37 @@ def test_load_config_reads_ollama_runtime_options(tmp_path, monkeypatch):
         "num_ctx = 8192\n"
         "num_thread = 6\n"
         "num_gpu = 0\n"
+        "num_predict = 4096\n"
+        "\n[agent]\n"
+        "max_code_continuations = 2\n"
     )
     monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
     monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
 
     cfg = load_config()
 
-    assert cfg.ollama_options == {"num_ctx": 8192, "num_thread": 6, "num_gpu": 0}
+    assert cfg.ollama_options == {
+        "num_ctx": 8192,
+        "num_thread": 6,
+        "num_gpu": 0,
+        "num_predict": 4096,
+    }
+    assert cfg.max_code_continuations == 2
+
+
+def test_small_qwen_defaults_to_non_thinking_and_allows_override(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    data_dir = tmp_path / "data"
+    config_dir.mkdir()
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
+
+    cfg = load_config()
+    assert cfg.ollama_think_for_model("qwen3.5:4b") is False
+    assert cfg.ollama_think_for_model("qwen3-coder:30b") is None
+
+    (config_dir / "config.toml").write_text("[ollama]\nthink = true\n")
+    assert load_config().ollama_think_for_model("qwen3.5:4b") is True
 
 
 def test_env_paths_ignore_unrelated_workdir_dotenv_when_source_root_is_known(
@@ -296,9 +320,21 @@ def test_load_config_reads_web_search_provider_sections(tmp_path, monkeypatch):
         "[web.search.behavior]\n"
         "max_query_rewrites = 2\n"
         "max_provider_fallbacks = 3\n"
+        "max_web_actions = 7\n"
+        "max_search_calls = 3\n"
+        "max_fetch_calls = 5\n"
+        "max_pages_per_domain = 2\n"
+        "max_consecutive_failures = 2\n"
         "max_total_search_calls = 4\n"
         "max_fetch_attempts = 2\n"
         "max_repeated_query_similarity = 0.85\n"
+        "\n"
+        "[web.fetch]\n"
+        "timeout_seconds = 12\n"
+        "max_download_bytes = 750000\n"
+        "max_content_characters = 16000\n"
+        "max_redirects = 3\n"
+        "cache_ttl_seconds = 7200\n"
         "\n"
         "[web.verification]\n"
         "max_domains = 3\n"
@@ -337,9 +373,19 @@ def test_load_config_reads_web_search_provider_sections(tmp_path, monkeypatch):
     assert cfg.web_search.location.maximum_inferred_location_weight == 0.08
     assert cfg.web_search.behavior.max_query_rewrites == 2
     assert cfg.web_search.behavior.max_provider_fallbacks == 3
+    assert cfg.web_search.behavior.max_web_actions == 7
+    assert cfg.web_search.behavior.max_search_calls == 3
+    assert cfg.web_search.behavior.max_fetch_calls == 5
+    assert cfg.web_search.behavior.max_pages_per_domain == 2
+    assert cfg.web_search.behavior.max_consecutive_failures == 2
     assert cfg.web_search.behavior.max_total_search_calls == 4
     assert cfg.web_search.behavior.max_fetch_attempts == 2
     assert cfg.web_search.behavior.max_repeated_query_similarity == 0.85
+    assert cfg.web_fetch.timeout_seconds == 12
+    assert cfg.web_fetch.max_download_bytes == 750000
+    assert cfg.web_fetch.max_content_characters == 16000
+    assert cfg.web_fetch.max_redirects == 3
+    assert cfg.web_fetch.cache_ttl_seconds == 7200
     assert cfg.web_verification.max_domains == 3
     assert cfg.web_verification.max_pages_per_domain == 5
     assert cfg.web_verification.max_total_verification_pages == 7
