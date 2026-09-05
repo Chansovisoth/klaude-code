@@ -67,7 +67,8 @@ must come from this registry or from the Typer command implementation.
 
 Top-level commands currently include:
 
-- `klaude chat`: interactive agent session in the current directory.
+- `klaude chat`: interactive agent session in the current directory; `--no-tui`
+  uses a simple line-oriented mode for terminal-native text selection/copying.
 - `klaude ask`: one-shot question with tools enabled.
 - `klaude learn`: ingest a URL or local file into a knowledge library.
 - `klaude crawl`: same-domain documentation crawl into a refreshable library.
@@ -97,7 +98,12 @@ Chat slash commands currently include:
 - `/keybinds`: print only keyboard controls directly. Slash commands belong in
   `/help` and the `/` completion popup.
 - `/settings [CATEGORY]`: configure categorized Theme, Output Field, and Input
-  Field appearance settings. Output border defaults off and scrollbar defaults on; input
+  Field appearance settings plus Runtime controls. Runtime controls persist for
+  future chats in `chat-preferences.json`: Auto lets Ollama choose CPU/GPU placement, CPU-only sets no
+  GPU layers, GPU-preferred requests full offload where possible, and CPU
+  threads/context size offer presets and custom numeric input. Auto Calibrate
+  derives bounded thread and context targets from local CPU, RAM, and VRAM,
+  while keeping device placement automatic. Output border defaults off and scrollbar defaults on; input
   border defaults on. Every category includes its own reset action.
 - `/models`: list installed Ollama models and mark the active model.
 - `/model`: open an arrow-key model picker, then an effort picker.
@@ -109,15 +115,23 @@ Chat slash commands currently include:
 - `/steer TEXT`: prioritize a new instruction and interrupt the active turn at
   the next safe model/tool boundary.
 - `/cancel`: interrupt the active turn at the next safe boundary.
+- `/restart` and `/stop`: restart or stop the local Ollama service after confirmation; these controls do not exit the chat session.
+- `/refresh`: discard and redraw the current TUI frame without changing session state, for clearing terminal-render artifacts.
 - `/cd [PATH]`: show or change the agent workspace directory. Relative paths
   resolve from the current agent directory; the process cwd is unchanged.
 - `/pwd`: show the current agent workspace directory.
 - `/ls [OPTIONS]`: run the colorized Linux `ls` command in the current agent
   workspace (for example, `/ls -lha`); positional paths remain jailed there.
+- `/attach PATH`: attach a file or folder as bounded context for the next
+  message. Typing `/attach ` offers paths from the current agent workspace;
+  absolute paths are also accepted.
 - `/theme [NAME]`: open Theme settings for interface and text/code colors;
   an optional NAME sets persistent TUI chrome independently from content
-  colors. Built-ins are Autumn (default), Pastelle Pink, Hacker Green, and Neon
-  Synth; the picker and `/theme reset` restore the default.
+  colors. Built-ins include Crimson Red, Autumn (default), Egg Yolk, Hacker
+  Green, Neon Synth, and a contiguous rainbow-ordered Pastelle family: Red,
+  Orange, Yellow, Lime, Green, Cyan, Azure, Blue, Lavender, Purple, Magenta,
+  and Pink. Every Pastelle theme uses the same neutral, non-hued background;
+  the picker and `/theme reset` restore the default.
 - Theme settings also choose persistent Markdown/code syntax colors. Built-ins
   are VS Code Dark (default), GitHub Dark, Monokai, and Solarized Light; the
   picker reset restores the default. There is no separate `/text-theme` command.
@@ -142,19 +156,24 @@ that is removed without discarding intervening output.
 Interactive chat uses a persistent full-screen layout: the scrollable transcript
 stays above a full-width input at the bottom, and the input remains focused while
 the agent runs in a background thread. Enter queues additional turns while one
-is active; Ctrl+Enter steers using the current input, Alt+Enter inserts a
+is active; Alt+\ steers using the current input, Alt+Enter inserts a
 newline when distinguishable, Ctrl+J is the legacy-terminal newline fallback,
 repeated Alt+Up edits queued follow-ups from newest to oldest, and Ctrl+C
-interrupts the active response. Enter saves a queue edit; empty text plus Enter
+interrupts the active response. Ctrl+D exits the chat and discards any unsent
+input. Enter saves a queue edit; empty text plus Enter
 deletes that item. Pending inputs render in a compact live strip immediately
 above the input field, and automatic queue consumption pauses during editing.
+Permission prompts accept `y`/`yes`, `n`/`no`, or `a`/`always` typed in the
+composer and confirmed with Enter; picker prompts also accept a full option or
+unique prefix typed into the composer and confirmed with Enter.
 Cancellation is cooperative at
 the next emitted model/tool event, so an in-flight Ollama HTTP request or tool
 call may finish before the steering turn starts. Bracketed multiline paste is
 one logical turn. Up/down navigate input history, Tab completes slash commands,
 and the live status line shows activity,
 queue depth, model, effort, context-window use, and last input/output token
-counts. Non-interactive stdin retains line-oriented compatibility and plain
+counts. The TUI renders assistant text character by character; `klaude chat
+--legacy` retains chunk-at-a-time streaming for debugging. Non-interactive stdin retains line-oriented compatibility and plain
 output. In the TUI, `/help` category names are underlined, and each user or
 assistant message begins with a full-width gray divider containing the speaker
 name and local date/time. Each session starts with a `Session: <id>` divider
@@ -174,11 +193,12 @@ input history; history navigation resumes when the popup is closed.
 Escape closes the completion popup without altering the current input.
 Enter accepts the highlighted completion and executes the command in one press;
 Tab completes without executing so users can add arguments.
-The separate Scroll settings category controls both input and output scroll speed
+The separate Scroll settings category stores input and output scroll speed
 (1–10 lines per wheel event, default 2), persisted as `scroll.lines` with legacy
 `output_field.scroll_lines` loading supported. Output resets do not reset Scroll.
-This controls mouse events
-delivered to Klaude, not terminal-owned scrollback or terminal-intercepted gestures.
+Mouse capture is enabled only for clickable completion and picker menus; outside
+those menus, native terminal dragging selects and copies transcript text without
+requiring Shift.
 
 Modified Enter combinations support both Kitty CSI-u and xterm modifyOtherKeys
 escape sequences. The TUI enables both protocols on entry and must restore both
@@ -242,7 +262,9 @@ Source-checkout runtime data:
 - `.klaude/data/skills/<name>/`: installed skill manifests and versions.
 - `.klaude/data/runtime-context.json`: volatile cached machine context.
 - `.klaude/data/appearance.json`: persistent TUI chrome and text-theme choices.
-- `.klaude/data/chat-preferences.json`: last selected interactive chat model.
+- `.klaude/data/chat-preferences.json`: last selected interactive chat model and
+  persistent interactive runtime overrides (CPU/GPU preference, CPU threads,
+  and context size).
 - `.klaude/data/webcache.db`: cached search/fetch/Hugging Face results.
 - `.klaude/data/web-provider-state.json`: provider health/cooldown state.
 - `.klaude/data/entities.sqlite`: compact learned canonical names, aliases,

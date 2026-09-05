@@ -69,6 +69,7 @@ from klaude_core.runtime_context import (
     render_runtime_context,
 )
 from prompt_toolkit import Application, PromptSession
+from prompt_toolkit.application.current import get_app
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.data_structures import Point
@@ -91,16 +92,21 @@ from prompt_toolkit.layout import (
 )
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.margins import ScrollbarMargin
-from prompt_toolkit.layout.menus import CompletionsMenu
+from prompt_toolkit.layout.menus import CompletionsMenu, CompletionsMenuControl
+from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.lexers import Lexer, PygmentsLexer
 from prompt_toolkit.layout.processors import ConditionalProcessor, Processor, Transformation
 from prompt_toolkit.shortcuts import CompleteStyle, radiolist_dialog
 from prompt_toolkit.styles import Style, merge_styles
 from prompt_toolkit.styles.pygments import style_from_pygments_cls
 from prompt_toolkit.layout.screen import Char
+from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Label, TextArea
 from pygments.lexers.markup import MarkdownLexer
+from pygments.lexers import get_lexer_by_name
+from pygments.lexers.special import TextLexer
 from pygments.styles import get_style_by_name
+from pygments.util import ClassNotFound
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -145,9 +151,9 @@ XTERM_MODIFY_OTHER_KEYS_OFF = "\x1b[>4m"
 KITTY_KEYBOARD_PROTOCOL_ON = "\x1b[>1u"
 KITTY_KEYBOARD_PROTOCOL_OFF = "\x1b[<u"
 for _sequence in SHIFT_ENTER_SEQUENCES:
-    ANSI_SEQUENCES.setdefault(_sequence, (Keys.Escape, Keys.ControlM))
+    ANSI_SEQUENCES[_sequence] = (Keys.Escape, Keys.ControlM)
 for _sequence in CTRL_ENTER_SEQUENCES:
-    ANSI_SEQUENCES.setdefault(_sequence, (Keys.Escape, Keys.ControlJ))
+    ANSI_SEQUENCES[_sequence] = (Keys.Escape, Keys.ControlJ)
 ANSI_SEQUENCES.setdefault("\x1b[27;5;99~", Keys.ControlC)
 ANSI_SEQUENCES.setdefault("\x1b[27;5;100~", Keys.ControlD)
 ANSI_SEQUENCES.setdefault("\x1b[99;5u", Keys.ControlC)
@@ -163,6 +169,7 @@ MAX_INPUT_HEIGHT = 12
 DEFAULT_SCROLL_LINES = 2
 INPUT_PLACEHOLDER_TEXT = "Ask Klaude anything. Type '/' to use commands."
 ESCAPE_SEQUENCE_TIMEOUT = 0.05
+CHARACTER_STREAM_DELAY = 0.01
 ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 RESET_THEME_CHOICE = "reset to default"
 CANCEL_CHOICE = "cancel"
@@ -171,6 +178,7 @@ SETTINGS_CATEGORIES = (
     "output field",
     "input field",
     "scroll",
+    "runtime",
     RESET_THEME_CHOICE,
     CANCEL_CHOICE,
 )
@@ -200,15 +208,69 @@ INPUT_HEIGHT_CHOICES = tuple(
     for height in range(MIN_INPUT_HEIGHT, MAX_INPUT_HEIGHT + 1)
 )
 TEXT_THEME_PREVIEW_BLOCK = (
-    "\n\n### Text color preview\n"
-    "Regular text · **bold text** · `inline_code`\n"
-    "```python\nvalue = \"Klaude\"\nprint(value)\n```\n"
+    "\n\n```html\n"
+    "<main class=\"preview\">\n"
+    "  <h1 data-theme=\"syntax\">Klaude</h1>\n"
+    "  <button type=\"button\" aria-pressed=\"false\">Run preview</button>\n"
+    "  <p>Local-first <strong>coding</strong> assistant.</p>\n"
+    "</main>\n"
+    "```\n\n"
+    "```javascript\n"
+    "const status = { ready: true, tokens: 128 };\n"
+    "function render({ ready, tokens }) {\n"
+    "  const label = ready ? \"READY\" : \"WORKING\";\n"
+    "  return `${label} · ${tokens.toLocaleString()} tokens`;\n"
+    "}\n"
+    "console.log(render(status));\n"
+    "```\n\n"
+    "```json\n"
+    "{\n"
+    "  \"theme\": \"monokai\",\n"
+    "  \"preview\": true,\n"
+    "  \"languages\": [\"html\", \"javascript\", \"python\", \"cpp\"],\n"
+    "  \"limits\": { \"context\": 8192, \"threads\": 8 }\n"
+    "}\n"
+    "```\n\n"
+    "```python\n"
+    "from dataclasses import dataclass\n\n"
+    "@dataclass\n"
+    "class Task:\n"
+    "    name: str\n"
+    "    completed: bool = False\n\n"
+    "def render(task: Task) -> str:\n"
+    "    state = \"done\" if task.completed else \"waiting\"\n"
+    "    return f\"{task.name}: {state}\"\n\n"
+    "print(render(Task(\"Preview syntax\")))\n"
+    "```\n\n"
+    "```cpp\n"
+    "#include <iostream>\n"
+    "#include <string>\n\n"
+    "int main() {\n"
+    "  const std::string theme = \"Monokai\";\n"
+    "  std::cout << \"Preview: \" << theme << '\\n';\n"
+    "  return 0;\n"
+    "}\n"
+    "```\n"
 )
+BRAILLE_LOADING_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 TUI_THEME_LABELS = {
+    "crimson-red": "Crimson Red",
     "autumn": "Autumn",
-    "pastelle-pink": "Pastelle Pink",
+    "egg-yolk": "Egg Yolk",
     "hacker-green": "Hacker Green",
     "neon-synth": "Neon Synth",
+    "pastelle-red": "Pastelle Red",
+    "pastelle-orange": "Pastelle Orange",
+    "pastelle-yellow": "Pastelle Yellow",
+    "pastelle-lime": "Pastelle Lime",
+    "pastelle-green": "Pastelle Green",
+    "pastelle-cyan": "Pastelle Cyan",
+    "pastelle-azure": "Pastelle Azure",
+    "pastelle-blue": "Pastelle Blue",
+    "pastelle-lavender": "Pastelle Lavender",
+    "pastelle-purple": "Pastelle Purple",
+    "pastelle-magenta": "Pastelle Magenta",
+    "pastelle-pink": "Pastelle Pink",
 }
 TEXT_THEME_LABELS = {
     "vscode-dark": "VS Code Dark",
@@ -223,10 +285,23 @@ TEXT_THEME_PYGMENTS = {
     "solarized-light": "solarized-light",
 }
 TUI_THEME_ALIASES = {
+    "crimson": "crimson-red",
+    "red": "pastelle-red",
+    "egg": "egg-yolk",
+    "yolk": "egg-yolk",
+    "yellow": "pastelle-yellow",
     "pastelle": "pastelle-pink",
     "pink": "pastelle-pink",
     "hacker": "hacker-green",
-    "green": "hacker-green",
+    "green": "pastelle-green",
+    "lime": "pastelle-lime",
+    "sky": "pastelle-cyan",
+    "cyan": "pastelle-cyan",
+    "azure": "pastelle-azure",
+    "blue": "pastelle-blue",
+    "lavender": "pastelle-lavender",
+    "purple": "pastelle-purple",
+    "magenta": "pastelle-magenta",
     "neon": "neon-synth",
     "synth": "neon-synth",
 }
@@ -236,7 +311,68 @@ TEXT_THEME_ALIASES = {
     "github": "github-dark",
     "solarized": "solarized-light",
 }
+
+
+def _pastelle_theme(accent: str, soft: str) -> dict[str, str]:
+    """Pastelle accents on shared neutral terminal surfaces."""
+    return {
+        "background": "bg:#181818 #e8e8e8",
+        "output-field": "bg:#181818 #e8e8e8",
+        "input-field": "bg:#242424 #f2f2f2",
+        "frame.border": accent,
+        "frame.label": f"{soft} bold",
+        "status": "bg:#303030 #dedede",
+        "status.busy": f"bg:#303030 {accent} bold",
+        "status.queue": f"bg:#303030 {soft}",
+        "status.error": "bg:#303030 #ff9292 bold",
+        "bottom-toolbar": "bg:#303030 #dedede",
+        "bottom-toolbar.model": f"bg:#303030 {soft} bold",
+        "bottom-toolbar.tokens": f"bg:#303030 {accent}",
+        "completion-menu.completion": "bg:#383838 #e8e8e8",
+        "completion-menu.completion.current": "bg:#484848 #f2f2f2 bold",
+        "completion-menu.meta.completion": "bg:#303030 #a8a0a4",
+        "completion-menu.meta.completion.current": "bg:#404040 #b8b2b4",
+        "scrollbar.background": "bg:#383838",
+        "scrollbar.button": f"bg:{accent}",
+    }
+
+
+PASTELLE_THEME_STYLES = {
+    "pastelle-red": _pastelle_theme("#ff8795", "#ffb5bd"),
+    "pastelle-orange": _pastelle_theme("#ffad70", "#ffd0ad"),
+    "pastelle-yellow": _pastelle_theme("#f6d66c", "#fff0ac"),
+    "pastelle-lime": _pastelle_theme("#b9e96e", "#dcf7ac"),
+    "pastelle-green": _pastelle_theme("#83d9a0", "#b6efc8"),
+    "pastelle-cyan": _pastelle_theme("#76dce0", "#afeff0"),
+    "pastelle-azure": _pastelle_theme("#7ec7f5", "#b6e2fb"),
+    "pastelle-blue": _pastelle_theme("#9cb7ff", "#c8d6ff"),
+    "pastelle-lavender": _pastelle_theme("#c7a7f4", "#e1cdfc"),
+    "pastelle-purple": _pastelle_theme("#b994ed", "#dabef7"),
+    "pastelle-magenta": _pastelle_theme("#ef9cda", "#f8c5eb"),
+    "pastelle-pink": _pastelle_theme("#f3a2be", "#fac8d9"),
+}
+
 TUI_THEME_STYLES = {
+    "crimson-red": {
+        "background": "bg:#211820 #ffe8e8",
+        "output-field": "bg:#211820 #ffe8e8",
+        "input-field": "bg:#35222a #fff1e9",
+        "frame.border": "#ff3b4f",
+        "frame.label": "#ff9aa4 bold",
+        "status": "bg:#650d15 #ffe0e0",
+        "status.busy": "bg:#650d15 #ff4050 bold",
+        "status.queue": "bg:#650d15 #ff9aa4",
+        "status.error": "bg:#650d15 #ff9292 bold",
+        "bottom-toolbar": "bg:#650d15 #ffe0e0",
+        "bottom-toolbar.model": "bg:#650d15 #ff9aa4 bold",
+        "bottom-toolbar.tokens": "bg:#650d15 #ff4050",
+        "completion-menu.completion": "bg:#76121b #ffe5e5",
+        "completion-menu.completion.current": "bg:#8d1822 #ffe5e5 bold",
+        "completion-menu.meta.completion": "bg:#611018 #a8a0a4",
+        "completion-menu.meta.completion.current": "bg:#75131c #a8a0a4",
+        "scrollbar.background": "bg:#76121b",
+        "scrollbar.button": "bg:#ff2638",
+    },
     "autumn": {
         "background": "bg:#211820 #f8e1d8",
         "output-field": "bg:#211820 #f8e1d8",
@@ -251,9 +387,31 @@ TUI_THEME_STYLES = {
         "bottom-toolbar.model": "bg:#452a35 #ffc1a8 bold",
         "bottom-toolbar.tokens": "bg:#452a35 #ff9b72",
         "completion-menu.completion": "bg:#50313a #fbe5dc",
-        "completion-menu.completion.current": "bg:#f29a72 #211820 bold",
+        "completion-menu.completion.current": "bg:#5b3943 #fbe5dc bold",
+        "completion-menu.meta.completion": "bg:#432a32 #a8a0a4",
+        "completion-menu.meta.completion.current": "bg:#4d3039 #a8a0a4",
         "scrollbar.background": "bg:#50313a",
         "scrollbar.button": "bg:#f29a72",
+    },
+    "egg-yolk": {
+        "background": "bg:#201a08 #fff0bd",
+        "output-field": "bg:#201a08 #fff0bd",
+        "input-field": "bg:#352b0d #fff8db",
+        "frame.border": "#f3c84b",
+        "frame.label": "#ffe58b bold",
+        "status": "bg:#4a3b11 #ffedb0",
+        "status.busy": "bg:#4a3b11 #ffd35a bold",
+        "status.queue": "bg:#4a3b11 #ffe58b",
+        "status.error": "bg:#4a3b11 #ff8a8a bold",
+        "bottom-toolbar": "bg:#4a3b11 #ffedb0",
+        "bottom-toolbar.model": "bg:#4a3b11 #ffe58b bold",
+        "bottom-toolbar.tokens": "bg:#4a3b11 #ffd35a",
+        "completion-menu.completion": "bg:#584617 #fff0bd",
+        "completion-menu.completion.current": "bg:#68551d #fff0bd bold",
+        "completion-menu.meta.completion": "bg:#493a12 #a8a0a4",
+        "completion-menu.meta.completion.current": "bg:#554516 #a8a0a4",
+        "scrollbar.background": "bg:#584617",
+        "scrollbar.button": "bg:#edbf3f",
     },
     "pastelle-pink": {
         "background": "bg:#20151d #f4dce9",
@@ -269,7 +427,9 @@ TUI_THEME_STYLES = {
         "bottom-toolbar.model": "bg:#41283a #ffc1dc bold",
         "bottom-toolbar.tokens": "bg:#41283a #cab8ff",
         "completion-menu.completion": "bg:#432c3d #f8ddea",
-        "completion-menu.completion.current": "bg:#f29ac2 #20151d bold",
+        "completion-menu.completion.current": "bg:#4e3447 #f8ddea bold",
+        "completion-menu.meta.completion": "bg:#392633 #a8a0a4",
+        "completion-menu.meta.completion.current": "bg:#432c3c #a8a0a4",
         "scrollbar.background": "bg:#432c3d",
         "scrollbar.button": "bg:#f29ac2",
     },
@@ -287,9 +447,31 @@ TUI_THEME_STYLES = {
         "bottom-toolbar.model": "bg:#0d2712 #68ff8d bold",
         "bottom-toolbar.tokens": "bg:#0d2712 #20d9a0",
         "completion-menu.completion": "bg:#103219 #caffd3",
-        "completion-menu.completion.current": "bg:#24d15d #061006 bold",
+        "completion-menu.completion.current": "bg:#164222 #caffd3 bold",
+        "completion-menu.meta.completion": "bg:#0c2911 #a8a0a4",
+        "completion-menu.meta.completion.current": "bg:#103416 #a8a0a4",
         "scrollbar.background": "bg:#103219",
         "scrollbar.button": "bg:#24d15d",
+    },
+    "sky-blue": {
+        "background": "bg:#0c1924 #d9efff",
+        "output-field": "bg:#0c1924 #d9efff",
+        "input-field": "bg:#132c3d #e8f7ff",
+        "frame.border": "#6cc7f2",
+        "frame.label": "#a8e3ff bold",
+        "status": "bg:#1b3d53 #d2efff",
+        "status.busy": "bg:#1b3d53 #74cfff bold",
+        "status.queue": "bg:#1b3d53 #a8e3ff",
+        "status.error": "bg:#1b3d53 #ff8a8a bold",
+        "bottom-toolbar": "bg:#1b3d53 #d2efff",
+        "bottom-toolbar.model": "bg:#1b3d53 #a8e3ff bold",
+        "bottom-toolbar.tokens": "bg:#1b3d53 #74cfff",
+        "completion-menu.completion": "bg:#21485f #d9efff",
+        "completion-menu.completion.current": "bg:#28566f #d9efff bold",
+        "completion-menu.meta.completion": "bg:#1b3d51 #a8a0a4",
+        "completion-menu.meta.completion.current": "bg:#214960 #a8a0a4",
+        "scrollbar.background": "bg:#21485f",
+        "scrollbar.button": "bg:#65c5ee",
     },
     "neon-synth": {
         "background": "bg:#100b22 #e4ddff",
@@ -305,11 +487,16 @@ TUI_THEME_STYLES = {
         "bottom-toolbar.model": "bg:#211544 #00e5ff bold",
         "bottom-toolbar.tokens": "bg:#211544 #ff55dd",
         "completion-menu.completion": "bg:#291956 #e4ddff",
-        "completion-menu.completion.current": "bg:#00e5ff #100b22 bold",
+        "completion-menu.completion.current": "bg:#332168 #e4ddff bold",
+        "completion-menu.meta.completion": "bg:#221549 #a8a0a4",
+        "completion-menu.meta.completion.current": "bg:#2a1a5b #a8a0a4",
         "scrollbar.background": "bg:#291956",
         "scrollbar.button": "bg:#ff55dd",
     },
 }
+TUI_THEME_STYLES.update(PASTELLE_THEME_STYLES)
+# Preserve existing saved Sky Blue appearances while presenting it as Pastelle Cyan.
+TUI_THEME_STYLES["sky-blue"] = PASTELLE_THEME_STYLES["pastelle-cyan"]
 TRANSCRIPT_STYLE = Style.from_dict(
     {
         "help.category": "underline bold",
@@ -330,23 +517,105 @@ HELP_CATEGORY_TITLES = frozenset(
 
 
 class TranscriptLexer(Lexer):
-    """Markdown highlighting plus semantic styling for Klaude transcript chrome."""
+    """Markdown highlighting, fenced-code syntax, and transcript chrome."""
 
     _MESSAGE_PREFIXES = ("━━ you · ", "━━ klaude · ")
+
+    @staticmethod
+    def _is_logo_line(line: str) -> bool:
+        return (
+            len(line) == 69
+            and (
+                (line.startswith("╔") and line.endswith("╗"))
+                or (line.startswith("╚") and line.endswith("╝"))
+                or (line.startswith("║") and line.endswith("║"))
+            )
+        )
 
     def __init__(self) -> None:
         self._markdown = PygmentsLexer(MarkdownLexer)
 
+    @staticmethod
+    def _help_command_prefix(line: str) -> str | None:
+        """Return the registered usage at the start of a help entry line."""
+        leading = len(line) - len(line.lstrip())
+        if not leading:
+            return None
+        content = line[leading:]
+        for usage in _HELP_COMMAND_USAGES:
+            if content == usage or (
+                content.startswith(usage)
+                and len(content) > len(usage)
+                and content[len(usage)].isspace()
+            ):
+                return line[: leading + len(usage)]
+        return None
+
+    @staticmethod
+    def _without_prefix(fragments, prefix_length: int):
+        """Keep a lexer result's styling after a known character prefix."""
+        remainder = []
+        remaining = prefix_length
+        for style, text in fragments:
+            if remaining >= len(text):
+                remaining -= len(text)
+                continue
+            if remaining:
+                text = text[remaining:]
+                remaining = 0
+            remainder.append((style, text))
+        return remainder
+
     def lex_document(self, document):
         markdown_line = self._markdown.lex_document(document)
+        code_lines: dict[int, list[tuple[str, str]]] = {}
+        fence_language: str | None = None
+        fence_start = 0
+
+        def highlight_fence(start: int, end: int, language: str | None) -> None:
+            if start >= end:
+                return
+            try:
+                lexer = get_lexer_by_name(language) if language else TextLexer()
+            except ClassNotFound:
+                lexer = TextLexer()
+            highlighted = PygmentsLexer(lexer.__class__).lex_document(
+                Document("\n".join(document.lines[start:end]))
+            )
+            for line_number in range(start, end):
+                code_lines[line_number] = highlighted(line_number - start)
+
+        for line_number, line in enumerate(document.lines):
+            fence = re.match(r"^\s*```\s*([^\s`]*)", line)
+            if fence is None:
+                continue
+            if fence_language is None:
+                fence_language = fence.group(1).lower() or None
+                fence_start = line_number + 1
+            else:
+                highlight_fence(fence_start, line_number, fence_language)
+                fence_language = None
+        if fence_language is not None:
+            highlight_fence(fence_start, len(document.lines), fence_language)
 
         def get_line(lineno: int):
             line = document.lines[lineno]
+            if self._is_logo_line(line):
+                return [("class:transcript.logo", line)]
             if line in HELP_CATEGORY_TITLES:
                 return [("class:help.category", line)]
             if line.startswith(self._MESSAGE_PREFIXES):
                 return [("class:transcript.divider", line)]
-            return markdown_line(lineno)
+            if lineno in code_lines:
+                return code_lines[lineno]
+            fragments = markdown_line(lineno)
+            command_prefix = self._help_command_prefix(line)
+            if command_prefix is None:
+                return fragments
+            return [
+                ("class:help.command", command_prefix),
+                *self._without_prefix(fragments, len(command_prefix)),
+            ]
 
         return get_line
 
@@ -364,6 +633,23 @@ def _is_user_transcript_line(document: Document, lineno: int) -> bool:
         if line.startswith(("━━ klaude · ", "━━ Session: ")):
             return True
     return False
+
+
+def _fenced_code_lines(document: Document) -> set[int]:
+    """Return every row belonging to a Markdown fenced code block."""
+    lines: set[int] = set()
+    fence_start: int | None = None
+    for index, line in enumerate(document.lines):
+        if not re.match(r"^\s*```", line):
+            continue
+        if fence_start is None:
+            fence_start = index
+        else:
+            lines.update(range(fence_start, index + 1))
+            fence_start = None
+    if fence_start is not None:
+        lines.update(range(fence_start, len(document.lines)))
+    return lines
 
 
 class TranscriptWindow(Window):
@@ -403,6 +689,7 @@ class TranscriptWindow(Window):
             get_line_prefix,
         )
         start_x = write_position.xpos + move_x
+        fenced_code_lines = _fenced_code_lines(self.content.buffer.document)
         for relative_y, (lineno, _column) in visible_rows.items():
             document = self.content.buffer.document
             # Prompt Toolkit also calls this method to render the one-cell
@@ -410,14 +697,21 @@ class TranscriptWindow(Window):
             # remain untouched.
             if width <= 1 or lineno >= len(document.lines):
                 continue
-            if not _is_user_transcript_line(document, lineno):
+            user_line = _is_user_transcript_line(document, lineno)
+            code_line = lineno in fenced_code_lines
+            if not user_line and not code_line:
                 continue
+            surface_style = (
+                "class:transcript.code"
+                if code_line
+                else "class:transcript.user-message"
+            )
             row = new_screen.data_buffer[write_position.ypos + relative_y]
             for column in range(width):
                 cell = row[start_x + column]
                 row[start_x + column] = Char(
                     cell.char,
-                    f"{cell.style} class:transcript.user-message".strip(),
+                    f"{cell.style} {surface_style}".strip(),
                 )
         return visible_rows, rowcol_to_yx
 
@@ -425,9 +719,12 @@ class TranscriptWindow(Window):
 class InputPlaceholderProcessor(Processor):
     """Render a hint without treating it as a cursor-moving input prefix."""
 
+    def __init__(self, text_provider=None) -> None:
+        self._text_provider = text_provider or (lambda: INPUT_PLACEHOLDER_TEXT)
+
     def apply_transformation(self, transformation_input) -> Transformation:
         return Transformation(
-            [("class:input.placeholder", INPUT_PLACEHOLDER_TEXT)],
+            [("class:input.placeholder", self._text_provider())],
             source_to_display=lambda position: position,
             display_to_source=lambda position: 0,
         )
@@ -435,6 +732,39 @@ class InputPlaceholderProcessor(Processor):
 
 def _tui_style(theme: str, text_theme: str):
     chrome = TUI_THEME_STYLES.get(theme, TUI_THEME_STYLES[DEFAULT_TUI_THEME])
+    input_background = next(
+        token.removeprefix("bg:")
+        for token in chrome["input-field"].split()
+        if token.startswith("bg:")
+    )
+    output_background = next(
+        token.removeprefix("bg:")
+        for token in chrome["output-field"].split()
+        if token.startswith("bg:")
+    )
+    output_foreground = next(
+        token for token in chrome["output-field"].split() if token.startswith("#")
+    )
+    def foreground(style: str) -> str:
+        return next(token for token in style.split() if token.startswith("#"))
+    def blend_hex(background: str, foreground: str, ratio: float) -> str:
+        background_rgb = tuple(int(background[index : index + 2], 16) for index in (1, 3, 5))
+        foreground_rgb = tuple(int(foreground[index : index + 2], 16) for index in (1, 3, 5))
+        return "#" + "".join(
+            f"{round(base + (accent - base) * ratio):02x}"
+            for base, accent in zip(background_rgb, foreground_rgb, strict=True)
+        )
+    muted_runtime_text = blend_hex(
+        input_background,
+        output_foreground,
+        0.60 if theme == "crimson-red" else 0.45,
+    )
+    composer_rail = f"bg:{input_background} {output_background}"
+    footer_path_background = next(
+        token.removeprefix("bg:")
+        for token in chrome["bottom-toolbar"].split()
+        if token.startswith("bg:")
+    )
     pygments_name = TEXT_THEME_PYGMENTS.get(
         text_theme,
         TEXT_THEME_PYGMENTS[DEFAULT_TEXT_THEME],
@@ -443,7 +773,33 @@ def _tui_style(theme: str, text_theme: str):
         [
             Style.from_dict(chrome),
             style_from_pygments_cls(get_style_by_name(pygments_name)),
-            Style.from_dict({"transcript.user-message": chrome["input-field"]}),
+            Style.from_dict(
+                {
+                    # Keep the user surface, but do not set a foreground here:
+                    # a foreground would override Markdown, command, and code
+                    # token colors after TranscriptWindow applies this class.
+                    "transcript.user-message": f"bg:{input_background}",
+                    "transcript.code": f"bg:{input_background}",
+                    "composer.surface": chrome["input-field"],
+                    "composer.padding": chrome["input-field"],
+                    "composer.rail": composer_rail,
+                    "composer.rail.busy": composer_rail,
+                    "composer.rail.warning": composer_rail,
+                    "composer.rail.error": composer_rail,
+                    "runtime_text": muted_runtime_text,
+                    "runtime_model": f"{muted_runtime_text} bold",
+                    "runtime_busy": f"{muted_runtime_text} bold",
+                    "runtime_queue": muted_runtime_text,
+                    "runtime_error": f"{foreground(chrome['status.error'])} bold",
+                    "help.command": f"{foreground(chrome['frame.border'])} bold",
+                    "transcript.logo": f"{foreground(chrome['frame.border'])} bold",
+                    "footer": chrome["input-field"],
+                    "footer.brand": f"{chrome['scrollbar.button']} {output_background}",
+                    "footer.path": f"bg:{footer_path_background} {output_foreground}",
+                    "footer.path.rail": f"bg:{footer_path_background} {input_background}",
+                    "footer.keybinds": muted_runtime_text,
+                }
+            ),
             TRANSCRIPT_STYLE,
         ]
     )
@@ -475,6 +831,8 @@ def _load_tui_appearance(path: Path) -> TUIAppearance:
     else:
         theme = str(theme_group or DEFAULT_TUI_THEME)
         text_theme = str(value.get("text_theme", DEFAULT_TEXT_THEME))
+    if theme == "sky-blue":
+        theme = "pastelle-cyan"
     if theme not in TUI_THEME_LABELS:
         theme = DEFAULT_TUI_THEME
     if text_theme not in TEXT_THEME_LABELS:
@@ -544,21 +902,61 @@ def _save_tui_appearance(path: Path, appearance: TUIAppearance) -> None:
 
 
 def _load_last_chat_model(path: Path) -> str | None:
-    try:
-        value = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
+    value = _load_chat_preferences(path)
     model = value.get("last_model")
     return model.strip() if isinstance(model, str) and model.strip() else None
 
 
-def _save_last_chat_model(path: Path, model: str) -> None:
+def _load_chat_preferences(path: Path) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _write_chat_preferences(path: Path, value: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps({"last_model": model}, indent=2, ensure_ascii=False) + "\n"
-    )
+    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
     temporary.replace(path)
+
+
+def _save_last_chat_model(path: Path, model: str) -> None:
+    value = _load_chat_preferences(path)
+    value["last_model"] = model
+    _write_chat_preferences(path, value)
+
+
+def _load_runtime_preferences(path: Path) -> dict[str, int | None]:
+    raw = _load_chat_preferences(path).get("runtime_options")
+    if not isinstance(raw, dict):
+        return {}
+    preferences: dict[str, int | None] = {}
+    for key in ("num_gpu", "num_thread", "num_ctx"):
+        value = raw.get(key)
+        if value is None and key in raw:
+            preferences[key] = None
+        elif type(value) is int and (
+            (key == "num_gpu" and value >= -1)
+            or (key != "num_gpu" and value >= 1)
+        ):
+            preferences[key] = value
+    return preferences
+
+
+def _save_runtime_preferences(path: Path, preferences: dict[str, int | None]) -> None:
+    value = _load_chat_preferences(path)
+    value["runtime_options"] = preferences
+    _write_chat_preferences(path, value)
+
+
+def _apply_runtime_preferences(agent: Agent, preferences: dict[str, int | None]) -> None:
+    for key, value in preferences.items():
+        if value is None:
+            agent.ollama_options.pop(key, None)
+        else:
+            agent.ollama_options[key] = value
 
 
 def _resolve_theme_name(
@@ -579,7 +977,9 @@ CHAT_PROMPT_STYLE = Style.from_dict(
         "bottom-toolbar.model": "bg:#1c2533 #5fd7ff bold",
         "bottom-toolbar.tokens": "bg:#1c2533 #ffd75f",
         "completion-menu.completion": "bg:#263445 #d7e3f0",
-        "completion-menu.completion.current": "bg:#00a7c4 #081018 bold",
+        "completion-menu.completion.current": "bg:#304052 #d7e3f0 bold",
+        "completion-menu.meta.completion": "bg:#202c3b #a8a0a4",
+        "completion-menu.meta.completion.current": "bg:#283747 #a8a0a4",
         "scrollbar.background": "bg:#263445",
         "scrollbar.button": "bg:#00a7c4",
         **TUI_THEME_STYLES[DEFAULT_TUI_THEME],
@@ -701,6 +1101,11 @@ def _read_chat_input(
     ).strip()
 
 
+def _read_plain_chat_input() -> str:
+    """Read a simple line without alternate-screen UI or prompt decoration."""
+    return input("you> ").strip()
+
+
 def _print_trace(line: str) -> None:
     console.print(Text(line, style="dim"))
 
@@ -720,6 +1125,7 @@ class CommandSpec:
     summary: str
     aliases: tuple[str, ...] = ()
     examples: tuple[str, ...] = ()
+    visible: bool = True
 
 
 @dataclass(frozen=True)
@@ -927,7 +1333,7 @@ CHAT_COMMANDS = (
         "model",
         CommandSurface.CHAT,
         "/model",
-        "Interactively select an installed model, then choose reasoning effort.",
+        "Select an installed model, or use /model NAME to switch directly, then choose reasoning effort.",
     ),
     CommandSpec(
         "model-name",
@@ -941,7 +1347,7 @@ CHAT_COMMANDS = (
         "effort",
         CommandSurface.CHAT,
         "/effort",
-        "Interactively change reasoning effort for the active model.",
+        "Change reasoning effort, or use /effort LEVEL to set it directly.",
     ),
     CommandSpec(
         "effort-level",
@@ -972,6 +1378,24 @@ CHAT_COMMANDS = (
         "Interrupt the active response at the next safe boundary.",
     ),
     CommandSpec(
+        "restart-ollama",
+        CommandSurface.CHAT,
+        "/restart",
+        "Restart the local Ollama service after confirmation.",
+    ),
+    CommandSpec(
+        "stop-ollama",
+        CommandSurface.CHAT,
+        "/stop",
+        "Stop the local Ollama service after confirmation.",
+    ),
+    CommandSpec(
+        "refresh-tui",
+        CommandSurface.CHAT,
+        "/refresh",
+        "Redraw the TUI without changing the chat session.",
+    ),
+    CommandSpec(
         "cd",
         CommandSurface.CHAT,
         "/cd [PATH]",
@@ -991,23 +1415,44 @@ CHAT_COMMANDS = (
         "List files and directories in the current agent workspace.",
     ),
     CommandSpec(
+        "attach",
+        CommandSurface.CHAT,
+        "/attach PATH",
+        "Attach a file or folder as context for the next message.",
+        examples=("/attach README.md", "/attach ../other-project"),
+    ),
+    CommandSpec(
         "theme",
         CommandSurface.CHAT,
         "/theme [NAME]",
         "Open Theme settings for interface and text/code colors; NAME sets interface colors.",
         examples=("/theme", "/theme hacker-green", "/theme reset"),
     ),
-    CommandSpec("quit", CommandSurface.CHAT, "/quit", "Exit the interactive chat session."),
-    CommandSpec("exit", CommandSurface.CHAT, "/exit", "Exit the interactive chat session."),
-    CommandSpec("q", CommandSurface.CHAT, "/q", "Exit the interactive chat session."),
+    CommandSpec(
+        "quit", CommandSurface.CHAT, "/quit", "Exit the interactive chat session.", visible=False
+    ),
+    CommandSpec(
+        "exit",
+        CommandSurface.CHAT,
+        "/exit",
+        "Exit the interactive chat session. (Alternatives: /quit /q)",
+    ),
+    CommandSpec("q", CommandSurface.CHAT, "/q", "Exit the interactive chat session.", visible=False),
 )
 PUBLIC_COMMAND_SPECS = CLI_COMMANDS + DOCS_COMMANDS + CHAT_COMMANDS
+_HELP_COMMAND_USAGES = tuple(
+    sorted(
+        (spec.usage for spec in OPTION_COMMANDS + PUBLIC_COMMAND_SPECS),
+        key=len,
+        reverse=True,
+    )
+)
 CHAT_KEYBINDINGS = (
     CommandSpec("send", CommandSurface.CHAT, "Enter", "Send now, or queue behind an active turn."),
     CommandSpec(
         "steer-key",
         CommandSurface.CHAT,
-        "Ctrl+Enter",
+        "Alt+\\",
         "Prioritize the input and interrupt at the next safe boundary.",
     ),
     CommandSpec(
@@ -1047,19 +1492,44 @@ CHAT_KEYBINDINGS = (
         "Ctrl+C",
         "Stop or interrupt the active response; otherwise cancel a picker or clear input.",
     ),
-    CommandSpec("exit-key", CommandSurface.CHAT, "Ctrl+D", "Exit when the input field is empty."),
+    CommandSpec("exit-key", CommandSurface.CHAT, "Ctrl+D", "Exit and discard any unsent input."),
 )
 
 
 class ChatCommandCompleter(Completer):
     """Complete registered slash commands, including immediately after `/`."""
 
+    def __init__(self, workdir_provider=None) -> None:
+        self._workdir_provider = workdir_provider or Path.cwd
+
     def get_completions(self, document: Document, complete_event):
         prefix = document.text_before_cursor
+        if prefix.startswith("/attach "):
+            fragment = prefix.removeprefix("/attach ")
+            try:
+                root = Path(self._workdir_provider()).resolve()
+                candidate = Path(fragment).expanduser()
+                parent = (candidate.parent if candidate.is_absolute() else root / candidate.parent)
+                entries = sorted(parent.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))
+            except OSError:
+                return
+            for entry in entries[:100]:
+                value = str(entry) if Path(fragment).is_absolute() else str(entry.relative_to(root))
+                if entry.is_dir():
+                    value += "/"
+                if value.startswith(fragment):
+                    yield Completion(
+                        value,
+                        start_position=-len(fragment),
+                        display=f"{_attachment_suggestion_icon(entry)} {value}",
+                    )
+            return
         if not prefix.startswith("/") or any(char.isspace() for char in prefix):
             return
         seen: set[str] = set()
         for spec in CHAT_COMMANDS:
+            if not spec.visible:
+                continue
             command = spec.usage.split()[0]
             if command in seen or not command.startswith(prefix):
                 continue
@@ -1067,9 +1537,119 @@ class ChatCommandCompleter(Completer):
             yield Completion(
                 command,
                 start_position=-len(prefix),
-                display=command,
-                display_meta=spec.summary,
+                # The menu already provides one outer cell of spacing. These
+                # display-only spaces provide one more on each side.
+                display=f" {command} ",
+                display_meta=f" {spec.summary} ",
             )
+
+
+def _attachment_suggestion_icon(path: Path) -> str:
+    """Return the compact visual type marker for an attachment suggestion."""
+    if path.is_dir():
+        return "🗀"
+    suffix = path.suffix.lower()
+    if suffix in {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus"}:
+        return "🎝"
+    if suffix in {
+        ".txt", ".md", ".rst", ".toml", ".yaml", ".yml", ".json", ".ini",
+        ".cfg", ".conf", ".env", ".properties", ".xml", ".csv",
+    } or path.name.lower() in {"makefile", "dockerfile", "readme", "license"}:
+        return "🗎"
+    return "🗋"
+
+
+class TwoClickCompletionsMenuControl(CompletionsMenuControl):
+    """Require a second click to accept a slash-command completion."""
+
+    def mouse_handler(self, mouse_event):
+        if mouse_event.event_type != MouseEventType.MOUSE_UP:
+            return super().mouse_handler(mouse_event)
+        buffer = get_app().current_buffer
+        state = buffer.complete_state
+        selected = mouse_event.position.y
+        if state is None or not 0 <= selected < len(state.completions):
+            return None
+        if state.complete_index == selected:
+            buffer.complete_state = None
+        else:
+            buffer.go_to_completion(selected)
+        return None
+
+
+class TwoClickCompletionsMenu(CompletionsMenu):
+    """Completion menu wired to the two-click selection control."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.content.content = TwoClickCompletionsMenuControl()
+
+
+class TwoClickChoiceControl(FormattedTextControl):
+    """Make model and settings pickers select before they confirm."""
+
+    def __init__(self, tui) -> None:
+        super().__init__(
+            tui._choice_fragments,
+            focusable=True,
+            get_cursor_position=lambda: Point(x=0, y=tui._choice_index),
+        )
+        self._tui = tui
+
+    def mouse_handler(self, mouse_event):
+        if mouse_event.event_type != MouseEventType.MOUSE_UP:
+            return super().mouse_handler(mouse_event)
+        index = mouse_event.position.y
+        if 0 <= index < len(self._tui._choice_values):
+            self._tui._click_choice(index)
+            return None
+        return NotImplemented
+
+
+class CursorOffsetFloatContainer(FloatContainer):
+    """Support cursor-relative or prefix-anchored offsets for one popup."""
+
+    def __init__(
+        self,
+        *args,
+        offset_float: Float,
+        offset_columns: int,
+        anchor_columns=None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self._offset_float = offset_float
+        self._offset_columns = offset_columns
+        self._anchor_columns = anchor_columns
+
+    def _draw_float(
+        self, fl, screen, mouse_handlers, write_position, parent_style, erase_bg, z_index
+    ):
+        if fl is not self._offset_float or fl.attach_to_window is None:
+            return super()._draw_float(
+                fl, screen, mouse_handlers, write_position, parent_style, erase_bg, z_index
+            )
+        window = fl.attach_to_window
+        original_position = screen.menu_positions.get(window)
+        position = screen.get_menu_position(window)
+        shift = self._offset_columns
+        if self._anchor_columns is not None:
+            # The cursor begins one cell after the first typed character.
+            # Offset the growing prefix too, keeping the popup stationary.
+            shift += max(0, self._anchor_columns() - 1)
+        screen.menu_positions[window] = Point(
+            x=max(0, position.x - shift),
+            y=position.y,
+        )
+        try:
+            return super()._draw_float(
+                fl, screen, mouse_handlers, write_position, parent_style, erase_bg, z_index
+            )
+        finally:
+            if original_position is None:
+                screen.menu_positions.pop(window, None)
+            else:
+                screen.menu_positions[window] = original_position
 
 
 def _rounded_frame(body, title):
@@ -1190,8 +1770,21 @@ def _registered_command_usages() -> tuple[str, ...]:
     return tuple(spec.usage for spec in PUBLIC_COMMAND_SPECS)
 
 
+def _chat_commands_for_reference() -> tuple[CommandSpec, ...]:
+    """Show one entry per slash-command base in the human-facing reference."""
+    seen: set[str] = set()
+    entries: list[CommandSpec] = []
+    for spec in CHAT_COMMANDS:
+        base = spec.usage.split()[0]
+        if not spec.visible or base in seen:
+            continue
+        seen.add(base)
+        entries.append(spec)
+    return tuple(entries)
+
+
 def _command_reference_context() -> str:
-    chat = ", ".join(spec.usage for spec in CHAT_COMMANDS)
+    chat = ", ".join(spec.usage for spec in _chat_commands_for_reference())
     cli = ", ".join(spec.usage for spec in CLI_COMMANDS)
     docs = ", ".join(spec.usage for spec in DOCS_COMMANDS)
     return (
@@ -1328,7 +1921,12 @@ def format_command_reference(*, width: int | None = None) -> str:
     _append_command_section(lines, "OPTIONS", OPTION_COMMANDS, width=width)
     _append_command_section(lines, "CLI COMMANDS", CLI_COMMANDS, width=width)
     _append_command_section(lines, "DOCS COMMANDS", DOCS_COMMANDS, width=width)
-    _append_command_section(lines, "CHAT COMMANDS", CHAT_COMMANDS, width=width)
+    _append_command_section(
+        lines,
+        "CHAT COMMANDS",
+        _chat_commands_for_reference(),
+        width=width,
+    )
     return "\n".join(lines)
 
 
@@ -3355,6 +3953,41 @@ def _list_agent_directory(agent: Agent, arguments: str = "") -> tuple[bool, str]
     return True, output or "(empty)"
 
 
+def _control_ollama_service(action: str) -> tuple[bool, str]:
+    """Run the intentionally narrow local Ollama service controls."""
+    if action not in {"restart", "stop"}:
+        return False, f"unsupported Ollama action: {action}"
+    if shutil.which("systemctl") is None:
+        return False, "systemctl is unavailable; manage Ollama with your service manager"
+    try:
+        completed = subprocess.run(
+            ["systemctl", "--no-ask-password", action, "ollama"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"Ollama service {action} timed out"
+    except OSError as exc:
+        return False, f"could not {action} Ollama: {exc}"
+    if completed.returncode == 0:
+        completed_action = "restarted" if action == "restart" else "stopped"
+        return True, f"Ollama service {completed_action}"
+    detail = (completed.stderr or completed.stdout).strip().splitlines()
+    message = detail[-1] if detail else f"systemctl exited with status {completed.returncode}"
+    if "authentication" in message.lower() or "access denied" in message.lower():
+        return False, (
+            f"administrator access is required; run `sudo systemctl {action} ollama` "
+            "in a normal terminal"
+        )
+    return False, (
+        f"could not {action} Ollama: {message} "
+        f"Run `sudo systemctl {action} ollama` in a normal terminal to enter your "
+        "password and see the full service error."
+    )
+
+
 def _strip_ansi_sgr(value: str) -> str:
     return ANSI_SGR_RE.sub("", value)
 
@@ -3367,7 +4000,12 @@ def _print_preformatted_text(content: str) -> None:
     console.print(rendered, overflow="fold")
 
 
-def _print_assistant_text(content: str, metadata: dict | None = None) -> None:
+def _print_assistant_text(
+    content: str,
+    metadata: dict | None = None,
+    *,
+    plain: bool = False,
+) -> None:
     metadata = metadata or {}
     if (
         metadata.get("preserve_whitespace")
@@ -3377,7 +4015,7 @@ def _print_assistant_text(content: str, metadata: dict | None = None) -> None:
         _print_preformatted_text(content)
         return
     markdown = Markdown(content, code_theme="monokai")
-    if not console.is_terminal:
+    if plain or not console.is_terminal:
         console.print(markdown)
         return
     console.print(
@@ -3448,6 +4086,7 @@ def _render(
     session_id: str,
     user_msg: str,
     ui_state: ChatUIState | None = None,
+    plain: bool = False,
 ) -> str:
     builder = getattr(agent, "set_system_prompt_builder", None)
     if builder:
@@ -3472,7 +4111,7 @@ def _render(
                     console.file.flush()
                 streamed_logged = True
             else:
-                _print_assistant_text(event.payload["content"], metadata)
+                _print_assistant_text(event.payload["content"], metadata, plain=plain)
             memory.log_turn(session_id, "assistant", event.payload["content"])
             assistant_text.append(event.payload["content"])
         elif event.kind == "tool_start":
@@ -3816,11 +4455,13 @@ class PersistentChatTUI:
         cfg,
         appearance_path: Path | None = None,
         chat_preferences_path: Path | None = None,
+        character_stream: bool = True,
     ) -> None:
         self.agent = agent
         self.memory = memory
         self.session_id = session_id
         self.cfg = cfg
+        self.character_stream = character_stream
         self.ui_state = ChatUIState(
             model=agent.model,
             effort=_agent_effort_label(agent),
@@ -3836,21 +4477,28 @@ class PersistentChatTUI:
         self._history: list[str] = []
         self._history_index: int | None = None
         self._history_draft = ""
+        self._pending_attachments: list[Path] = []
         self._choice_kind: str | None = None
         self._choice_values: list[str] = []
         self._choice_index = 0
+        self._choice_click_index: int | None = None
         self._choice_prior_model: str | None = None
         self._choice_preview_appearance: tuple[str, str] | None = None
         self._text_theme_preview_visible = False
+        self._text_theme_preview_original: str | None = None
+        self._text_theme_preview_pending = ""
         self._height_edit = False
+        self._runtime_edit: str | None = None
         self._queue_edit_index: int | None = None
         self._queue_edit_draft = ""
         self._permission_request: dict[str, object] | None = None
+        self._ollama_control_action: str | None = None
         self._turn_started_at: float | None = None
         self.appearance_path = appearance_path or (cfg.data_dir / "appearance.json")
         self.chat_preferences_path = chat_preferences_path or (
             cfg.data_dir / "chat-preferences.json"
         )
+        self._runtime_preferences = _load_runtime_preferences(self.chat_preferences_path)
         self.appearance = _load_tui_appearance(self.appearance_path)
 
         self.output = TextArea(
@@ -3861,7 +4509,7 @@ class PersistentChatTUI:
                 f"Path: {getattr(agent, 'workdir', Path.cwd())}\n"
                 f"Model: {agent.model}\n"
                 "Tips\n"
-                "  Enter send/queue · Ctrl+Enter steer · Alt+Enter newline · / commands\n\n"
+                "  Enter to send/queue · Alt+\\ to steer · Alt+Enter newline · / commands\n\n"
                 + _session_divider(
                     session_id,
                     width=max(32, shutil.get_terminal_size((100, 24)).columns),
@@ -3891,19 +4539,19 @@ class PersistentChatTUI:
         self.input = TextArea(
             multiline=True,
             height=lambda: Dimension(
-                min=self.appearance.input_height,
-                max=self.appearance.input_max_height,
+                min=self._composer_content_height_limits()[0],
+                max=self._composer_content_height_limits()[1],
             ),
             history=InMemoryHistory(),
             auto_suggest=AutoSuggestFromHistory(),
-            completer=ChatCommandCompleter(),
+            completer=ChatCommandCompleter(lambda: getattr(self.agent, "workdir", Path.cwd())),
             complete_while_typing=True,
             wrap_lines=True,
             style="class:input-field",
         )
         self.input.control.input_processors.append(
             ConditionalProcessor(
-                InputPlaceholderProcessor(),
+                InputPlaceholderProcessor(self._composer_placeholder_text),
                 Condition(lambda: not self.input.text and self._choice_kind is None),
             )
         )
@@ -3924,11 +4572,7 @@ class PersistentChatTUI:
 
         configure_scroll(self.output.window)
         configure_scroll(self.input.window)
-        self.choice_control = FormattedTextControl(
-            self._choice_fragments,
-            focusable=True,
-            get_cursor_position=lambda: Point(x=0, y=self._choice_index),
-        )
+        self.choice_control = TwoClickChoiceControl(self)
         self.choice_window = Window(
             content=self.choice_control,
             height=self._choice_height,
@@ -3943,12 +4587,103 @@ class PersistentChatTUI:
             filter=Condition(lambda: self._choice_kind is not None),
             alternative_content=self.input,
         )
+        self.composer_row = VSplit(
+            [
+                Window(width=2, char=" ", style="class:composer.padding"),
+                self.composer,
+                Window(width=2, char=" ", style="class:composer.padding"),
+            ],
+            padding=0,
+            style="class:composer.surface",
+        )
+        self.composer_body = HSplit(
+            [
+                ConditionalContainer(
+                    content=Window(
+                        height=1,
+                        char=" ",
+                        style="class:composer.padding",
+                    ),
+                    filter=Condition(self._composer_vertical_padding_visible),
+                ),
+                self.composer_row,
+                ConditionalContainer(
+                    content=Window(
+                        height=1,
+                        char=" ",
+                        style="class:composer.padding",
+                    ),
+                    filter=Condition(self._composer_vertical_padding_visible),
+                ),
+            ],
+            style="class:composer.surface",
+        )
+        self.composer_rail = ConditionalContainer(
+            content=HSplit(
+                [
+                    Window(
+                        char="┃",
+                        style=self._composer_rail_style,
+                    ),
+                    Window(
+                        height=1,
+                        char="┃",
+                        style=self._composer_rail_style,
+                    ),
+                ],
+                width=1,
+            ),
+            filter=Condition(lambda: self.appearance.input_border),
+        )
+        self.composer_surface = VSplit(
+            [
+                self.composer_rail,
+                self.composer_body,
+            ],
+            padding=0,
+            style="class:composer.surface",
+        )
         self.status_control = FormattedTextControl(self._status_fragments)
         self.status_window = Window(
             content=self.status_control,
             height=1,
-            style="class:status",
+            style="class:output-field",
             dont_extend_width=False,
+        )
+        self.status_model_window = Window(
+            content=FormattedTextControl(self._status_model_fragments),
+            height=1,
+            style="class:output-field",
+            dont_extend_width=True,
+        )
+        self.status_row = VSplit(
+            [self.status_window, self.status_model_window],
+            padding=0,
+            style="class:output-field",
+        )
+        self.status_spacer = Window(height=1, style="class:output-field")
+        self.footer_brand_window = Window(
+            content=FormattedTextControl(self._footer_brand_fragments),
+            height=1,
+            style="class:footer",
+            dont_extend_width=True,
+        )
+        self.keybind_window = Window(
+            content=FormattedTextControl(self._keybind_fragments),
+            height=1,
+            style="class:footer",
+            dont_extend_width=True,
+        )
+        self.footer_path_window = Window(
+            content=FormattedTextControl(self._footer_path_fragments),
+            height=1,
+            style="class:footer",
+            dont_extend_width=False,
+        )
+        self.footer_row = VSplit(
+            [self.footer_brand_window, self.footer_path_window, self.keybind_window],
+            padding=0,
+            style="class:footer",
         )
         self.queue_control = FormattedTextControl(self._queue_fragments)
         self.queue_window = Window(
@@ -3962,46 +4697,93 @@ class PersistentChatTUI:
             content=self.queue_window,
             filter=Condition(lambda: bool(self.pending)),
         )
+        self.input_spacer = Window(
+            height=1,
+            char=" ",
+            style="class:output-field",
+        )
         self.key_bindings = self._build_key_bindings()
         self.output_frame = _rounded_frame(self.output, title="conversation")
-        self.input_frame = _rounded_frame(self.composer, title=self._input_title)
         self.output_panel = ConditionalContainer(
             content=self.output_frame,
             filter=Condition(lambda: self.appearance.output_border),
             alternative_content=self.output,
         )
-        self.input_panel = ConditionalContainer(
-            content=self.input_frame,
-            filter=Condition(lambda: self.appearance.input_border),
-            alternative_content=self.composer,
-        )
+        self.input_panel = self.composer_surface
         self._apply_field_settings()
+        completion_visible = Condition(
+            lambda: bool(
+                self.input.buffer.complete_state
+                and self.input.buffer.complete_state.completions
+            )
+        )
+        self.completion_menu = TwoClickCompletionsMenu(max_height=12, scroll_offset=1)
+        completion_padding = FormattedTextControl(self._completion_padding_fragments)
+        def completion_scrollbar_track(edge: str) -> Window:
+            return Window(
+                width=1,
+                height=1,
+                char=" ",
+                style=lambda: self._completion_scrollbar_padding_style(edge),
+            )
+        self.completion_popup = ConditionalContainer(
+            content=HSplit(
+                [
+                    VSplit(
+                        [
+                            Window(content=completion_padding, height=1, dont_extend_width=True),
+                            completion_scrollbar_track("top"),
+                        ],
+                        padding=0,
+                    ),
+                    self.completion_menu,
+                    VSplit(
+                        [
+                            Window(content=completion_padding, height=1, dont_extend_width=True),
+                            completion_scrollbar_track("bottom"),
+                        ],
+                        padding=0,
+                    ),
+                ]
+            ),
+            filter=completion_visible,
+        )
         body = HSplit(
             [
                 self.output_panel,
                 self.queue_panel,
+                self.input_spacer,
                 self.input_panel,
-                self.status_window,
+                self.status_row,
+                self.status_spacer,
+                self.footer_row,
             ],
             style="class:background",
         )
-        root = FloatContainer(
+        self.completion_float = Float(
+            xcursor=True,
+            ycursor=True,
+            attach_to_window=self.input.window,
+            content=self.completion_popup,
+        )
+        root = CursorOffsetFloatContainer(
             content=body,
-            floats=[
-                Float(
-                    xcursor=True,
-                    ycursor=True,
-                    content=CompletionsMenu(max_height=12, scroll_offset=1),
-                )
-            ],
+            floats=[self.completion_float],
+            offset_float=self.completion_float,
+            offset_columns=3,
+            anchor_columns=self._completion_anchor_columns,
         )
         self.application: Application[None] = Application(
             layout=Layout(root, focused_element=self.input),
             full_screen=True,
-            mouse_support=True,
+            # Leave ordinary drags to the terminal so users can select and
+            # copy transcript text without holding Shift. Mouse capture is
+            # enabled only while a click-selectable menu is visible.
+            mouse_support=Condition(self._mouse_interaction_active),
             paste_mode=False,
             key_bindings=self.key_bindings,
             style=_tui_style(self.appearance.theme, self.appearance.text_theme),
+            refresh_interval=0.1,
             before_render=self._before_render,
         )
         # Escape prefixes modified Enter and Alt+Up bindings. Keep the wait
@@ -4010,6 +4792,9 @@ class PersistentChatTUI:
         self.application.ttimeoutlen = ESCAPE_SEQUENCE_TIMEOUT
         self.application.timeoutlen = ESCAPE_SEQUENCE_TIMEOUT
         self.agent.gate.set_ask_callback(self._ask_permission)
+
+    def _mouse_interaction_active(self) -> bool:
+        return bool(self._choice_kind) or self.input.buffer.complete_state is not None
 
     def _input_title(self):
         if self._choice_kind:
@@ -4022,6 +4807,25 @@ class PersistentChatTUI:
             ("", f"  {self.ui_state.model}"),
             ("", f"  effort:{self.ui_state.effort}"),
         ]
+
+    def _composer_rail_style(self) -> str:
+        if self._permission_request:
+            return "class:composer.rail.warning"
+        if self.status_error:
+            return "class:composer.rail.error"
+        if self.running:
+            return "class:composer.rail.busy"
+        return "class:composer.rail"
+
+    def _composer_vertical_padding_visible(self) -> bool:
+        """Keep every composer mode inset without violating one-line mode."""
+        return self.appearance.input_max_height >= 3
+
+    def _composer_content_height_limits(self) -> tuple[int, int]:
+        padding = 2 if self._composer_vertical_padding_visible() else 0
+        minimum = max(1, self.appearance.input_height - padding)
+        maximum = max(minimum, self.appearance.input_max_height - padding)
+        return minimum, maximum
 
     def _apply_field_settings(self) -> None:
         self.output.window.right_margins = (
@@ -4082,9 +4886,10 @@ class PersistentChatTUI:
         return fragments
 
     def _choice_height(self) -> int:
+        minimum, maximum = self._composer_content_height_limits()
         return max(
-            self.appearance.input_height,
-            min(len(self._choice_values), self.appearance.input_max_height),
+            minimum,
+            min(len(self._choice_values), maximum),
         )
 
     def _choice_scroll(self, _window) -> int:
@@ -4099,15 +4904,116 @@ class PersistentChatTUI:
         for index, value in enumerate(self._choice_values):
             selected = index == self._choice_index
             marker = "›" if selected else " "
-            label = textwrap.shorten(value, width=width, placeholder="…")
+            active_marker = " *" if self._choice_value_is_active(value) else ""
+            label = textwrap.shorten(
+                value + active_marker,
+                width=width,
+                placeholder="…",
+            )
             style = "class:choice.selected" if selected else "class:choice.item"
             suffix = "\n" if index < len(self._choice_values) - 1 else ""
             fragments.append((style, f"  {marker} {label}{suffix}"))
         return fragments
 
+    def _choice_value_is_active(self, value: str) -> bool:
+        """Whether a picker row represents the value currently in use."""
+        kind = self._choice_kind
+        if kind == "theme":
+            saved_theme = (
+                self._choice_preview_appearance[0]
+                if self._choice_preview_appearance is not None
+                else self.appearance.theme
+            )
+            return value == saved_theme
+        if kind == "text theme":
+            saved_text_theme = (
+                self._choice_preview_appearance[1]
+                if self._choice_preview_appearance is not None
+                else self.appearance.text_theme
+            )
+            return value == saved_text_theme
+        if kind == "scroll speed":
+            return value == (
+                f"{self.appearance.scroll_lines} "
+                f"{'line' if self.appearance.scroll_lines == 1 else 'lines'} per scroll"
+            )
+        if kind == "input height":
+            if self.appearance.input_height != self.appearance.input_max_height:
+                return value == "enter min/max"
+            return value == (
+                f"{self.appearance.input_height} "
+                f"{'line' if self.appearance.input_height == 1 else 'lines'}"
+            )
+        if kind == "runtime device":
+            current = self.agent.ollama_options.get("num_gpu")
+            return value == (
+                "CPU only" if current == 0 else
+                "GPU preferred" if current == -1 else
+                "auto (Klaude decides)"
+            )
+        if kind == "CPU threads":
+            current = self.agent.ollama_options.get("num_thread")
+            if current is None:
+                return value == "auto (Klaude decides)"
+            return value == (str(current) if str(current) in self._choice_values else "custom input")
+        if kind == "context size":
+            current = int(self.agent.ollama_options.get("num_ctx", 8192))
+            formatted = f"{current:,}"
+            return value == (formatted if formatted in self._choice_values else "custom input")
+        if kind == "model":
+            return value == self.agent.model
+        if kind == "effort":
+            return value == _effort_value_label(self.agent.ollama_code_think)
+        return False
+
+    def _persist_runtime_preferences(self, *keys: str) -> None:
+        for key in keys:
+            self._runtime_preferences[key] = self.agent.ollama_options.get(key)
+        try:
+            _save_runtime_preferences(
+                self.chat_preferences_path,
+                self._runtime_preferences,
+            )
+        except OSError as exc:
+            self.status_error = f"runtime settings were not saved: {exc}"
+
+    def _completion_padding_fragments(self):
+        """Render fixed, column-matched padding around command suggestions."""
+        state = self.input.buffer.complete_state
+        completions = state.completions if state else ()
+        if not completions:
+            return []
+        command_width = max(7, max(get_cwidth(item.display_text) for item in completions) + 2)
+        meta_width = (
+            max(get_cwidth(item.display_meta_text) for item in completions) + 2
+            if any(item.display_meta_text for item in completions)
+            else 0
+        )
+        fragments = [("class:completion-menu.completion", " " * command_width)]
+        if meta_width:
+            fragments.append(("class:completion-menu.meta.completion", " " * meta_width))
+        return fragments
+
+    def _completion_anchor_columns(self) -> int:
+        """Keep the popup at the prefix that started this completion session."""
+        state = self.input.buffer.complete_state
+        document = state.original_document if state else self.input.buffer.document
+        return get_cwidth(document.text_before_cursor)
+
+    def _completion_scrollbar_padding_style(self, edge: str) -> str:
+        """Continue the thumb into fixed completion padding at either end."""
+        info = self.completion_menu.content.render_info
+        if info is None:
+            return "class:scrollbar.background"
+        at_top = info.vertical_scroll <= 0
+        at_bottom = info.vertical_scroll + info.window_height >= info.content_height
+        if (edge == "top" and at_top) or (edge == "bottom" and at_bottom):
+            return "class:scrollbar.button"
+        return "class:scrollbar.background"
+
     def _status_fragments(self):
         if self._height_edit:
-            return [("class:status", self.status_error or
+            return [("class:runtime_text", self.status_error or
                      " Enter min max (1–12) · Enter save · Ctrl+C cancel · type reset to default")]
         used = self.ui_state.prompt_tokens
         context = max(1, self.ui_state.context_window)
@@ -4115,63 +5021,113 @@ class PersistentChatTUI:
         if self._permission_request:
             tool = str(self._permission_request["tool"])
             return [
-                ("class:status.busy", f" ALLOW {tool}? "),
-                ("class:status", "y yes · n no · a always · Enter deny "),
+                ("class:runtime_busy", f" ALLOW {tool}? "),
+                ("class:runtime_text", "type y/n/a · Enter confirm (empty denies) "),
             ]
         if self._choice_kind:
+            typed = self.input.text.strip()
+            typed_hint = (
+                f" · typed: {textwrap.shorten(typed, width=24, placeholder='…')}"
+                if typed
+                else ""
+            )
             return [
-                ("class:status.busy", f" {self._choice_kind.upper()} "),
-                ("class:status", " ↑/↓ choose · PgUp/PgDn page · Enter select · Esc cancel "),
-                ("class:status.error", self.status_error),
+                ("class:runtime_busy", f" {self._choice_kind.upper()} "),
+                (
+                    "class:runtime_text",
+                    f" ↑/↓ choose · type option + Enter · Esc cancel{typed_hint} ",
+                ),
+                ("class:runtime_error", self.status_error),
             ]
-        state = "WORKING" if self.running else "READY"
-        state_style = "class:status.busy" if self.running else "class:status"
+        indicator = (
+            BRAILLE_LOADING_FRAMES[int(time.monotonic() * 10) % len(BRAILLE_LOADING_FRAMES)]
+            if self.running
+            else "★"
+        )
+        state = f"{indicator} {'WORKING' if self.running else 'READY'}"
+        state_style = "class:runtime_busy" if self.running else "class:runtime_text"
+        elapsed = ""
+        if self.running and self._turn_started_at is not None:
+            elapsed_seconds = max(0, int(time.monotonic() - self._turn_started_at))
+            hours, remainder = divmod(elapsed_seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            elapsed = (
+                f" {hours:02d}:{minutes:02d}:{seconds:02d}"
+                if hours
+                else f" {minutes:02d}:{seconds:02d}"
+            )
         width = shutil.get_terminal_size((100, 24)).columns
         estimate = "~" if self.ui_state.prompt_tokens_estimated else ""
         if width < 92:
             compact_activity = self.activity[:18]
             fragments = [
                 (state_style, f" {state} "),
-                ("class:status", f"{compact_activity}  "),
-                ("class:status.queue", f"q:{len(self.pending)}  "),
-                ("class:status", f"ctx:{estimate}{percent}%  "),
+                ("class:runtime_text", f"{compact_activity}{elapsed}  "),
+                ("class:runtime_queue", f"q:{len(self.pending)}  "),
+                ("class:runtime_text", f"ctx:{estimate}{percent}%  "),
                 (
-                    "class:bottom-toolbar.tokens",
+                    "class:runtime_text",
                     f"↑{used:,} ↓{self.ui_state.output_tokens:,} ",
                 ),
-                ("class:status", " C-Enter steer · Alt-Enter newline "
-                 "· Shift+Scroll "),
             ]
             if self.status_error:
-                fragments.append(("class:status.error", " error "))
+                fragments.append(("class:runtime_error", " error "))
             return fragments
         fragments = [
             (state_style, f" {state} "),
-            ("class:status", f"{self.activity}  "),
-            ("class:status.queue", f"queue {len(self.pending)}  "),
+            ("class:runtime_text", f"{self.activity}{elapsed}  "),
+            ("class:runtime_queue", f"queue {len(self.pending)}  "),
             (
-                "class:status",
+                "class:runtime_text",
                 f"ctx {estimate}{used:,}/{context:,} ({percent}%)  ",
             ),
             (
-                "class:bottom-toolbar.tokens",
+                "class:runtime_text",
                 f"last ↑{used:,} ↓{self.ui_state.output_tokens:,} ",
-            ),
-            (
-                "class:status",
-                " Enter send/queue · Ctrl+Enter steer · Alt+Enter newline "
-                "· Shift+Scroll ",
             ),
         ]
         if self.status_error:
-            fragments.append(("class:status.error", f" {self.status_error} "))
+            fragments.append(("class:runtime_error", f" {self.status_error} "))
         return fragments
+
+    def _status_model_fragments(self):
+        return [("class:runtime_model", f"{self.ui_state.model} ")]
+
+    def _keybind_fragments(self):
+        return [
+            (
+                "class:footer.keybinds",
+                " Enter to send/queue · Alt+\\ to steer · Alt+Enter newline · Shift+Scroll to scroll ",
+            )
+        ]
+
+    def _footer_brand_fragments(self):
+        try:
+            release = package_version("klaude-cli")
+        except PackageNotFoundError:
+            release = "dev"
+        return [("class:footer.brand", f"┃✦klaude v{release} ")]
+
+    def _footer_path_fragments(self):
+        path = Path(getattr(self.agent, "workdir", Path.cwd())).resolve()
+        try:
+            relative = path.relative_to(Path.home())
+        except ValueError:
+            label = str(path)
+        else:
+            label = "~" if not relative.parts else f"~/{relative}"
+        return [
+            ("class:footer.path", f" {label} "),
+            ("class:footer.path.rail", "┃"),
+        ]
 
     def _build_key_bindings(self) -> KeyBindings:
         bindings = KeyBindings()
 
         @bindings.add(
-            "escape", filter=Condition(lambda: bool(self._choice_kind) or self._height_edit)
+            "escape", filter=Condition(
+                lambda: bool(self._choice_kind) or self._height_edit or self._runtime_edit
+            )
         )
         def dismiss_picker(event) -> None:
             self._cancel_choice()
@@ -4183,8 +5139,10 @@ class PersistentChatTUI:
             self.input.buffer.cancel_completion()
 
         @bindings.add("<any>", filter=Condition(lambda: bool(self._choice_kind)))
-        def ignore_picker_typing(event) -> None:
-            pass
+        def type_picker_choice(event) -> None:
+            if event.data:
+                self.input.buffer.insert_text(event.data)
+                self.application.invalidate()
 
         @bindings.add("pageup", filter=Condition(lambda: bool(self._choice_kind)))
         def previous_page(event) -> None:
@@ -4205,23 +5163,18 @@ class PersistentChatTUI:
             if selected_completion is not None:
                 buffer.apply_completion(selected_completion)
             if self._choice_kind:
-                self._accept_choice()
+                self._submit_choice_response()
                 return
-            if self._permission_request and not self.input.text:
-                self._answer_permission("n")
+            if self._permission_request:
+                self._submit_permission_response()
                 return
             self._submit_buffer(steer=False)
 
-        for key, answer in (("y", "y"), ("n", "n"), ("a", "a")):
+        for key in ("y", "n", "a"):
 
             @bindings.add(key)
-            def permission_answer(event, answer=answer, key=key) -> None:
-                if self._choice_kind:
-                    return
-                if self._permission_request and not self.input.text:
-                    self._answer_permission(answer)
-                else:
-                    self.input.buffer.insert_text(key)
+            def permission_answer(event, key=key) -> None:
+                self.input.buffer.insert_text(key)
 
         @bindings.add("escape", "enter")
         @bindings.add("c-j")
@@ -4230,7 +5183,7 @@ class PersistentChatTUI:
                 return
             self.input.buffer.insert_text("\n")
 
-        @bindings.add("escape", "c-j")
+        @bindings.add("escape", "\\")
         def steer(event) -> None:
             if self._choice_kind:
                 return
@@ -4247,7 +5200,7 @@ class PersistentChatTUI:
 
         @bindings.add("c-c")
         def cancel(event) -> None:
-            if self._choice_kind or self._height_edit:
+            if self._choice_kind or self._height_edit or self._runtime_edit:
                 self._cancel_choice()
             elif self._queue_edit_index is not None:
                 self._cancel_queue_edit()
@@ -4261,8 +5214,7 @@ class PersistentChatTUI:
 
         @bindings.add("c-d")
         def exit_chat(event) -> None:
-            if not self.input.text:
-                self._exit()
+            self._exit()
 
         @bindings.add("up")
         def previous(event) -> None:
@@ -4306,6 +5258,16 @@ class PersistentChatTUI:
 
     def _set_input(self, text: str) -> None:
         self.input.buffer.set_document(Document(text, len(text)), bypass_readonly=True)
+
+    def _composer_placeholder_text(self) -> str:
+        """Describe the response expected when the composer is temporarily modal."""
+        if self._permission_request:
+            return "Type y/yes, n/no, or a/always · Enter confirms."
+        if self._height_edit:
+            return "Enter minimum and maximum input height, then press Enter."
+        if self._runtime_edit:
+            return "Enter a value, then press Enter. Esc or Ctrl+C goes back."
+        return INPUT_PLACEHOLDER_TEXT
 
     def _move_history(self, delta: int) -> None:
         if self._history_index is None:
@@ -4380,30 +5342,45 @@ class PersistentChatTUI:
     def _move_choice(self, delta: int) -> None:
         if not self._choice_values:
             return
+        self._choice_click_index = None
         self._choice_index = (self._choice_index + delta) % len(self._choice_values)
+        self._apply_choice_preview()
+        self.application.invalidate()
+
+    def _click_choice(self, index: int) -> None:
+        """Select once by mouse, then confirm only on a second click."""
+        if index == self._choice_click_index:
+            self._choice_click_index = None
+            self._accept_choice()
+            return
+        self._choice_click_index = index
+        self._choice_index = index
         self._apply_choice_preview()
         self.application.invalidate()
 
     def _show_text_theme_preview(self) -> None:
         if self._text_theme_preview_visible:
             return
-        self._append(TEXT_THEME_PREVIEW_BLOCK)
+        self._text_theme_preview_original = self.output.text
+        self._text_theme_preview_pending = ""
         self._text_theme_preview_visible = True
+        self.output.buffer.set_document(
+            Document(TEXT_THEME_PREVIEW_BLOCK, len(TEXT_THEME_PREVIEW_BLOCK)),
+            bypass_readonly=True,
+        )
 
     def _hide_text_theme_preview(self) -> None:
         if not self._text_theme_preview_visible:
             return
-        current = self.output.text
-        preview_at = current.rfind(TEXT_THEME_PREVIEW_BLOCK)
-        if preview_at >= 0:
-            current = (
-                current[:preview_at]
-                + current[preview_at + len(TEXT_THEME_PREVIEW_BLOCK) :]
-            )
-            self.output.buffer.set_document(
-                Document(current, len(current)),
-                bypass_readonly=True,
-            )
+        current = (self._text_theme_preview_original or "") + self._text_theme_preview_pending
+        if len(current) > self._TRANSCRIPT_LIMIT:
+            current = "[older transcript trimmed]\n" + current[-self._TRANSCRIPT_LIMIT :]
+        self.output.buffer.set_document(
+            Document(current, len(current)),
+            bypass_readonly=True,
+        )
+        self._text_theme_preview_original = None
+        self._text_theme_preview_pending = ""
         self._text_theme_preview_visible = False
 
     def _apply_choice_preview(self) -> None:
@@ -4455,6 +5432,7 @@ class PersistentChatTUI:
         self._choice_kind = kind
         self._choice_values = values
         self._choice_index = values.index(default) if default in values else 0
+        self._choice_click_index = None
         if kind in {"theme", "text theme"}:
             self._choice_preview_appearance = (
                 self.appearance.theme,
@@ -4467,7 +5445,34 @@ class PersistentChatTUI:
         self.application.invalidate()
 
     def _cancel_choice(self) -> None:
+        if self._runtime_edit:
+            self._runtime_edit = None
+            self.status_error = ""
+            self._set_input("")
+            self._open_settings_category("runtime")
+            return
+        if self._height_edit:
+            self._height_edit = False
+            self.status_error = ""
+            self._set_input("")
+            self._open_settings_category("input field")
+            return
+        parent = {
+            "theme": "theme",
+            "text theme": "theme",
+            "theme settings": "settings",
+            "output field settings": "settings",
+            "input field settings": "settings",
+            "runtime settings": "settings",
+            "runtime device": "runtime",
+            "CPU threads": "runtime",
+            "context size": "runtime",
+            "scroll speed": "settings",
+            "input height": "input field",
+        }.get(self._choice_kind)
         self._height_edit = False
+        self._runtime_edit = None
+        self._choice_click_index = None
         self._end_choice_preview(restore=True)
         if self._choice_prior_model is not None:
             self.agent.model = self._choice_prior_model
@@ -4476,10 +5481,97 @@ class PersistentChatTUI:
         self._choice_values = []
         self._set_input("")
         self.activity = "ready" if not self.running else self.activity
+        if parent == "settings":
+            self._begin_choice("settings", self._settings_categories(), "theme")
+            return
+        if parent:
+            self._open_settings_category(parent)
+            return
         self.application.invalidate()
+
+    def _submit_choice_response(self) -> None:
+        """Accept the highlighted row or a uniquely typed picker option."""
+        response = self.input.text.strip().casefold()
+        if not response:
+            self._accept_choice()
+            return
+        exact = [
+            index
+            for index, value in enumerate(self._choice_values)
+            if value.casefold() == response
+        ]
+        matches = exact or [
+            index
+            for index, value in enumerate(self._choice_values)
+            if value.casefold().startswith(response)
+        ]
+        if len(matches) != 1:
+            self.status_error = (
+                "Type a full option or a unique prefix, then press Enter"
+                if matches
+                else "That is not an available option"
+            )
+            self.application.invalidate()
+            return
+        self._choice_index = matches[0]
+        self._choice_click_index = None
+        self._set_input("")
+        self.status_error = ""
+        self._apply_choice_preview()
+        self._accept_choice()
 
     def _accept_choice(self) -> None:
         selected = self._choice_values[self._choice_index]
+        if selected == "back" and self._choice_kind in {"theme", "text theme"}:
+            self._cancel_choice()
+            return
+        if self._choice_kind == "runtime device":
+            if selected == "back":
+                self._open_settings_category("runtime")
+                return
+            if selected in {"auto (Klaude decides)", RESET_THEME_CHOICE}:
+                self.agent.ollama_options.pop("num_gpu", None)
+            elif selected == "CPU only":
+                self.agent.ollama_options["num_gpu"] = 0
+            else:
+                self.agent.ollama_options["num_gpu"] = -1
+            self._persist_runtime_preferences("num_gpu")
+            self._open_settings_category("runtime")
+            return
+        if self._choice_kind == "CPU threads":
+            if selected == "back":
+                self._open_settings_category("runtime")
+                return
+            if selected == "custom input":
+                self._choice_kind = None
+                self._choice_values = []
+                self._runtime_edit = "num_thread"
+                self._set_input(str(self.agent.ollama_options.get("num_thread", "")))
+                return
+            if selected in {"auto (Klaude decides)", RESET_THEME_CHOICE}:
+                self.agent.ollama_options.pop("num_thread", None)
+            else:
+                self.agent.ollama_options["num_thread"] = int(selected)
+            self._persist_runtime_preferences("num_thread")
+            self._open_settings_category("runtime")
+            return
+        if self._choice_kind == "context size":
+            if selected == "back":
+                self._open_settings_category("runtime")
+                return
+            if selected == "custom input":
+                self._choice_kind = None
+                self._choice_values = []
+                self._runtime_edit = "num_ctx"
+                self._set_input(str(self.agent.ollama_options.get("num_ctx", 8192)))
+                return
+            self.agent.ollama_options["num_ctx"] = (
+                8192 if selected == RESET_THEME_CHOICE else int(selected.replace(",", ""))
+            )
+            self.ui_state.context_window = self.agent.ollama_options["num_ctx"]
+            self._persist_runtime_preferences("num_ctx")
+            self._open_settings_category("runtime")
+            return
         if self._choice_kind == "scroll speed":
             if selected != "back":
                 self.appearance.scroll_lines = (
@@ -4501,6 +5593,7 @@ class PersistentChatTUI:
             "theme settings",
             "output field settings",
             "input field settings",
+            "runtime settings",
         }:
             self._apply_settings_action(self._choice_kind, selected)
             return
@@ -4646,6 +5739,27 @@ class PersistentChatTUI:
             ]
             self._begin_choice("input field settings", choices, choices[0])
             return
+        if category == "runtime":
+            gpu_layers = self.agent.ollama_options.get("num_gpu")
+            device = (
+                "CPU only" if gpu_layers == 0 else
+                "GPU preferred" if gpu_layers == -1 else
+                "auto (Klaude decides)"
+            )
+            threads = self.agent.ollama_options.get("num_thread")
+            thread_label = str(threads) if threads else "auto (Klaude decides)"
+            context = int(self.agent.ollama_options.get("num_ctx", 8192))
+            choices = [
+                f"device: {device}",
+                f"CPU threads: {thread_label}",
+                f"context size: {context:,}",
+                "auto calibrate",
+                "back",
+                RESET_THEME_CHOICE,
+                CANCEL_CHOICE,
+            ]
+            self._begin_choice("runtime settings", choices, choices[0])
+            return
         self.appearance = TUIAppearance()
         self._choice_kind = None
         self._choice_values = []
@@ -4660,14 +5774,14 @@ class PersistentChatTUI:
             if selected.startswith("interface theme:"):
                 self._begin_choice(
                     "theme",
-                    [*TUI_THEME_LABELS, RESET_THEME_CHOICE, CANCEL_CHOICE],
+                    [*TUI_THEME_LABELS, RESET_THEME_CHOICE, "back"],
                     self.appearance.theme,
                 )
                 return
             if selected.startswith("text/code theme:"):
                 self._begin_choice(
                     "text theme",
-                    [*TEXT_THEME_LABELS, RESET_THEME_CHOICE, CANCEL_CHOICE],
+                    [*TEXT_THEME_LABELS, RESET_THEME_CHOICE, "back"],
                     self.appearance.text_theme,
                 )
                 return
@@ -4696,6 +5810,40 @@ class PersistentChatTUI:
                 "scrollbar" if selected.startswith("scrollbar:") else None,
             )
             return
+        if kind == "runtime settings":
+            if selected == "auto calibrate":
+                self._calibrate_runtime()
+                self._open_settings_category("runtime")
+                return
+            if selected.startswith("device:"):
+                current = selected.removeprefix("device: ")
+                self._begin_choice(
+                    "runtime device",
+                    ["auto (Klaude decides)", "CPU only", "GPU preferred", "back"],
+                    current,
+                )
+                return
+            if selected.startswith("CPU threads:"):
+                current = selected.removeprefix("CPU threads: ")
+                self._begin_choice(
+                    "CPU threads",
+                    ["auto (Klaude decides)", "1", "2", "4", "8", "12", "16", "custom input", "back"],
+                    current,
+                )
+                return
+            if selected.startswith("context size:"):
+                current = selected.removeprefix("context size: ").replace(",", "")
+                self._begin_choice(
+                    "context size",
+                    ["4,096", "8,192", "16,384", "32,768", "64,000", "custom input", "back"],
+                    f"{int(current):,}",
+                )
+                return
+            self.agent.ollama_options.pop("num_gpu", None)
+            self.agent.ollama_options.pop("num_thread", None)
+            self._persist_runtime_preferences("num_gpu", "num_thread")
+            self._open_settings_category("runtime")
+            return
         if selected.startswith("height:"):
             current = (
                 f"{self.appearance.input_height} "
@@ -4718,7 +5866,45 @@ class PersistentChatTUI:
         self._commit_appearance(message, reset=selected.startswith("reset"))
         self._open_settings_category("input field")
 
+    def _calibrate_runtime(self) -> None:
+        """Choose conservative per-chat options from local CPU, RAM, and VRAM."""
+        workdir = Path(getattr(self.agent, "workdir", Path.cwd()))
+        try:
+            runtime = collect_runtime_context(self.cfg, workdir).context.system
+        except Exception as exc:
+            self.status_error = f"runtime calibration unavailable: {exc}"
+            return
+        logical_threads = next(
+            (cpu.logical_threads for cpu in runtime.cpu if cpu.logical_threads),
+            os.cpu_count() or 1,
+        )
+        threads = max(1, min(16, max(1, logical_threads // 2)))
+        vram = max((gpu.memory_bytes or 0 for gpu in runtime.gpu), default=0)
+        memory = runtime.memory_total_bytes or 0
+        budget = vram or memory
+        context = (
+            65_536 if budget >= 24 * 1024**3 else
+            32_768 if budget >= 12 * 1024**3 else
+            16_384 if budget >= 8 * 1024**3 else
+            8_192
+        )
+        # Leave placement to Ollama: it can select supported GPUs and choose a
+        # CPU/GPU split that fits the current model and available memory.
+        self.agent.ollama_options.pop("num_gpu", None)
+        self.agent.ollama_options["num_thread"] = threads
+        self.agent.ollama_options["num_ctx"] = context
+        self._persist_runtime_preferences("num_gpu", "num_thread", "num_ctx")
+        self.ui_state.context_window = context
+        self.status_error = ""
+        self._append(
+            f"\n[runtime] auto calibrated · device auto · {threads} CPU threads · "
+            f"{context:,} context\n"
+        )
+
     def _append(self, text: str) -> None:
+        if self._text_theme_preview_visible:
+            self._text_theme_preview_pending += text
+            return
         current = self.output.text + text
         if len(current) > self._TRANSCRIPT_LIMIT:
             current = "[older transcript trimmed]\n" + current[-self._TRANSCRIPT_LIMIT :]
@@ -4740,10 +5926,9 @@ class PersistentChatTUI:
         return max(32, columns - field_chrome - scrollbar)
 
     def _divider_width(self) -> int:
-        # Keep a visible gutter at the right edge. Terminal renderers can wrap
-        # a line that reaches the final cell when a frame and scrollbar are
-        # both present.
-        return max(32, self._transcript_content_width() - 3)
+        # A final-cell glyph puts many terminals into deferred-wrap state,
+        # producing a phantom continuation row on the next redraw.
+        return max(32, self._transcript_content_width() - 1)
 
     def _refresh_transcript_dividers(self) -> None:
         width = self._divider_width()
@@ -4788,7 +5973,31 @@ class PersistentChatTUI:
                 bypass_readonly=True,
             )
 
+    def _refresh_tui(self) -> None:
+        """Discard the rendered screen so the next frame repaints it in full."""
+        self._refresh_transcript_dividers()
+        self.application.renderer.erase(leave_alternate_screen=False)
+        self.application.invalidate()
+
     def _submit_buffer(self, *, steer: bool) -> None:
+        if self._runtime_edit:
+            value = self.input.text.strip()
+            if value.lower() == CANCEL_CHOICE:
+                self._runtime_edit = None
+                self._open_settings_category("runtime")
+                return
+            if not value.isdecimal() or not 1 <= int(value) <= 262144:
+                self.status_error = "Enter a whole number from 1 to 262144, or cancel"
+                return
+            self.agent.ollama_options[self._runtime_edit] = int(value)
+            if self._runtime_edit == "num_ctx":
+                self.ui_state.context_window = int(value)
+            self._persist_runtime_preferences(self._runtime_edit)
+            self._runtime_edit = None
+            self.status_error = ""
+            self._set_input("")
+            self._open_settings_category("runtime")
+            return
         if self._height_edit:
             value = self.input.text.strip().lower()
             if value == CANCEL_CHOICE:
@@ -4829,7 +6038,7 @@ class PersistentChatTUI:
             self._enqueue(text.removeprefix("/steer ").strip(), steer=True)
             return
         if text == "/steer":
-            self._append("\n[hint] Use /steer TEXT or type TEXT and press Ctrl+Enter.\n")
+            self._append("\n[hint] Use /steer TEXT or type TEXT and press Alt+\\.\n")
             return
         if text == "/queue":
             if self.pending:
@@ -4851,8 +6060,14 @@ class PersistentChatTUI:
             else:
                 self._append("\n[session] Nothing is running.\n")
             return
+        if text in {"/restart", "/stop"}:
+            self._request_ollama_service_control(text.removeprefix("/"))
+            return
         if text == "/pwd":
             self._append(f"\n[workspace] {getattr(self.agent, 'workdir', Path.cwd())}\n")
+            return
+        if text == "/attach" or text.startswith("/attach "):
+            self._attach_path(text.removeprefix("/attach").strip())
             return
         if text == "/ls" or text.startswith("/ls "):
             ok, message = _list_agent_directory(self.agent, text.removeprefix("/ls").strip())
@@ -4875,6 +6090,9 @@ class PersistentChatTUI:
         if text == "/help":
             width = max(32, shutil.get_terminal_size((100, 24)).columns - 4)
             self._append("\n" + format_command_reference(width=width) + "\n")
+            return
+        if text == "/refresh":
+            self._refresh_tui()
             return
         if text == "/keybinds":
             width = max(32, shutil.get_terminal_size((100, 24)).columns - 4)
@@ -4937,7 +6155,7 @@ class PersistentChatTUI:
             }
             if requested not in category_aliases:
                 self._append(
-                    "\n[error] Settings category must be theme, output, input, scroll, or reset.\n"
+                    "\n[error] Settings category must be theme, output, input, scroll, runtime, or reset.\n"
                 )
                 return
             category = category_aliases[requested]
@@ -4956,8 +6174,7 @@ class PersistentChatTUI:
                 )
                 if selected is None:
                     self._append(
-                        "\n[error] Theme must be autumn, pastelle-pink, "
-                        "hacker-green, neon-synth, or reset.\n"
+                        "\n[error] Unknown theme. Use /theme to choose an available theme.\n"
                     )
                     return
                 self._apply_appearance_choice("theme", selected)
@@ -4988,6 +6205,69 @@ class PersistentChatTUI:
             return
         self._enqueue(text)
 
+    def _request_ollama_service_control(self, action: str) -> None:
+        if self._ollama_control_action:
+            self._append(
+                f"\n[ollama] {self._ollama_control_action} already awaiting confirmation.\n"
+            )
+            return
+        self._ollama_control_action = action
+        if self.running:
+            self.cancel_requested.set()
+            self.agent.ollama.cancel_active()
+            self.activity = f"cancelling before Ollama {action}"
+
+        def control() -> None:
+            approved = self._ask_permission(
+                "Ollama service",
+                f"{action.title()} the local Ollama service? Active model requests will stop.",
+            )
+            if approved not in {"y", "a"}:
+                self._emit("ollama_control", (False, f"Ollama service {action} cancelled"))
+                return
+            self._emit("activity", f"Ollama {action}ing")
+            self._emit("ollama_control", _control_ollama_service(action))
+
+        threading.Thread(
+            target=control,
+            daemon=True,
+            name=f"klaude-ollama-{action}",
+        ).start()
+
+    def _attach_path(self, path_text: str) -> None:
+        if not path_text:
+            self._append("\n[hint] Use /attach PATH. Type /attach and a space for path suggestions.\n")
+            return
+        current = Path(getattr(self.agent, "workdir", Path.cwd()))
+        try:
+            path = Path(path_text).expanduser()
+            path = (path if path.is_absolute() else current / path).resolve(strict=True)
+        except OSError as exc:
+            self._append(f"\n[error] cannot attach path: {exc}\n")
+            return
+        self._pending_attachments.append(path)
+        self._append(f"\n[attached] {path} · included with the next message\n")
+
+    def _attachment_context(self) -> str:
+        parts: list[str] = []
+        for path in self._pending_attachments:
+            if path.is_file():
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")[:32768]
+                except OSError as exc:
+                    parts.append(f"[Attached file unavailable: {path} ({exc})]")
+                else:
+                    parts.append(f"[Attached file: {path}]\n{text}")
+            elif path.is_dir():
+                try:
+                    entries = list(sorted(path.rglob("*"), key=lambda item: str(item)))[:200]
+                    listing = "\n".join(str(item.relative_to(path)) + ("/" if item.is_dir() else "") for item in entries)
+                    parts.append(f"[Attached folder: {path}]\n{listing}")
+                except OSError as exc:
+                    parts.append(f"[Attached folder unavailable: {path} ({exc})]")
+        self._pending_attachments.clear()
+        return "\n\n".join(parts)
+
     def _enqueue(self, text: str, *, steer: bool = False, force_queue: bool = False) -> None:
         if not text:
             return
@@ -5017,6 +6297,10 @@ class PersistentChatTUI:
         ):
             return
         user_msg = self.pending.popleft()
+        attachment_context = self._attachment_context()
+        agent_message = (
+            f"{user_msg}\n\n{attachment_context}" if attachment_context else user_msg
+        )
         self.running = True
         self._turn_started_at = time.monotonic()
         self.cancel_requested = threading.Event()
@@ -5035,7 +6319,7 @@ class PersistentChatTUI:
         )
         threading.Thread(
             target=self._run_turn,
-            args=(user_msg, self.cancel_requested),
+            args=(agent_message, self.cancel_requested),
             daemon=True,
             name="klaude-agent-turn",
         ).start()
@@ -5045,9 +6329,27 @@ class PersistentChatTUI:
         if not self.shutting_down:
             self.application.invalidate()
 
+    def _emit_assistant_text(self, text: str, *, initial: bool) -> str:
+        """Render live output one character at a time, or legacy chunks."""
+        prefix = "\n" if initial and not text.startswith("\n") else ""
+        if not self.character_stream:
+            self._emit("append", prefix + text)
+            return text
+        if prefix:
+            self._emit("append", prefix)
+        emitted: list[str] = []
+        for character in text:
+            if self.cancel_requested.is_set():
+                break
+            self._emit("append", character)
+            emitted.append(character)
+            time.sleep(CHARACTER_STREAM_DELAY)
+        return "".join(emitted)
+
     def _run_turn(self, user_msg: str, cancel_event: threading.Event) -> None:
         assistant_parts: list[str] = []
         streamed = False
+        assistant_started = False
         pending_metadata: dict[str, dict] = {}
         cancelled = False
         try:
@@ -5063,13 +6365,17 @@ class PersistentChatTUI:
                 if event.kind == "text_delta" and payload.get("content"):
                     piece = payload["content"]
                     streamed = True
-                    assistant_parts.append(piece)
-                    self._emit("append", piece)
+                    assistant_parts.append(
+                        self._emit_assistant_text(piece, initial=not assistant_started)
+                    )
+                    assistant_started = True
                 elif event.kind == "text" and payload.get("content"):
                     content = payload["content"]
                     if not (payload.get("metadata") or {}).get("streamed"):
-                        assistant_parts.append(content)
-                        self._emit("append", content)
+                        assistant_parts.append(
+                            self._emit_assistant_text(content, initial=not assistant_started)
+                        )
+                        assistant_started = True
                     self.memory.log_turn(self.session_id, "assistant", content)
                 elif event.kind == "tool_start":
                     tool = payload["tool"]
@@ -5161,6 +6467,25 @@ class PersistentChatTUI:
                 return "n"
         return str(request["answer"])
 
+    def _submit_permission_response(self) -> None:
+        response = self.input.text.strip().lower()
+        answers = {
+            "": "n",
+            "y": "y",
+            "yes": "y",
+            "n": "n",
+            "no": "n",
+            "a": "a",
+            "always": "a",
+        }
+        answer = answers.get(response)
+        if answer is None:
+            self.status_error = "Type y/yes, n/no, or a/always, then press Enter"
+            return
+        self.status_error = ""
+        self._set_input("")
+        self._answer_permission(answer)
+
     def _answer_permission(self, answer: str) -> None:
         request = self._permission_request
         if request is None:
@@ -5194,6 +6519,14 @@ class PersistentChatTUI:
                 self._append(
                     f"\n[permission · {payload['tool']}]\n{payload['detail']}\n"
                 )
+            elif kind == "ollama_control":
+                success, message = payload
+                self._ollama_control_action = None
+                if success:
+                    self._append(f"\n[ollama] {message}\n")
+                    self.activity = "ready" if not self.running else self.activity
+                else:
+                    self._append(f"\n[ollama] {message}\n")
             elif kind == "turn_done":
                 metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
                 self.ui_state.model = self.agent.model
@@ -5233,12 +6566,21 @@ class PersistentChatTUI:
 
 
 @app.command()
-def chat(model: str = typer.Option("", help="override the coder model")):
+def chat(
+    model: str = typer.Option("", help="override the coder model"),
+    legacy: bool = typer.Option(False, "--legacy", help="render streamed output in legacy chunks"),
+    no_tui: bool = typer.Option(
+        False,
+        "--no-tui",
+        help="use the simple line-oriented chat without the full-screen TUI",
+    ),
+):
     """Interactive agent session in the current directory."""
     cfg = load_config()
     chat_preferences_path = cfg.data_dir / "chat-preferences.json"
     remembered_model = _load_last_chat_model(chat_preferences_path)
     agent, memory = _build_agent(Path.cwd(), model or remembered_model or None)
+    _apply_runtime_preferences(agent, _load_runtime_preferences(chat_preferences_path))
     if remembered_model and not model:
         try:
             installed_models = agent.ollama.list_models()
@@ -5257,30 +6599,36 @@ def chat(model: str = typer.Option("", help="override the coder model")):
         effort=_agent_effort_label(agent),
         context_window=int(agent.ollama_options.get("num_ctx", 8192)),
     )
-    if sys.stdin.isatty() and sys.stdout.isatty():
+    if not no_tui and sys.stdin.isatty() and sys.stdout.isatty():
         PersistentChatTUI(
             agent,
             memory,
             session_id,
             cfg,
             chat_preferences_path=chat_preferences_path,
+            character_stream=not legacy,
         ).run()
         console.print("[dim]bye[/]")
         return
-    console.print(
-        Panel(
-            "[dim]↑ previous input  •  Tab command completion  •  "
-            "/model picker  •  /effort picker  •  /help[/]",
-            title=f"[bold cyan]klaude[/]  [white]{agent.model}[/]",
-            subtitle="local-first coding agent",
-            border_style="cyan",
-            padding=(0, 1),
+    if not no_tui:
+        console.print(
+            Panel(
+                "[dim]↑ previous input  •  Tab command completion  •  "
+                "/model picker  •  /effort picker  •  /help[/]",
+                title=f"[bold cyan]klaude[/]  [white]{agent.model}[/]",
+                subtitle="local-first coding agent",
+                border_style="cyan",
+                padding=(0, 1),
+            )
         )
-    )
-    prompt_session = _new_chat_prompt_session()
+    prompt_session = None if no_tui else _new_chat_prompt_session()
     while True:
         try:
-            user_msg = _read_chat_input(prompt_session, ui_state)
+            user_msg = (
+                _read_plain_chat_input()
+                if no_tui
+                else _read_chat_input(prompt_session, ui_state)
+            )
         except (EOFError, KeyboardInterrupt):
             break
         if not user_msg:
@@ -5289,6 +6637,16 @@ def chat(model: str = typer.Option("", help="override the coder model")):
             break
         if user_msg == "/help":
             _handle_command_reference_request(user_msg, agent, memory, session_id)
+            continue
+        if user_msg == "/refresh":
+            continue
+        if user_msg in {"/restart", "/stop"}:
+            action = user_msg.removeprefix("/")
+            if typer.confirm(f"{action.title()} the local Ollama service?"):
+                ok, message = _control_ollama_service(action)
+                console.print(f"[green]{message}[/]" if ok else f"[red]{message}[/]")
+            else:
+                console.print("[dim]Ollama service control cancelled.[/]")
             continue
         if user_msg == "/pwd":
             console.print(f"[workspace] {getattr(agent, 'workdir', Path.cwd())}")
@@ -5339,7 +6697,7 @@ def chat(model: str = typer.Option("", help="override the coder model")):
             continue
         if _handle_explicit_memory_request(user_msg, agent, memory, session_id):
             continue
-        _render(agent, memory, session_id, user_msg, ui_state)
+        _render(agent, memory, session_id, user_msg, ui_state, plain=no_tui)
         for fact in memory.auto_remember_turn(user_msg):
             console.print(f"[dim]memory saved: {fact}[/]")
     console.print("[dim]bye[/]")

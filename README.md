@@ -71,9 +71,10 @@ without asking the model to summarize it.
 The interactive terminal is a full-screen conversation: output stays above a
 full-width input at the bottom, and the input remains usable while Klaude is
 thinking, searching, or writing. Enter submits immediately or queues behind the
-active turn; Ctrl+Enter (or `/steer TEXT`) prioritizes a correction and interrupts
+active turn; Alt+\ (or `/steer TEXT`) prioritizes a correction and interrupts
 at the next safe model/tool boundary. `/queue` shows pending turns and `/cancel`
-interrupts without adding one. Queued follow-ups appear in a compact live strip
+interrupts without adding one. `/restart` and `/stop` confirm before controlling
+the local Ollama service and leave the chat session open. Queued follow-ups appear in a compact live strip
 immediately above the input. Repeated Alt+Up edits them from newest to oldest;
 Enter saves the current edit, while clearing all text and pressing Enter deletes
 that queued input. Queue consumption pauses while an item is being edited. The status line continuously shows the model,
@@ -98,7 +99,9 @@ defaults to on. Input Field → Height → Enter min/max accepts two whole numbe
 satisfy `1 ≤ min ≤ max ≤ 12`, with defaults of 8 and 12. Enter saves, Escape or
 Ctrl+C cancels, and typing `reset to default` restores both defaults.
 Each category can be reset independently. Autumn is the
-default interface theme, with Pastelle Pink, Hacker Green, and Neon Synth also
+default interface theme, with Crimson Red, Egg Yolk, Hacker Green, Neon Synth,
+and rainbow-ordered Pastelle Red, Orange, Yellow, Lime, Green, Cyan, Azure,
+Blue, Lavender, Purple, Magenta, and Pink also
 included. Text/code colors remain independent: VS Code Dark, GitHub Dark,
 Monokai, or Solarized Light. `/theme` opens Theme settings for both color choices.
 Choices persist in `.klaude/data/appearance.json`. Non-interactive and piped

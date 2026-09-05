@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from klaude_cli.main import (
     COMMAND_REFERENCE,
+    CTRL_ENTER_SEQUENCES,
     DEFAULT_INPUT_BORDER,
     DEFAULT_INPUT_HEIGHT,
     DEFAULT_OUTPUT_BORDER,
@@ -30,12 +31,16 @@ from klaude_cli.main import (
     WEB_SEARCH_TOOL_DESCRIPTION,
     XTERM_MODIFY_OTHER_KEYS_OFF,
     XTERM_MODIFY_OTHER_KEYS_ON,
+    SHIFT_ENTER_SEQUENCES,
     ChatCommandCompleter,
     ChatUIState,
     CommandSurface,
     PersistentChatTUI,
     TranscriptLexer,
     TUIAppearance,
+    TUI_THEME_LABELS,
+    TUI_THEME_STYLES,
+    TEXT_THEME_PREVIEW_BLOCK,
     _append_tool_capabilities,
     _apply_runtime_context_to_search_config,
     _apply_session_effort,
@@ -43,6 +48,8 @@ from klaude_cli.main import (
     _chat_toolbar,
     _command_reference_context,
     _command_reference_result,
+    _control_ollama_service,
+    _fenced_code_lines,
     _format_search_response,
     _format_web_results,
     _handle_command_reference_request,
@@ -52,6 +59,7 @@ from klaude_cli.main import (
     _knowledge_context_chunk_count,
     _knowledge_libraries_count,
     _load_last_chat_model,
+    _load_runtime_preferences,
     _load_tui_appearance,
     _message_divider,
     _mode_from_permission,
@@ -60,13 +68,17 @@ from klaude_cli.main import (
     _print_trace,
     _query_knowledge_display_lines,
     _read_chat_input,
+    _read_plain_chat_input,
     _render,
     _runtime_status_summary,
     _save_last_chat_model,
+    _save_runtime_preferences,
     _save_tui_appearance,
     _search_execution_metadata,
     _select_tool_names,
     _system_prompt,
+    _apply_runtime_preferences,
+    _tui_style,
     _update_online_docs,
     _web_mode,
     _web_search_display_lines,
@@ -83,6 +95,7 @@ from klaude_cli.main import (
     sessions_delete,
     system_info,
 )
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from klaude_core import Agent, AgentEvent, PermissionGate, Tool
 from klaude_core.config import DEFAULT_PERMISSIONS, Config
 from klaude_core.memory import Memory
@@ -144,6 +157,14 @@ def test_chat_input_preserves_a_multiline_prompt_as_one_turn():
     )
 
 
+def test_plain_chat_input_uses_an_undecorated_terminal_prompt(monkeypatch):
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "  hello  ")
+
+    assert _read_plain_chat_input() == "hello"
+    assert prompts == ["you> "]
+
+
 def test_canonical_command_reference_preserves_sections_and_lines():
     reference = format_command_reference(width=100)
 
@@ -159,9 +180,13 @@ def test_canonical_command_reference_preserves_sections_and_lines():
     assert "\n  /help" in reference
     assert "\n  /models" in reference
     assert "\n  /model" in reference
-    assert "Interactively select an installed model" in reference
+    assert "use /model NAME to switch directly" in reference
     assert "\n  /effort" in reference
-    assert "\n  /model NAME" in reference
+    assert "\n  /restart" in reference
+    assert "\n  /stop" in reference
+    assert "\n  /refresh" in reference
+    assert "\n  /model NAME" not in reference
+    assert "\n  /effort LEVEL" not in reference
     assert "AGENT CAPABILITIES" not in reference
     assert "chat Interactive" not in reference
     assert "ask One-shot" not in reference
@@ -429,6 +454,64 @@ def test_transcript_lexer_underlines_help_categories_and_grays_message_dividers(
     ]
 
 
+def test_transcript_lexer_highlights_fenced_code_with_its_language():
+    fence = "`" * 3
+    document = Document(f"{fence}python\nvalue = 1\n{fence}")
+
+    fragments = TranscriptLexer().lex_document(document)(1)
+
+    assert ("class:pygments.name", "value") in fragments
+    assert ("class:pygments.operator", "=") in fragments
+
+
+def test_transcript_lexer_accents_help_command_without_restyling_description():
+    line = "  /settings [CATEGORY]  Configure the interface."
+
+    fragments = TranscriptLexer().lex_document(Document(line))(0)
+
+    assert fragments[0] == ("class:help.command", "  /settings [CATEGORY]")
+    assert "".join(text for _style, text in fragments[1:]) == "  Configure the interface."
+    assert all(style != "class:help.command" for style, _text in fragments[1:])
+    assert _tui_style("autumn", "vscode-dark").get_attrs_for_style_str(
+        "class:help.command"
+    ).color == "f59a78"
+
+
+def test_user_surface_background_preserves_command_and_code_foregrounds():
+    style = _tui_style("autumn", "vscode-dark")
+
+    command = style.get_attrs_for_style_str(
+        "class:help.command class:transcript.user-message"
+    )
+    keyword = style.get_attrs_for_style_str(
+        "class:pygments.keyword class:transcript.user-message"
+    )
+    code_keyword = style.get_attrs_for_style_str(
+        "class:pygments.keyword class:transcript.code"
+    )
+
+    assert command.color == "f59a78"
+    assert keyword.color == "6ebf26"
+    assert code_keyword.color == "6ebf26"
+    assert command.bgcolor == keyword.bgcolor == code_keyword.bgcolor == "35222a"
+
+
+def test_fenced_code_lines_include_the_fences_and_unclosed_blocks():
+    closed = Document("before\n```python\nvalue = 1\n```\nafter")
+    unclosed = Document("```python\nvalue = 1")
+
+    assert _fenced_code_lines(closed) == {1, 2, 3}
+    assert _fenced_code_lines(unclosed) == {0, 1}
+
+
+def test_text_theme_preview_has_long_multilanguage_syntax_samples():
+    assert TEXT_THEME_PREVIEW_BLOCK.count("\n") >= 45
+    assert TEXT_THEME_PREVIEW_BLOCK.startswith("\n\n```html\n")
+    assert "Regular text" not in TEXT_THEME_PREVIEW_BLOCK
+    for language in ("html", "javascript", "json", "python", "cpp"):
+        assert f"```{language}" in TEXT_THEME_PREVIEW_BLOCK
+
+
 def test_message_divider_includes_role_timestamp_and_fills_width():
     divider = _message_divider(
         "klaude",
@@ -477,7 +560,7 @@ def test_transcript_dividers_refresh_after_resize():
     tui._refresh_transcript_dividers()
 
     refreshed = next(line for line in tui.output.text.splitlines() if line.startswith("━━ you · "))
-    assert len(refreshed) == 45
+    assert len(refreshed) == 47
     assert refreshed.startswith("━━ you · 2026-09-05 12:34:56 ")
 
 
@@ -530,6 +613,22 @@ def test_terminal_assistant_text_uses_styled_panel_and_code_theme(monkeypatch):
     assert panel.border_style == "#3aa7c4"
 
 
+def test_plain_assistant_text_has_no_terminal_panel(monkeypatch):
+    printed = []
+
+    class FakeTerminalConsole:
+        is_terminal = True
+
+        def print(self, *args, **kwargs):
+            printed.append((args, kwargs))
+
+    monkeypatch.setattr("klaude_cli.main.console", FakeTerminalConsole())
+
+    _print_assistant_text("**hello**", plain=True)
+
+    assert isinstance(printed[0][0][0], Markdown)
+
+
 def test_chat_toolbar_shows_model_effort_context_and_last_tokens():
     state = ChatUIState(
         model="gpt-oss:20b",
@@ -557,12 +656,29 @@ def test_welcome_logo_is_boxed_aligned_and_uses_installed_version():
     assert lines[-1].endswith("╝")
 
 
+def test_transcript_lexer_and_theme_apply_primary_color_to_the_tui_logo():
+    logo = _klaude_logo()
+    fragments = TranscriptLexer().lex_document(Document(logo))(0)
+    color = _tui_style("autumn", "vscode-dark").get_attrs_for_style_str(
+        "class:transcript.logo"
+    ).color
+
+    assert fragments == [("class:transcript.logo", logo.splitlines()[0])]
+    assert color == "f59a78"
+
+
 def test_slash_completer_lists_every_command_immediately_after_slash():
     completions = list(ChatCommandCompleter().get_completions(Document("/"), None))
     commands = {completion.text for completion in completions}
 
-    assert commands == {spec.usage.split()[0] for spec in iter_command_specs(CommandSurface.CHAT)}
+    assert commands == {
+        spec.usage.split()[0]
+        for spec in iter_command_specs(CommandSurface.CHAT)
+        if spec.visible
+    }
     assert "/keybinds" in commands
+    assert "/quit" not in commands
+    assert "/q" not in commands
     assert list(ChatCommandCompleter().get_completions(Document("say /"), None)) == []
 
 
@@ -571,7 +687,7 @@ def test_keybind_reference_contains_only_keyboard_controls():
 
     assert "\nKEYBOARD\n" in reference
     assert "  Enter" in reference
-    assert "  Ctrl+Enter" in reference
+    assert "  Alt+\\" in reference
     assert "  Alt+Enter" in reference
     assert "  Ctrl+J" in reference
     assert "  Ctrl+C" in reference
@@ -603,7 +719,7 @@ def test_persistent_tui_registers_modified_enter_and_interrupt_bindings():
     assert (Keys.ControlM,) in handlers
     assert handlers[(Keys.Escape, Keys.ControlM)] == "newline"
     assert handlers[(Keys.ControlJ,)] == "newline"
-    assert handlers[(Keys.Escape, Keys.ControlJ)] == "steer"
+    assert handlers[(Keys.Escape, "\\")] == "steer"
     assert (Keys.ControlC,) in handlers
 
 
@@ -711,6 +827,102 @@ def test_persistent_tui_input_has_empty_state_placeholder():
     assert isinstance(placeholder.processor, InputPlaceholderProcessor)
 
 
+def test_persistent_tui_permission_uses_a_contextual_composer_placeholder():
+    tui = _fake_persistent_tui()
+
+    tui._permission_request = {"tool": "run_shell"}
+
+    assert tui._composer_placeholder_text() == "Type y/yes, n/no, or a/always · Enter confirms."
+
+
+def test_persistent_tui_composer_uses_a_themed_side_rail_instead_of_a_frame():
+    tui = _fake_persistent_tui()
+
+    assert tui.input_panel is tui.composer_surface
+    assert tui.composer_rail.content.width == 1
+    assert tui.composer_rail.content.children[0].char == "┃"
+    assert tui.composer_rail.content.children[1].char == "┃"
+    assert tui._composer_rail_style() == "class:composer.rail"
+
+    tui.running = True
+    assert tui._composer_rail_style() == "class:composer.rail.busy"
+    tui._permission_request = {"tool": "run_shell"}
+    assert tui._composer_rail_style() == "class:composer.rail.warning"
+    tui._permission_request = None
+    tui.status_error = "connection failed"
+    assert tui._composer_rail_style() == "class:composer.rail.error"
+
+
+def test_composer_rail_uses_output_background_on_input_surface():
+    attrs = _tui_style("autumn", "vscode-dark").get_attrs_for_style_str(
+        "class:composer.rail"
+    )
+
+    assert attrs.color == "211820"
+    assert attrs.bgcolor == "35222a"
+
+
+def test_crimson_red_uses_autumn_neutral_output_background():
+    autumn = _tui_style("autumn", "vscode-dark").get_attrs_for_style_str(
+        "class:output-field"
+    )
+    crimson = _tui_style("crimson-red", "vscode-dark").get_attrs_for_style_str(
+        "class:output-field"
+    )
+
+    assert crimson.bgcolor == autumn.bgcolor == "211820"
+
+
+def test_crimson_red_uses_autumn_input_surface_and_lighter_runtime_text():
+    autumn = _tui_style("autumn", "vscode-dark")
+    crimson = _tui_style("crimson-red", "vscode-dark")
+
+    assert crimson.get_attrs_for_style_str("class:input-field").bgcolor == (
+        autumn.get_attrs_for_style_str("class:input-field").bgcolor
+    )
+    assert crimson.get_attrs_for_style_str("class:runtime_text").color == "ae999c"
+    assert crimson.get_attrs_for_style_str("class:footer.keybinds").color == "ae999c"
+
+
+def test_persistent_tui_composer_keeps_vertical_padding_inside_configured_height():
+    tui = _fake_persistent_tui()
+
+    assert tui._composer_vertical_padding_visible()
+    assert tui.input.window.height().min == tui.appearance.input_height - 2
+    assert tui.input.window.height().max == tui.appearance.input_max_height - 2
+
+    tui._begin_choice("model", ["model-a", "model-b"], "model-a")
+    assert tui._composer_vertical_padding_visible()
+    assert tui._choice_height() == tui.appearance.input_height - 2
+
+    tui.appearance.input_height = tui.appearance.input_max_height = 1
+    assert not tui._composer_vertical_padding_visible()
+    assert tui.input.window.height().min == 1
+    assert tui.input.window.height().max == 1
+
+
+def test_persistent_tui_marks_active_settings_options():
+    tui = _fake_persistent_tui()
+    tui.appearance.scroll_lines = 4
+    tui._begin_choice(
+        "scroll speed",
+        ["1 line per scroll", "4 lines per scroll", "back"],
+        "1 line per scroll",
+    )
+
+    rendered = "".join(text for _style, text in tui._choice_fragments())
+
+    assert "4 lines per scroll *" in rendered
+    assert "1 line per scroll *" not in rendered
+
+    tui.appearance.input_height = tui.appearance.input_max_height = 8
+    tui._begin_choice("input height", ["8 lines", "10 lines"], "10 lines")
+    rendered = "".join(text for _style, text in tui._choice_fragments())
+
+    assert "8 lines *" in rendered
+    assert "10 lines *" not in rendered
+
+
 def test_persistent_tui_uses_short_escape_sequence_timeout():
     tui = _fake_persistent_tui()
 
@@ -732,7 +944,8 @@ def test_persistent_tui_shows_compact_queued_inputs_above_composer():
     )
     root = tui.application.layout.container
     assert root.content.children[1] is tui.queue_panel
-    assert root.content.children[2] is tui.input_panel
+    assert root.content.children[2] is tui.input_spacer
+    assert root.content.children[3] is tui.input_panel
 
 
 def test_repeated_alt_up_edits_queued_inputs_from_newest_to_oldest():
@@ -927,7 +1140,7 @@ def test_enter_submits_model_command_when_completion_menu_has_no_selection():
     assert tui._choice_kind == "model"
     assert tui._choice_values == ["gpt-oss:20b", "qwen3.5:4b", "reset to default", "cancel"]
     rendered = "".join(text for _style, text in tui._choice_fragments())
-    assert rendered == "    gpt-oss:20b\n  › qwen3.5:4b\n    reset to default\n    cancel"
+    assert rendered == "    gpt-oss:20b\n  › qwen3.5:4b *\n    reset to default\n    cancel"
 
 
 @pytest.mark.parametrize("category", ["theme", "output field", "input field"])
@@ -945,8 +1158,139 @@ def test_settings_submenus_end_with_back_instead_of_cancel(category):
 
 def test_bottom_status_includes_scroll_hint():
     tui = _fake_persistent_tui()
-    text = "".join(fragment[1] for fragment in tui._status_fragments())
-    assert "Shift+Scroll" in text
+    text = "".join(fragment[1] for fragment in tui._keybind_fragments())
+    assert "Shift+Scroll to scroll" in text
+    assert "/ commands" not in text
+
+
+def test_modified_enter_sequences_override_plain_enter_mappings():
+    for sequence in CTRL_ENTER_SEQUENCES:
+        assert ANSI_SEQUENCES[sequence] == (Keys.Escape, Keys.ControlJ)
+    for sequence in SHIFT_ENTER_SEQUENCES:
+        assert ANSI_SEQUENCES[sequence] == (Keys.Escape, Keys.ControlM)
+
+
+def test_footer_separates_runtime_model_spacer_and_keybind_rows():
+    tui = _fake_persistent_tui()
+
+    assert tui.status_row.children == [tui.status_window, tui.status_model_window]
+    assert tui.status_spacer.height == 1
+    assert tui.footer_row.children == [
+        tui.footer_brand_window,
+        tui.footer_path_window,
+        tui.keybind_window,
+    ]
+    assert "qwen3.5:4b" in "".join(
+        text for _style, text in tui._status_model_fragments()
+    )
+    assert "klaude v" in "".join(
+        text for _style, text in tui._footer_brand_fragments()
+    )
+    assert "~/klaude-code" in "".join(
+        text for _style, text in tui._footer_path_fragments()
+    )
+    assert "Enter to send/queue" in "".join(
+        text for _style, text in tui._keybind_fragments()
+    )
+
+
+def test_runtime_settings_control_device_threads_and_context_persist(tmp_path):
+    preferences_path = tmp_path / "chat-preferences.json"
+    tui = _fake_persistent_tui(chat_preferences_path=preferences_path)
+
+    tui._open_settings_category("runtime")
+    assert tui._choice_kind == "runtime settings"
+    assert any(value.startswith("device: auto") for value in tui._choice_values)
+
+    tui._accept_choice()
+    assert tui._choice_kind == "runtime device"
+
+    tui._begin_choice("runtime device", ["auto (Klaude decides)", "CPU only", "back"], "CPU only")
+    tui._accept_choice()
+    assert tui.agent.ollama_options["num_gpu"] == 0
+
+    tui._begin_choice("CPU threads", ["auto (Klaude decides)", "4", "back"], "4")
+    tui._accept_choice()
+    assert tui.agent.ollama_options["num_thread"] == 4
+
+    tui._begin_choice("context size", ["8,192", "16,384", "back"], "16,384")
+    tui._accept_choice()
+    assert tui.agent.ollama_options["num_ctx"] == 16_384
+    assert tui.ui_state.context_window == 16_384
+    assert _load_runtime_preferences(preferences_path) == {
+        "num_gpu": 0,
+        "num_thread": 4,
+        "num_ctx": 16_384,
+    }
+
+
+def test_custom_setting_edit_cancel_returns_to_its_parent_category():
+    tui = _fake_persistent_tui()
+
+    tui._runtime_edit = "num_ctx"
+    tui._set_input("12345")
+    tui._cancel_choice()
+    assert tui._choice_kind == "runtime settings"
+    assert not tui._runtime_edit
+
+    tui._choice_kind = None
+    tui._height_edit = True
+    tui._set_input("3 9")
+    tui._cancel_choice()
+    assert tui._choice_kind == "input field settings"
+    assert not tui._height_edit
+
+
+def test_tui_streams_assistant_text_by_character_with_legacy_chunk_fallback(monkeypatch):
+    tui = _fake_persistent_tui()
+    emitted = []
+    monkeypatch.setattr(tui, "_emit", lambda kind, value: emitted.append((kind, value)))
+    monkeypatch.setattr("klaude_cli.main.time.sleep", lambda _delay: None)
+
+    assert tui._emit_assistant_text("hi", initial=True) == "hi"
+    assert emitted == [("append", "\n"), ("append", "h"), ("append", "i")]
+
+    tui.character_stream = False
+    emitted.clear()
+    assert tui._emit_assistant_text("ok", initial=False) == "ok"
+    assert emitted == [("append", "ok")]
+
+
+def test_pastelle_themes_are_contiguous_rainbow_ordered_and_neutral_surface():
+    names = tuple(TUI_THEME_LABELS)
+    pastelle = tuple(name for name in names if name.startswith("pastelle-"))
+    assert pastelle == (
+        "pastelle-red", "pastelle-orange", "pastelle-yellow", "pastelle-lime",
+        "pastelle-green", "pastelle-cyan", "pastelle-azure", "pastelle-blue",
+        "pastelle-lavender", "pastelle-purple", "pastelle-magenta", "pastelle-pink",
+    )
+    assert {TUI_THEME_STYLES[name]["output-field"] for name in pastelle} == {
+        "bg:#181818 #e8e8e8"
+    }
+    assert {TUI_THEME_STYLES[name]["input-field"] for name in pastelle} == {
+        "bg:#242424 #f2f2f2"
+    }
+
+
+def test_status_text_has_no_fill_while_footer_uses_input_surface():
+    style = _tui_style("autumn", "vscode-dark")
+    status = style.get_attrs_for_style_str("class:runtime_busy")
+    footer = style.get_attrs_for_style_str("class:footer")
+    brand = style.get_attrs_for_style_str("class:footer.brand")
+    path = style.get_attrs_for_style_str("class:footer.path")
+    path_rail = style.get_attrs_for_style_str("class:footer.path.rail")
+    runtime = style.get_attrs_for_style_str("class:runtime_text")
+    keybinds = style.get_attrs_for_style_str("class:footer.keybinds")
+
+    assert not status.bgcolor
+    assert footer.bgcolor == "35222a"
+    assert brand.bgcolor == "f29a72"
+    assert brand.color == "211820"
+    assert path.bgcolor == "452a35"
+    assert path_rail.bgcolor == "452a35"
+    assert path_rail.color == "35222a"
+    assert runtime.color == "8d7878"
+    assert keybinds.color == runtime.color
 
 
 def test_cd_changes_agent_workspace_and_reports_current_path(tmp_path):
@@ -998,6 +1342,21 @@ def test_output_wheel_uses_scroll_speed(monkeypatch, direction, field):
     assert len(calls) == 3
 
 
+def test_mouse_capture_is_reserved_for_click_selectable_menus():
+    tui = _fake_persistent_tui()
+
+    assert not tui._mouse_interaction_active()
+    tui._begin_choice("model", ["model-a"], "model-a")
+    assert tui._mouse_interaction_active()
+    tui._cancel_choice()
+    tui.input.buffer.complete_state = CompletionState(
+        tui.input.buffer.document,
+        [Completion("/help")],
+        complete_index=0,
+    )
+    assert tui._mouse_interaction_active()
+
+
 def test_scroll_speed_selection_persists_and_resets(tmp_path):
     path = tmp_path / "appearance.json"
     tui = _fake_persistent_tui(path)
@@ -1014,7 +1373,7 @@ def test_scroll_speed_selection_persists_and_resets(tmp_path):
     assert _load_tui_appearance(path).scroll_lines == 2
 
 
-def test_model_and_theme_pickers_have_visible_cancel_options():
+def test_model_picker_cancels_while_theme_picker_goes_back_to_settings():
     tui = _fake_persistent_tui()
     original_theme = tui.appearance.theme
     tui._set_input("/model")
@@ -1031,10 +1390,10 @@ def test_model_and_theme_pickers_have_visible_cancel_options():
     assert tui._choice_kind == "theme settings"
     tui._choice_index = 0
     tui._accept_choice()
-    assert tui._choice_values[-1] == "cancel"
+    assert tui._choice_values[-1] == "back"
     tui._choice_index = len(tui._choice_values) - 1
     tui._accept_choice()
-    assert tui._choice_kind is None
+    assert tui._choice_kind == "theme settings"
     assert tui.appearance.theme == original_theme
 
 
@@ -1067,8 +1426,8 @@ def test_persistent_tui_models_command_is_sorted_alphabetically():
 
 @pytest.mark.parametrize(
     "minimum,maximum,count,selected,expected_height",
-    [(8, 12, 2, 1, 8), (2, 10, 5, 4, 7), (8, 12, 30, 25, 12),
-     (1, 1, 30, 25, 1), (6, 6, 30, 25, 6)],
+    [(8, 12, 2, 1, 6), (2, 10, 5, 4, 7), (8, 12, 30, 25, 10),
+     (1, 1, 30, 25, 1), (6, 6, 30, 25, 4)],
 )
 def test_live_picker_scrolls_selected_row_into_view(
     tmp_path, minimum, maximum, count, selected, expected_height,
@@ -1122,7 +1481,7 @@ def test_transcript_width_uses_rendered_content_width_with_border_and_scrollbar(
                 info = tui.output.window.render_info
                 assert info is not None
                 assert tui._transcript_content_width() == info.window_width
-                assert tui._divider_width() == info.window_width - 3
+                assert tui._divider_width() == info.window_width - 1
                 screen = tui.application.renderer._last_screen
                 user_row = next(
                     row
@@ -1179,17 +1538,24 @@ def test_theme_preview_cancel_restores_colors_and_preserves_new_output(tmp_path)
     tui._begin_choice("theme", ["autumn", "neon-synth"], "autumn")
     tui._move_choice(1)
     assert tui.appearance.theme == "neon-synth"
+    preview_rows = "".join(text for _style, text in tui._choice_fragments())
+    assert "autumn *" in preview_rows
+    assert "neon-synth *" not in preview_rows
     assert not path.exists()
     tui._cancel_choice()
     assert (tui.appearance.theme, tui.appearance.text_theme) == original
+    assert tui._choice_kind == "theme settings"
     tui._begin_choice("text theme", ["vscode-dark", "monokai"], "vscode-dark")
     tui._move_choice(1)
-    assert "Text color preview" in tui.output.text
+    assert "```html" in tui.output.text
+    assert tui.output.text == TEXT_THEME_PREVIEW_BLOCK
     tui._append("\narrived during preview\n")
+    assert tui.output.text == TEXT_THEME_PREVIEW_BLOCK
     tui._cancel_choice()
-    assert "Text color preview" not in tui.output.text
+    assert TEXT_THEME_PREVIEW_BLOCK not in tui.output.text
     assert "arrived during preview" in tui.output.text
     assert (tui.appearance.theme, tui.appearance.text_theme) == original
+    assert tui._choice_kind == "theme settings"
 
 
 def test_persistent_tui_replaces_live_context_estimate_with_exact_tokens():
@@ -1223,6 +1589,121 @@ def test_persistent_tui_permission_answer_unblocks_worker_request():
     assert request["answer"] == "a"
     assert done.is_set()
     assert tui._permission_request is None
+
+
+def test_ollama_service_control_does_not_attempt_an_interactive_password(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    monkeypatch.setattr("klaude_cli.main.shutil.which", lambda command: "/usr/bin/systemctl")
+    monkeypatch.setattr(
+        "klaude_cli.main.subprocess.run",
+        lambda arguments, **kwargs: calls.append((arguments, kwargs)) or SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="Failed to restart ollama.service: Interactive authentication required.\n",
+        ),
+    )
+
+    ok, message = _control_ollama_service("restart")
+
+    assert not ok
+    assert calls[0][0] == ["systemctl", "--no-ask-password", "restart", "ollama"]
+    assert "sudo systemctl restart ollama" in message
+
+
+def test_ollama_service_control_gives_a_terminal_command_for_generic_failures(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("klaude_cli.main.shutil.which", lambda command: "/usr/bin/systemctl")
+    monkeypatch.setattr(
+        "klaude_cli.main.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="See system logs and 'systemctl status ollama.service' for details.\n",
+            stderr="",
+        ),
+    )
+
+    ok, message = _control_ollama_service("restart")
+
+    assert not ok
+    assert "sudo systemctl restart ollama" in message
+
+
+def test_persistent_tui_refresh_erases_and_invalidates_current_frame(monkeypatch):
+    tui = _fake_persistent_tui()
+    calls = []
+
+    class FakeRenderer:
+        def erase(self, *, leave_alternate_screen):
+            calls.append(("erase", leave_alternate_screen))
+
+    monkeypatch.setattr(tui.application, "renderer", FakeRenderer())
+    monkeypatch.setattr(tui.application, "invalidate", lambda: calls.append(("invalidate",)))
+
+    tui._refresh_tui()
+
+    assert calls == [("erase", False), ("invalidate",)]
+
+
+def test_persistent_tui_permission_response_accepts_composer_input():
+    tui = _fake_persistent_tui()
+    done = __import__("threading").Event()
+    request = {"tool": "run_shell", "detail": "run tests", "answer": "n", "done": done}
+    tui._permission_request = request
+    tui._set_input("yes")
+
+    tui._submit_permission_response()
+
+    assert request["answer"] == "y"
+    assert done.is_set()
+    assert tui.input.text == ""
+
+
+def test_persistent_tui_permission_response_keeps_invalid_composer_input():
+    tui = _fake_persistent_tui()
+    done = __import__("threading").Event()
+    tui._permission_request = {
+        "tool": "run_shell",
+        "detail": "run tests",
+        "answer": "n",
+        "done": done,
+    }
+    tui._set_input("maybe")
+
+    tui._submit_permission_response()
+
+    assert not done.is_set()
+    assert tui.input.text == "maybe"
+    assert "Type y/yes" in tui.status_error
+
+
+def test_persistent_tui_choice_response_accepts_a_typed_option():
+    tui = _fake_persistent_tui()
+    tui._begin_choice(
+        "runtime device",
+        ["auto (Klaude decides)", "CPU only", "GPU preferred", "back"],
+        "auto (Klaude decides)",
+    )
+    tui._set_input("GPU preferred")
+
+    tui._submit_choice_response()
+
+    assert tui.agent.ollama_options["num_gpu"] == -1
+    assert tui._choice_kind == "runtime settings"
+
+
+def test_persistent_tui_choice_response_preserves_invalid_typed_option():
+    tui = _fake_persistent_tui()
+    tui._begin_choice("settings", ["theme", "scroll"], "theme")
+    tui._set_input("unknown")
+
+    tui._submit_choice_response()
+
+    assert tui._choice_kind == "settings"
+    assert tui.input.text == "unknown"
+    assert tui.status_error == "That is not an available option"
 
 
 def test_tui_appearance_store_defaults_and_round_trips(tmp_path):
@@ -1261,6 +1742,37 @@ def test_last_chat_model_store_defaults_and_round_trips(tmp_path):
     _save_last_chat_model(path, "qwen3.5:9b")
 
     assert _load_last_chat_model(path) == "qwen3.5:9b"
+
+
+def test_runtime_preferences_persist_alongside_the_last_chat_model(tmp_path):
+    path = tmp_path / "chat-preferences.json"
+    _save_runtime_preferences(
+        path,
+        {"num_gpu": -1, "num_thread": 8, "num_ctx": 16_384},
+    )
+    _save_last_chat_model(path, "qwen3.5:9b")
+
+    assert _load_last_chat_model(path) == "qwen3.5:9b"
+    assert _load_runtime_preferences(path) == {
+        "num_gpu": -1,
+        "num_thread": 8,
+        "num_ctx": 16_384,
+    }
+    tui = _fake_persistent_tui()
+    tui.agent.ollama_options.update({"num_gpu": 0, "num_thread": 1, "num_ctx": 8192})
+    _apply_runtime_preferences(tui.agent, _load_runtime_preferences(path))
+    assert tui.agent.ollama_options == {"num_gpu": -1, "num_thread": 8, "num_ctx": 16_384}
+
+
+def test_runtime_preference_auto_removes_the_saved_request(tmp_path):
+    path = tmp_path / "chat-preferences.json"
+    _save_runtime_preferences(path, {"num_gpu": None})
+    tui = _fake_persistent_tui()
+    tui.agent.ollama_options["num_gpu"] = -1
+
+    _apply_runtime_preferences(tui.agent, _load_runtime_preferences(path))
+
+    assert "num_gpu" not in tui.agent.ollama_options
 
 
 def test_persistent_tui_theme_and_text_theme_persist_independently(tmp_path):
