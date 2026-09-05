@@ -6,6 +6,8 @@ requires-python = ">=3.11"
 dependencies = [
     "typer>=0.12",
     "rich>=13.7",
+    "prompt-toolkit>=3.0,<4",
+    "pygments>=2.17",
     "klaude-core",
     "klaude-knowledge",
     "klaude-web",

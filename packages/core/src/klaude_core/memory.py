@@ -163,7 +163,10 @@ class Memory:
         self.memory_file = memory_file
         self.memory_file.parent.mkdir(parents=True, exist_ok=True)
         sessions_db.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(sessions_db)
+        # Interactive TUI model turns run on a background worker so the input
+        # remains usable. Turns are serialized, but the connection crosses the
+        # UI/worker boundary.
+        self.db = sqlite3.connect(sessions_db, check_same_thread=False)
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS turns (
                 session_id TEXT, ts REAL, role TEXT, content TEXT

@@ -6,6 +6,13 @@
 # [models.override]
 # coder = "qwen3-coder:30b"
 
+[ollama]
+# General reasoning control. Keep false for responsive small-model chat/tool
+# use; choose low/medium/high on capable hardware and models when desired.
+# think = false
+# Optional code-only override. This never silently changes the selected model.
+# code_think = "low"
+
 [ollama.options]
 # Sent with each /api/chat request. On an 8-thread CPU, num_thread = 6 is
 # about 75% of logical threads and num_thread = 8 asks Ollama to use all
@@ -16,18 +23,34 @@
 # num_ctx = 8192
 # num_thread = 8
 # num_gpu = 999
-# num_predict = 4096  # output-token ceiling; raise for deliberately long code
+# num_predict = 2048  # default output-token ceiling; raise for deliberately long code
+# temperature = 0.2
+# top_p = 0.9
+# min_p = 0.0
+# presence_penalty = 0.0
+# frequency_penalty = 0.0
+# repeat_penalty = 1.1
 
-# Top-level Ollama reasoning control, separate from runtime options. Set false
-# for responsive small Qwen chat/tool use; use true or low/medium/high when a
-# thinking-capable model should deliberate before responding.
-# [ollama]
-# think = false
+# Optional overrides used only for code requests. Constrained machines can set
+# smaller context/output ceilings; stronger machines can raise them without
+# increasing the cost of ordinary chat and retrieval turns.
+[ollama.code_options]
+# num_ctx = 16384
+# num_predict = 4096
+# temperature = 0.15
+# top_p = 0.85
+# presence_penalty = 0.0
 
 [agent]
+# Maximum model/tool-loop iterations for one user turn. Keep this bounded on
+# slower hardware; raise it only for workflows that genuinely need more tools.
+# max_steps = 8
+# retrieval_k = 6
 # Continue a response only when Ollama reports an output-length stop inside an
 # unfinished fenced code block.  Limited to avoid loops with weak local models.
 # max_code_continuations = 2
+# Repair mechanically invalid Python/GDScript from concrete diagnostics only.
+# max_code_repairs = 2
 
 [services]
 # ollama_url  = "http://localhost:11434"
@@ -204,7 +227,3 @@ max_results = 5
 # run_shell = "ask"    # ask | allow | deny
 # edit_file = "ask"
 # crawl_site = "ask"
-
-[agent]
-# max_steps = 20
-# retrieval_k = 6

@@ -9,8 +9,10 @@ typed agent framework.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -82,6 +84,20 @@ PROMISE_TO_SEARCH_RE = re.compile(
     r"(?:search|look up|check|research|find)"
     r")\b"
 )
+PROMISE_TO_CODE_RE = re.compile(
+    r"(?i)\b(?:"
+    r"let me|i (?:should|need to)|i(?:'ll| will)|would you like me to"
+    r")\s+(?:now\s+)?(?:provide|create|write|rewrite|finish|complete)\b"
+    r"[^\n]{0,100}\b(?:code|script|program|file|version|implementation)\b"
+)
+DIRECT_CODE_SYSTEM_PROMPT = """You are Klaude, a local-first coding assistant.
+Produce the requested code directly. Return one minimal, complete, copy-pasteable
+implementation using only real APIs from the requested language and framework
+version. Do not invent nodes, assets, types, methods, or helper functions. Ensure
+every declared setting is used and every requested action is reachable from input.
+Keep one language and API version throughout, close code fences, and never promise
+to provide a corrected version later. If the request says code only, output only
+the fenced code. No tools are available for this self-contained request."""
 DIRECT_LOOKUP_RE = re.compile(r"(?i)^\s*(?:who|what|where|when)\s+(?:is|are|was|were)\b")
 DIRECT_LOOKUP_SUBJECT_RE = re.compile(
     r"(?i)^\s*(?:who|what|where|when)\s+(?:is|are|was|were)\s+(?P<subject>.+?)\s*[?.!]*$"
@@ -2715,6 +2731,17 @@ def _contextual_search_query(
         collapse_whitespace=True,
     )
     query = _search_query_from_request(raw_query)
+    if (
+        query
+        and not _is_low_info_search_query(query)
+        and SEARCH_VERB_RE.search(user_message)
+        and not _is_refinement_followup(user_message)
+    ):
+        # A model-authored, self-contained query is already the best expression
+        # of its retrieval intent. Conversation state is for resolving genuine
+        # follow-ups, not replacing a complete query with a stray noun from the
+        # user's sentence (for example, turning Godot documentation into "URL").
+        return query
     if _refinement_anchor_topic(user_message, messages):
         query = _search_query_from_request(user_message)
     rewrite = rewrite_followup_query(query, user_message, messages, state)
@@ -2964,13 +2991,48 @@ def _runtime_error_message(error: Exception) -> str:
     """Turn known local-runtime failures into an actionable, non-destructive hint."""
     message = str(error)
     lowered = message.lower()
-    if "cuda" in lowered and "illegal memory access" in lowered:
+    cuda_fault = next(
+        (
+            label
+            for label in (
+                "illegal memory access",
+                "illegal instruction",
+                "unspecified launch failure",
+            )
+            if label in lowered
+        ),
+        "",
+    )
+    if "cuda" in lowered and cuda_fault:
         return (
-            "Ollama's GPU runner crashed (CUDA illegal memory access). "
+            f"Ollama's GPU runner crashed (CUDA {cuda_fault}). "
             "Restart the Ollama service before retrying, or set "
             "[ollama.options] num_gpu = 0 to isolate the model on CPU."
         )
     return message
+
+
+def _recoverable_tool_parser_error(error: Exception) -> bool:
+    """Identify Ollama failures caused by malformed model-emitted tool XML."""
+    lowered = str(error).lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "xml syntax error",
+            "tool call parsing failed",
+            "failed to parse tool call",
+        )
+    ) and any(
+        marker in lowered
+        for marker in (
+            "<function",
+            "\\u003cfunction",
+            "unexpected eof",
+            "unexpected end",
+            "mismatched tag",
+            "closed by </parameter>",
+        )
+    )
 
 
 def _controller_message(content: str) -> dict[str, str]:
@@ -2990,6 +3052,383 @@ def _unfinished_fenced_code(content: str) -> bool:
     return content.count("```") % 2 == 1
 
 
+_EVIDENCE_QUERY_STOPWORDS = {
+    "after",
+    "answer",
+    "current",
+    "documentation",
+    "fetch",
+    "include",
+    "official",
+    "page",
+    "relevant",
+    "search",
+    "source",
+    "then",
+    "whether",
+    "with",
+}
+
+
+def _bounded_fetched_evidence(
+    content: str,
+    user_message: str,
+    *,
+    limit: int = 8_000,
+) -> str:
+    """Keep provenance plus query-relevant page windows for small contexts."""
+    if len(content) <= limit:
+        return content
+    terms = {
+        token.lower()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_.:-]{3,}", user_message)
+        if token.lower() not in _EVIDENCE_QUERY_STOPWORDS
+    }
+    header_size = min(1_200, limit // 4)
+    header = content[:header_size].rstrip()
+    window_size = 1_600
+    stride = 1_200
+    candidates: list[tuple[float, int, str]] = []
+    lowered = content.lower()
+    for start in range(header_size, len(content), stride):
+        window = content[start : start + window_size]
+        lowered_window = lowered[start : start + window_size]
+        score = sum(
+            lowered_window.count(term) * (1.0 + min(len(term), 24) / 8.0)
+            for term in terms
+        )
+        if score:
+            candidates.append((score, start, window.strip()))
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    selected: list[str] = []
+    selected_ranges: list[tuple[int, int]] = []
+    remaining = limit - len(header) - 180
+    for _score, start, window in candidates:
+        end = start + len(window)
+        overlaps_selected = any(
+            start < prior_end and end > prior_start
+            for prior_start, prior_end in selected_ranges
+        )
+        if overlaps_selected:
+            continue
+        if len(window) + 2 > remaining:
+            window = window[: max(0, remaining - 2)].rstrip()
+        if not window:
+            break
+        selected.append(window)
+        selected_ranges.append((start, start + len(window)))
+        remaining -= len(window) + 2
+        if remaining < 240:
+            break
+    if not selected:
+        selected.append(content[header_size : limit - 120].rstrip())
+    closing = (
+        "\n</untrusted_web_content>"
+        if "<untrusted_web_content" in content and "</untrusted_web_content>" in content
+        else ""
+    )
+    return (
+        f"{header}\n\n...[page truncated; query-relevant excerpts follow]...\n\n"
+        + "\n\n".join(selected)
+        + f"\n...[truncated]{closing}"
+    )[: limit + len(closing)]
+
+
+def _code_validation_language(user_message: str) -> str:
+    lowered = user_message.lower()
+    if "gdscript" in lowered or re.search(r"\.gd\b", lowered):
+        return "gdscript"
+    if "python" in lowered or re.search(r"\.py\b", lowered):
+        return "python"
+    return ""
+
+
+def _fenced_code(content: str, expected_language: str) -> str:
+    pattern = re.compile(
+        rf"```(?:{re.escape(expected_language)})?\s*\n(?P<code>.*?)```",
+        re.IGNORECASE | re.DOTALL,
+    )
+    match = pattern.search(content)
+    return match.group("code") if match else ""
+
+
+def _gdscript_validation_diagnostics(code: str, user_message: str = "") -> list[str]:
+    """High-confidence, dependency-free GDScript checks.
+
+    This deliberately avoids pretending to be a complete Godot parser. When a
+    Godot executable becomes available it can be added behind the same seam.
+    """
+    diagnostics: list[str] = []
+    last_sibling: dict[int, tuple[int, str]] = {}
+    for line_number, raw_line in enumerate(code.splitlines(), 1):
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw_line.expandtabs(4)) - len(raw_line.expandtabs(4).lstrip())
+        if re.match(r"^(?:else|elif)\b", stripped):
+            previous = last_sibling.get(indent)
+            if previous is None or not re.match(r"^(?:if|elif)\b", previous[1]):
+                previous_label = previous[1] if previous else "no preceding sibling"
+                diagnostics.append(
+                    f"line {line_number}: {stripped.split(':', 1)[0]} has no matching "
+                    f"if/elif at the same indentation; previous sibling is {previous_label!r}"
+                )
+        last_sibling[indent] = (line_number, stripped)
+        for deeper in [level for level in last_sibling if level > indent]:
+            del last_sibling[deeper]
+
+    invalid_api_patterns = {
+        r"\bget_world\(\)": "get_world() is not the Godot 4 CanvasItem 2D-world API",
+        r"\.direct_space_state_2d\b": (
+            "direct_space_state_2d is not a World2D property; use direct_space_state"
+        ),
+        r"\bintersect_objects_excluding\b": (
+            "intersect_objects_excluding is not a PhysicsDirectSpaceState2D method"
+        ),
+        r"\.exclude\s*=\s*\[\s*self\s*\]": (
+            "PhysicsShapeQueryParameters2D.exclude requires RIDs, not the node object"
+        ),
+        r"\bOS\.get_ticks_msec\b": (
+            "OS.get_ticks_msec is not the Godot 4 timing API; use Time.get_ticks_msec"
+        ),
+    }
+    for pattern, message in invalid_api_patterns.items():
+        if re.search(pattern, code):
+            diagnostics.append(message)
+
+    if re.search(r"(?m)^extends\s+CharacterBody2D\s*$", code):
+        if re.search(r"(?m)^\s*var\s+velocity\s*(?::|:=|=)", code):
+            diagnostics.append(
+                "CharacterBody2D already defines velocity; do not redeclare the built-in property"
+            )
+        if re.search(r"\bmove_and_slide\s*\(\s*[^)\s]", code):
+            diagnostics.append(
+                "Godot 4 CharacterBody2D.move_and_slide() takes no velocity argument"
+            )
+
+    lowered_request = user_message.lower()
+    export_clause = re.search(r"\bexport\s+([^\.\n]+)", user_message, re.IGNORECASE)
+    if export_clause:
+        requested_exports = {
+            token
+            for token in re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", export_clause.group(1))
+            if "_" in token
+        }
+        declared_exports = set(
+            re.findall(r"(?m)^\s*@export(?:_[a-zA-Z_]+)?\s+var\s+([a-zA-Z_]\w*)", code)
+        )
+        missing_exports = sorted(requested_exports - declared_exports)
+        if missing_exports:
+            diagnostics.append(
+                "missing requested exported variables: " + ", ".join(missing_exports)
+            )
+
+    requested_actions: set[str] = set()
+    for match in re.finditer(
+        r"Input\.get_vector\s*\((?P<arguments>[^)]*)\)",
+        user_message,
+        re.IGNORECASE,
+    ):
+        arguments = match.group("arguments")
+        requested_actions.update(
+            re.findall(r"[\"']([a-zA-Z_][a-zA-Z0-9_]*)[\"']", arguments)
+        )
+        requested_actions.update(re.findall(r"\bmove_[a-zA-Z0-9_]+\b", arguments))
+    for match in re.finditer(
+        r"Input\.get_vector\s+with\s+(?P<arguments>[^.;\n]{1,160})",
+        user_message,
+        re.IGNORECASE,
+    ):
+        arguments = match.group("arguments")
+        requested_actions.update(
+            re.findall(r"[\"']([a-zA-Z_][a-zA-Z0-9_]*)[\"']", arguments)
+        )
+        requested_actions.update(re.findall(r"\bmove_[a-zA-Z0-9_]+\b", arguments))
+    for match in re.finditer(
+        r"input actions?\s+(?P<actions>[^.;\n]{1,160})",
+        user_message,
+        re.IGNORECASE,
+    ):
+        actions = match.group("actions")
+        requested_actions.update(
+            re.findall(r"[\"']([a-zA-Z_][a-zA-Z0-9_]*)[\"']", actions)
+        )
+        requested_actions.update(re.findall(r"\bmove_[a-zA-Z0-9_]+\b", actions))
+    for match in re.finditer(
+        r"\battack(?:\s+input)?(?:\s+action|\s+on)\s+[\"']"
+        r"(?P<action>[a-zA-Z_][a-zA-Z0-9_]*)[\"']",
+        user_message,
+        re.IGNORECASE,
+    ):
+        requested_actions.add(match.group("action"))
+    if re.search(r"\b(?:attack input action|attack action)\b", lowered_request):
+        requested_actions.add("attack")
+    missing_actions = sorted(
+        action
+        for action in requested_actions
+        if f'"{action}"' not in code and f"'{action}'" not in code
+    )
+    if missing_actions:
+        diagnostics.append("missing requested input actions: " + ", ".join(missing_actions))
+    if "input.get_vector" in lowered_request and "Input.get_vector" not in code:
+        diagnostics.append(
+            "the request requires Input.get_vector, but the candidate does not use it"
+        )
+
+    if "typed variables" in lowered_request:
+        untyped_lines = []
+        for line_number, raw_line in enumerate(code.splitlines(), 1):
+            stripped = raw_line.strip()
+            if re.match(r"^(?:@export\s+)?var\s+\w+\s*=", stripped):
+                untyped_lines.append(str(line_number))
+        if untyped_lines:
+            diagnostics.append(
+                "variables lack type annotations or := inference on lines "
+                + ", ".join(untyped_lines[:8])
+            )
+
+    if (
+        re.search(r"\bexclude\b.{0,30}\b(?:player|self)\b", lowered_request)
+        and "intersect_shape" in code
+        and not re.search(
+            r"\.exclude(?:\s*=\s*\[[^\]]*|\.append\(\s*)(?:self\.)?get_rid\(\)",
+            code,
+        )
+    ):
+        diagnostics.append(
+            "the request requires excluding the player from the physics query; assign "
+            "get_rid() to PhysicsShapeQueryParameters2D.exclude before intersect_shape"
+        )
+
+    if "physicsbody2d" in lowered_request and "intersect_shape" in code:
+        if not re.search(
+            r"\b(?:is|as)\s+PhysicsBody2D\b|:\s*PhysicsBody2D\b",
+            code,
+        ):
+            diagnostics.append(
+                "intersect_shape colliders are not restricted to PhysicsBody2D as requested"
+            )
+
+    if (
+        re.search(
+            r"\b(?:implement|has(?:\s+the)?\s+method)\b.{0,40}\btake_damage\b",
+            lowered_request,
+        )
+        and not re.search(r"\.has_method\s*\(\s*&?[\"']take_damage[\"']\s*\)", code)
+    ):
+        diagnostics.append(
+            'the request requires a take_damage capability check; use has_method("take_damage")'
+        )
+
+    if "every exported variable must be used" in lowered_request:
+        for name in re.findall(
+            r"(?m)^\s*@export(?:_[a-zA-Z_]+)?\s+var\s+([a-zA-Z_]\w*)",
+            code,
+        ):
+            if len(re.findall(rf"\b{re.escape(name)}\b", code)) < 2:
+                diagnostics.append(f"exported variable {name} is declared but never used")
+    return diagnostics
+
+
+def _code_validation_diagnostics(content: str, user_message: str) -> list[str]:
+    language = _code_validation_language(user_message)
+    if not language:
+        return []
+    code = _fenced_code(content, language)
+    if not code:
+        return [f"response does not contain a closed {language} fenced code block"]
+    if language == "python":
+        try:
+            ast.parse(code)
+        except SyntaxError as error:
+            return [f"Python syntax error on line {error.lineno}: {error.msg}"]
+        return []
+    if language == "gdscript":
+        return _gdscript_validation_diagnostics(code, user_message)
+    return []
+
+
+def _code_request(user_message: str) -> bool:
+    return bool(
+        re.search(
+            r"(?i)\b(?:code|script|program|function|class|implementation|"
+            r"gdscript|javascript|typescript|python|rust|golang|java|c\+\+)\b",
+            user_message,
+        )
+    )
+
+
+def _explicit_retrieval_tools(
+    user_message: str,
+    available_tools: set[str],
+) -> tuple[str, ...]:
+    """Return explicitly requested retrieval operations in their required order."""
+    lowered = " ".join(user_message.lower().split())
+    search_disabled = any(
+        phrase in lowered
+        for phrase in (
+            "do not search",
+            "don't search",
+            "without searching",
+            "no search",
+            "offline only",
+        )
+    )
+    required: list[str] = []
+    if not search_disabled and "query_knowledge" in available_tools and re.search(
+        r"\b(?:search|query|check|look up)\b.{0,50}"
+        r"\b(?:knowledge|library|learned docs?|local docs?)\b",
+        lowered,
+    ):
+        required.append("query_knowledge")
+    if not search_disabled and "code_search" in available_tools and re.search(
+        r"\b(?:code[- ]search|search (?:the )?(?:code|programming) docs?)\b",
+        lowered,
+    ):
+        required.append("code_search")
+    if not search_disabled and "web_search" in available_tools and re.search(
+        r"\b(?:search (?:the )?web|web search|browse (?:the )?web|"
+        r"look (?:it |this )?up online|search online|check online)\b",
+        lowered,
+    ):
+        required.append("web_search")
+    elif not search_disabled and "web_search" in available_tools and re.search(
+        r"\b(?:current|latest|today|recent|real[- ]time)\b.{0,40}"
+        r"\b(?:public|result|status|news|price|version|release|documentation)\b",
+        lowered,
+    ):
+        required.append("web_search")
+    if not search_disabled and "fetch_url" in available_tools and re.search(
+        r"\b(?:fetch|open|read|visit)\b.{0,100}"
+        r"\b(?:url|web ?page|page|site|search result|documentation)\b",
+        lowered,
+    ):
+        required.append("fetch_url")
+    if "git_status" in available_tools and re.search(
+        r"\b(?:current\s+branch|git\s+status|worktree\s+(?:status|dirty|clean)|"
+        r"whether\s+the\s+worktree\s+is\s+(?:dirty|clean))\b",
+        lowered,
+    ):
+        required.append("git_status")
+    return tuple(dict.fromkeys(required))
+
+
+def _explicit_source_url_requested(user_message: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:include|give|provide|cite|show)\b.{0,40}"
+            r"\b(?:source\s+(?:url|link)|url|link)\b",
+            user_message,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _promises_unprovided_code(content: str) -> bool:
+    """Catch an answer that ends by announcing code it never emits."""
+    return bool(PROMISE_TO_CODE_RE.search(content[-700:]))
+
+
 class Agent:
     def __init__(
         self,
@@ -2998,12 +3437,16 @@ class Agent:
         tools: list[Tool],
         gate: PermissionGate,
         system_prompt: str,
-        max_steps: int = 20,
+        max_steps: int = 8,
         max_code_continuations: int = 2,
+        max_code_repairs: int = 2,
         tool_selector: ToolSelector | None = None,
         ollama_options: dict[str, Any] | None = None,
         ollama_think: bool | str | None = None,
         web_research_budget: WebResearchBudget | None = None,
+        ollama_code_options: dict[str, Any] | None = None,
+        ollama_code_think: bool | str | None = None,
+        code_context: str = "",
     ):
         self.ollama = ollama
         self.model = model
@@ -3011,9 +3454,13 @@ class Agent:
         self.gate = gate
         self.max_steps = max_steps
         self.max_code_continuations = max(0, min(3, max_code_continuations))
+        self.max_code_repairs = max(0, min(3, max_code_repairs))
         self.tool_selector = tool_selector
         self.ollama_options = dict(ollama_options or {})
         self.ollama_think = ollama_think
+        self.ollama_code_options = dict(ollama_code_options or {})
+        self.ollama_code_think = ollama_code_think
+        self.code_context = code_context.strip()[:2_000]
         self.web_research_budget = (web_research_budget or WebResearchBudget()).bounded()
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         self.retrieval_state = RetrievalConversationState()
@@ -3025,7 +3472,12 @@ class Agent:
         else:
             self.messages.insert(0, {"role": "system", "content": system_prompt})
 
-    def _compact_history(self, tool_schemas: list[dict[str, Any]]) -> None:
+    def _compact_history(
+        self,
+        tool_schemas: list[dict[str, Any]],
+        *,
+        system_prompt_for_budget: str | None = None,
+    ) -> None:
         """Keep a new request within the configured context window.
 
         Entity state is retained separately, making stale transcript prose a
@@ -3037,9 +3489,16 @@ class Agent:
             return
         num_ctx = int(self.ollama_options.get("num_ctx", 8192))
         output_reserve = int(self.ollama_options.get("num_predict", 2048))
-        input_budget = max(8_000, (num_ctx - max(1_024, output_reserve)) * 4)
+        # Source code, tool schemas, and chat-template tokens routinely use
+        # substantially fewer than four characters per token.  A two-character
+        # estimate deliberately leaves output headroom instead of relying on
+        # Ollama to silently discard old messages at the context boundary.
+        input_budget = max(6_000, (num_ctx - max(1_024, output_reserve)) * 2)
         fixed = self.messages[0]
-        used = len(str(fixed.get("content", ""))) + len(str(tool_schemas))
+        budget_prompt = system_prompt_for_budget
+        if budget_prompt is None:
+            budget_prompt = str(fixed.get("content", ""))
+        used = len(budget_prompt) + len(str(tool_schemas))
         retained: list[dict[str, Any]] = []
         for message in reversed(self.messages[1:]):
             cost = len(str(message.get("content", ""))) + 96
@@ -3059,17 +3518,54 @@ class Agent:
             selected_tools = {
                 name: self.tools[name] for name in selected_names if name in self.tools
             }
+        required_retrieval_tools = _explicit_retrieval_tools(
+            user_message,
+            set(self.tools),
+        )
+        for required_tool in required_retrieval_tools:
+            if required_tool in self.tools:
+                selected_tools.setdefault(required_tool, self.tools[required_tool])
         used_tools: set[str] = set()
         used_tool_calls: set[str] = set()
         search_queries_this_turn: list[str] = []
         web_stop_instruction_sent = False
         empty_response_retried = False
         code_continuations = 0
+        code_repair_retried = False
+        code_validation_repairs = 0
+        tool_parser_retried = False
+        retrieval_requirement_retries: set[str] = set()
+        source_reference_retried = False
+        tools_disabled_for_turn = False
+        streamed_any = False
         continued_content: list[str] = []
+        request_options = dict(self.ollama_options)
+        code_request = _code_request(user_message)
+        if code_request:
+            request_options.update(self.ollama_code_options)
+            if request_options:
+                # Qwen 3.5's model defaults are intentionally creative. Code
+                # generation is more reliable with conservative sampling, and
+                # this does not increase memory use on low-end GPUs.
+                request_options.setdefault("temperature", 0.2)
+                request_options.setdefault("top_p", 0.9)
+                request_options.setdefault("presence_penalty", 0.0)
+        request_think = (
+            self.ollama_code_think
+            if code_request and self.ollama_code_think is not None
+            else self.ollama_think
+        )
+        direct_code_system_prompt = DIRECT_CODE_SYSTEM_PROMPT
+        if self.code_context:
+            direct_code_system_prompt += (
+                "\n\nRelevant durable user and project preferences:\n" + self.code_context
+            )
         research = AgenticSearchState(user_message, self.web_research_budget)
         self.last_web_research_state = research
 
         def active_schemas() -> list[dict[str, Any]]:
+            if tools_disabled_for_turn:
+                return []
             schemas: list[dict[str, Any]] = []
             for name, tool in selected_tools.items():
                 if name in {"web_search", "fetch_url"} and research.web_activity_stopped:
@@ -3084,6 +3580,16 @@ class Agent:
                     continue
                 schemas.append(tool.schema())
             return schemas
+
+        def model_messages() -> list[dict[str, Any]]:
+            if _code_request(user_message) and (
+                not selected_tools or tools_disabled_for_turn
+            ):
+                return [
+                    {"role": "system", "content": direct_code_system_prompt},
+                    *self.messages[1:],
+                ]
+            return self.messages
 
         def attach_research_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
             enriched = dict(metadata)
@@ -3118,7 +3624,15 @@ class Agent:
                 detail=research.exhausted_reason,
             )
 
-        self._compact_history(active_schemas())
+        direct_code_prompt = (
+            direct_code_system_prompt
+            if _code_request(user_message) and not selected_tools
+            else None
+        )
+        self._compact_history(
+            active_schemas(),
+            system_prompt_for_budget=direct_code_prompt,
+        )
 
         def execute_tool_call(call: dict[str, Any]):
             fn = call.get("function", {})
@@ -3434,7 +3948,9 @@ class Agent:
                 if result_urls:
                     research.result_sets.append(result_urls)
             result = str(result)
-            if len(result) > 12000:  # keep small-model context healthy
+            if name == "fetch_url":
+                result = _bounded_fetched_evidence(result, user_message)
+            elif len(result) > 12000:  # keep small-model context healthy
                 result = result[:12000] + "\n...[truncated]"
             if name in {"web_search", "fetch_url"}:
                 failed, failure_reason = _tool_result_failed(name, result, metadata)
@@ -3546,35 +4062,95 @@ class Agent:
 
         for _step in range(self.max_steps):
             try:
-                if self.ollama_options or self.ollama_think is not None:
+                schemas = active_schemas()
+                stream_chat = getattr(self.ollama, "chat_stream", None)
+                if code_request and not schemas and callable(stream_chat):
+                    streamed_parts: list[str] = []
+                    validation_language = _code_validation_language(user_message)
+                    last_progress_at = 0.0
+                    progress_stage = ""
+                    for fragment in stream_chat(
+                        self.model,
+                        model_messages(),
+                        options=request_options,
+                        think=request_think,
+                    ):
+                        stage = "reasoning" if fragment.get("thinking") else ""
+                        piece = str(fragment.get("content", ""))
+                        if piece:
+                            stage = "drafting code"
+                        now = time.monotonic()
+                        if stage and (stage != progress_stage or now - last_progress_at >= 15.0):
+                            progress_stage = stage
+                            last_progress_at = now
+                            yield AgentEvent("progress", {"stage": stage})
+                        if not piece:
+                            continue
+                        streamed_parts.append(piece)
+                        if not validation_language:
+                            streamed_any = True
+                            yield AgentEvent("text_delta", {"content": piece})
+                    msg = {"role": "assistant", "content": "".join(streamed_parts)}
+                elif request_options or request_think is not None:
                     chat_kwargs: dict[str, Any] = {
-                        "tools": active_schemas(),
-                        "options": self.ollama_options,
+                        "tools": schemas,
+                        "options": request_options,
                     }
                     # `think` is a newer Ollama API field.  Do not send an
                     # explicit null: lightweight compatible clients commonly
                     # accept `options` but have not added this parameter.
-                    if self.ollama_think is not None:
-                        chat_kwargs["think"] = self.ollama_think
-                    msg = self.ollama.chat(self.model, self.messages, **chat_kwargs)
+                    if request_think is not None:
+                        chat_kwargs["think"] = request_think
+                    msg = self.ollama.chat(self.model, model_messages(), **chat_kwargs)
                 else:
                     msg = self.ollama.chat(
                         self.model,
-                        self.messages,
-                        tools=active_schemas(),
+                        model_messages(),
+                        tools=schemas,
                     )
             except Exception as e:  # surface, don't crash the session
+                if (
+                    not tool_parser_retried
+                    and active_schemas()
+                    and _recoverable_tool_parser_error(e)
+                ):
+                    tool_parser_retried = True
+                    tools_disabled_for_turn = True
+                    self.messages.append(
+                        _controller_message(
+                            "The previous tool-call syntax was invalid. Do not call tools again "
+                            "this turn. Answer the user's request directly and completely."
+                        )
+                    )
+                    continue
                 yield AgentEvent("error", {"message": _runtime_error_message(e)})
                 return
 
             self.messages.append(msg)
             content = msg.get("content", "")
             tool_calls = msg.get("tool_calls") or _parse_text_tool_calls(
-                content, set(selected_tools)
+                content, set() if tools_disabled_for_turn else set(selected_tools)
             )
 
             if not tool_calls:
                 if not content.strip() and not empty_response_retried:
+                    completion_metadata = getattr(self.ollama, "last_chat_metadata", None)
+                    if (
+                        isinstance(completion_metadata, dict)
+                        and completion_metadata.get("thinking_characters")
+                        and _stopped_at_output_limit(completion_metadata)
+                    ):
+                        yield AgentEvent(
+                            "error",
+                            {
+                                "message": (
+                                    "model exhausted its output budget while reasoning before "
+                                    "producing an answer; lower reasoning effort or increase "
+                                    "[ollama.code_options] num_predict"
+                                )
+                            },
+                        )
+                        return
                     empty_response_retried = True
                     self.messages.append(
                         _controller_message(
@@ -3632,6 +4208,56 @@ class Agent:
                         },
                     )
                     return
+                missing_retrieval_tool = next(
+                    (
+                        tool_name
+                        for tool_name in required_retrieval_tools
+                        if tool_name not in used_tools
+                    ),
+                    None,
+                )
+                if missing_retrieval_tool:
+                    if missing_retrieval_tool in retrieval_requirement_retries:
+                        yield AgentEvent(
+                            "error",
+                            {
+                                "message": (
+                                    "model did not perform the explicitly requested "
+                                    f"{missing_retrieval_tool} call; try a stronger model"
+                                )
+                            },
+                        )
+                        return
+                    retrieval_requirement_retries.add(missing_retrieval_tool)
+                    self.messages.append(
+                        _controller_message(
+                            f"The user explicitly requested {missing_retrieval_tool}, but your "
+                            "previous response did not call it. Call that tool now using your own "
+                            "concise query or source selection. Do not answer from memory or claim "
+                            "that retrieval ran."
+                        )
+                    )
+                    yield AgentEvent(
+                        "retry",
+                        {"reason": f"required {missing_retrieval_tool} was not called"},
+                    )
+                    continue
+                if (
+                    research.web_actions_used
+                    and _explicit_source_url_requested(user_message)
+                    and not re.search(r"https?://\S+", content)
+                    and not source_reference_retried
+                ):
+                    source_reference_retried = True
+                    self.messages.append(
+                        _controller_message(
+                            "The user explicitly requested a source URL, but your answer omitted "
+                            "it. Answer again and include the exact URL from the gathered web "
+                            "evidence. Do not perform another web action."
+                        )
+                    )
+                    yield AgentEvent("retry", {"reason": "requested source URL was omitted"})
+                    continue
                 completion_metadata = getattr(self.ollama, "last_chat_metadata", None)
                 if (
                     code_continuations < self.max_code_continuations
@@ -3648,9 +4274,68 @@ class Agent:
                         )
                     )
                     continue
-                content = "".join([*continued_content, content])
+                combined_content = "".join([*continued_content, content])
+                validation_diagnostics = _code_validation_diagnostics(
+                    combined_content,
+                    user_message,
+                )
+                if validation_diagnostics:
+                    if code_validation_repairs >= self.max_code_repairs:
+                        yield AgentEvent(
+                            "error",
+                            {
+                                "message": (
+                                    "generated code still failed validation after "
+                                    f"{code_validation_repairs} repair attempt(s): "
+                                    + "; ".join(validation_diagnostics[:3])
+                                )
+                            },
+                        )
+                        return
+                    code_validation_repairs += 1
+                    self.messages.append(
+                        _controller_message(
+                            "The previous candidate is invalid and will not be shown to the user. "
+                            "Discard it as an answer and rewrite the entire file. Return exactly "
+                            "one corrected, complete fenced file with no commentary. Before "
+                            "responding, verify that the new file addresses every diagnostic; do "
+                            "not repeat a line identified as invalid:\n- "
+                            + "\n- ".join(validation_diagnostics[:12])
+                        )
+                    )
+                    yield AgentEvent(
+                        "retry",
+                        {
+                            "reason": (
+                                "generated code failed mechanical validation; repair "
+                                f"{code_validation_repairs}/{self.max_code_repairs}"
+                            )
+                        },
+                    )
+                    continued_content.clear()
+                    continue
+                if (
+                    not code_repair_retried
+                    and not streamed_any
+                    and _code_request(user_message)
+                    and _promises_unprovided_code(content)
+                ):
+                    code_repair_retried = True
+                    self.messages.append(
+                        _controller_message(
+                            "You ended by promising a cleaner or more complete code response "
+                            "without providing it. Provide that final implementation now in one "
+                            "fenced code block. Keep the requested language and framework version "
+                            "consistent, use their current APIs, and do not announce another pass."
+                        )
+                    )
+                    continue
+                content = combined_content
                 record_finish(content, best_effort=research.web_activity_stopped)
-                yield AgentEvent("text", {"content": content})
+                text_payload: dict[str, Any] = {"content": content}
+                if streamed_any:
+                    text_payload["metadata"] = {"streamed": True}
+                yield AgentEvent("text", text_payload)
                 yield AgentEvent("done", finish_payload())
                 return
 

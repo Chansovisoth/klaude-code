@@ -23,6 +23,10 @@ class PermissionGate:
         self.policies = dict(policies)
         self._ask = ask
 
+    def set_ask_callback(self, ask: AskCallback) -> None:
+        """Replace the client prompt when the active UI surface changes."""
+        self._ask = ask
+
     def check(self, tool: str, detail: str) -> None:
         policy = self.policies.get(tool, "ask")
         if policy == "allow":

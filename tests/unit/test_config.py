@@ -4,6 +4,30 @@ import klaude_core.config as config_module
 from klaude_core.config import load_config
 
 
+def test_agent_step_budget_defaults_low_and_clamps_overrides(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    data_dir = tmp_path / "data"
+    config_dir.mkdir()
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
+
+    cfg = load_config()
+    assert cfg.max_agent_steps == 8
+    assert cfg.max_code_repairs == 2
+
+    (config_dir / "config.toml").write_text("[agent]\nmax_steps = 200\n")
+    assert load_config().max_agent_steps == 20
+
+    (config_dir / "config.toml").write_text("[agent]\nmax_steps = 0\n")
+    assert load_config().max_agent_steps == 1
+
+    (config_dir / "config.toml").write_text("[agent]\nmax_code_repairs = 99\n")
+    assert load_config().max_code_repairs == 3
+
+    (config_dir / "config.toml").write_text("[agent]\nmax_code_repairs = -1\n")
+    assert load_config().max_code_repairs == 0
+
+
 def test_source_root_resolves_visible_config_and_portable_data_dirs(tmp_path, monkeypatch):
     source_root = tmp_path / "klaude-code"
     monkeypatch.delenv("KLAUDE_CONFIG_DIR", raising=False)
@@ -44,13 +68,23 @@ def test_load_config_reads_ollama_runtime_options(tmp_path, monkeypatch):
     data_dir = tmp_path / "data"
     config_dir.mkdir()
     (config_dir / "config.toml").write_text(
-        "[ollama.options]\n"
+        "[ollama]\n"
+        "code_think = 'high'\n"
+        "\n[ollama.options]\n"
         "num_ctx = 8192\n"
         "num_thread = 6\n"
         "num_gpu = 0\n"
         "num_predict = 4096\n"
+        "temperature = 0.25\n"
+        "top_p = 0.85\n"
+        "presence_penalty = 0.0\n"
+        "\n[ollama.code_options]\n"
+        "num_ctx = 16384\n"
+        "num_predict = 6144\n"
+        "temperature = 0.1\n"
         "\n[agent]\n"
         "max_code_continuations = 2\n"
+        "max_code_repairs = 3\n"
     )
     monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
     monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
@@ -62,8 +96,18 @@ def test_load_config_reads_ollama_runtime_options(tmp_path, monkeypatch):
         "num_thread": 6,
         "num_gpu": 0,
         "num_predict": 4096,
+        "temperature": 0.25,
+        "top_p": 0.85,
+        "presence_penalty": 0.0,
     }
+    assert cfg.ollama_code_options == {
+        "num_ctx": 16384,
+        "num_predict": 6144,
+        "temperature": 0.1,
+    }
+    assert cfg.ollama_code_think_for_model("qwen3.5:9b") == "high"
     assert cfg.max_code_continuations == 2
+    assert cfg.max_code_repairs == 3
 
 
 def test_small_qwen_defaults_to_non_thinking_and_allows_override(tmp_path, monkeypatch):
@@ -75,10 +119,17 @@ def test_small_qwen_defaults_to_non_thinking_and_allows_override(tmp_path, monke
 
     cfg = load_config()
     assert cfg.ollama_think_for_model("qwen3.5:4b") is False
+    assert cfg.ollama_code_think_for_model("qwen3.5:4b") is False
+    assert cfg.ollama_code_think_for_model("gpt-oss:20b") == "low"
     assert cfg.ollama_think_for_model("qwen3-coder:30b") is None
+    assert cfg.ollama_options["num_predict"] == 2048
 
-    (config_dir / "config.toml").write_text("[ollama]\nthink = true\n")
-    assert load_config().ollama_think_for_model("qwen3.5:4b") is True
+    (config_dir / "config.toml").write_text(
+        "[ollama]\nthink = true\ncode_think = 'medium'\n"
+    )
+    overridden = load_config()
+    assert overridden.ollama_think_for_model("qwen3.5:4b") is True
+    assert overridden.ollama_code_think_for_model("qwen3.5:4b") == "medium"
 
 
 def test_env_paths_ignore_unrelated_workdir_dotenv_when_source_root_is_known(

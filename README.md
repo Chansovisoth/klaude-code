@@ -65,8 +65,72 @@ uv run klaude chat  # or: uv tool install --editable apps/cli && klaude chat
 
 `-l` / `--library` is the friendly name for a knowledge bucket. `-c` / `--collection` still works as a compatibility alias.
 
-Inside `klaude chat`, use `/help` or `/commands` to print the command reference
+Inside `klaude chat`, use `/help` to print the command reference
 without asking the model to summarize it.
+
+The interactive terminal is a full-screen conversation: output stays above a
+full-width input at the bottom, and the input remains usable while Klaude is
+thinking, searching, or writing. Enter submits immediately or queues behind the
+active turn; Ctrl+Enter (or `/steer TEXT`) prioritizes a correction and interrupts
+at the next safe model/tool boundary. `/queue` shows pending turns and `/cancel`
+interrupts without adding one. Queued follow-ups appear in a compact live strip
+immediately above the input. Repeated Alt+Up edits them from newest to oldest;
+Enter saves the current edit, while clearing all text and pressing Enter deletes
+that queued input. Queue consumption pauses while an item is being edited. The status line continuously shows the model,
+reasoning effort, queue, activity, context usage, and last input/output tokens.
+Up/down recall prior inputs, Tab completes slash commands, and Alt+Enter inserts
+a newline when the terminal reports it distinctly. Ctrl+J is the compatibility
+newline shortcut for terminals such as MobaXterm that collapse modified Enter
+into plain Enter. `/model` and `/effort` use inline arrow-key pickers without leaving
+the chat screen, displaying the available options and highlighted selection
+inside the input frame rather than replacing the input with one option at a
+time. All selection menus end with reset to default and cancel; cancelling the
+effort step after choosing a model restores the original model. Model lists are
+sorted alphabetically. Klaude remembers the last successfully selected chat model
+across launches; an explicit `--model` overrides and updates that preference.
+Typing `/` as the first input character immediately opens slash-command
+suggestions with descriptions. `/keybinds` lists every keyboard control and
+does not include slash commands or involve the model.
+`/settings` organizes appearance under Theme, Output Field, and Input Field.
+The output border defaults to off and the scrollbar defaults to on; the rounded input border
+defaults to on. Input Field → Height → Enter min/max accepts two whole numbers
+(for example `2 10`). The composer grows between those limits; valid limits
+satisfy `1 ≤ min ≤ max ≤ 12`, with defaults of 8 and 12. Enter saves, Escape or
+Ctrl+C cancels, and typing `reset to default` restores both defaults.
+Each category can be reset independently. Autumn is the
+default interface theme, with Pastelle Pink, Hacker Green, and Neon Synth also
+included. Text/code colors remain independent: VS Code Dark, GitHub Dark,
+Monokai, or Solarized Light. `/theme` opens Theme settings for both color choices.
+Choices persist in `.klaude/data/appearance.json`. Non-interactive and piped
+output remains plain.
+
+Navigating interface themes previews the colors immediately. Text-theme pickers
+show a temporary sample in the output. Enter saves the chosen colors; cancel
+restores the previous colors and removes the sample. Picker lists follow the
+selected row when scrolling; PageUp/PageDown navigate and Escape cancels.
+
+Each session starts with a session divider after the logo and intro. Each user
+message is followed by its timestamped user divider; streamed assistant output
+is followed by a closing Klaude divider with elapsed duration.
+`/help` category names are underlined
+without adding separate underline rows.
+
+Modified Enter keys use the terminal's distinct key sequences. While the TUI is
+active, Klaude enables Kitty keyboard disambiguation and xterm modifyOtherKeys,
+then restores both on every exit path. It accepts both protocols' sequences.
+Terminals that implement neither protocol may collapse modified Enter into
+ordinary Enter before any terminal application can inspect it; use Ctrl+J for a
+newline and `/steer TEXT` for terminal-independent steering in that case.
+
+Multiline clipboard pastes are submitted as one chat turn. Explicit web or
+local-library search requests get one bounded compliance retry if a small model
+tries to answer from memory instead of calling the requested retrieval tool.
+When a prompt explicitly requests both discovery and page reading, Klaude
+requires both model-directed operations and keeps query-relevant excerpts from
+long fetched pages within the local model's context. Explicit no-search wording
+never becomes focused help for the `klaude search` command.
+Python and GDScript are mechanically checked before display and receive at most
+two diagnostic-driven repair attempts when validation finds concrete defects.
 
 `scripts/knowledge/install-online-docs.sh` writes timestamped logs under
 `logs/knowledge/online-docs/` by default. Set `KLAUDE_LOG_DIR` to store logs
@@ -109,7 +173,22 @@ Docker Compose, or `ollama run` parameters. Klaude only owns request tuning for
 the chat calls it sends: `config/config.toml` has `[ollama.options]`. For
 example, `num_thread = 8` asks Ollama to use all 8 logical CPU threads for
 Klaude chat requests, while GPU placement remains Ollama's automatic CUDA
-behavior unless you explicitly set `num_gpu`.
+behavior unless you explicitly set `num_gpu`. Self-contained code generation
+uses a smaller prompt and streams output immediately. Machines with additional
+capacity can tune code separately without changing ordinary chat:
+
+```toml
+[ollama]
+code_think = "low"
+
+[ollama.code_options]
+num_ctx = 16384
+num_predict = 4096
+temperature = 0.15
+```
+
+Leave those overrides unset for the bounded defaults. Klaude never silently
+switches the selected model based on hardware.
 
 Imported documentation and assistant skills are permanent user data, not repo
 files:

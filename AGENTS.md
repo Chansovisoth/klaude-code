@@ -93,11 +93,118 @@ Top-level commands currently include:
 
 Chat slash commands currently include:
 
-- `/help` and `/commands`: print the deterministic command reference directly.
+- `/help`: print the deterministic command reference directly.
+- `/keybinds`: print only keyboard controls directly. Slash commands belong in
+  `/help` and the `/` completion popup.
+- `/settings [CATEGORY]`: configure categorized Theme, Output Field, and Input
+  Field appearance settings. Output border defaults off and scrollbar defaults on; input
+  border defaults on. Every category includes its own reset action.
 - `/models`: list installed Ollama models and mark the active model.
-- `/model`: show the active chat model.
-- `/model NAME`: switch the active chat model while keeping chat history.
+- `/model`: open an arrow-key model picker, then an effort picker.
+- `/model NAME`: switch the active chat model, then choose effort while keeping
+  chat history. A successful selection is reused at the next chat launch.
+- `/effort` and `/effort LEVEL`: choose or directly set `auto`, `off`, `low`,
+  `medium`, or `high` reasoning effort for the active session.
+- `/queue [TEXT]`: show pending turns or explicitly append one to the queue.
+- `/steer TEXT`: prioritize a new instruction and interrupt the active turn at
+  the next safe model/tool boundary.
+- `/cancel`: interrupt the active turn at the next safe boundary.
+- `/cd [PATH]`: show or change the agent workspace directory. Relative paths
+  resolve from the current agent directory; the process cwd is unchanged.
+- `/pwd`: show the current agent workspace directory.
+- `/ls [OPTIONS]`: run the colorized Linux `ls` command in the current agent
+  workspace (for example, `/ls -lha`); positional paths remain jailed there.
+- `/theme [NAME]`: open Theme settings for interface and text/code colors;
+  an optional NAME sets persistent TUI chrome independently from content
+  colors. Built-ins are Autumn (default), Pastelle Pink, Hacker Green, and Neon
+  Synth; the picker and `/theme reset` restore the default.
+- Theme settings also choose persistent Markdown/code syntax colors. Built-ins
+  are VS Code Dark (default), GitHub Dark, Monokai, and Solarized Light; the
+  picker reset restores the default. There is no separate `/text-theme` command.
 - `/quit`, `/exit`, `/q`: exit the chat session.
+
+All picker modes render their available options inside the input field with a
+visible selected row; long lists scroll with the selection. Picker height obeys
+the same configured input minimum and maximum as the text composer, padding
+short lists to the minimum and scrolling long lists within the maximum.
+Model options and
+the `/models` listing are sorted case-insensitively by full model name. Model,
+effort, theme, settings, and input-height pickers end with `reset to default`
+and `cancel`, except settings submenus with a parent end with `back` instead
+of a redundant cancel option. Cancelling the effort step of a model change restores the prior
+model. Resetting a model selects the configured coder role if installed;
+resetting effort selects auto. The picker control cursor tracks the selected
+row so Prompt Toolkit does not reset scrolling to row zero. PageUp/PageDown
+navigate and Escape cancels. Theme navigation previews colors without saving;
+cancel restores the original colors. Text previews include a temporary sample
+that is removed without discarding intervening output.
+
+Interactive chat uses a persistent full-screen layout: the scrollable transcript
+stays above a full-width input at the bottom, and the input remains focused while
+the agent runs in a background thread. Enter queues additional turns while one
+is active; Ctrl+Enter steers using the current input, Alt+Enter inserts a
+newline when distinguishable, Ctrl+J is the legacy-terminal newline fallback,
+repeated Alt+Up edits queued follow-ups from newest to oldest, and Ctrl+C
+interrupts the active response. Enter saves a queue edit; empty text plus Enter
+deletes that item. Pending inputs render in a compact live strip immediately
+above the input field, and automatic queue consumption pauses during editing.
+Cancellation is cooperative at
+the next emitted model/tool event, so an in-flight Ollama HTTP request or tool
+call may finish before the steering turn starts. Bracketed multiline paste is
+one logical turn. Up/down navigate input history, Tab completes slash commands,
+and the live status line shows activity,
+queue depth, model, effort, context-window use, and last input/output token
+counts. Non-interactive stdin retains line-oriented compatibility and plain
+output. In the TUI, `/help` category names are underlined, and each user or
+assistant message begins with a full-width gray divider containing the speaker
+name and local date/time. Each session starts with a `Session: <id>` divider
+after the logo and intro; the composer is labeled `you`, and each turn closes
+the actual user message with its `you` divider and the streamed assistant output
+with its Klaude divider; the
+closing Klaude divider includes the elapsed `worked for HH:MM:SS` duration.
+The intro displays the current agent workspace path. `/cd` updates that path,
+the workspace jail, repository context, and the next system-prompt runtime
+context; it validates that the target exists and is a directory.
+
+Typing `/` at the beginning of the input must immediately offer every registered
+chat slash command with its registry description. Keep completion sourced from
+`CHAT_COMMANDS`; do not maintain a second command-name list.
+While the completion popup is open, Up/Down navigate suggestions instead of
+input history; history navigation resumes when the popup is closed.
+Escape closes the completion popup without altering the current input.
+Enter accepts the highlighted completion and executes the command in one press;
+Tab completes without executing so users can add arguments.
+The separate Scroll settings category controls both input and output scroll speed
+(1–10 lines per wheel event, default 2), persisted as `scroll.lines` with legacy
+`output_field.scroll_lines` loading supported. Output resets do not reset Scroll.
+This controls mouse events
+delivered to Klaude, not terminal-owned scrollback or terminal-intercepted gestures.
+
+Modified Enter combinations support both Kitty CSI-u and xterm modifyOtherKeys
+escape sequences. The TUI enables both protocols on entry and must restore both
+in a `finally` path on exit. Ctrl+J inserts a newline as a compatibility fallback.
+A legacy terminal may collapse modified Enter into ordinary Enter before Klaude
+receives it, which cannot be disambiguated in the application; `/steer TEXT`
+remains the terminal-independent steering fallback.
+
+Interactive TUI appearance is stored in `.klaude/data/appearance.json` (or the
+configured data directory) as categorized `theme`, `output_field`, and
+`input_field` objects. Chrome and content syntax themes are deliberately
+separate settings. `/theme` opens the Theme category. Input height grows between `input_field.min_height`
+and `input_field.max_height` (defaults 8 and 12); legacy `height` is accepted as
+the minimum. Input Field → Height → Enter min/max accepts two integers with
+`1 <= min <= max <= 12`. Invalid input stays in the editor without saving;
+invalid persisted ranges fall back to defaults. Escape/Ctrl+C cancels the editor.
+Numbered height presets are fixed heights: selecting `8 lines` sets both the
+minimum and maximum to 8. `Enter min/max` is the flexible-range option.
+`Application(full_screen=True)` uses the terminal
+alternate screen and must restore the user's original terminal on exit.
+
+The last successfully selected chat model is stored separately in
+`.klaude/data/chat-preferences.json`. Chat startup uses explicit `--model`
+first, then that saved model, then the configured coder role. If the saved model
+is no longer installed, startup falls back to the configured coder role. Do not
+silently choose a different model for performance reasons.
 
 When the user explicitly asks for the complete command list, use the
 deterministic command-reference handler and preserve its formatting. When the
@@ -134,6 +241,8 @@ Source-checkout runtime data:
 - `.klaude/data/docs-sources/<name>/`: refreshable docs manifests and versions.
 - `.klaude/data/skills/<name>/`: installed skill manifests and versions.
 - `.klaude/data/runtime-context.json`: volatile cached machine context.
+- `.klaude/data/appearance.json`: persistent TUI chrome and text-theme choices.
+- `.klaude/data/chat-preferences.json`: last selected interactive chat model.
 - `.klaude/data/webcache.db`: cached search/fetch/Hugging Face results.
 - `.klaude/data/web-provider-state.json`: provider health/cooldown state.
 - `.klaude/data/entities.sqlite`: compact learned canonical names, aliases,
@@ -162,11 +271,19 @@ Model tier defaults are in `packages/core/src/klaude_core/config.py`:
 The user can override roles in `config/config.toml` under `[models.override]`.
 Klaude request tuning belongs under `[ollama.options]` and is sent with each
 `/api/chat` request. Supported options currently parsed by config are
-`num_ctx`, `num_thread`, `num_gpu`, and `num_predict`. `num_predict` is the
+`num_ctx`, `num_thread`, `num_gpu`, `num_predict`, `top_k`, `seed`,
+`temperature`, `top_p`, `min_p`, `presence_penalty`, `frequency_penalty`, and
+`repeat_penalty`. `[ollama.code_options]` can override these only for code
+requests, and `[ollama] code_think` can override general `think` only for code.
+This keeps constrained defaults while allowing stronger machines to spend more
+context and reasoning without silently switching models. `num_predict` is the
 per-response output-token ceiling; Klaude detects an Ollama length stop inside
 an unfinished fenced code block and may request up to
 `[agent] max_code_continuations` (default 2) continuations. It does not
 continue ordinary prose or guess at truncation without Ollama metadata.
+Python and GDScript responses are buffered for dependency-free mechanical
+validation and may receive up to `[agent] max_code_repairs` (default 2)
+diagnostic-driven repairs. Unsupported languages remain single-pass.
 
 Do not put Ollama chat options in `.env`. Do not require Modelfiles for ordinary
 tuning. Host-level Ollama daemon settings such as model storage path, keepalive,
@@ -193,6 +310,12 @@ The agent loop in `packages/core/src/klaude_core/agent.py` handles:
 - a bounded, model-directed retrieval loop; the host preserves safety,
   provenance, deduplication, and budgets but does not synthesize a first search
   or fallback query.
+- explicit retrieval requirements are cumulative: a user request to search and
+  fetch must perform both model-directed operations, and a requested source URL
+  receives one answer-only compliance retry if omitted.
+- a configurable per-turn model/tool step ceiling (`[agent] max_steps`, default
+  8 and clamped to 1-20) so malformed or weak-model tool behavior cannot run
+  indefinitely on slow hardware.
 - context-window protection at each user-turn boundary: stale transcript prose
   is compacted before the request reaches Ollama, while the canonical system
   prompt, newest turn, and separate entity state are retained.
@@ -207,6 +330,16 @@ tool. The system prompt requires retrieval for fresh public facts and explicit
 lookups, while ordinary conversation and stable explanations should answer
 directly. The runtime bounds and deduplicates calls but never fabricates a
 search merely because the model did not ask for one.
+
+Self-contained code-generation requests use a compact code prompt with no tool
+schemas while retaining bounded durable user/project preferences. Unsupported
+languages stream tool-free output. Python and GDScript are buffered until
+dependency-free validation succeeds, with safe reasoning/drafting progress and
+bounded diagnostic repairs, then persist one completed assistant turn.
+Retrieval remains available when the user explicitly requests search, current
+documentation, or workspace inspection. Explicit `do not search` language
+removes knowledge and web tools for the turn. If Ollama rejects malformed Qwen
+tool XML, retry once with tools disabled, then surface any repeated error.
 
 For follow-ups, resolve the subject from the current conversation and preserve
 explicit clarifications such as entity type, location, official domain, and
@@ -471,6 +604,11 @@ runtime owns an in-memory source registry: SERP leads receive
 IDs. Canonically equivalent URLs reuse the same source, while the existing
 SQLite TTL cache avoids repeat downloads across runtimes. Search-query/provider
 provenance is attached to fetched sources when available.
+
+Long fetched pages are reduced to bounded, query-relevant evidence windows
+while retaining source identity and the untrusted-content boundary. Do not
+blindly keep only the beginning of a page, because decisive API signatures or
+claim evidence may occur later in the document.
 
 The untrusted public `fetch_url` boundary accepts only HTTP(S), rejects URL
 credentials and local/private/link-local/metadata targets, resolves hostnames

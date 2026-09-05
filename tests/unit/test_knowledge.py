@@ -964,6 +964,19 @@ def test_phase1_entity_state_switches_ais_to_paragon_without_constraint_leak():
 
     class FakeOllama:
         def chat(self, model, messages, tools=None):
+            if messages[-1]["role"] != "tool":
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "web_search",
+                                "arguments": {"query": messages[-1]["content"]},
+                            }
+                        }
+                    ],
+                }
             return {"role": "assistant", "content": "ok"}
 
     def web_search(query):
@@ -1820,6 +1833,19 @@ def test_web_unavailable_claim_triggers_registered_web_search_tool():
                 return {
                     "role": "assistant",
                     "content": "I cannot perform real-time web searches.",
+                }
+            if self.calls == 2:
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "web_search",
+                                "arguments": {"query": "current public result for AIS"},
+                            }
+                        }
+                    ],
                 }
             assert messages[-1]["role"] == "tool"
             return {"role": "assistant", "content": "I searched instead."}
@@ -3363,7 +3389,19 @@ def test_model_can_select_one_of_multiple_structured_search_results():
 
     class FakeOllama:
         def chat(self, model, messages, tools=None):
-            assert messages[-1]["role"] == "tool"
+            if messages[-1]["role"] == "user":
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "web_search",
+                                "arguments": {"query": "Example Person biography"},
+                            }
+                        }
+                    ],
+                }
             if messages[-1].get("tool_name") == "web_search":
                 return {
                     "role": "assistant",

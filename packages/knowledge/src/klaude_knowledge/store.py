@@ -43,7 +43,8 @@ class KnowledgeStore:
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
         self.db = lancedb.connect(str(root))
-        self.fts = sqlite3.connect(root / "fts.db")
+        # Hybrid retrieval can execute on Klaude's serialized TUI worker.
+        self.fts = sqlite3.connect(root / "fts.db", check_same_thread=False)
         self.fts.row_factory = sqlite3.Row
         self.fts.execute(
             """CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(

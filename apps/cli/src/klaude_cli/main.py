@@ -25,19 +25,26 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import shlex
 import shutil
 import sqlite3
 import subprocess
+import sys
 import textwrap
+import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from difflib import get_close_matches
 from enum import StrEnum
+from functools import partial
 from importlib import resources
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -61,6 +68,39 @@ from klaude_core.runtime_context import (
     context_to_dict,
     render_runtime_context,
 )
+from prompt_toolkit import Application, PromptSession
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.data_structures import Point
+from prompt_toolkit.document import Document
+from prompt_toolkit.filters import Condition
+from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.layout import (
+    ConditionalContainer,
+    Dimension,
+    Float,
+    FloatContainer,
+    HSplit,
+    Layout,
+    VSplit,
+    Window,
+)
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.margins import ScrollbarMargin
+from prompt_toolkit.layout.menus import CompletionsMenu
+from prompt_toolkit.lexers import Lexer, PygmentsLexer
+from prompt_toolkit.layout.processors import ConditionalProcessor, Processor, Transformation
+from prompt_toolkit.shortcuts import CompleteStyle, radiolist_dialog
+from prompt_toolkit.styles import Style, merge_styles
+from prompt_toolkit.styles.pygments import style_from_pygments_cls
+from prompt_toolkit.layout.screen import Char
+from prompt_toolkit.widgets import Label, TextArea
+from pygments.lexers.markup import MarkdownLexer
+from pygments.styles import get_style_by_name
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -96,6 +136,569 @@ WEB_SEARCH_PROVIDER_LABELS = {
     "searxng",
     "none",
 }
+
+EFFORT_CHOICES = ("auto", "off", "low", "medium", "high")
+SHIFT_ENTER_SEQUENCES = ("\x1b[13;2u", "\x1b[27;2;13~")
+CTRL_ENTER_SEQUENCES = ("\x1b[13;5u", "\x1b[27;5;13~")
+XTERM_MODIFY_OTHER_KEYS_ON = "\x1b[>4;2m"
+XTERM_MODIFY_OTHER_KEYS_OFF = "\x1b[>4m"
+KITTY_KEYBOARD_PROTOCOL_ON = "\x1b[>1u"
+KITTY_KEYBOARD_PROTOCOL_OFF = "\x1b[<u"
+for _sequence in SHIFT_ENTER_SEQUENCES:
+    ANSI_SEQUENCES.setdefault(_sequence, (Keys.Escape, Keys.ControlM))
+for _sequence in CTRL_ENTER_SEQUENCES:
+    ANSI_SEQUENCES.setdefault(_sequence, (Keys.Escape, Keys.ControlJ))
+ANSI_SEQUENCES.setdefault("\x1b[27;5;99~", Keys.ControlC)
+ANSI_SEQUENCES.setdefault("\x1b[27;5;100~", Keys.ControlD)
+ANSI_SEQUENCES.setdefault("\x1b[99;5u", Keys.ControlC)
+ANSI_SEQUENCES.setdefault("\x1b[100;5u", Keys.ControlD)
+DEFAULT_TUI_THEME = "autumn"
+DEFAULT_TEXT_THEME = "vscode-dark"
+DEFAULT_OUTPUT_BORDER = False
+DEFAULT_OUTPUT_SCROLLBAR = True
+DEFAULT_INPUT_BORDER = True
+MIN_INPUT_HEIGHT = 1
+DEFAULT_INPUT_HEIGHT = 8
+MAX_INPUT_HEIGHT = 12
+DEFAULT_SCROLL_LINES = 2
+INPUT_PLACEHOLDER_TEXT = "Ask Klaude anything. Type '/' to use commands."
+ESCAPE_SEQUENCE_TIMEOUT = 0.05
+ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+RESET_THEME_CHOICE = "reset to default"
+CANCEL_CHOICE = "cancel"
+SETTINGS_CATEGORIES = (
+    "theme",
+    "output field",
+    "input field",
+    "scroll",
+    RESET_THEME_CHOICE,
+    CANCEL_CHOICE,
+)
+THEME_SETTINGS = (
+    "interface theme",
+    "text/code theme",
+    "back",
+    RESET_THEME_CHOICE,
+    CANCEL_CHOICE,
+)
+OUTPUT_FIELD_SETTINGS = (
+    "toggle border",
+    "toggle scrollbar",
+    "back",
+    RESET_THEME_CHOICE,
+    CANCEL_CHOICE,
+)
+INPUT_FIELD_SETTINGS = (
+    "toggle border",
+    "height",
+    "back",
+    RESET_THEME_CHOICE,
+    CANCEL_CHOICE,
+)
+INPUT_HEIGHT_CHOICES = tuple(
+    f"{height} {'line' if height == 1 else 'lines'}"
+    for height in range(MIN_INPUT_HEIGHT, MAX_INPUT_HEIGHT + 1)
+)
+TEXT_THEME_PREVIEW_BLOCK = (
+    "\n\n### Text color preview\n"
+    "Regular text · **bold text** · `inline_code`\n"
+    "```python\nvalue = \"Klaude\"\nprint(value)\n```\n"
+)
+TUI_THEME_LABELS = {
+    "autumn": "Autumn",
+    "pastelle-pink": "Pastelle Pink",
+    "hacker-green": "Hacker Green",
+    "neon-synth": "Neon Synth",
+}
+TEXT_THEME_LABELS = {
+    "vscode-dark": "VS Code Dark",
+    "github-dark": "GitHub Dark",
+    "monokai": "Monokai",
+    "solarized-light": "Solarized Light",
+}
+TEXT_THEME_PYGMENTS = {
+    "vscode-dark": "native",
+    "github-dark": "github-dark",
+    "monokai": "monokai",
+    "solarized-light": "solarized-light",
+}
+TUI_THEME_ALIASES = {
+    "pastelle": "pastelle-pink",
+    "pink": "pastelle-pink",
+    "hacker": "hacker-green",
+    "green": "hacker-green",
+    "neon": "neon-synth",
+    "synth": "neon-synth",
+}
+TEXT_THEME_ALIASES = {
+    "vscode": "vscode-dark",
+    "vs-code-dark": "vscode-dark",
+    "github": "github-dark",
+    "solarized": "solarized-light",
+}
+TUI_THEME_STYLES = {
+    "autumn": {
+        "background": "bg:#211820 #f8e1d8",
+        "output-field": "bg:#211820 #f8e1d8",
+        "input-field": "bg:#35222a #fff1e9",
+        "frame.border": "#f59a78",
+        "frame.label": "#ffc1a8 bold",
+        "status": "bg:#452a35 #f8d8c9",
+        "status.busy": "bg:#452a35 #ff9b72 bold",
+        "status.queue": "bg:#452a35 #ffc1a8",
+        "status.error": "bg:#452a35 #ff7a7a bold",
+        "bottom-toolbar": "bg:#452a35 #f8d8c9",
+        "bottom-toolbar.model": "bg:#452a35 #ffc1a8 bold",
+        "bottom-toolbar.tokens": "bg:#452a35 #ff9b72",
+        "completion-menu.completion": "bg:#50313a #fbe5dc",
+        "completion-menu.completion.current": "bg:#f29a72 #211820 bold",
+        "scrollbar.background": "bg:#50313a",
+        "scrollbar.button": "bg:#f29a72",
+    },
+    "pastelle-pink": {
+        "background": "bg:#20151d #f4dce9",
+        "output-field": "bg:#20151d #f4dce9",
+        "input-field": "bg:#321f2c #fff2f8",
+        "frame.border": "#f29ac2",
+        "frame.label": "#ffc1dc bold",
+        "status": "bg:#41283a #f8ddea",
+        "status.busy": "bg:#41283a #ff9dce bold",
+        "status.queue": "bg:#41283a #cab8ff",
+        "status.error": "bg:#41283a #ff7070 bold",
+        "bottom-toolbar": "bg:#41283a #f8ddea",
+        "bottom-toolbar.model": "bg:#41283a #ffc1dc bold",
+        "bottom-toolbar.tokens": "bg:#41283a #cab8ff",
+        "completion-menu.completion": "bg:#432c3d #f8ddea",
+        "completion-menu.completion.current": "bg:#f29ac2 #20151d bold",
+        "scrollbar.background": "bg:#432c3d",
+        "scrollbar.button": "bg:#f29ac2",
+    },
+    "hacker-green": {
+        "background": "bg:#061006 #b9f6c2",
+        "output-field": "bg:#061006 #b9f6c2",
+        "input-field": "bg:#0a1b0c #dbffe0",
+        "frame.border": "#24d15d",
+        "frame.label": "#68ff8d bold",
+        "status": "bg:#0d2712 #b9f6c2",
+        "status.busy": "bg:#0d2712 #68ff8d bold",
+        "status.queue": "bg:#0d2712 #20d9a0",
+        "status.error": "bg:#0d2712 #ff6565 bold",
+        "bottom-toolbar": "bg:#0d2712 #b9f6c2",
+        "bottom-toolbar.model": "bg:#0d2712 #68ff8d bold",
+        "bottom-toolbar.tokens": "bg:#0d2712 #20d9a0",
+        "completion-menu.completion": "bg:#103219 #caffd3",
+        "completion-menu.completion.current": "bg:#24d15d #061006 bold",
+        "scrollbar.background": "bg:#103219",
+        "scrollbar.button": "bg:#24d15d",
+    },
+    "neon-synth": {
+        "background": "bg:#100b22 #e4ddff",
+        "output-field": "bg:#100b22 #e4ddff",
+        "input-field": "bg:#1c1238 #fff4ff",
+        "frame.border": "#00e5ff",
+        "frame.label": "#ff55dd bold",
+        "status": "bg:#211544 #d9d1ff",
+        "status.busy": "bg:#211544 #00e5ff bold",
+        "status.queue": "bg:#211544 #ff55dd",
+        "status.error": "bg:#211544 #ff5c8a bold",
+        "bottom-toolbar": "bg:#211544 #d9d1ff",
+        "bottom-toolbar.model": "bg:#211544 #00e5ff bold",
+        "bottom-toolbar.tokens": "bg:#211544 #ff55dd",
+        "completion-menu.completion": "bg:#291956 #e4ddff",
+        "completion-menu.completion.current": "bg:#00e5ff #100b22 bold",
+        "scrollbar.background": "bg:#291956",
+        "scrollbar.button": "bg:#ff55dd",
+    },
+}
+TRANSCRIPT_STYLE = Style.from_dict(
+    {
+        "help.category": "underline bold",
+        "transcript.divider": "#808080",
+        "transcript.user-message": "",
+        "input.placeholder": "#808080 italic",
+        "queue.title": "#a3a3a3 bold",
+        "queue.item": "#d4d4d4",
+        "queue.hint": "#808080 italic",
+        "queue.selected": "reverse bold",
+        "choice.item": "#d4d4d4",
+        "choice.selected": "reverse bold",
+    }
+)
+HELP_CATEGORY_TITLES = frozenset(
+    {"OPTIONS", "CLI COMMANDS", "DOCS COMMANDS", "CHAT COMMANDS", "KEYBOARD"}
+)
+
+
+class TranscriptLexer(Lexer):
+    """Markdown highlighting plus semantic styling for Klaude transcript chrome."""
+
+    _MESSAGE_PREFIXES = ("━━ you · ", "━━ klaude · ")
+
+    def __init__(self) -> None:
+        self._markdown = PygmentsLexer(MarkdownLexer)
+
+    def lex_document(self, document):
+        markdown_line = self._markdown.lex_document(document)
+
+        def get_line(lineno: int):
+            line = document.lines[lineno]
+            if line in HELP_CATEGORY_TITLES:
+                return [("class:help.category", line)]
+            if line.startswith(self._MESSAGE_PREFIXES):
+                return [("class:transcript.divider", line)]
+            return markdown_line(lineno)
+
+        return get_line
+
+
+def _is_user_transcript_line(document: Document, lineno: int) -> bool:
+    """Whether a transcript line belongs to the user block above its divider."""
+    if document.lines[lineno].startswith(
+        ("━━ you · ", "━━ klaude · ", "━━ Session: ")
+    ):
+        return False
+    for index in range(lineno - 1, -1, -1):
+        line = document.lines[index]
+        if line.startswith("━━ you · "):
+            return False
+        if line.startswith(("━━ klaude · ", "━━ Session: ")):
+            return True
+    return False
+
+
+class TranscriptWindow(Window):
+    """Paint user transcript rows without inserting wrapping padding text."""
+
+    def _copy_body(
+        self,
+        ui_content,
+        new_screen,
+        write_position,
+        move_x,
+        width,
+        vertical_scroll=0,
+        horizontal_scroll=0,
+        wrap_lines=False,
+        highlight_lines=False,
+        vertical_scroll_2=0,
+        always_hide_cursor=False,
+        has_focus=False,
+        align=None,
+        get_line_prefix=None,
+    ):
+        visible_rows, rowcol_to_yx = super()._copy_body(
+            ui_content,
+            new_screen,
+            write_position,
+            move_x,
+            width,
+            vertical_scroll,
+            horizontal_scroll,
+            wrap_lines,
+            highlight_lines,
+            vertical_scroll_2,
+            always_hide_cursor,
+            has_focus,
+            align,
+            get_line_prefix,
+        )
+        start_x = write_position.xpos + move_x
+        for relative_y, (lineno, _column) in visible_rows.items():
+            document = self.content.buffer.document
+            # Prompt Toolkit also calls this method to render the one-cell
+            # scrollbar margin. It has independent line numbering and must
+            # remain untouched.
+            if width <= 1 or lineno >= len(document.lines):
+                continue
+            if not _is_user_transcript_line(document, lineno):
+                continue
+            row = new_screen.data_buffer[write_position.ypos + relative_y]
+            for column in range(width):
+                cell = row[start_x + column]
+                row[start_x + column] = Char(
+                    cell.char,
+                    f"{cell.style} class:transcript.user-message".strip(),
+                )
+        return visible_rows, rowcol_to_yx
+
+
+class InputPlaceholderProcessor(Processor):
+    """Render a hint without treating it as a cursor-moving input prefix."""
+
+    def apply_transformation(self, transformation_input) -> Transformation:
+        return Transformation(
+            [("class:input.placeholder", INPUT_PLACEHOLDER_TEXT)],
+            source_to_display=lambda position: position,
+            display_to_source=lambda position: 0,
+        )
+
+
+def _tui_style(theme: str, text_theme: str):
+    chrome = TUI_THEME_STYLES.get(theme, TUI_THEME_STYLES[DEFAULT_TUI_THEME])
+    pygments_name = TEXT_THEME_PYGMENTS.get(
+        text_theme,
+        TEXT_THEME_PYGMENTS[DEFAULT_TEXT_THEME],
+    )
+    return merge_styles(
+        [
+            Style.from_dict(chrome),
+            style_from_pygments_cls(get_style_by_name(pygments_name)),
+            Style.from_dict({"transcript.user-message": chrome["input-field"]}),
+            TRANSCRIPT_STYLE,
+        ]
+    )
+
+
+@dataclass
+class TUIAppearance:
+    theme: str = DEFAULT_TUI_THEME
+    text_theme: str = DEFAULT_TEXT_THEME
+    output_border: bool = DEFAULT_OUTPUT_BORDER
+    output_scrollbar: bool = DEFAULT_OUTPUT_SCROLLBAR
+    scroll_lines: int = DEFAULT_SCROLL_LINES
+    input_border: bool = DEFAULT_INPUT_BORDER
+    input_height: int = DEFAULT_INPUT_HEIGHT
+    input_max_height: int = MAX_INPUT_HEIGHT
+
+
+def _load_tui_appearance(path: Path) -> TUIAppearance:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        value = {}
+    if not isinstance(value, dict):
+        value = {}
+    theme_group = value.get("theme", {})
+    if isinstance(theme_group, dict):
+        theme = str(theme_group.get("interface", DEFAULT_TUI_THEME))
+        text_theme = str(theme_group.get("text", DEFAULT_TEXT_THEME))
+    else:
+        theme = str(theme_group or DEFAULT_TUI_THEME)
+        text_theme = str(value.get("text_theme", DEFAULT_TEXT_THEME))
+    if theme not in TUI_THEME_LABELS:
+        theme = DEFAULT_TUI_THEME
+    if text_theme not in TEXT_THEME_LABELS:
+        text_theme = DEFAULT_TEXT_THEME
+    output_group = value.get("output_field", {})
+    if not isinstance(output_group, dict):
+        output_group = {}
+    input_group = value.get("input_field", {})
+    if not isinstance(input_group, dict):
+        input_group = {}
+    lower = input_group.get("min_height", input_group.get("height", DEFAULT_INPUT_HEIGHT))
+    scroll_group = value.get("scroll", {})
+    if not isinstance(scroll_group, dict):
+        scroll_group = {}
+    scroll_lines = scroll_group.get("lines", output_group.get("scroll_lines", DEFAULT_SCROLL_LINES))
+    if type(scroll_lines) is not int or not 1 <= scroll_lines <= 10:
+        scroll_lines = DEFAULT_SCROLL_LINES
+    upper = input_group.get("max_height", MAX_INPUT_HEIGHT)
+    if type(lower) is not int or type(upper) is not int or not 1 <= lower <= upper <= 12:
+        lower, upper = DEFAULT_INPUT_HEIGHT, MAX_INPUT_HEIGHT
+    return TUIAppearance(
+        theme=theme,
+        text_theme=text_theme,
+        output_border=output_group.get("border", DEFAULT_OUTPUT_BORDER)
+        if isinstance(output_group.get("border", DEFAULT_OUTPUT_BORDER), bool)
+        else DEFAULT_OUTPUT_BORDER,
+        output_scrollbar=output_group.get("scrollbar", DEFAULT_OUTPUT_SCROLLBAR)
+        if isinstance(output_group.get("scrollbar", DEFAULT_OUTPUT_SCROLLBAR), bool)
+        else DEFAULT_OUTPUT_SCROLLBAR,
+        input_border=input_group.get("border", DEFAULT_INPUT_BORDER)
+        if isinstance(input_group.get("border", DEFAULT_INPUT_BORDER), bool)
+        else DEFAULT_INPUT_BORDER,
+        input_height=lower,
+        scroll_lines=scroll_lines,
+        input_max_height=upper,
+    )
+
+
+def _save_tui_appearance(path: Path, appearance: TUIAppearance) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "theme": {
+                    "interface": appearance.theme,
+                    "text": appearance.text_theme,
+                },
+                "output_field": {
+                    "border": appearance.output_border,
+                    "scrollbar": appearance.output_scrollbar,
+                },
+                "scroll": {"lines": appearance.scroll_lines},
+                "input_field": {
+                    "border": appearance.input_border,
+                    "height": appearance.input_height,
+                    "min_height": appearance.input_height,
+                    "max_height": appearance.input_max_height,
+                },
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
+    temporary.replace(path)
+
+
+def _load_last_chat_model(path: Path) -> str | None:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    model = value.get("last_model")
+    return model.strip() if isinstance(model, str) and model.strip() else None
+
+
+def _save_last_chat_model(path: Path, model: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps({"last_model": model}, indent=2, ensure_ascii=False) + "\n"
+    )
+    temporary.replace(path)
+
+
+def _resolve_theme_name(
+    requested: str,
+    choices: dict[str, str],
+    aliases: dict[str, str],
+) -> str | None:
+    normalized = "-".join(requested.strip().lower().split())
+    if normalized in {"reset", "default", RESET_THEME_CHOICE.replace(" ", "-")}:
+        return RESET_THEME_CHOICE
+    normalized = aliases.get(normalized, normalized)
+    return normalized if normalized in choices else None
+
+
+CHAT_PROMPT_STYLE = Style.from_dict(
+    {
+        "bottom-toolbar": "bg:#1c2533 #a9b7c6",
+        "bottom-toolbar.model": "bg:#1c2533 #5fd7ff bold",
+        "bottom-toolbar.tokens": "bg:#1c2533 #ffd75f",
+        "completion-menu.completion": "bg:#263445 #d7e3f0",
+        "completion-menu.completion.current": "bg:#00a7c4 #081018 bold",
+        "scrollbar.background": "bg:#263445",
+        "scrollbar.button": "bg:#00a7c4",
+        **TUI_THEME_STYLES[DEFAULT_TUI_THEME],
+    }
+)
+CHAT_KEY_BINDINGS = KeyBindings()
+
+
+@CHAT_KEY_BINDINGS.add("escape", "enter")
+def _insert_chat_newline(event) -> None:
+    event.current_buffer.insert_text("\n")
+
+
+@dataclass
+class ChatUIState:
+    model: str
+    effort: str
+    context_window: int
+    prompt_tokens: int = 0
+    output_tokens: int = 0
+    prompt_tokens_estimated: bool = False
+
+    def update_from_agent(self, agent: Agent) -> None:
+        self.model = agent.model
+        self.effort = _agent_effort_label(agent)
+        self.context_window = int(agent.ollama_options.get("num_ctx", 8192))
+        metadata = getattr(agent.ollama, "last_chat_metadata", {})
+        self.prompt_tokens = int(metadata.get("prompt_eval_count") or 0)
+        self.output_tokens = int(metadata.get("eval_count") or 0)
+        self.prompt_tokens_estimated = False
+
+
+def _effort_value_label(value: bool | str | None) -> str:
+    if value is False:
+        return "off"
+    if value is True:
+        return "on"
+    return str(value) if value else "auto"
+
+
+def _agent_effort_label(agent: Agent) -> str:
+    chat_effort = _effort_value_label(agent.ollama_think)
+    code_effort = _effort_value_label(agent.ollama_code_think)
+    if chat_effort == code_effort:
+        return chat_effort
+    return f"chat:{chat_effort} code:{code_effort}"
+
+
+def _chat_prompt_header(state: ChatUIState) -> ANSI:
+    width = max(40, min(shutil.get_terminal_size((100, 24)).columns, 120))
+    label = f" klaude  {state.model}  effort:{state.effort} "
+    # Leave the final terminal column unused; writing into it makes many PTYs
+    # wrap the closing border onto a new line.
+    fill = "─" * max(1, width - len(label) - 4)
+    return ANSI(f"\x1b[38;5;45m╭─\x1b[1;37m{label}\x1b[0;38;5;45m{fill}╮\n│\x1b[0m ")
+
+
+def _chat_toolbar(state: ChatUIState):
+    used = state.prompt_tokens
+    context = max(1, state.context_window)
+    percent = min(100, round(used * 100 / context))
+    width = shutil.get_terminal_size((100, 24)).columns
+    if width < 72:
+        model = state.model if len(state.model) <= 18 else f"{state.model[:15]}..."
+        return [
+            ("class:bottom-toolbar", "╰─ "),
+            ("class:bottom-toolbar.model", model),
+            ("class:bottom-toolbar", f"  {state.effort}  ctx {percent}%  "),
+            (
+                "class:bottom-toolbar.tokens",
+                f"↑{state.prompt_tokens:,} ↓{state.output_tokens:,}",
+            ),
+            ("class:bottom-toolbar", " "),
+        ]
+    return [
+        ("class:bottom-toolbar", "╰─ "),
+        ("class:bottom-toolbar.model", state.model),
+        (
+            "class:bottom-toolbar",
+            f"  effort {state.effort}  ctx {used:,}/{context:,} ({percent}%)  ",
+        ),
+        ("class:bottom-toolbar.tokens", f"last ↑{state.prompt_tokens:,} ↓{state.output_tokens:,}"),
+        ("class:bottom-toolbar", " "),
+    ]
+
+
+def _new_chat_prompt_session() -> PromptSession[str] | None:
+    """Use a paste-aware terminal editor without disturbing piped CLI input."""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return None
+    return PromptSession(
+        multiline=False,
+        history=InMemoryHistory(),
+        auto_suggest=AutoSuggestFromHistory(),
+        enable_history_search=True,
+        completer=ChatCommandCompleter(),
+        complete_while_typing=True,
+        complete_style=CompleteStyle.MULTI_COLUMN,
+        key_bindings=CHAT_KEY_BINDINGS,
+        style=CHAT_PROMPT_STYLE,
+    )
+
+
+def _read_chat_input(
+    prompt_session: PromptSession[str] | None,
+    state: ChatUIState | None = None,
+) -> str:
+    """Read one logical turn; bracketed multiline pastes remain one turn."""
+    if prompt_session is None:
+        return console.input("[bold cyan]you>[/] ").strip()
+    if state is None:
+        return prompt_session.prompt(ANSI("\x1b[1;36myou>\x1b[0m ")).strip()
+    return prompt_session.prompt(
+        _chat_prompt_header(state),
+        bottom_toolbar=lambda: _chat_toolbar(state),
+        prompt_continuation=ANSI("\x1b[38;5;45m│\x1b[0m "),
+        rprompt=ANSI("\x1b[2mEnter send · Alt+Enter newline\x1b[0m"),
+        wrap_lines=True,
+    ).strip()
 
 
 def _print_trace(line: str) -> None:
@@ -301,7 +904,19 @@ DOCS_COMMANDS = (
 )
 CHAT_COMMANDS = (
     CommandSpec("help", CommandSurface.CHAT, "/help", "Show this command reference."),
-    CommandSpec("commands", CommandSurface.CHAT, "/commands", "Show this command reference."),
+    CommandSpec(
+        "keybinds",
+        CommandSurface.CHAT,
+        "/keybinds",
+        "Show keyboard shortcuts.",
+    ),
+    CommandSpec(
+        "settings",
+        CommandSurface.CHAT,
+        "/settings [CATEGORY]",
+        "Configure Theme, Output Field, Input Field, or Scroll settings.",
+        examples=("/settings", "/settings output", "/settings input"),
+    ),
     CommandSpec(
         "/models",
         CommandSurface.CHAT,
@@ -312,7 +927,7 @@ CHAT_COMMANDS = (
         "model",
         CommandSurface.CHAT,
         "/model",
-        "Show the active chat model.",
+        "Interactively select an installed model, then choose reasoning effort.",
     ),
     CommandSpec(
         "model-name",
@@ -322,11 +937,210 @@ CHAT_COMMANDS = (
         aliases=("/model [NAME]",),
         examples=("/model", "/model qwen3-coder:30b"),
     ),
+    CommandSpec(
+        "effort",
+        CommandSurface.CHAT,
+        "/effort",
+        "Interactively change reasoning effort for the active model.",
+    ),
+    CommandSpec(
+        "effort-level",
+        CommandSurface.CHAT,
+        "/effort LEVEL",
+        "Set reasoning effort to auto, off, low, medium, or high.",
+        aliases=("/effort [LEVEL]",),
+        examples=("/effort low", "/effort off"),
+    ),
+    CommandSpec(
+        "queue",
+        CommandSurface.CHAT,
+        "/queue [TEXT]",
+        "Show pending turns, or add a turn without interrupting the active response.",
+        examples=("/queue", "/queue explain the tests next"),
+    ),
+    CommandSpec(
+        "steer",
+        CommandSurface.CHAT,
+        "/steer TEXT",
+        "Prioritize a new instruction and interrupt at the next safe boundary.",
+        examples=("/steer focus only on the parser"),
+    ),
+    CommandSpec(
+        "cancel",
+        CommandSurface.CHAT,
+        "/cancel",
+        "Interrupt the active response at the next safe boundary.",
+    ),
+    CommandSpec(
+        "cd",
+        CommandSurface.CHAT,
+        "/cd [PATH]",
+        "Change the agent workspace directory, or show the current path.",
+        examples=("/cd", "/cd ../other-project", "/cd ~/src/project"),
+    ),
+    CommandSpec(
+        "pwd",
+        CommandSurface.CHAT,
+        "/pwd",
+        "Show the current agent workspace directory.",
+    ),
+    CommandSpec(
+        "ls",
+        CommandSurface.CHAT,
+        "/ls",
+        "List files and directories in the current agent workspace.",
+    ),
+    CommandSpec(
+        "theme",
+        CommandSurface.CHAT,
+        "/theme [NAME]",
+        "Open Theme settings for interface and text/code colors; NAME sets interface colors.",
+        examples=("/theme", "/theme hacker-green", "/theme reset"),
+    ),
     CommandSpec("quit", CommandSurface.CHAT, "/quit", "Exit the interactive chat session."),
     CommandSpec("exit", CommandSurface.CHAT, "/exit", "Exit the interactive chat session."),
     CommandSpec("q", CommandSurface.CHAT, "/q", "Exit the interactive chat session."),
 )
 PUBLIC_COMMAND_SPECS = CLI_COMMANDS + DOCS_COMMANDS + CHAT_COMMANDS
+CHAT_KEYBINDINGS = (
+    CommandSpec("send", CommandSurface.CHAT, "Enter", "Send now, or queue behind an active turn."),
+    CommandSpec(
+        "steer-key",
+        CommandSurface.CHAT,
+        "Ctrl+Enter",
+        "Prioritize the input and interrupt at the next safe boundary.",
+    ),
+    CommandSpec(
+        "newline",
+        CommandSurface.CHAT,
+        "Alt+Enter",
+        "Insert a deliberate newline without sending.",
+    ),
+    CommandSpec(
+        "newline-compatible",
+        CommandSurface.CHAT,
+        "Ctrl+J",
+        "Insert a newline when the terminal collapses modified Enter into Enter.",
+    ),
+    CommandSpec(
+        "edit-queued",
+        CommandSurface.CHAT,
+        "Alt+Up",
+        "Edit queued follow-ups from newest to oldest; empty and Enter deletes one.",
+    ),
+    CommandSpec(
+        "previous",
+        CommandSurface.CHAT,
+        "Up",
+        "Choose the previous input or picker option.",
+    ),
+    CommandSpec("next", CommandSurface.CHAT, "Down", "Choose the next input or picker option."),
+    CommandSpec(
+        "complete",
+        CommandSurface.CHAT,
+        "Tab",
+        "Accept or navigate slash-command suggestions.",
+    ),
+    CommandSpec(
+        "cancel-key",
+        CommandSurface.CHAT,
+        "Ctrl+C",
+        "Stop or interrupt the active response; otherwise cancel a picker or clear input.",
+    ),
+    CommandSpec("exit-key", CommandSurface.CHAT, "Ctrl+D", "Exit when the input field is empty."),
+)
+
+
+class ChatCommandCompleter(Completer):
+    """Complete registered slash commands, including immediately after `/`."""
+
+    def get_completions(self, document: Document, complete_event):
+        prefix = document.text_before_cursor
+        if not prefix.startswith("/") or any(char.isspace() for char in prefix):
+            return
+        seen: set[str] = set()
+        for spec in CHAT_COMMANDS:
+            command = spec.usage.split()[0]
+            if command in seen or not command.startswith(prefix):
+                continue
+            seen.add(command)
+            yield Completion(
+                command,
+                start_position=-len(prefix),
+                display=command,
+                display_meta=spec.summary,
+            )
+
+
+def _rounded_frame(body, title):
+    """Frame a TUI container with rounded corners and a live formatted title."""
+    fill = partial(Window, style="class:frame.border")
+
+    def padded_title():
+        value = title() if callable(title) else title
+        return [("", " "), *to_formatted_text(value), ("", " ")]
+
+    return HSplit(
+        [
+            VSplit(
+                [
+                    fill(width=1, height=1, char="╭"),
+                    fill(char="─"),
+                    Label(
+                        padded_title,
+                        style="class:frame.label",
+                        dont_extend_width=True,
+                    ),
+                    fill(char="─"),
+                    fill(width=1, height=1, char="╮"),
+                ],
+                height=1,
+            ),
+            VSplit(
+                [
+                    fill(width=1, char="│"),
+                    body,
+                    fill(width=1, char="│"),
+                ],
+                padding=0,
+            ),
+            VSplit(
+                [
+                    fill(width=1, height=1, char="╰"),
+                    fill(char="─"),
+                    fill(width=1, height=1, char="╯"),
+                ],
+                height=1,
+            ),
+        ],
+        style="class:frame",
+    )
+
+
+def _klaude_logo() -> str:
+    try:
+        release = package_version("klaude-cli")
+    except PackageNotFoundError:
+        release = "dev"
+    release = release[:20]
+    bottom_prefix = f"╚════ v{release} "
+    bottom = bottom_prefix + ("═" * max(1, 68 - len(bottom_prefix))) + "╝"
+    return "\n".join(
+        [
+            "╔═══════════════════════════════════════════════════════════════════╗",
+            "║                                                                   ║",
+            "║      █████      ████                           █████              ║",
+            "║     ░░███      ░░███                          ░░███               ║",
+            "║      ░███ █████ ░███   ██████   █████ ████  ███████   ██████      ║",
+            "║      ░███░░███  ░███  ░░░░░███ ░░███ ░███  ███░░███  ███░░███     ║",
+            "║      ░██████░   ░███   ███████  ░███ ░███ ░███ ░███ ░███████      ║",
+            "║      ░███░░███  ░███  ███░░███  ░███ ░███ ░███ ░███ ░███░░░       ║",
+            "║      ████ █████ █████░░████████ ░░████████░░████████░░██████      ║",
+            "║     ░░░░ ░░░░░ ░░░░░  ░░░░░░░░   ░░░░░░░░  ░░░░░░░░  ░░░░░░       ║",
+            "║                                                                   ║",
+            bottom,
+        ]
+    )
 
 
 def _plain_command_text(value: str) -> str:
@@ -431,7 +1245,7 @@ def _is_fuzzy_command_term(token: str, targets: set[str]) -> bool:
 
 def is_complete_command_reference_request(text: str) -> bool:
     normalized = _command_lookup_text(text)
-    if normalized in {"/help", "/commands"}:
+    if normalized == "/help":
         return True
     if any(pattern in normalized for pattern in COMMAND_REFERENCE_PATTERNS):
         return True
@@ -506,7 +1320,6 @@ def _append_command_section(
     if lines:
         lines.append("")
     lines.append(title)
-    lines.append("-" * len(title))
     lines.extend(_format_command_entries(entries, width=width))
 
 
@@ -517,6 +1330,33 @@ def format_command_reference(*, width: int | None = None) -> str:
     _append_command_section(lines, "DOCS COMMANDS", DOCS_COMMANDS, width=width)
     _append_command_section(lines, "CHAT COMMANDS", CHAT_COMMANDS, width=width)
     return "\n".join(lines)
+
+
+def format_chat_keybind_reference(*, width: int | None = None) -> str:
+    lines = ["Klaude chat controls"]
+    _append_command_section(lines, "KEYBOARD", CHAT_KEYBINDINGS, width=width)
+    return "\n".join(lines)
+
+
+def _message_divider(
+    role: str,
+    *,
+    width: int,
+    timestamp: datetime | None = None,
+    suffix: str = "",
+) -> str:
+    """Build a timestamped transcript divider that fills the content width."""
+    occurred_at = timestamp or datetime.now().astimezone()
+    label = f"━━ {role} · {occurred_at:%Y-%m-%d %H:%M:%S}"
+    if suffix:
+        label += f" · {suffix}"
+    label += " "
+    return label + ("━" * max(0, width - len(label)))
+
+
+def _session_divider(session_id: str, *, width: int) -> str:
+    label = f"━━ Session: {session_id} ━━━"
+    return label + ("━" * max(0, width - len(label)))
 
 
 COMMAND_REFERENCE = format_command_reference()
@@ -1372,16 +2212,20 @@ def _format_model_command_help(*, include_yes: bool = False) -> str:
     lines.extend(
         [
             "/model",
-            "    Show the currently active model.",
+            "    Open the model picker, then choose reasoning effort.",
             "",
             "/model NAME",
-            "    Switch to an installed Ollama model while preserving this conversation.",
+            "    Select an installed Ollama model, then choose reasoning effort while",
+            "    preserving this conversation.",
+            "",
+            "/effort [auto|off|low|medium|high]",
+            "    Change reasoning effort for the active model.",
             "",
             "Examples:",
             "    /model",
             "    /model qwen3-coder:30b",
             "",
-            "Use /models to list the available models.",
+            "Use /models to list the available models without switching.",
         ]
     )
     return "\n".join(lines)
@@ -1460,6 +2304,10 @@ def format_focused_command_help(
     *,
     width: int | None = None,
 ) -> str | None:
+    if _explicitly_disallows_retrieval(user_message) and not is_complete_command_reference_request(
+        user_message
+    ):
+        return None
     resolution = resolve_command_help_request(user_message)
     if resolution is not None:
         return format_command_help(resolution, user_message, width=width)
@@ -1502,7 +2350,6 @@ CAPABILITY_DIRECT_PATTERNS = (
 )
 COMMAND_REFERENCE_PATTERNS = (
     "/help",
-    "/commands",
     "show commands",
     "show me commands",
     "show me all commands",
@@ -1579,12 +2426,80 @@ def _is_command_reference_request(user_message: str) -> bool:
     return is_complete_command_reference_request(user_message)
 
 
+def _explicitly_disallows_retrieval(user_message: str) -> bool:
+    text = _normalized_request_text(user_message)
+    return any(
+        phrase in text
+        for phrase in (
+            "do not search",
+            "don't search",
+            "without searching",
+            "no web search",
+            "no search",
+            "offline only",
+        )
+    )
+
+
+def _is_standalone_code_generation_request(user_message: str) -> bool:
+    """Route self-contained code generation directly to the model.
+
+    Tool schemas are useful for explicit research or workspace work, but they
+    add latency and invite small models to search instead of writing code.
+    """
+    text = _normalized_request_text(user_message)
+    asks_to_generate = bool(
+        re.search(r"\b(?:write|create|generate|make|code|give|provide|produce)\b", text)
+    )
+    code_subject = bool(
+        re.search(
+            r"\b(?:code|script|program|function|class|implementation|gdscript|"
+            r"python|javascript|typescript|rust|golang|java|c\+\+)\b",
+            text,
+        )
+        or re.search(r"\.[a-z0-9]{1,8}\b", text)
+    )
+    explicit_research = any(
+        phrase in text
+        for phrase in (
+            "search",
+            "look up",
+            "research",
+            "browse",
+            "documentation",
+            "official docs",
+            "latest",
+            "current api",
+            "source",
+            "citation",
+        )
+    ) and not _explicitly_disallows_retrieval(user_message)
+    workspace_scope = any(
+        phrase in text
+        for phrase in (
+            "in this repo",
+            "in the repo",
+            "in this repository",
+            "in this project",
+            "in the workspace",
+            "edit the",
+            "modify the",
+            "update the",
+            "patch the",
+            "fix the existing",
+        )
+    )
+    return asks_to_generate and code_subject and not explicit_research and not workspace_scope
+
+
 def _tool_use_route(user_message: str) -> ToolUseRoute:
     text = _normalized_request_text(user_message)
     if _is_command_reference_request(user_message):
         return ToolUseRoute.COMMAND_REFERENCE
     if any(word in text for word in WORKSPACE_LOCATION_PATTERNS):
         return ToolUseRoute.WORKSPACE_TOOL
+    if _is_standalone_code_generation_request(user_message):
+        return ToolUseRoute.DIRECT_RESPONSE
     if any(word in text for word in ("time", "date", "weather", "forecast")):
         return ToolUseRoute.UTILITY_TOOL
     if any(word in text for word in ("search", "web", "latest", "current", "online")):
@@ -1857,6 +2772,12 @@ def _select_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
     if not selected and any(word in text for word in lookup_starters):
         add("search_sessions", "query_knowledge", "web_search", "fetch_url")
 
+    if _explicitly_disallows_retrieval(user_message):
+        selected = [
+            name
+            for name in selected
+            if name not in {"query_knowledge", "code_search", "web_search", "fetch_url"}
+        ]
     return selected[:14]
 
 
@@ -2269,8 +3190,7 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, object
         ),
         Tool(
             "query_knowledge",
-            "Search the local docs knowledge base (learned documentation). "
-            "Always try this before web_search for library/framework questions.",
+            "Search learned local documentation when it is relevant to the request.",
             {
                 "type": "object",
                 "properties": {"question": S, "query": S, "library": S, "collection": S},
@@ -2324,9 +3244,13 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, object
         _system_prompt(memory, runtime_text),
         max_steps=cfg.max_agent_steps,
         max_code_continuations=cfg.max_code_continuations,
+        max_code_repairs=cfg.max_code_repairs,
         tool_selector=_select_tool_names,
         ollama_options=cfg.ollama_options,
         ollama_think=cfg.ollama_think_for_model(model or cfg.models["coder"]),
+        ollama_code_options=cfg.ollama_code_options,
+        ollama_code_think=cfg.ollama_code_think_for_model(model or cfg.models["coder"]),
+        code_context=memory.facts(),
         web_research_budget=WebResearchBudget(
             max_web_actions=cfg.web_search.behavior.max_web_actions,
             max_search_calls=cfg.web_search.behavior.max_search_calls,
@@ -2336,9 +3260,12 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, object
             repeated_query_similarity=(cfg.web_search.behavior.max_repeated_query_similarity),
         ),
     )
+    agent.workspace = ws
+    agent.workdir = workdir.resolve()
 
     def refreshed_system_prompt() -> str:
-        refreshed_runtime = _runtime_context_result(cfg, workdir)
+        refreshed_workdir = getattr(agent, "workdir", workdir)
+        refreshed_runtime = _runtime_context_result(cfg, refreshed_workdir)
         _apply_runtime_context_to_search_config(cfg, refreshed_runtime)
         refreshed_text = (
             render_runtime_context(refreshed_runtime.context, cfg) if refreshed_runtime else ""
@@ -2352,8 +3279,92 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, object
     return agent, memory
 
 
+def _change_agent_directory(agent: Agent, path_text: str) -> tuple[bool, str]:
+    """Move the local tool workspace without changing the process cwd."""
+    current = Path(getattr(agent, "workdir", Path.cwd())).resolve()
+    if not path_text.strip():
+        return True, str(current)
+    try:
+        target = Path(path_text.strip()).expanduser()
+        if not target.is_absolute():
+            target = current / target
+        target = target.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        return False, f"cannot resolve directory: {exc}"
+    if not target.is_dir():
+        return False, f"not a directory: {target}"
+    workspace = getattr(agent, "workspace", None)
+    if workspace is None:
+        return False, "workspace is unavailable"
+    workspace.root = target
+    workspace.repo_root = workspace._discover_repo_root()
+    note = workspace.ensure_work_branch(time.strftime("%Y%m%d-%H%M"))
+    agent.workdir = target
+    return True, f"{target}\n{note}"
+
+
+def _list_agent_directory(agent: Agent, arguments: str = "") -> tuple[bool, str]:
+    current = Path(getattr(agent, "workdir", Path.cwd())).resolve()
+    try:
+        tokens = shlex.split(arguments) if arguments.strip() else []
+    except ValueError as exc:
+        return False, f"invalid ls arguments: {exc}"
+    # Keep ls useful while preserving the active workspace jail. Options are
+    # passed directly to ls; positional paths must remain below the workspace.
+    path_tokens: list[str] = []
+    options: list[str] = []
+    options_done = False
+    for token in tokens:
+        if not options_done and token == "--":
+            options_done = True
+            options.append(token)
+            continue
+        if not options_done and token.startswith("-"):
+            options.append(token)
+            continue
+        path_tokens.append(token)
+    for token in path_tokens:
+        candidate = (
+            (current / token).resolve()
+            if not Path(token).is_absolute()
+            else Path(token).resolve()
+        )
+        if not candidate.is_relative_to(current):
+            return False, f"path escapes workspace: {token}"
+    try:
+        completed = subprocess.run(
+            [
+                "ls",
+                "-F",
+                *[option for option in options if option != "--"],
+                "--color=always",
+                "--",
+                *path_tokens,
+            ],
+            cwd=current,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"ls failed: {exc}"
+    output = (completed.stdout + completed.stderr).rstrip()
+    if completed.returncode:
+        return False, output or f"ls exited with status {completed.returncode}"
+    return True, output or "(empty)"
+
+
+def _strip_ansi_sgr(value: str) -> str:
+    return ANSI_SGR_RE.sub("", value)
+
+
 def _print_preformatted_text(content: str) -> None:
-    console.print(Text(content), overflow="fold")
+    rendered = Text()
+    for line in content.splitlines(keepends=True):
+        plain_line = line.rstrip("\r\n")
+        rendered.append(line, style="underline" if plain_line in HELP_CATEGORY_TITLES else None)
+    console.print(rendered, overflow="fold")
 
 
 def _print_assistant_text(content: str, metadata: dict | None = None) -> None:
@@ -2365,7 +3376,19 @@ def _print_assistant_text(content: str, metadata: dict | None = None) -> None:
     ):
         _print_preformatted_text(content)
         return
-    console.print(Markdown(content))
+    markdown = Markdown(content, code_theme="monokai")
+    if not console.is_terminal:
+        console.print(markdown)
+        return
+    console.print(
+        Panel(
+            markdown,
+            title="[bold cyan]klaude[/]",
+            title_align="left",
+            border_style="#3aa7c4",
+            padding=(0, 1),
+        )
+    )
 
 
 def _record_direct_command_context(
@@ -2390,7 +3413,11 @@ def _handle_command_reference_request(
     memory: Memory | None = None,
     session_id: str | None = None,
 ) -> bool:
-    if _is_command_reference_request(user_msg):
+    if user_msg.strip() == "/keybinds":
+        response = format_chat_keybind_reference(width=console.width)
+        context = response
+        show_trace = True
+    elif _is_command_reference_request(user_msg):
         response = format_command_reference(width=console.width)
         context = _command_reference_context()
         show_trace = True
@@ -2415,19 +3442,37 @@ def _handle_command_reference_request(
     return True
 
 
-def _render(agent: Agent, memory: Memory, session_id: str, user_msg: str) -> str:
+def _render(
+    agent: Agent,
+    memory: Memory,
+    session_id: str,
+    user_msg: str,
+    ui_state: ChatUIState | None = None,
+) -> str:
     builder = getattr(agent, "set_system_prompt_builder", None)
     if builder:
         agent.set_system_prompt(builder())
     memory.log_turn(session_id, "user", user_msg)
+    _print_trace(f"-> model [{getattr(agent, 'model', 'local')}] thinking...")
     assistant_text: list[str] = []
+    streamed_fragments: list[str] = []
+    streamed_logged = False
     pending_tool_start_metadata: dict[str, dict] = {}
     for event in agent.run(user_msg):
-        if event.kind == "text" and event.payload.get("content"):
-            _print_assistant_text(
-                event.payload["content"],
-                event.payload.get("metadata") or {},
-            )
+        if event.kind == "text_delta" and event.payload.get("content"):
+            piece = event.payload["content"]
+            console.file.write(piece)
+            console.file.flush()
+            streamed_fragments.append(piece)
+        elif event.kind == "text" and event.payload.get("content"):
+            metadata = event.payload.get("metadata") or {}
+            if metadata.get("streamed"):
+                if streamed_fragments and not streamed_fragments[-1].endswith("\n"):
+                    console.file.write("\n")
+                    console.file.flush()
+                streamed_logged = True
+            else:
+                _print_assistant_text(event.payload["content"], metadata)
             memory.log_turn(session_id, "assistant", event.payload["content"])
             assistant_text.append(event.payload["content"])
         elif event.kind == "tool_start":
@@ -2474,12 +3519,27 @@ def _render(agent: Agent, memory: Memory, session_id: str, user_msg: str) -> str
             preview = event.payload["result"][:200].replace("\n", " ")
             _print_trace(f"   {preview}")
         elif event.kind == "error":
+            if streamed_fragments and not streamed_logged:
+                partial = "".join(streamed_fragments)
+                if not partial.endswith("\n"):
+                    console.file.write("\n")
+                    console.file.flush()
+                memory.log_turn(session_id, "assistant", partial)
+                assistant_text.append(partial)
+                streamed_logged = True
             console.print(f"[red]error: {event.payload['message']}[/]")
             memory.log_turn(
                 session_id,
                 "system",
                 {"event": "runtime_error", "message": event.payload["message"]},
             )
+        elif event.kind == "retry":
+            _print_trace(f"-> retry [{event.payload['reason']}]")
+        elif event.kind == "progress":
+            model_name = getattr(agent, "model", "local")
+            _print_trace(f"-> model [{model_name}] {event.payload['stage']}...")
+    if ui_state is not None:
+        ui_state.update_from_agent(agent)
     return "\n\n".join(assistant_text)
 
 
@@ -2658,43 +3718,1615 @@ def _resolve_model(ollama: Ollama, name: str) -> str | None:
     return None
 
 
+def _sorted_model_names(models: list[str]) -> list[str]:
+    return sorted(models, key=lambda value: (value.casefold(), value))
+
+
+def _select_tui_option(
+    title: str,
+    text: str,
+    values: list[str],
+    default: str,
+) -> str | None:
+    if not values or not sys.stdin.isatty() or not sys.stdout.isatty():
+        return None
+    return radiolist_dialog(
+        title=title,
+        text=text,
+        values=[(value, value) for value in values],
+        default=default if default in values else values[0],
+        ok_text="Select",
+        cancel_text="Cancel",
+        style=CHAT_PROMPT_STYLE,
+    ).run()
+
+
+def _apply_session_effort(agent: Agent, cfg, effort: str) -> None:
+    if effort == "auto":
+        agent.ollama_think = cfg.ollama_think_for_model(agent.model)
+        agent.ollama_code_think = cfg.ollama_code_think_for_model(agent.model)
+        return
+    value: bool | str = False if effort == "off" else effort
+    agent.ollama_think = value
+    agent.ollama_code_think = value
+
+
+def _choose_effort(agent: Agent, cfg, requested: str = "") -> str | None:
+    requested = requested.strip().lower()
+    if requested:
+        if requested not in EFFORT_CHOICES:
+            console.print(
+                "[red]unknown effort[/] — choose auto, off, low, medium, or high"
+            )
+            return None
+        selected = requested
+    else:
+        current = _effort_value_label(agent.ollama_code_think)
+        selected = _select_tui_option(
+            "Reasoning effort",
+            f"Choose effort for {agent.model}. ↑/↓ navigate, Enter marks, Tab confirms.",
+            list(EFFORT_CHOICES),
+            current if current in EFFORT_CHOICES else "auto",
+        )
+        if selected is None:
+            return None
+    _apply_session_effort(agent, cfg, selected)
+    return selected
+
+
+def _choose_model_and_effort(agent: Agent, cfg, requested: str = "") -> bool:
+    requested = requested.strip()
+    if requested:
+        resolved = _resolve_model(agent.ollama, requested)
+        if resolved is None:
+            console.print(f"[red]no unique match for '{requested}'[/] — see /models")
+            return False
+    else:
+        installed = _sorted_model_names(agent.ollama.list_models())
+        resolved = _select_tui_option(
+            "Select model",
+            "Choose an installed Ollama model. ↑/↓ navigate, Enter marks, Tab confirms.",
+            installed,
+            agent.model,
+        )
+        if resolved is None:
+            return False
+    prior_model = agent.model
+    agent.model = resolved
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        _apply_session_effort(agent, cfg, "auto")
+        return True
+    if _choose_effort(agent, cfg) is None:
+        agent.model = prior_model
+        return False
+    return True
+
+
+class PersistentChatTUI:
+    """Full-screen chat surface with a live input while the agent is running."""
+
+    _TRANSCRIPT_LIMIT = 250_000
+    _QUEUE_PREVIEW_LIMIT = 4
+
+    def __init__(
+        self,
+        agent: Agent,
+        memory: Memory,
+        session_id: str,
+        cfg,
+        appearance_path: Path | None = None,
+        chat_preferences_path: Path | None = None,
+    ) -> None:
+        self.agent = agent
+        self.memory = memory
+        self.session_id = session_id
+        self.cfg = cfg
+        self.ui_state = ChatUIState(
+            model=agent.model,
+            effort=_agent_effort_label(agent),
+            context_window=int(agent.ollama_options.get("num_ctx", 8192)),
+        )
+        self.pending: deque[str] = deque()
+        self.running = False
+        self.cancel_requested = threading.Event()
+        self.shutting_down = False
+        self.activity = "ready"
+        self.status_error = ""
+        self._events: queue.SimpleQueue[tuple[str, object]] = queue.SimpleQueue()
+        self._history: list[str] = []
+        self._history_index: int | None = None
+        self._history_draft = ""
+        self._choice_kind: str | None = None
+        self._choice_values: list[str] = []
+        self._choice_index = 0
+        self._choice_prior_model: str | None = None
+        self._choice_preview_appearance: tuple[str, str] | None = None
+        self._text_theme_preview_visible = False
+        self._height_edit = False
+        self._queue_edit_index: int | None = None
+        self._queue_edit_draft = ""
+        self._permission_request: dict[str, object] | None = None
+        self._turn_started_at: float | None = None
+        self.appearance_path = appearance_path or (cfg.data_dir / "appearance.json")
+        self.chat_preferences_path = chat_preferences_path or (
+            cfg.data_dir / "chat-preferences.json"
+        )
+        self.appearance = _load_tui_appearance(self.appearance_path)
+
+        self.output = TextArea(
+            text=(
+                _klaude_logo()
+                + "\n"
+                "Local-first coding, knowledge, and web research.\n"
+                f"Path: {getattr(agent, 'workdir', Path.cwd())}\n"
+                f"Model: {agent.model}\n"
+                "Tips\n"
+                "  Enter send/queue · Ctrl+Enter steer · Alt+Enter newline · / commands\n\n"
+                + _session_divider(
+                    session_id,
+                    width=max(32, shutil.get_terminal_size((100, 24)).columns),
+                )
+                + "\n"
+            ),
+            multiline=True,
+            read_only=True,
+            focusable=False,
+            wrap_lines=True,
+            scrollbar=False,
+            lexer=TranscriptLexer(),
+            style="class:output-field",
+        )
+        output_window = self.output.window
+        self.output.window = TranscriptWindow(
+            content=self.output.control,
+            height=output_window.height,
+            width=output_window.width,
+            dont_extend_width=output_window.dont_extend_width,
+            dont_extend_height=output_window.dont_extend_height,
+            wrap_lines=output_window.wrap_lines,
+            left_margins=output_window.left_margins,
+            right_margins=output_window.right_margins,
+            style=output_window.style,
+        )
+        self.input = TextArea(
+            multiline=True,
+            height=lambda: Dimension(
+                min=self.appearance.input_height,
+                max=self.appearance.input_max_height,
+            ),
+            history=InMemoryHistory(),
+            auto_suggest=AutoSuggestFromHistory(),
+            completer=ChatCommandCompleter(),
+            complete_while_typing=True,
+            wrap_lines=True,
+            style="class:input-field",
+        )
+        self.input.control.input_processors.append(
+            ConditionalProcessor(
+                InputPlaceholderProcessor(),
+                Condition(lambda: not self.input.text and self._choice_kind is None),
+            )
+        )
+        def configure_scroll(window):
+            original_mouse_handler = window._mouse_handler
+
+            def scroll_field(event):
+                from prompt_toolkit.mouse_events import MouseEventType
+
+                if event.event_type in {MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN}:
+                    for _ in range(self.appearance.scroll_lines):
+                        original_mouse_handler(event)
+                        window.vertical_scroll = max(0, window.vertical_scroll)
+                    return None
+                return original_mouse_handler(event)
+
+            window._mouse_handler = scroll_field
+
+        configure_scroll(self.output.window)
+        configure_scroll(self.input.window)
+        self.choice_control = FormattedTextControl(
+            self._choice_fragments,
+            focusable=True,
+            get_cursor_position=lambda: Point(x=0, y=self._choice_index),
+        )
+        self.choice_window = Window(
+            content=self.choice_control,
+            height=self._choice_height,
+            get_vertical_scroll=self._choice_scroll,
+            always_hide_cursor=True,
+            dont_extend_width=False,
+            wrap_lines=False,
+            style="class:input-field",
+        )
+        self.composer = ConditionalContainer(
+            content=self.choice_window,
+            filter=Condition(lambda: self._choice_kind is not None),
+            alternative_content=self.input,
+        )
+        self.status_control = FormattedTextControl(self._status_fragments)
+        self.status_window = Window(
+            content=self.status_control,
+            height=1,
+            style="class:status",
+            dont_extend_width=False,
+        )
+        self.queue_control = FormattedTextControl(self._queue_fragments)
+        self.queue_window = Window(
+            content=self.queue_control,
+            height=self._queue_height,
+            dont_extend_width=False,
+            wrap_lines=False,
+            style="class:background",
+        )
+        self.queue_panel = ConditionalContainer(
+            content=self.queue_window,
+            filter=Condition(lambda: bool(self.pending)),
+        )
+        self.key_bindings = self._build_key_bindings()
+        self.output_frame = _rounded_frame(self.output, title="conversation")
+        self.input_frame = _rounded_frame(self.composer, title=self._input_title)
+        self.output_panel = ConditionalContainer(
+            content=self.output_frame,
+            filter=Condition(lambda: self.appearance.output_border),
+            alternative_content=self.output,
+        )
+        self.input_panel = ConditionalContainer(
+            content=self.input_frame,
+            filter=Condition(lambda: self.appearance.input_border),
+            alternative_content=self.composer,
+        )
+        self._apply_field_settings()
+        body = HSplit(
+            [
+                self.output_panel,
+                self.queue_panel,
+                self.input_panel,
+                self.status_window,
+            ],
+            style="class:background",
+        )
+        root = FloatContainer(
+            content=body,
+            floats=[
+                Float(
+                    xcursor=True,
+                    ycursor=True,
+                    content=CompletionsMenu(max_height=12, scroll_offset=1),
+                )
+            ],
+        )
+        self.application: Application[None] = Application(
+            layout=Layout(root, focused_element=self.input),
+            full_screen=True,
+            mouse_support=True,
+            paste_mode=False,
+            key_bindings=self.key_bindings,
+            style=_tui_style(self.appearance.theme, self.appearance.text_theme),
+            before_render=self._before_render,
+        )
+        # Escape prefixes modified Enter and Alt+Up bindings. Keep the wait
+        # short so a standalone Escape dismisses menus without a perceptible
+        # pause while still allowing terminals to deliver those sequences.
+        self.application.ttimeoutlen = ESCAPE_SEQUENCE_TIMEOUT
+        self.application.timeoutlen = ESCAPE_SEQUENCE_TIMEOUT
+        self.agent.gate.set_ask_callback(self._ask_permission)
+
+    def _input_title(self):
+        if self._choice_kind:
+            return [
+                ("class:frame.label", f"select {self._choice_kind}"),
+                ("", f"  {self._choice_index + 1}/{len(self._choice_values)}"),
+            ]
+        return [
+            ("class:frame.label", "you"),
+            ("", f"  {self.ui_state.model}"),
+            ("", f"  effort:{self.ui_state.effort}"),
+        ]
+
+    def _apply_field_settings(self) -> None:
+        self.output.window.right_margins = (
+            [ScrollbarMargin(display_arrows=True)]
+            if self.appearance.output_scrollbar
+            else []
+        )
+
+    def _queue_height(self) -> int:
+        start, stop = self._queue_preview_bounds()
+        hidden_rows = int(start > 0) + int(stop < len(self.pending))
+        return 2 + (stop - start) + hidden_rows
+
+    def _queue_preview_bounds(self) -> tuple[int, int]:
+        total = len(self.pending)
+        visible = min(total, self._QUEUE_PREVIEW_LIMIT)
+        if self._queue_edit_index is None:
+            start = max(0, total - visible)
+        else:
+            start = max(
+                0,
+                min(
+                    self._queue_edit_index - visible + 1,
+                    total - visible,
+                ),
+            )
+        return start, start + visible
+
+    def _queue_fragments(self):
+        width = max(24, self._transcript_content_width() - 4)
+        queued = list(self.pending)
+        start, stop = self._queue_preview_bounds()
+        fragments = [("class:queue.title", "• Queued follow-up inputs\n")]
+        if start:
+            fragments.append(("class:queue.hint", f"  ↳ … {start} earlier\n"))
+        for index in range(start, stop):
+            item = queued[index]
+            compact = " ↵ ".join(part.strip() for part in item.splitlines() if part.strip())
+            compact = textwrap.shorten(
+                compact or "(empty)",
+                width=width,
+                placeholder="…",
+            )
+            editing = index == self._queue_edit_index
+            style = "class:queue.selected" if editing else "class:queue.item"
+            marker = "›" if editing else "↳"
+            fragments.append((style, f"  {marker} {compact}\n"))
+        if stop < len(queued):
+            fragments.append(
+                ("class:queue.hint", f"  ↳ … {len(queued) - stop} later\n")
+            )
+        hint = (
+            "    alt + ↑ earlier · enter save · empty + enter delete"
+            if self._queue_edit_index is not None
+            else "    alt + ↑ edit last queued message"
+        )
+        fragments.append(("class:queue.hint", hint))
+        return fragments
+
+    def _choice_height(self) -> int:
+        return max(
+            self.appearance.input_height,
+            min(len(self._choice_values), self.appearance.input_max_height),
+        )
+
+    def _choice_scroll(self, _window) -> int:
+        visible = self._choice_height()
+        maximum = max(0, len(self._choice_values) - visible)
+        centered = self._choice_index - (visible // 2)
+        return max(0, min(centered, maximum))
+
+    def _choice_fragments(self):
+        width = max(20, self._transcript_content_width() - 6)
+        fragments = []
+        for index, value in enumerate(self._choice_values):
+            selected = index == self._choice_index
+            marker = "›" if selected else " "
+            label = textwrap.shorten(value, width=width, placeholder="…")
+            style = "class:choice.selected" if selected else "class:choice.item"
+            suffix = "\n" if index < len(self._choice_values) - 1 else ""
+            fragments.append((style, f"  {marker} {label}{suffix}"))
+        return fragments
+
+    def _status_fragments(self):
+        if self._height_edit:
+            return [("class:status", self.status_error or
+                     " Enter min max (1–12) · Enter save · Ctrl+C cancel · type reset to default")]
+        used = self.ui_state.prompt_tokens
+        context = max(1, self.ui_state.context_window)
+        percent = min(100, round(used * 100 / context))
+        if self._permission_request:
+            tool = str(self._permission_request["tool"])
+            return [
+                ("class:status.busy", f" ALLOW {tool}? "),
+                ("class:status", "y yes · n no · a always · Enter deny "),
+            ]
+        if self._choice_kind:
+            return [
+                ("class:status.busy", f" {self._choice_kind.upper()} "),
+                ("class:status", " ↑/↓ choose · PgUp/PgDn page · Enter select · Esc cancel "),
+                ("class:status.error", self.status_error),
+            ]
+        state = "WORKING" if self.running else "READY"
+        state_style = "class:status.busy" if self.running else "class:status"
+        width = shutil.get_terminal_size((100, 24)).columns
+        estimate = "~" if self.ui_state.prompt_tokens_estimated else ""
+        if width < 92:
+            compact_activity = self.activity[:18]
+            fragments = [
+                (state_style, f" {state} "),
+                ("class:status", f"{compact_activity}  "),
+                ("class:status.queue", f"q:{len(self.pending)}  "),
+                ("class:status", f"ctx:{estimate}{percent}%  "),
+                (
+                    "class:bottom-toolbar.tokens",
+                    f"↑{used:,} ↓{self.ui_state.output_tokens:,} ",
+                ),
+                ("class:status", " C-Enter steer · Alt-Enter newline "
+                 "· Shift+Scroll "),
+            ]
+            if self.status_error:
+                fragments.append(("class:status.error", " error "))
+            return fragments
+        fragments = [
+            (state_style, f" {state} "),
+            ("class:status", f"{self.activity}  "),
+            ("class:status.queue", f"queue {len(self.pending)}  "),
+            (
+                "class:status",
+                f"ctx {estimate}{used:,}/{context:,} ({percent}%)  ",
+            ),
+            (
+                "class:bottom-toolbar.tokens",
+                f"last ↑{used:,} ↓{self.ui_state.output_tokens:,} ",
+            ),
+            (
+                "class:status",
+                " Enter send/queue · Ctrl+Enter steer · Alt+Enter newline "
+                "· Shift+Scroll ",
+            ),
+        ]
+        if self.status_error:
+            fragments.append(("class:status.error", f" {self.status_error} "))
+        return fragments
+
+    def _build_key_bindings(self) -> KeyBindings:
+        bindings = KeyBindings()
+
+        @bindings.add(
+            "escape", filter=Condition(lambda: bool(self._choice_kind) or self._height_edit)
+        )
+        def dismiss_picker(event) -> None:
+            self._cancel_choice()
+
+        @bindings.add(
+            "escape", filter=Condition(lambda: self.input.buffer.complete_state is not None)
+        )
+        def dismiss_completion(event) -> None:
+            self.input.buffer.cancel_completion()
+
+        @bindings.add("<any>", filter=Condition(lambda: bool(self._choice_kind)))
+        def ignore_picker_typing(event) -> None:
+            pass
+
+        @bindings.add("pageup", filter=Condition(lambda: bool(self._choice_kind)))
+        def previous_page(event) -> None:
+            self._move_choice(-self._choice_height())
+
+        @bindings.add("pagedown", filter=Condition(lambda: bool(self._choice_kind)))
+        def next_page(event) -> None:
+            self._move_choice(self._choice_height())
+
+        @bindings.add("enter")
+        def accept(event) -> None:
+            buffer = self.input.buffer
+            selected_completion = (
+                buffer.complete_state.current_completion
+                if buffer.complete_state is not None
+                else None
+            )
+            if selected_completion is not None:
+                buffer.apply_completion(selected_completion)
+            if self._choice_kind:
+                self._accept_choice()
+                return
+            if self._permission_request and not self.input.text:
+                self._answer_permission("n")
+                return
+            self._submit_buffer(steer=False)
+
+        for key, answer in (("y", "y"), ("n", "n"), ("a", "a")):
+
+            @bindings.add(key)
+            def permission_answer(event, answer=answer, key=key) -> None:
+                if self._choice_kind:
+                    return
+                if self._permission_request and not self.input.text:
+                    self._answer_permission(answer)
+                else:
+                    self.input.buffer.insert_text(key)
+
+        @bindings.add("escape", "enter")
+        @bindings.add("c-j")
+        def newline(event) -> None:
+            if self._choice_kind:
+                return
+            self.input.buffer.insert_text("\n")
+
+        @bindings.add("escape", "c-j")
+        def steer(event) -> None:
+            if self._choice_kind:
+                return
+            self._submit_buffer(steer=True)
+
+        @bindings.add("backspace")
+        @bindings.add("c-h")
+        def delete_and_refresh_command_completion(event) -> None:
+            buffer = self.input.buffer
+            buffer.delete_before_cursor(count=1)
+            prefix = buffer.document.text_before_cursor
+            if prefix.startswith("/") and not any(char.isspace() for char in prefix):
+                buffer.start_completion(select_first=False)
+
+        @bindings.add("c-c")
+        def cancel(event) -> None:
+            if self._choice_kind or self._height_edit:
+                self._cancel_choice()
+            elif self._queue_edit_index is not None:
+                self._cancel_queue_edit()
+            elif self.running:
+                self.cancel_requested.set()
+                self.agent.ollama.cancel_active()
+                self.activity = "interrupt requested"
+            else:
+                self.input.buffer.reset()
+            self.application.invalidate()
+
+        @bindings.add("c-d")
+        def exit_chat(event) -> None:
+            if not self.input.text:
+                self._exit()
+
+        @bindings.add("up")
+        def previous(event) -> None:
+            if self._choice_kind:
+                self._move_choice(-1)
+                return
+            if self.input.buffer.complete_state is not None:
+                self.input.buffer.complete_previous()
+                return
+            if self._queue_edit_index is not None:
+                self.input.buffer.cursor_up()
+                return
+            document = self.input.buffer.document
+            if document.cursor_position_row == 0 and self._history:
+                self._move_history(-1)
+            else:
+                self.input.buffer.cursor_up()
+
+        @bindings.add("down")
+        def following(event) -> None:
+            if self._choice_kind:
+                self._move_choice(1)
+                return
+            if self.input.buffer.complete_state is not None:
+                self.input.buffer.complete_next()
+                return
+            if self._queue_edit_index is not None:
+                self.input.buffer.cursor_down()
+                return
+            document = self.input.buffer.document
+            if document.cursor_position_row == document.line_count - 1 and self._history:
+                self._move_history(1)
+            else:
+                self.input.buffer.cursor_down()
+
+        @bindings.add("escape", "up")
+        def edit_last_queued(event) -> None:
+            self._edit_previous_queued()
+
+        return bindings
+
+    def _set_input(self, text: str) -> None:
+        self.input.buffer.set_document(Document(text, len(text)), bypass_readonly=True)
+
+    def _move_history(self, delta: int) -> None:
+        if self._history_index is None:
+            if delta > 0:
+                return
+            self._history_draft = self.input.text
+            self._history_index = len(self._history)
+        target = self._history_index + delta
+        if target < 0:
+            target = 0
+        if target >= len(self._history):
+            self._history_index = None
+            self._set_input(self._history_draft)
+            return
+        self._history_index = target
+        self._set_input(self._history[target])
+
+    def _cancel_queue_edit(self) -> None:
+        self._queue_edit_index = None
+        self._set_input(self._queue_edit_draft)
+        self._queue_edit_draft = ""
+        self.activity = "ready" if not self.running else self.activity
+        self.status_error = ""
+        if not self.running:
+            self._start_next()
+        self.application.invalidate()
+
+    def _edit_previous_queued(self) -> None:
+        if self._choice_kind or not self.pending:
+            return
+        if self._queue_edit_index is None:
+            self._queue_edit_draft = self.input.text
+            self._queue_edit_index = len(self.pending) - 1
+        else:
+            current = self._queue_edit_index
+            edited = self.input.text.strip()
+            if edited:
+                self.pending[current] = edited
+                self._queue_edit_index = max(0, current - 1)
+            else:
+                del self.pending[current]
+                if not self.pending:
+                    self._cancel_queue_edit()
+                    return
+                self._queue_edit_index = max(0, current - 1)
+        self._set_input(self.pending[self._queue_edit_index])
+        self.activity = (
+            f"editing queued follow-up {self._queue_edit_index + 1}/{len(self.pending)}"
+        )
+        self.status_error = ""
+        self.application.invalidate()
+
+    def _finish_queue_edit(self) -> None:
+        index = self._queue_edit_index
+        if index is None:
+            return
+        edited = self.input.text.strip()
+        if edited:
+            self.pending[index] = edited
+            self.activity = "queued follow-up updated"
+        else:
+            del self.pending[index]
+            self.activity = "queued follow-up deleted"
+        self._queue_edit_index = None
+        self._queue_edit_draft = ""
+        self._set_input("")
+        self.status_error = ""
+        if not self.running:
+            self._start_next()
+        self.application.invalidate()
+
+    def _move_choice(self, delta: int) -> None:
+        if not self._choice_values:
+            return
+        self._choice_index = (self._choice_index + delta) % len(self._choice_values)
+        self._apply_choice_preview()
+        self.application.invalidate()
+
+    def _show_text_theme_preview(self) -> None:
+        if self._text_theme_preview_visible:
+            return
+        self._append(TEXT_THEME_PREVIEW_BLOCK)
+        self._text_theme_preview_visible = True
+
+    def _hide_text_theme_preview(self) -> None:
+        if not self._text_theme_preview_visible:
+            return
+        current = self.output.text
+        preview_at = current.rfind(TEXT_THEME_PREVIEW_BLOCK)
+        if preview_at >= 0:
+            current = (
+                current[:preview_at]
+                + current[preview_at + len(TEXT_THEME_PREVIEW_BLOCK) :]
+            )
+            self.output.buffer.set_document(
+                Document(current, len(current)),
+                bypass_readonly=True,
+            )
+        self._text_theme_preview_visible = False
+
+    def _apply_choice_preview(self) -> None:
+        if self._choice_kind not in {"theme", "text theme"}:
+            return
+        selected = self._choice_values[self._choice_index]
+        original = self._choice_preview_appearance
+        if original is None:
+            return
+        if self._choice_kind == "theme":
+            if selected in TUI_THEME_LABELS:
+                self.appearance.theme = selected
+            elif selected == RESET_THEME_CHOICE:
+                self.appearance.theme = DEFAULT_TUI_THEME
+            else:
+                self.appearance.theme = original[0]
+        else:
+            if selected in TEXT_THEME_LABELS:
+                self.appearance.text_theme = selected
+            elif selected == RESET_THEME_CHOICE:
+                self.appearance.text_theme = DEFAULT_TEXT_THEME
+            else:
+                self.appearance.text_theme = original[1]
+            self._show_text_theme_preview()
+        self.application.style = _tui_style(
+            self.appearance.theme,
+            self.appearance.text_theme,
+        )
+
+    def _end_choice_preview(self, *, restore: bool) -> None:
+        if restore and self._choice_preview_appearance is not None:
+            self.appearance.theme, self.appearance.text_theme = (
+                self._choice_preview_appearance
+            )
+            self.application.style = _tui_style(
+                self.appearance.theme,
+                self.appearance.text_theme,
+            )
+        self._choice_preview_appearance = None
+        self._hide_text_theme_preview()
+
+    def _begin_choice(self, kind: str, values: list[str], default: str) -> None:
+        exit_choice = "back" if "back" in values else CANCEL_CHOICE
+        values = [v for v in values if v not in {RESET_THEME_CHOICE, CANCEL_CHOICE, "back"}]
+        values.extend([RESET_THEME_CHOICE, exit_choice])
+        if not values:
+            self._append(f"\n[error] No {kind} choices are available.\n")
+            return
+        self._choice_kind = kind
+        self._choice_values = values
+        self._choice_index = values.index(default) if default in values else 0
+        if kind in {"theme", "text theme"}:
+            self._choice_preview_appearance = (
+                self.appearance.theme,
+                self.appearance.text_theme,
+            )
+        self._set_input("")
+        self.activity = f"select {kind}"
+        self.status_error = ""
+        self._apply_choice_preview()
+        self.application.invalidate()
+
+    def _cancel_choice(self) -> None:
+        self._height_edit = False
+        self._end_choice_preview(restore=True)
+        if self._choice_prior_model is not None:
+            self.agent.model = self._choice_prior_model
+        self._choice_prior_model = None
+        self._choice_kind = None
+        self._choice_values = []
+        self._set_input("")
+        self.activity = "ready" if not self.running else self.activity
+        self.application.invalidate()
+
+    def _accept_choice(self) -> None:
+        selected = self._choice_values[self._choice_index]
+        if self._choice_kind == "scroll speed":
+            if selected != "back":
+                self.appearance.scroll_lines = (
+                    DEFAULT_SCROLL_LINES if selected == RESET_THEME_CHOICE
+                    else int(selected.split()[0])
+                )
+                self._commit_appearance("scroll speed")
+                self._open_settings_category("scroll")
+            else:
+                self._begin_choice("settings", self._settings_categories(), "scroll")
+            return
+        if selected == CANCEL_CHOICE:
+            self._cancel_choice()
+            return
+        if self._choice_kind == "settings":
+            self._open_settings_category(selected)
+            return
+        if self._choice_kind in {
+            "theme settings",
+            "output field settings",
+            "input field settings",
+        }:
+            self._apply_settings_action(self._choice_kind, selected)
+            return
+        if selected == RESET_THEME_CHOICE:
+            if self._choice_kind == "model":
+                default_model = self.cfg.models.get("coder", "")
+                installed = set(self.agent.ollama.list_models())
+                if not default_model or default_model not in installed:
+                    self.status_error = "configured default model is not installed"
+                    self.application.invalidate()
+                    return
+                selected = default_model
+            elif self._choice_kind == "effort":
+                selected = "auto"
+            elif self._choice_kind == "input height":
+                self.appearance.input_height = DEFAULT_INPUT_HEIGHT
+                self.appearance.input_max_height = MAX_INPUT_HEIGHT
+        if self._choice_kind == "model":
+            self._choice_prior_model = self.agent.model
+            self.agent.model = selected
+            current = _effort_value_label(self.agent.ollama_code_think)
+            self._begin_choice(
+                "effort",
+                [*EFFORT_CHOICES, RESET_THEME_CHOICE, CANCEL_CHOICE],
+                current,
+            )
+            return
+        if self._choice_kind in {"theme", "text theme"}:
+            self._apply_appearance_choice(self._choice_kind, selected)
+            return
+        if self._choice_kind == "input height":
+            if selected == "enter min/max":
+                self._choice_kind = None
+                self._choice_values = []
+                self._height_edit = True
+                self._set_input(
+                    f"{self.appearance.input_height} {self.appearance.input_max_height}"
+                )
+                return
+            selected_height = int(selected.split()[0])
+            self.appearance.input_height = selected_height
+            self.appearance.input_max_height = selected_height
+            self._choice_kind = None
+            self._choice_values = []
+            self._set_input("")
+            self._commit_appearance(
+                f"input field height: {selected}",
+            )
+            self._open_settings_category("input field")
+            return
+        model_changed = self._choice_prior_model is not None
+        _apply_session_effort(self.agent, self.cfg, selected)
+        self._choice_kind = None
+        self._choice_values = []
+        self._choice_prior_model = None
+        if model_changed:
+            try:
+                _save_last_chat_model(self.chat_preferences_path, self.agent.model)
+            except OSError as exc:
+                self.status_error = f"model preference was not saved: {exc}"
+        self.ui_state.update_from_agent(self.agent)
+        self._set_input("")
+        self.activity = "ready" if not self.running else self.activity
+        self._append(
+            f"\n[session] model {self.agent.model} · effort "
+            f"{_agent_effort_label(self.agent)} · history kept\n"
+        )
+
+    def _apply_appearance_choice(self, kind: str, selected: str) -> None:
+        reset = selected == RESET_THEME_CHOICE
+        if kind == "theme":
+            self.appearance.theme = DEFAULT_TUI_THEME if reset else selected
+            label = TUI_THEME_LABELS[self.appearance.theme]
+        else:
+            self.appearance.text_theme = DEFAULT_TEXT_THEME if reset else selected
+            label = TEXT_THEME_LABELS[self.appearance.text_theme]
+        self._end_choice_preview(restore=False)
+        self._choice_kind = None
+        self._choice_values = []
+        self._set_input("")
+        self._commit_appearance(f"{kind}: {label}", reset=reset)
+
+    def _commit_appearance(self, message: str, *, reset: bool = False) -> None:
+        self.application.style = _tui_style(
+            self.appearance.theme,
+            self.appearance.text_theme,
+        )
+        self._apply_field_settings()
+        try:
+            _save_tui_appearance(self.appearance_path, self.appearance)
+        except OSError as exc:
+            self.status_error = f"appearance was not saved: {exc}"
+            self._append(f"\n[appearance] {message} applied for this session only.\n")
+        else:
+            reset_note = " (default restored)" if reset else ""
+            self._append(f"\n[appearance] {message}{reset_note}\n")
+        self.activity = "ready" if not self.running else self.activity
+        self.application.invalidate()
+
+    def _settings_categories(self) -> list[str]:
+        return list(SETTINGS_CATEGORIES)
+
+    def _open_settings_category(self, category: str, default: str | None = None) -> None:
+        if category == "scroll":
+            choices = [f"{n} {'line' if n == 1 else 'lines'} per scroll" for n in range(1, 11)]
+            self._begin_choice(
+                "scroll speed", [*choices, "back"],
+                choices[self.appearance.scroll_lines - 1],
+            )
+            return
+        if category == "theme":
+            choices = [
+                f"interface theme: {TUI_THEME_LABELS[self.appearance.theme]}",
+                f"text/code theme: {TEXT_THEME_LABELS[self.appearance.text_theme]}",
+                "back",
+                RESET_THEME_CHOICE,
+                CANCEL_CHOICE,
+            ]
+            self._begin_choice("theme settings", choices, choices[0])
+            return
+        if category == "output field":
+            choices = [
+                f"border: {'on' if self.appearance.output_border else 'off'} (toggle)",
+                f"scrollbar: {'on' if self.appearance.output_scrollbar else 'off'} (toggle)",
+                "back",
+                RESET_THEME_CHOICE,
+                CANCEL_CHOICE,
+            ]
+            selected_default = (
+                choices[1]
+                if default == "scrollbar"
+                else choices[0]
+            )
+            self._begin_choice("output field settings", choices, selected_default)
+            return
+        if category == "input field":
+            choices = [
+                f"border: {'on' if self.appearance.input_border else 'off'} (toggle)",
+                f"height: {self.appearance.input_height}–{self.appearance.input_max_height} lines",
+                "back",
+                RESET_THEME_CHOICE,
+                CANCEL_CHOICE,
+            ]
+            self._begin_choice("input field settings", choices, choices[0])
+            return
+        self.appearance = TUIAppearance()
+        self._choice_kind = None
+        self._choice_values = []
+        self._set_input("")
+        self._commit_appearance("all settings", reset=True)
+
+    def _apply_settings_action(self, kind: str, selected: str) -> None:
+        if selected == "back":
+            self._begin_choice("settings", self._settings_categories(), "theme")
+            return
+        if kind == "theme settings":
+            if selected.startswith("interface theme:"):
+                self._begin_choice(
+                    "theme",
+                    [*TUI_THEME_LABELS, RESET_THEME_CHOICE, CANCEL_CHOICE],
+                    self.appearance.theme,
+                )
+                return
+            if selected.startswith("text/code theme:"):
+                self._begin_choice(
+                    "text theme",
+                    [*TEXT_THEME_LABELS, RESET_THEME_CHOICE, CANCEL_CHOICE],
+                    self.appearance.text_theme,
+                )
+                return
+            self.appearance.theme = DEFAULT_TUI_THEME
+            self.appearance.text_theme = DEFAULT_TEXT_THEME
+            self._commit_appearance("theme settings", reset=True)
+            self._open_settings_category("theme")
+            return
+        if kind == "output field settings":
+            if selected.startswith("border:"):
+                self.appearance.output_border = not self.appearance.output_border
+                message = f"output field border: {'on' if self.appearance.output_border else 'off'}"
+            elif selected.startswith("scrollbar:"):
+                self.appearance.output_scrollbar = not self.appearance.output_scrollbar
+                message = (
+                    "output field scrollbar: "
+                    f"{'on' if self.appearance.output_scrollbar else 'off'}"
+                )
+            else:
+                self.appearance.output_border = DEFAULT_OUTPUT_BORDER
+                self.appearance.output_scrollbar = DEFAULT_OUTPUT_SCROLLBAR
+                message = "output field settings"
+            self._commit_appearance(message, reset=selected.startswith("reset"))
+            self._open_settings_category(
+                "output field",
+                "scrollbar" if selected.startswith("scrollbar:") else None,
+            )
+            return
+        if selected.startswith("height:"):
+            current = (
+                f"{self.appearance.input_height} "
+                f"{'line' if self.appearance.input_height == 1 else 'lines'}"
+            )
+            self._begin_choice(
+                "input height",
+                ["enter min/max", *INPUT_HEIGHT_CHOICES, RESET_THEME_CHOICE, CANCEL_CHOICE],
+                current,
+            )
+            return
+        if selected.startswith("border:"):
+            self.appearance.input_border = not self.appearance.input_border
+            message = f"input field border: {'on' if self.appearance.input_border else 'off'}"
+        else:
+            self.appearance.input_border = DEFAULT_INPUT_BORDER
+            self.appearance.input_height = DEFAULT_INPUT_HEIGHT
+            self.appearance.input_max_height = MAX_INPUT_HEIGHT
+            message = "input field settings"
+        self._commit_appearance(message, reset=selected.startswith("reset"))
+        self._open_settings_category("input field")
+
+    def _append(self, text: str) -> None:
+        current = self.output.text + text
+        if len(current) > self._TRANSCRIPT_LIMIT:
+            current = "[older transcript trimmed]\n" + current[-self._TRANSCRIPT_LIMIT :]
+        self.output.buffer.set_document(
+            Document(current, len(current)),
+            bypass_readonly=True,
+        )
+
+    def _transcript_content_width(self) -> int:
+        render_info = self.output.window.render_info
+        if render_info is not None:
+            return max(32, render_info.window_width)
+        try:
+            columns = self.application.output.get_size().columns
+        except (AttributeError, OSError):
+            columns = shutil.get_terminal_size((100, 24)).columns
+        field_chrome = 2 if self.appearance.output_border else 0
+        scrollbar = 1 if self.appearance.output_scrollbar else 0
+        return max(32, columns - field_chrome - scrollbar)
+
+    def _divider_width(self) -> int:
+        # Keep a visible gutter at the right edge. Terminal renderers can wrap
+        # a line that reaches the final cell when a frame and scrollbar are
+        # both present.
+        return max(32, self._transcript_content_width() - 3)
+
+    def _refresh_transcript_dividers(self) -> None:
+        width = self._divider_width()
+        updated: list[str] = []
+        changed = False
+        for line in self.output.text.splitlines():
+            match = re.match(
+                r"^(━━ )(?P<role>you|klaude) · (?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?: · (?P<suffix>.*?))?\s*━*$",
+                line,
+            )
+            if match:
+                label = f"━━ {match['role']} · {match['time']}"
+                suffix = match.group("suffix")
+                if suffix:
+                    label += f" · {suffix}"
+                label += " "
+                refreshed = label + ("━" * max(0, width - len(label)))
+                if refreshed != line:
+                    changed = True
+                updated.append(refreshed)
+                continue
+            if line.startswith("━━ Session: "):
+                match = re.match(
+                    r"^━━ Session: (?P<session>.+?)(?:\s*━+)?$",
+                    line,
+                )
+                if match:
+                    refreshed = _session_divider(match.group("session"), width=width)
+                    if refreshed != line:
+                        changed = True
+                    updated.append(refreshed)
+                    continue
+            updated.append(line)
+        if changed:
+            new_text = "\n".join(updated) + ("\n" if self.output.text.endswith("\n") else "")
+            cursor_position = min(
+                self.output.buffer.cursor_position,
+                len(new_text),
+            )
+            self.output.buffer.set_document(
+                Document(new_text, cursor_position),
+                bypass_readonly=True,
+            )
+
+    def _submit_buffer(self, *, steer: bool) -> None:
+        if self._height_edit:
+            value = self.input.text.strip().lower()
+            if value == CANCEL_CHOICE:
+                self._cancel_choice()
+                return
+            if value == RESET_THEME_CHOICE:
+                value = f"{DEFAULT_INPUT_HEIGHT} {MAX_INPUT_HEIGHT}"
+            parts = value.split()
+            if len(parts) != 2 or not all(p.isascii() and p.isdecimal() for p in parts):
+                self.status_error = "Enter two whole numbers: min max (1–12)"
+                return
+            lower, upper = map(int, parts)
+            if not MIN_INPUT_HEIGHT <= lower <= upper <= MAX_INPUT_HEIGHT:
+                self.status_error = "Height must satisfy 1 ≤ min ≤ max ≤ 12"
+                return
+            self.appearance.input_height = lower
+            self.appearance.input_max_height = upper
+            self._height_edit = False
+            self.status_error = ""
+            self._set_input("")
+            self._commit_appearance(f"input height: {lower}–{upper} lines")
+            self._open_settings_category("input field")
+            return
+        if self._queue_edit_index is not None:
+            self._finish_queue_edit()
+            return
+        text = self.input.text.strip()
+        if not text:
+            return
+        self._set_input("")
+        self._history.append(text)
+        self._history_index = None
+        self._history_draft = ""
+        if text in {"/quit", "/exit", "/q"}:
+            self._exit()
+            return
+        if text.startswith("/steer "):
+            self._enqueue(text.removeprefix("/steer ").strip(), steer=True)
+            return
+        if text == "/steer":
+            self._append("\n[hint] Use /steer TEXT or type TEXT and press Ctrl+Enter.\n")
+            return
+        if text == "/queue":
+            if self.pending:
+                listing = "\n".join(
+                    f"  {index}. {item}" for index, item in enumerate(self.pending, 1)
+                )
+                self._append(f"\n[pending turns]\n{listing}\n")
+            else:
+                self._append("\n[pending turns] none\n")
+            return
+        if text.startswith("/queue "):
+            self._enqueue(text.removeprefix("/queue ").strip(), force_queue=True)
+            return
+        if text == "/cancel":
+            if self.running:
+                self.cancel_requested.set()
+                self.agent.ollama.cancel_active()
+                self.activity = "interrupt requested"
+            else:
+                self._append("\n[session] Nothing is running.\n")
+            return
+        if text == "/pwd":
+            self._append(f"\n[workspace] {getattr(self.agent, 'workdir', Path.cwd())}\n")
+            return
+        if text == "/ls" or text.startswith("/ls "):
+            ok, message = _list_agent_directory(self.agent, text.removeprefix("/ls").strip())
+            message = _strip_ansi_sgr(message)
+            self._append(
+                f"\n[workspace listing]\n{message}\n"
+                if ok else f"\n[error] {message}\n"
+            )
+            return
+        if text == "/cd" or text.startswith("/cd "):
+            ok, message = _change_agent_directory(self.agent, text.removeprefix("/cd").strip())
+            if ok:
+                builder = getattr(self.agent, "set_system_prompt_builder", None)
+                if builder:
+                    self.agent.set_system_prompt(builder())
+                self._append(f"\n[workspace] {message}\n")
+            else:
+                self._append(f"\n[error] {message}\n")
+            return
+        if text == "/help":
+            width = max(32, shutil.get_terminal_size((100, 24)).columns - 4)
+            self._append("\n" + format_command_reference(width=width) + "\n")
+            return
+        if text == "/keybinds":
+            width = max(32, shutil.get_terminal_size((100, 24)).columns - 4)
+            self._append("\n" + format_chat_keybind_reference(width=width) + "\n")
+            return
+        if text == "/models":
+            models = _sorted_model_names(self.agent.ollama.list_models())
+            listing = "\n".join(
+                f"  {name}{'  <- active' if name == self.agent.model else ''}"
+                for name in models
+            )
+            self._append(f"\n[installed models]\n{listing or '  none'}\n")
+            return
+        if text == "/model" or text.startswith("/model "):
+            requested = text.removeprefix("/model").strip()
+            if requested:
+                resolved = _resolve_model(self.agent.ollama, requested)
+                if resolved is None:
+                    self._append(f"\n[error] No unique model match for {requested!r}.\n")
+                    return
+                self._choice_prior_model = self.agent.model
+                self.agent.model = resolved
+                current = _effort_value_label(self.agent.ollama_code_think)
+                self._begin_choice("effort", [*EFFORT_CHOICES, CANCEL_CHOICE], current)
+            else:
+                self._begin_choice(
+                    "model",
+                    [
+                        *_sorted_model_names(self.agent.ollama.list_models()),
+                        CANCEL_CHOICE,
+                    ],
+                    self.agent.model,
+                )
+            return
+        if text == "/effort" or text.startswith("/effort "):
+            requested = text.removeprefix("/effort").strip().lower()
+            if requested:
+                if requested not in EFFORT_CHOICES:
+                    self._append("\n[error] Effort must be auto, off, low, medium, or high.\n")
+                    return
+                _apply_session_effort(self.agent, self.cfg, requested)
+                self.ui_state.update_from_agent(self.agent)
+                self._append(f"\n[session] effort {_agent_effort_label(self.agent)}\n")
+            else:
+                current = _effort_value_label(self.agent.ollama_code_think)
+                self._begin_choice("effort", [*EFFORT_CHOICES, CANCEL_CHOICE], current)
+            return
+        if text == "/settings" or text.startswith("/settings "):
+            requested = text.removeprefix("/settings").strip().lower()
+            category_aliases = {
+                "": "",
+                "theme": "theme",
+                "output": "output field",
+                "output field": "output field",
+                "input": "input field",
+                "input field": "input field",
+                "scroll": "scroll",
+                "reset": "reset all",
+                "reset all": "reset all",
+            }
+            if requested not in category_aliases:
+                self._append(
+                    "\n[error] Settings category must be theme, output, input, scroll, or reset.\n"
+                )
+                return
+            category = category_aliases[requested]
+            if category:
+                self._open_settings_category(category)
+            else:
+                self._begin_choice("settings", self._settings_categories(), "theme")
+            return
+        if text == "/theme" or text.startswith("/theme "):
+            requested = text.removeprefix("/theme").strip()
+            if requested:
+                selected = _resolve_theme_name(
+                    requested,
+                    TUI_THEME_LABELS,
+                    TUI_THEME_ALIASES,
+                )
+                if selected is None:
+                    self._append(
+                        "\n[error] Theme must be autumn, pastelle-pink, "
+                        "hacker-green, neon-synth, or reset.\n"
+                    )
+                    return
+                self._apply_appearance_choice("theme", selected)
+            else:
+                self._open_settings_category("theme")
+            return
+        if text.startswith("/"):
+            base = text.split()[0]
+            suggestions = _command_suggestions(base, surface=CommandSurface.CHAT)
+            self._append(
+                "\n" + format_unknown_command_message(base, suggestions, chat_input=True) + "\n"
+            )
+            return
+        if steer:
+            self._enqueue(text, steer=True)
+            return
+        candidate = explicit_memory_candidate(text)
+        if candidate:
+            fact, needs_confirmation = candidate
+            if needs_confirmation:
+                self._append(
+                    "\n[hint] Please use `remember that <short durable fact>` so "
+                    "it can be saved without leaving the live TUI.\n"
+                )
+            else:
+                saved = self.memory.remember(fact, source="manual")
+                self._append("\n[memory] saved\n" if saved else "\n[memory] not saved\n")
+            return
+        self._enqueue(text)
+
+    def _enqueue(self, text: str, *, steer: bool = False, force_queue: bool = False) -> None:
+        if not text:
+            return
+        if steer:
+            self.pending.appendleft(text)
+            if self.running:
+                self.cancel_requested.set()
+                self.agent.ollama.cancel_active()
+                self.activity = "steering at safe boundary"
+                self._append(f"\n[steer queued] {text}\n")
+            else:
+                self._append(f"\n[you · steer] {text}\n")
+                self._start_next()
+            return
+        self.pending.append(text)
+        if self.running or force_queue:
+            self._append(f"\n[queued {len(self.pending)}] {text}\n")
+        if not self.running:
+            self._start_next()
+
+    def _start_next(self) -> None:
+        if (
+            self.running
+            or not self.pending
+            or self.shutting_down
+            or self._queue_edit_index is not None
+        ):
+            return
+        user_msg = self.pending.popleft()
+        self.running = True
+        self._turn_started_at = time.monotonic()
+        self.cancel_requested = threading.Event()
+        self.activity = "thinking"
+        self.status_error = ""
+        estimated_characters = sum(
+            len(str(message.get("content", ""))) for message in self.agent.messages
+        ) + len(user_msg)
+        self.ui_state.prompt_tokens = max(1, estimated_characters // 4)
+        self.ui_state.prompt_tokens_estimated = True
+        divider_width = self._divider_width()
+        now = datetime.now().astimezone()
+        self._append(
+            f"\n{user_msg}\n"
+            f"\n{_message_divider('you', width=divider_width, timestamp=now)}\n"
+        )
+        threading.Thread(
+            target=self._run_turn,
+            args=(user_msg, self.cancel_requested),
+            daemon=True,
+            name="klaude-agent-turn",
+        ).start()
+
+    def _emit(self, kind: str, payload: object = None) -> None:
+        self._events.put((kind, payload))
+        if not self.shutting_down:
+            self.application.invalidate()
+
+    def _run_turn(self, user_msg: str, cancel_event: threading.Event) -> None:
+        assistant_parts: list[str] = []
+        streamed = False
+        pending_metadata: dict[str, dict] = {}
+        cancelled = False
+        try:
+            builder = getattr(self.agent, "set_system_prompt_builder", None)
+            if builder:
+                self.agent.set_system_prompt(builder())
+            self.memory.log_turn(self.session_id, "user", user_msg)
+            for event in self.agent.run(user_msg):
+                if cancel_event.is_set():
+                    cancelled = True
+                    break
+                payload = event.payload
+                if event.kind == "text_delta" and payload.get("content"):
+                    piece = payload["content"]
+                    streamed = True
+                    assistant_parts.append(piece)
+                    self._emit("append", piece)
+                elif event.kind == "text" and payload.get("content"):
+                    content = payload["content"]
+                    if not (payload.get("metadata") or {}).get("streamed"):
+                        assistant_parts.append(content)
+                        self._emit("append", content)
+                    self.memory.log_turn(self.session_id, "assistant", content)
+                elif event.kind == "tool_start":
+                    tool = payload["tool"]
+                    if tool in {"web_search", "fetch_url"}:
+                        pending_metadata[tool] = payload.get("metadata") or {}
+                    self._emit("activity", tool)
+                    if tool not in {
+                        "web_search",
+                        "fetch_url",
+                        "list_commands",
+                        "query_knowledge",
+                    }:
+                        self._emit("append", f"\n-> {tool}\n")
+                elif event.kind == "tool_result":
+                    if (payload.get("metadata") or {}).get("suppress_user_output"):
+                        continue
+                    tool = payload.get("tool")
+                    metadata = {
+                        **pending_metadata.pop(tool, {}),
+                        **(payload.get("metadata") or {}),
+                    }
+                    if tool == "web_search":
+                        lines = _web_search_display_lines(metadata, payload["result"])
+                    elif tool == "query_knowledge":
+                        lines = _query_knowledge_display_lines(metadata, payload["result"])
+                    elif tool == "fetch_url":
+                        lines = _fetch_url_display_lines(metadata, payload["result"])
+                    else:
+                        preview = payload["result"][:200].replace("\n", " ")
+                        lines = [f"   {preview}"]
+                    self._emit("append", "\n" + "\n".join(lines) + "\n")
+                elif event.kind == "error":
+                    message = payload["message"]
+                    self._emit("error", message)
+                    self.memory.log_turn(
+                        self.session_id,
+                        "system",
+                        {"event": "runtime_error", "message": message},
+                    )
+                elif event.kind == "retry":
+                    self._emit("append", f"\n-> retry [{payload['reason']}]\n")
+                elif event.kind == "progress":
+                    self._emit("activity", payload["stage"])
+            if cancelled:
+                partial = "".join(assistant_parts).strip()
+                if streamed and partial:
+                    self.memory.log_turn(self.session_id, "assistant", partial)
+                self._emit("append", "\n[interrupted at a safe boundary]\n")
+            for fact in self.memory.auto_remember_turn(user_msg):
+                self._emit("append", f"\n[memory saved] {fact}\n")
+        except Exception as exc:
+            self._emit("error", str(exc))
+            self.memory.log_turn(
+                self.session_id,
+                "system",
+                {"event": "runtime_error", "message": str(exc)},
+            )
+        finally:
+            elapsed = max(0, int(time.monotonic() - (self._turn_started_at or time.monotonic())))
+            hours, remainder = divmod(elapsed, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            divider_width = self._divider_width()
+            finished_at = datetime.now().astimezone()
+            self._emit(
+                "append",
+                "\n\n"
+                + _message_divider(
+                    "klaude",
+                    width=divider_width,
+                    timestamp=finished_at,
+                    suffix=f"worked for {hours:02d}:{minutes:02d}:{seconds:02d}",
+                )
+                + "\n",
+            )
+            metadata = dict(getattr(self.agent.ollama, "last_chat_metadata", {}))
+            self._emit("turn_done", {"metadata": metadata, "cancelled": cancelled})
+
+    def _ask_permission(self, tool: str, detail: str) -> str:
+        request: dict[str, object] = {
+            "tool": tool,
+            "detail": detail,
+            "answer": "n",
+            "done": threading.Event(),
+        }
+        self._emit("permission", request)
+        done = request["done"]
+        while not done.wait(0.1):
+            if self.shutting_down:
+                return "n"
+        return str(request["answer"])
+
+    def _answer_permission(self, answer: str) -> None:
+        request = self._permission_request
+        if request is None:
+            return
+        request["answer"] = answer
+        done = request["done"]
+        self._permission_request = None
+        self.activity = "permission accepted" if answer in {"y", "a"} else "permission denied"
+        done.set()
+        self.application.invalidate()
+
+    def _before_render(self, application) -> None:
+        self._refresh_transcript_dividers()
+        self.application.layout.focus(
+            self.choice_control if self._choice_kind else self.input
+        )
+        while True:
+            try:
+                kind, payload = self._events.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "append":
+                self._append(str(payload))
+            elif kind == "activity":
+                self.activity = str(payload)
+            elif kind == "error":
+                self.status_error = str(payload)
+                self._append(f"\n[error] {payload}\n")
+            elif kind == "permission" and isinstance(payload, dict):
+                self._permission_request = payload
+                self._append(
+                    f"\n[permission · {payload['tool']}]\n{payload['detail']}\n"
+                )
+            elif kind == "turn_done":
+                metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
+                self.ui_state.model = self.agent.model
+                self.ui_state.effort = _agent_effort_label(self.agent)
+                self.ui_state.context_window = int(
+                    self.agent.ollama_options.get("num_ctx", 8192)
+                )
+                self.ui_state.prompt_tokens = int(metadata.get("prompt_eval_count") or 0)
+                self.ui_state.output_tokens = int(metadata.get("eval_count") or 0)
+                self.ui_state.prompt_tokens_estimated = False
+                self.running = False
+                self.activity = "ready"
+                self._start_next()
+
+    def _exit(self) -> None:
+        self.shutting_down = True
+        if self._permission_request:
+            self._answer_permission("n")
+        self.cancel_requested.set()
+        self.agent.ollama.cancel_active()
+        self.application.exit(result=None)
+
+    def run(self) -> None:
+        output = self.application.output
+
+        def enable_modified_keys() -> None:
+            output.write_raw(KITTY_KEYBOARD_PROTOCOL_ON)
+            output.write_raw(XTERM_MODIFY_OTHER_KEYS_ON)
+            output.flush()
+
+        try:
+            self.application.run(pre_run=enable_modified_keys)
+        finally:
+            output.write_raw(XTERM_MODIFY_OTHER_KEYS_OFF)
+            output.write_raw(KITTY_KEYBOARD_PROTOCOL_OFF)
+            output.flush()
+
+
 @app.command()
 def chat(model: str = typer.Option("", help="override the coder model")):
     """Interactive agent session in the current directory."""
-    agent, memory = _build_agent(Path.cwd(), model or None)
+    cfg = load_config()
+    chat_preferences_path = cfg.data_dir / "chat-preferences.json"
+    remembered_model = _load_last_chat_model(chat_preferences_path)
+    agent, memory = _build_agent(Path.cwd(), model or remembered_model or None)
+    if remembered_model and not model:
+        try:
+            installed_models = agent.ollama.list_models()
+        except Exception:
+            installed_models = []
+        if installed_models and remembered_model not in installed_models:
+            agent.model = cfg.models["coder"]
+            _apply_session_effort(agent, cfg, "auto")
+    try:
+        _save_last_chat_model(chat_preferences_path, agent.model)
+    except OSError as exc:
+        console.print(f"[yellow]could not save chat model preference:[/] {exc}")
     session_id = str(uuid.uuid4())[:8]
-    console.print(
-        f"[bold]klaude[/] [dim]({agent.model})[/] — type your task; "
-        "/help lists commands, /models lists, /model NAME switches, /quit exits\n"
+    ui_state = ChatUIState(
+        model=agent.model,
+        effort=_agent_effort_label(agent),
+        context_window=int(agent.ollama_options.get("num_ctx", 8192)),
     )
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        PersistentChatTUI(
+            agent,
+            memory,
+            session_id,
+            cfg,
+            chat_preferences_path=chat_preferences_path,
+        ).run()
+        console.print("[dim]bye[/]")
+        return
+    console.print(
+        Panel(
+            "[dim]↑ previous input  •  Tab command completion  •  "
+            "/model picker  •  /effort picker  •  /help[/]",
+            title=f"[bold cyan]klaude[/]  [white]{agent.model}[/]",
+            subtitle="local-first coding agent",
+            border_style="cyan",
+            padding=(0, 1),
+        )
+    )
+    prompt_session = _new_chat_prompt_session()
     while True:
         try:
-            user_msg = console.input("[bold cyan]you>[/] ").strip()
+            user_msg = _read_chat_input(prompt_session, ui_state)
         except (EOFError, KeyboardInterrupt):
             break
         if not user_msg:
             continue
         if user_msg in {"/quit", "/exit", "/q"}:
             break
-        if user_msg in {"/help", "/commands"}:
+        if user_msg == "/help":
             _handle_command_reference_request(user_msg, agent, memory, session_id)
             continue
+        if user_msg == "/pwd":
+            console.print(f"[workspace] {getattr(agent, 'workdir', Path.cwd())}")
+            continue
+        if user_msg == "/ls" or user_msg.startswith("/ls "):
+            ok, message = _list_agent_directory(agent, user_msg.removeprefix("/ls").strip())
+            if ok:
+                console.print(Text.from_ansi(f"[workspace listing]\n{message}"))
+            else:
+                console.print(f"[red]error:[/] {message}")
+            continue
+        if user_msg == "/cd" or user_msg.startswith("/cd "):
+            ok, message = _change_agent_directory(agent, user_msg.removeprefix("/cd").strip())
+            console.print(f"[green]workspace:[/] {message}" if ok else f"[red]error:[/] {message}")
+            continue
         if user_msg == "/models":
-            for m in agent.ollama.list_models():
+            for m in _sorted_model_names(agent.ollama.list_models()):
                 marker = " [green]<- active[/]" if m == agent.model else ""
                 console.print(f"  {m}{marker}")
             continue
-        if user_msg.startswith("/model"):
+        if user_msg == "/model" or user_msg.startswith("/model "):
             target = user_msg.removeprefix("/model").strip()
-            if not target:
-                console.print(f"active model: [bold]{agent.model}[/]")
-                continue
-            resolved = _resolve_model(agent.ollama, target)
-            if resolved:
-                agent.model = resolved
-                console.print(f"[green]switched to {resolved}[/] [dim](history kept)[/]")
-            else:
-                console.print(f"[red]no unique match for '{target}'[/] — see /models")
+            if _choose_model_and_effort(agent, cfg, target):
+                try:
+                    _save_last_chat_model(chat_preferences_path, agent.model)
+                except OSError as exc:
+                    console.print(f"[yellow]model preference was not saved:[/] {exc}")
+                ui_state.update_from_agent(agent)
+                console.print(
+                    f"[green]switched to {agent.model}[/] "
+                    f"[dim](effort {_agent_effort_label(agent)}; history kept)[/]"
+                )
+            continue
+        if user_msg == "/effort" or user_msg.startswith("/effort "):
+            target = user_msg.removeprefix("/effort").strip()
+            if _choose_effort(agent, cfg, target) is not None:
+                ui_state.update_from_agent(agent)
+                console.print(f"[green]effort: {_agent_effort_label(agent)}[/]")
             continue
         if _handle_unknown_slash_command(
             user_msg,
@@ -2707,7 +5339,7 @@ def chat(model: str = typer.Option("", help="override the coder model")):
             continue
         if _handle_explicit_memory_request(user_msg, agent, memory, session_id):
             continue
-        _render(agent, memory, session_id, user_msg)
+        _render(agent, memory, session_id, user_msg, ui_state)
         for fact in memory.auto_remember_turn(user_msg):
             console.print(f"[dim]memory saved: {fact}[/]")
     console.print("[dim]bye[/]")
@@ -3186,7 +5818,7 @@ def models():
         console.print(f"[red]ollama not reachable at {cfg.ollama_url}[/]")
         raise typer.Exit(1)
     roles = {v: k for k, v in cfg.models.items() if v}
-    for m in ollama.list_models():
+    for m in _sorted_model_names(ollama.list_models()):
         role = roles.get(m) or roles.get(m.split(":")[0], "")
         tag = f"  [green]<- {role}[/]" if role else ""
         console.print(f"  {m}{tag}")
@@ -3549,6 +6181,15 @@ def status():
             f"tier={cfg.tier}; coder={cfg.models.get('coder', '')}; "
             f"embed={cfg.models.get('embed', '')}; "
             f"ollama_options={_ollama_options_label(cfg.ollama_options)}"
+        ),
+    )
+    modes.add_row(
+        "code profile",
+        "on",
+        (
+            "compact_prompt=true; "
+            f"think={cfg.ollama_code_think_for_model(cfg.models.get('coder', ''))}; "
+            f"overrides={_ollama_options_label(cfg.ollama_code_options)}"
         ),
     )
     modes.add_row("data", "on", str(cfg.data_dir))

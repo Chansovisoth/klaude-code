@@ -2,6 +2,68 @@
 
 ## Unreleased
 
+- Fix picker scrolling by tracking the selected row in the renderer; add
+  PageUp/PageDown navigation and Escape cancellation. Standardize reset and
+  cancel rows across selection menus, preview theme changes, and support
+  validated, persistent minimum/maximum composer heights.
+
+- Keep multiline terminal pastes together as one `klaude chat` request instead
+  of generating once per pasted line.
+- Prevent Enter from crashing `/model` or another slash command when its
+  completion menu is open but no suggestion is selected.
+- Add a bordered interactive chat surface with input history, slash-command
+  completion, model and reasoning-effort pickers, context/token telemetry,
+  deliberate multiline editing, and terminal-only styled Markdown/code panels.
+- Render all picker options as a highlighted, scrollable list inside the input
+  field, add visible cancellation to model/effort/theme flows, and sort model
+  pickers and model listings alphabetically.
+- Replace the blocking terminal chat loop with a persistent full-screen layout:
+  output stays above a full-width live input, background turns leave typing
+  available, multiple inputs queue, Ctrl+Enter or `/steer` can prioritize a new
+  instruction, Alt+Enter inserts a newline, and Ctrl+C interrupts at the next
+  safe boundary. Enable Kitty and xterm modified-key reporting only while the
+  TUI is active, restore both on exit, and provide Ctrl+J as a newline fallback
+  for terminals such as MobaXterm that collapse modified Enter into plain Enter.
+- Show queued follow-up inputs in a compact live strip above the composer and
+  provide a queue editor: repeated Alt+Up walks from newest to oldest, Enter
+  saves, empty text plus Enter deletes, and queue consumption pauses during edits.
+- Add a branded alternate-screen welcome view with a boxed block Klaude logo
+  and current package version, plus persistent, independent TUI appearance
+  controls: Autumn chrome by default plus Pastelle Pink, Hacker
+  Green, and Neon Synth; separate VS Code Dark, GitHub Dark, Monokai, and
+  Solarized Light Markdown/code colors; and reset-to-default actions for both.
+- Render `/help` category names with underline styling and separate each user
+  and Klaude message with a full-width gray divider containing its local date
+  and time.
+- Centralize appearance under Theme, Output Field, and Input Field settings;
+  default the output border and scrollbar off, keep the rounded input border
+  independently configurable, add a persistent 1–12 line input-height control
+  with an 8-line default, migrate legacy flat preferences, and remove redundant
+  dashed rows beneath command-reference category names.
+- Reuse the last successfully selected model on the next `klaude chat` launch,
+  while keeping explicit `--model` and the configured coder role as overrides
+  and fallback respectively.
+- Add `/keybinds` for a deterministic keyboard-only reference, and
+  show described slash-command suggestions immediately when input starts with
+  `/`.
+- Bound the default agent loop to eight model steps per turn and recover from
+  Qwen/Ollama tool-XML `unexpected EOF` failures with one tool-free retry.
+- Show safe reasoning/drafting progress, prevent reasoning-only blind retries,
+  and validate Python/GDScript before displaying code, with at most two
+  diagnostic-driven repair attempts.
+- Preserve concise model-authored search queries, require every explicitly
+  requested search/fetch operation, retain query-relevant excerpts from long
+  fetched pages, and retry once when an explicitly requested source URL is
+  omitted.
+- Keep explicit no-search prompts out of focused CLI command help, and restore
+  `git_status` when current branch or dirty-worktree inspection is requested.
+
+- Route self-contained code generation without retrieval tools, honor explicit
+  no-search requests, use a compact code prompt with live output streaming, and
+  retain durable user/project preferences in that prompt.
+- Add independent `[ollama.code_options]` and `code_think` tuning so constrained
+  and high-end machines can choose different code budgets without silent model
+  switching, plus one tool-free recovery for malformed Qwen tool XML.
 - Make provider health recoverable: a single operational failure no longer
   disables later searches, repeated failures enter a timed cooldown, stale
   legacy failures expire, and successful low-relevance responses still prove

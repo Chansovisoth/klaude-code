@@ -346,7 +346,9 @@ class WebProviderConfig:
 @dataclass
 class OllamaConfig:
     options: dict[str, Any] = field(default_factory=dict)
+    code_options: dict[str, Any] = field(default_factory=dict)
     think: bool | str | None = None
+    code_think: bool | str | None = None
 
 
 def _default_web_providers() -> dict[str, WebProviderConfig]:
@@ -383,8 +385,9 @@ class Config:
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     # permission policy per tool: ask | allow | deny
     permissions: dict[str, str] = field(default_factory=dict)
-    max_agent_steps: int = 20
+    max_agent_steps: int = 8
     max_code_continuations: int = 2
+    max_code_repairs: int = 2
     retrieval_k: int = 6
     snapshot_retention: int = 3
     crawl_max_depth: int = 2
@@ -455,12 +458,28 @@ class Config:
 
     @property
     def ollama_options(self) -> dict[str, Any]:
-        return dict(self.ollama.options)
+        # Local models otherwise choose their own often-small output budget.
+        # Keep enough room for a complete file while history compaction reserves
+        # matching context capacity before the request reaches Ollama.
+        options = dict(self.ollama.options)
+        options.setdefault("num_predict", 2048)
+        return options
+
+    @property
+    def ollama_code_options(self) -> dict[str, Any]:
+        return dict(self.ollama.code_options)
 
     def ollama_think_for_model(self, model: str) -> bool | str | None:
         if self.ollama.think is not None:
             return self.ollama.think
         return False if model.strip().lower().startswith("qwen3.5") else None
+
+    def ollama_code_think_for_model(self, model: str) -> bool | str | None:
+        if self.ollama.code_think is not None:
+            return self.ollama.code_think
+        if model.strip().lower().startswith("gpt-oss"):
+            return "low"
+        return self.ollama_think_for_model(model)
 
     @property
     def web_provider_state_file(self) -> Path:
@@ -552,6 +571,35 @@ DEFAULT_PERMISSIONS = {
 }
 
 
+def _validated_ollama_options(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    validated: dict[str, Any] = {}
+    for name in ("num_ctx", "num_thread", "num_gpu", "num_predict", "top_k", "seed"):
+        value = raw.get(name)
+        if value is None:
+            continue
+        parsed = int(value)
+        if parsed > 0 or (name in {"num_gpu", "seed"} and parsed == 0):
+            validated[name] = parsed
+    bounded_float_options = {
+        "temperature": (0.0, 2.0),
+        "top_p": (0.0, 1.0),
+        "min_p": (0.0, 1.0),
+        "presence_penalty": (-2.0, 2.0),
+        "frequency_penalty": (-2.0, 2.0),
+        "repeat_penalty": (0.0, 2.0),
+    }
+    for name, (minimum, maximum) in bounded_float_options.items():
+        value = raw.get(name)
+        if value is None:
+            continue
+        parsed = float(value)
+        if minimum <= parsed <= maximum:
+            validated[name] = parsed
+    return validated
+
+
 def load_config() -> Config:
     _load_env_files()
     cfg = Config()
@@ -567,20 +615,16 @@ def load_config() -> Config:
     cfg.models = preset
 
     ollama = user.get("ollama", {})
-    think = ollama.get("think")
-    if isinstance(think, bool):
-        cfg.ollama.think = think
-    elif isinstance(think, str) and think.lower() in {"low", "medium", "high"}:
-        cfg.ollama.think = think.lower()
-    ollama_options = ollama.get("options", {})
-    if isinstance(ollama_options, dict):
-        for name in ("num_ctx", "num_thread", "num_gpu", "num_predict"):
-            value = ollama_options.get(name)
-            if value is None:
-                continue
-            parsed = int(value)
-            if parsed > 0 or (name == "num_gpu" and parsed == 0):
-                cfg.ollama.options[name] = parsed
+    for name, field_name in (("think", "think"), ("code_think", "code_think")):
+        think = ollama.get(name)
+        if isinstance(think, bool):
+            setattr(cfg.ollama, field_name, think)
+        elif isinstance(think, str) and think.lower() in {"low", "medium", "high"}:
+            setattr(cfg.ollama, field_name, think.lower())
+    cfg.ollama.options.update(_validated_ollama_options(ollama.get("options", {})))
+    cfg.ollama.code_options.update(
+        _validated_ollama_options(ollama.get("code_options", {}))
+    )
 
     services = user.get("services", {})
     cfg.ollama_url = services.get("ollama_url", cfg.ollama_url)
@@ -944,9 +988,12 @@ def load_config() -> Config:
     cfg.permissions = {**DEFAULT_PERMISSIONS, **user.get("permissions", {})}
 
     agent = user.get("agent", {})
-    cfg.max_agent_steps = int(agent.get("max_steps", cfg.max_agent_steps))
+    cfg.max_agent_steps = max(1, min(20, int(agent.get("max_steps", cfg.max_agent_steps))))
     cfg.max_code_continuations = max(
         0, min(3, int(agent.get("max_code_continuations", cfg.max_code_continuations)))
+    )
+    cfg.max_code_repairs = max(
+        0, min(3, int(agent.get("max_code_repairs", cfg.max_code_repairs)))
     )
     cfg.retrieval_k = int(agent.get("retrieval_k", cfg.retrieval_k))
 
