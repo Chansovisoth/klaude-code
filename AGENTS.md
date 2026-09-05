@@ -97,14 +97,14 @@ Chat slash commands currently include:
 - `/help`: print the deterministic command reference directly.
 - `/keybinds`: print only keyboard controls directly. Slash commands belong in
   `/help` and the `/` completion popup.
-- `/settings [CATEGORY]`: configure categorized Theme, Output Field, and Input
+- `/settings [CATEGORY]`: configure categorized Theme and Input
   Field appearance settings plus Runtime controls. Runtime controls persist for
   future chats in `chat-preferences.json`: Auto lets Ollama choose CPU/GPU placement, CPU-only sets no
   GPU layers, GPU-preferred requests full offload where possible, and CPU
   threads/context size offer presets and custom numeric input. Auto Calibrate
   derives bounded thread and context targets from local CPU, RAM, and VRAM,
-  while keeping device placement automatic. Output border defaults off and scrollbar defaults on; input
-  border defaults on. Every category includes its own reset action.
+  while keeping device placement automatic. Input border defaults on. Every
+  category includes its own reset action.
 - `/models`: list installed Ollama models and mark the active model.
 - `/model`: open an arrow-key model picker, then an effort picker.
 - `/model NAME`: switch the active chat model, then choose effort while keeping
@@ -153,10 +153,10 @@ navigate and Escape cancels. Theme navigation previews colors without saving;
 cancel restores the original colors. Text previews include a temporary sample
 that is removed without discarding intervening output.
 
-Interactive chat uses a persistent full-screen layout: the scrollable transcript
-stays above a full-width input at the bottom, and the input remains focused while
-the agent runs in a background thread. Enter queues additional turns while one
-is active; Alt+\ steers using the current input, Alt+Enter inserts a
+Interactive chat writes its transcript to ordinary terminal scrollback rather
+than taking over the terminal's alternate screen. This lets the terminal handle
+wheel scrolling and native drag-to-select without Shift. The composer remains a
+Prompt Toolkit input at the bottom of the printed transcript. Alt+Enter inserts a
 newline when distinguishable, Ctrl+J is the legacy-terminal newline fallback,
 repeated Alt+Up edits queued follow-ups from newest to oldest, and Ctrl+C
 interrupts the active response. Ctrl+D exits the chat and discards any unsent
@@ -193,12 +193,9 @@ input history; history navigation resumes when the popup is closed.
 Escape closes the completion popup without altering the current input.
 Enter accepts the highlighted completion and executes the command in one press;
 Tab completes without executing so users can add arguments.
-The separate Scroll settings category stores input and output scroll speed
-(1–10 lines per wheel event, default 2), persisted as `scroll.lines` with legacy
-`output_field.scroll_lines` loading supported. Output resets do not reset Scroll.
 Mouse capture is enabled only for clickable completion and picker menus; outside
-those menus, native terminal dragging selects and copies transcript text without
-requiring Shift.
+those menus, terminal scrolling and native dragging select and copy transcript
+text without requiring Shift.
 
 Modified Enter combinations support both Kitty CSI-u and xterm modifyOtherKeys
 escape sequences. The TUI enables both protocols on entry and must restore both
@@ -207,9 +204,10 @@ A legacy terminal may collapse modified Enter into ordinary Enter before Klaude
 receives it, which cannot be disambiguated in the application; `/steer TEXT`
 remains the terminal-independent steering fallback.
 
-Interactive TUI appearance is stored in `.klaude/data/appearance.json` (or the
-configured data directory) as categorized `theme`, `output_field`, and
-`input_field` objects. Chrome and content syntax themes are deliberately
+Interactive appearance is stored in `.klaude/data/appearance.json` (or the
+configured data directory) as categorized `theme` and `input_field` objects.
+Legacy `output_field` values are ignored because the terminal owns transcript
+rendering and scrolling. Chrome and content syntax themes are deliberately
 separate settings. `/theme` opens the Theme category. Input height grows between `input_field.min_height`
 and `input_field.max_height` (defaults 8 and 12); legacy `height` is accepted as
 the minimum. Input Field → Height → Enter min/max accepts two integers with
@@ -217,8 +215,20 @@ the minimum. Input Field → Height → Enter min/max accepts two integers with
 invalid persisted ranges fall back to defaults. Escape/Ctrl+C cancels the editor.
 Numbered height presets are fixed heights: selecting `8 lines` sets both the
 minimum and maximum to 8. `Enter min/max` is the flexible-range option.
-`Application(full_screen=True)` uses the terminal
-alternate screen and must restore the user's original terminal on exit.
+The terminal composer must not enter the alternate screen; transcript history
+belongs to the terminal's normal scrollback buffer.
+Keep the complete transcript in the TUI for the lifetime of a chat session;
+never prune older messages or replace them with a truncation marker.
+Completed transcript lines must be printed once above the live composer, with
+the renderer origin reset below them. `full_screen=False` alone does not retain
+history: never put the full transcript in a redrawable TextArea. Only the
+unfinished streaming line and temporary theme preview belong in the live output
+area. Refresh, resize, and picker changes must not rewrite printed history.
+Printed transcript rows inherit the output background; user and code rows use
+their surface background across the full terminal width, including blank cells.
+Fill trailing cells without inserting copyable padding or erasing a full row's
+last character while terminal wrapping is pending.
+The terminal's configured scrollback capacity controls how far back it can scroll.
 
 The last successfully selected chat model is stored separately in
 `.klaude/data/chat-preferences.json`. Chat startup uses explicit `--model`

@@ -68,17 +68,15 @@ uv run klaude chat  # or: uv tool install --editable apps/cli && klaude chat
 Inside `klaude chat`, use `/help` to print the command reference
 without asking the model to summarize it.
 
-The interactive terminal is a full-screen conversation: output stays above a
-full-width input at the bottom, and the input remains usable while Klaude is
-thinking, searching, or writing. Enter submits immediately or queues behind the
-active turn; Alt+\ (or `/steer TEXT`) prioritizes a correction and interrupts
-at the next safe model/tool boundary. `/queue` shows pending turns and `/cancel`
-interrupts without adding one. `/restart` and `/stop` confirm before controlling
-the local Ollama service and leave the chat session open. Queued follow-ups appear in a compact live strip
-immediately above the input. Repeated Alt+Up edits them from newest to oldest;
-Enter saves the current edit, while clearing all text and pressing Enter deletes
-that queued input. Queue consumption pauses while an item is being edited. The status line continuously shows the model,
-reasoning effort, queue, activity, context usage, and last input/output tokens.
+The interactive terminal writes its transcript into ordinary terminal
+scrollback, so normal wheel scrolling and drag-to-select work without Shift.
+Completed lines stay above the live composer through refreshes and resizes;
+Klaude does not trim session history. Your terminal's scrollback limit determines
+how much history it retains.
+The input composer follows the transcript. Enter submits a turn; Alt+\ (or
+`/steer TEXT`) prioritizes a correction at the next safe model/tool boundary.
+`/restart` and `/stop` confirm before controlling the local Ollama service and
+leave the chat session open.
 Up/down recall prior inputs, Tab completes slash commands, and Alt+Enter inserts
 a newline when the terminal reports it distinctly. Ctrl+J is the compatibility
 newline shortcut for terminals such as MobaXterm that collapse modified Enter
@@ -92,8 +90,8 @@ across launches; an explicit `--model` overrides and updates that preference.
 Typing `/` as the first input character immediately opens slash-command
 suggestions with descriptions. `/keybinds` lists every keyboard control and
 does not include slash commands or involve the model.
-`/settings` organizes appearance under Theme, Output Field, and Input Field.
-The output border defaults to off and the scrollbar defaults to on; the rounded input border
+`/settings` organizes appearance under Theme and Input Field. Chat output uses normal terminal
+scrollback, so it has no Klaude-managed border or scrollbar; the rounded input border
 defaults to on. Input Field → Height → Enter min/max accepts two whole numbers
 (for example `2 10`). The composer grows between those limits; valid limits
 satisfy `1 ≤ min ≤ max ≤ 12`, with defaults of 8 and 12. Enter saves, Escape or

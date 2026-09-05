@@ -15,7 +15,6 @@ from klaude_cli.main import (
     DEFAULT_INPUT_BORDER,
     DEFAULT_INPUT_HEIGHT,
     DEFAULT_OUTPUT_BORDER,
-    DEFAULT_OUTPUT_SCROLLBAR,
     DEFAULT_TEXT_THEME,
     DEFAULT_TUI_THEME,
     FETCH_URL_TOOL_DESCRIPTION,
@@ -535,6 +534,19 @@ def test_start_next_separates_transcript_dividers_and_user_message(monkeypatch):
     assert "\n\nhello there\n\n━━ you · " in tui.output.text
 
 
+def test_persistent_tui_retains_the_full_transcript_without_trimming():
+    tui = _fake_persistent_tui()
+    opening = tui.output.text
+    earlier = "earlier response\n"
+    later = "x" * 250_001
+
+    tui._append(earlier)
+    tui._append(later)
+
+    assert tui.output.text == opening + earlier + later
+    assert "[older transcript trimmed]" not in tui.output.text
+
+
 def test_completed_assistant_message_has_blank_line_before_closing_divider():
     tui = _fake_persistent_tui()
     emitted = []
@@ -926,6 +938,7 @@ def test_persistent_tui_marks_active_settings_options():
 def test_persistent_tui_uses_short_escape_sequence_timeout():
     tui = _fake_persistent_tui()
 
+    assert tui.application.full_screen is False
     assert tui.application.ttimeoutlen == ESCAPE_SEQUENCE_TIMEOUT
     assert tui.application.timeoutlen == ESCAPE_SEQUENCE_TIMEOUT
 
@@ -1459,60 +1472,141 @@ def test_live_picker_scrolls_selected_row_into_view(
     asyncio.run(exercise())
 
 
-def test_transcript_width_uses_rendered_content_width_with_border_and_scrollbar(tmp_path):
+@pytest.mark.parametrize("responds_to_cpr", [False, True])
+def test_terminal_scrollback_survives_streaming_refresh_resize_and_preview(
+    tmp_path, responds_to_cpr,
+):
+    import pyte
+    from prompt_toolkit.data_structures import Size
+    from prompt_toolkit.output.vt100 import Vt100_Output
+
     async def exercise():
         tui = _fake_persistent_tui(tmp_path / "appearance.json")
-        tui.appearance.output_border = True
-        tui.appearance.output_scrollbar = True
-        tui._apply_field_settings()
-        transcript = (
-            "━━ Session: session-1 ━━━\n\nhello there\n\n"
-            "━━ you · 2026-09-05 12:34:56 ━━━\n\nassistant reply"
+
+        class Screen(pyte.HistoryScreen):
+            def write_process_input(self, data):
+                if responds_to_cpr:
+                    pipe.send_text(data)
+
+        screen = Screen(100, 30, history=2000)
+        stream = pyte.Stream(screen)
+        captured = StringIO()
+
+        class Terminal:
+            def isatty(self):
+                return True
+
+            def write(self, text):
+                captured.write(text)
+                stream.feed(text)
+
+            def flush(self):
+                pass
+
+        output = Vt100_Output(
+            Terminal(), lambda: Size(rows=screen.lines, columns=screen.columns),
+            enable_cpr=responds_to_cpr,
         )
-        tui.output.buffer.set_document(
-            Document(transcript, len(transcript)), bypass_readonly=True
-        )
+
+        def transcript_lines():
+            return [
+                "".join(row[x].data for x in range(screen.columns)).rstrip()
+                for row in screen.history.top
+            ] + [line.rstrip() for line in screen.display]
+
         with create_pipe_input() as pipe:
             tui.application.input = pipe
-            tui.application.output = DummyOutput()
+            tui.application.output = output
+            tui.application.renderer.output = output
             task = asyncio.create_task(tui.application.run_async())
             try:
-                await asyncio.sleep(0.1)
-                info = tui.output.window.render_info
-                assert info is not None
-                assert tui._transcript_content_width() == info.window_width
-                assert tui._divider_width() == info.window_width - 1
-                screen = tui.application.renderer._last_screen
-                user_row = next(
-                    row
-                    for row, (lineno, _column) in info.visible_line_to_row_col.items()
-                    if lineno == 2
-                )
-                user_padding_row = next(
-                    row
-                    for row, (lineno, _column) in info.visible_line_to_row_col.items()
-                    if lineno == 1
-                )
-                assert "class:transcript.user-message" in screen.data_buffer[
-                    info._y_offset + user_row
-                ][info._x_offset].style
-                assert "class:transcript.user-message" in screen.data_buffer[
-                    info._y_offset + user_padding_row
-                ][info._x_offset].style
-                divider_row = next(
-                    row
-                    for row, (lineno, _column) in info.visible_line_to_row_col.items()
-                    if lineno == 4
-                )
-                assert "class:transcript.user-message" not in screen.data_buffer[
-                    info._y_offset + divider_row
-                ][info._x_offset].style
-                assert tui.output.text.splitlines()[1:4] == ["", "hello there", ""]
+                await asyncio.sleep(0.05)
+                expected = [f"session message {i:03d}" for i in range(120)]
+                for start in range(0, 120, 12):
+                    tui._append("\n".join(expected[start:start + 12]) + "\n")
+                    tui.application._redraw()
+                    await asyncio.sleep(0.01)
+                tui._append("streaming par")
+                tui.application._redraw()
+                assert tui.live_output.text == "streaming par"
+                tui._append("tial\n")
+                tui.application._redraw()
+                expected.append("streaming partial")
+                wrapped = "wrapped-output-" * 100
+                tui._append(wrapped + "\n")
+                tui.application._redraw()
+                assert wrapped.strip() in "".join(transcript_lines())
+                tui._set_input("unsent draft\nsecond line")
+                tui.pending.append("queued follow-up")
+                tui._refresh_tui()
+                screen.resize(lines=36, columns=110)
+                tui.application._redraw()
+                tui._show_text_theme_preview()
+                tui._append("arrived during preview\n")
+                tui.application._redraw()
+                tui._hide_text_theme_preview()
+                tui.application._redraw()
+                expected.append("arrived during preview")
+                lines = transcript_lines()
+                assert [line for line in lines if line in expected] == expected, lines[-50:]
+                assert any("Session: session-1" in line for line in lines)
+                assert tui.input.text == "unsent draft\nsecond line"
+                assert not tui.live_output.text
+                assert tui.output.window.render_info is None
             finally:
                 tui.application.exit()
                 await task
+            lines = transcript_lines()
+            assert [line for line in lines if line in expected] == expected
+            assert "\x1b[?1049h" not in captured.getvalue()
+            assert "\x1b[3J" not in captured.getvalue()
 
     asyncio.run(exercise())
+
+
+def test_printed_transcript_background_fills_rows_without_padding(tmp_path):
+    import pyte
+    from prompt_toolkit.data_structures import Size
+    from prompt_toolkit.output.color_depth import ColorDepth
+    from prompt_toolkit.output.vt100 import Vt100_Output
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui.application.style = _tui_style("autumn", "vscode-dark")
+    screen = pyte.Screen(80, 30)
+    stream = pyte.Stream(screen)
+
+    class Terminal:
+        def write(self, text):
+            stream.feed(text)
+
+        def flush(self):
+            pass
+
+    output = Vt100_Output(
+        Terminal(), lambda: Size(rows=30, columns=80),
+        default_color_depth=ColorDepth.DEPTH_24_BIT, enable_cpr=False,
+    )
+    tui.application.output = tui.application.renderer.output = output
+    lines = [
+        "━━ Session: test ━━", "hello", "", "━━ you · time ━━",
+        "assistant text", "", "```python", "value = 1", "```",
+        "X" * 80, "Y" * 85,
+    ]
+    text = "\n".join(lines) + "\n"
+    tui.output.buffer.set_document(Document(text, len(text)), bypass_readonly=True)
+    tui._flush_transcript()
+
+    normal = tui.application.style.get_attrs_for_style_str("class:output-field").bgcolor
+    surface = tui.application.style.get_attrs_for_style_str(
+        "class:transcript.user-message"
+    ).bgcolor
+    for row in range(12):
+        expected = surface if row in {1, 2, 6, 7, 8} else normal
+        assert {screen.buffer[row][column].bg for column in range(80)} == {expected}
+    assert screen.display[9] == "X" * 80
+    assert screen.display[10] == "Y" * 80
+    assert screen.display[11].rstrip() == "Y" * 5
+    assert tui.output.text == text
 
 
 def test_height_range_rejects_invalid_input_and_persists_valid_range(tmp_path):
@@ -1715,7 +1809,6 @@ def test_tui_appearance_store_defaults_and_round_trips(tmp_path):
         theme="hacker-green",
         text_theme="monokai",
         output_border=True,
-        output_scrollbar=True,
         input_border=False,
         input_height=12,
     )
@@ -1809,19 +1902,14 @@ def test_persistent_tui_categorized_field_settings_toggle_and_reset(tmp_path):
     tui = _fake_persistent_tui(path)
 
     assert tui.appearance.output_border is DEFAULT_OUTPUT_BORDER
-    assert tui.appearance.output_scrollbar is DEFAULT_OUTPUT_SCROLLBAR
     assert tui.appearance.input_border is DEFAULT_INPUT_BORDER
-    assert len(tui.output.window.right_margins) == 1
+    assert tui.output.window.right_margins == []
 
     tui._open_settings_category("output field")
     tui._accept_choice()
-    tui._move_choice(1)
-    tui._accept_choice()
-    assert tui._choice_index == 1
 
     saved = _load_tui_appearance(path)
     assert saved.output_border is True
-    assert saved.output_scrollbar is False
     assert tui.output.window.right_margins == []
 
     tui._cancel_choice()
@@ -1834,7 +1922,7 @@ def test_persistent_tui_categorized_field_settings_toggle_and_reset(tmp_path):
     tui._set_input("/settings reset")
     tui._submit_buffer(steer=False)
     assert _load_tui_appearance(path) == TUIAppearance()
-    assert len(tui.output.window.right_margins) == 1
+    assert tui.output.window.right_margins == []
 
 
 def test_persistent_tui_input_height_picker_persists_and_resets(tmp_path):

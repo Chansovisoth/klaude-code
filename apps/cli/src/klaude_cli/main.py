@@ -91,11 +91,11 @@ from prompt_toolkit.layout import (
     Window,
 )
 from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.layout.menus import CompletionsMenu, CompletionsMenuControl
 from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.lexers import Lexer, PygmentsLexer
 from prompt_toolkit.layout.processors import ConditionalProcessor, Processor, Transformation
+from prompt_toolkit.renderer import print_formatted_text
 from prompt_toolkit.shortcuts import CompleteStyle, radiolist_dialog
 from prompt_toolkit.styles import Style, merge_styles
 from prompt_toolkit.styles.pygments import style_from_pygments_cls
@@ -161,7 +161,6 @@ ANSI_SEQUENCES.setdefault("\x1b[100;5u", Keys.ControlD)
 DEFAULT_TUI_THEME = "autumn"
 DEFAULT_TEXT_THEME = "vscode-dark"
 DEFAULT_OUTPUT_BORDER = False
-DEFAULT_OUTPUT_SCROLLBAR = True
 DEFAULT_INPUT_BORDER = True
 MIN_INPUT_HEIGHT = 1
 DEFAULT_INPUT_HEIGHT = 8
@@ -692,9 +691,6 @@ class TranscriptWindow(Window):
         fenced_code_lines = _fenced_code_lines(self.content.buffer.document)
         for relative_y, (lineno, _column) in visible_rows.items():
             document = self.content.buffer.document
-            # Prompt Toolkit also calls this method to render the one-cell
-            # scrollbar margin. It has independent line numbering and must
-            # remain untouched.
             if width <= 1 or lineno >= len(document.lines):
                 continue
             user_line = _is_user_transcript_line(document, lineno)
@@ -810,7 +806,6 @@ class TUIAppearance:
     theme: str = DEFAULT_TUI_THEME
     text_theme: str = DEFAULT_TEXT_THEME
     output_border: bool = DEFAULT_OUTPUT_BORDER
-    output_scrollbar: bool = DEFAULT_OUTPUT_SCROLLBAR
     scroll_lines: int = DEFAULT_SCROLL_LINES
     input_border: bool = DEFAULT_INPUT_BORDER
     input_height: int = DEFAULT_INPUT_HEIGHT
@@ -859,9 +854,6 @@ def _load_tui_appearance(path: Path) -> TUIAppearance:
         output_border=output_group.get("border", DEFAULT_OUTPUT_BORDER)
         if isinstance(output_group.get("border", DEFAULT_OUTPUT_BORDER), bool)
         else DEFAULT_OUTPUT_BORDER,
-        output_scrollbar=output_group.get("scrollbar", DEFAULT_OUTPUT_SCROLLBAR)
-        if isinstance(output_group.get("scrollbar", DEFAULT_OUTPUT_SCROLLBAR), bool)
-        else DEFAULT_OUTPUT_SCROLLBAR,
         input_border=input_group.get("border", DEFAULT_INPUT_BORDER)
         if isinstance(input_group.get("border", DEFAULT_INPUT_BORDER), bool)
         else DEFAULT_INPUT_BORDER,
@@ -883,7 +875,6 @@ def _save_tui_appearance(path: Path, appearance: TUIAppearance) -> None:
                 },
                 "output_field": {
                     "border": appearance.output_border,
-                    "scrollbar": appearance.output_scrollbar,
                 },
                 "scroll": {"lines": appearance.scroll_lines},
                 "input_field": {
@@ -1320,8 +1311,8 @@ CHAT_COMMANDS = (
         "settings",
         CommandSurface.CHAT,
         "/settings [CATEGORY]",
-        "Configure Theme, Output Field, Input Field, or Scroll settings.",
-        examples=("/settings", "/settings output", "/settings input"),
+        "Configure Theme, Input Field, or Runtime settings.",
+        examples=("/settings", "/settings theme", "/settings input"),
     ),
     CommandSpec(
         "/models",
@@ -4442,9 +4433,8 @@ def _choose_model_and_effort(agent: Agent, cfg, requested: str = "") -> bool:
 
 
 class PersistentChatTUI:
-    """Full-screen chat surface with a live input while the agent is running."""
+    """Normal-screen chat surface with a live input while the agent is running."""
 
-    _TRANSCRIPT_LIMIT = 250_000
     _QUEUE_PREVIEW_LIMIT = 4
 
     def __init__(
@@ -4494,6 +4484,7 @@ class PersistentChatTUI:
         self._permission_request: dict[str, object] | None = None
         self._ollama_control_action: str | None = None
         self._turn_started_at: float | None = None
+        self._printed_transcript_length = 0
         self.appearance_path = appearance_path or (cfg.data_dir / "appearance.json")
         self.chat_preferences_path = chat_preferences_path or (
             cfg.data_dir / "chat-preferences.json"
@@ -4535,6 +4526,19 @@ class PersistentChatTUI:
             left_margins=output_window.left_margins,
             right_margins=output_window.right_margins,
             style=output_window.style,
+        )
+        # The full transcript is a backing store, never a redrawable viewport.
+        # Only an unfinished line (or a temporary theme sample) stays live.
+        self.live_output = TextArea(
+            read_only=True,
+            focusable=False,
+            wrap_lines=True,
+            height=Dimension(min=1, max=8),
+            lexer=TranscriptLexer(),
+            style="class:output-field",
+        )
+        self.live_output_panel = ConditionalContainer(
+            self.live_output, filter=Condition(lambda: bool(self.live_output.text)),
         )
         self.input = TextArea(
             multiline=True,
@@ -4703,12 +4707,6 @@ class PersistentChatTUI:
             style="class:output-field",
         )
         self.key_bindings = self._build_key_bindings()
-        self.output_frame = _rounded_frame(self.output, title="conversation")
-        self.output_panel = ConditionalContainer(
-            content=self.output_frame,
-            filter=Condition(lambda: self.appearance.output_border),
-            alternative_content=self.output,
-        )
         self.input_panel = self.composer_surface
         self._apply_field_settings()
         completion_visible = Condition(
@@ -4750,7 +4748,7 @@ class PersistentChatTUI:
         )
         body = HSplit(
             [
-                self.output_panel,
+                self.live_output_panel,
                 self.queue_panel,
                 self.input_spacer,
                 self.input_panel,
@@ -4775,7 +4773,8 @@ class PersistentChatTUI:
         )
         self.application: Application[None] = Application(
             layout=Layout(root, focused_element=self.input),
-            full_screen=True,
+            # Completed transcript lines are printed above this small live UI.
+            full_screen=False,
             # Leave ordinary drags to the terminal so users can select and
             # copy transcript text without holding Shift. Mouse capture is
             # enabled only while a click-selectable menu is visible.
@@ -4828,11 +4827,10 @@ class PersistentChatTUI:
         return minimum, maximum
 
     def _apply_field_settings(self) -> None:
-        self.output.window.right_margins = (
-            [ScrollbarMargin(display_arrows=True)]
-            if self.appearance.output_scrollbar
-            else []
-        )
+        # The transcript lives in normal terminal scrollback now.  It never
+        # has an application-owned scrollbar, including for old appearance
+        # files that may still contain output_field.scrollbar.
+        self.output.window.right_margins = []
 
     def _queue_height(self) -> int:
         start, stop = self._queue_preview_bounds()
@@ -5373,8 +5371,6 @@ class PersistentChatTUI:
         if not self._text_theme_preview_visible:
             return
         current = (self._text_theme_preview_original or "") + self._text_theme_preview_pending
-        if len(current) > self._TRANSCRIPT_LIMIT:
-            current = "[older transcript trimmed]\n" + current[-self._TRANSCRIPT_LIMIT :]
         self.output.buffer.set_document(
             Document(current, len(current)),
             bypass_readonly=True,
@@ -5717,17 +5713,11 @@ class PersistentChatTUI:
         if category == "output field":
             choices = [
                 f"border: {'on' if self.appearance.output_border else 'off'} (toggle)",
-                f"scrollbar: {'on' if self.appearance.output_scrollbar else 'off'} (toggle)",
                 "back",
                 RESET_THEME_CHOICE,
                 CANCEL_CHOICE,
             ]
-            selected_default = (
-                choices[1]
-                if default == "scrollbar"
-                else choices[0]
-            )
-            self._begin_choice("output field settings", choices, selected_default)
+            self._begin_choice("output field settings", choices, choices[0])
             return
         if category == "input field":
             choices = [
@@ -5794,21 +5784,11 @@ class PersistentChatTUI:
             if selected.startswith("border:"):
                 self.appearance.output_border = not self.appearance.output_border
                 message = f"output field border: {'on' if self.appearance.output_border else 'off'}"
-            elif selected.startswith("scrollbar:"):
-                self.appearance.output_scrollbar = not self.appearance.output_scrollbar
-                message = (
-                    "output field scrollbar: "
-                    f"{'on' if self.appearance.output_scrollbar else 'off'}"
-                )
             else:
                 self.appearance.output_border = DEFAULT_OUTPUT_BORDER
-                self.appearance.output_scrollbar = DEFAULT_OUTPUT_SCROLLBAR
                 message = "output field settings"
             self._commit_appearance(message, reset=selected.startswith("reset"))
-            self._open_settings_category(
-                "output field",
-                "scrollbar" if selected.startswith("scrollbar:") else None,
-            )
+            self._open_settings_category("output field")
             return
         if kind == "runtime settings":
             if selected == "auto calibrate":
@@ -5906,8 +5886,6 @@ class PersistentChatTUI:
             self._text_theme_preview_pending += text
             return
         current = self.output.text + text
-        if len(current) > self._TRANSCRIPT_LIMIT:
-            current = "[older transcript trimmed]\n" + current[-self._TRANSCRIPT_LIMIT :]
         self.output.buffer.set_document(
             Document(current, len(current)),
             bypass_readonly=True,
@@ -5921,9 +5899,7 @@ class PersistentChatTUI:
             columns = self.application.output.get_size().columns
         except (AttributeError, OSError):
             columns = shutil.get_terminal_size((100, 24)).columns
-        field_chrome = 2 if self.appearance.output_border else 0
-        scrollbar = 1 if self.appearance.output_scrollbar else 0
-        return max(32, columns - field_chrome - scrollbar)
+        return max(32, columns)
 
     def _divider_width(self) -> int:
         # A final-cell glyph puts many terminals into deferred-wrap state,
@@ -5931,10 +5907,14 @@ class PersistentChatTUI:
         return max(32, self._transcript_content_width() - 1)
 
     def _refresh_transcript_dividers(self) -> None:
+        if self._text_theme_preview_visible:
+            return
         width = self._divider_width()
         updated: list[str] = []
         changed = False
-        for line in self.output.text.splitlines():
+        prefix = self.output.text[:self._printed_transcript_length]
+        pending = self.output.text[self._printed_transcript_length:]
+        for line in pending.splitlines():
             match = re.match(
                 r"^(━━ )(?P<role>you|klaude) · (?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?: · (?P<suffix>.*?))?\s*━*$",
                 line,
@@ -5963,7 +5943,7 @@ class PersistentChatTUI:
                     continue
             updated.append(line)
         if changed:
-            new_text = "\n".join(updated) + ("\n" if self.output.text.endswith("\n") else "")
+            new_text = prefix + "\n".join(updated) + ("\n" if pending.endswith("\n") else "")
             cursor_position = min(
                 self.output.buffer.cursor_position,
                 len(new_text),
@@ -5978,6 +5958,59 @@ class PersistentChatTUI:
         self._refresh_transcript_dividers()
         self.application.renderer.erase(leave_alternate_screen=False)
         self.application.invalidate()
+
+    def _flush_transcript(self) -> None:
+        """Commit complete lines above the UI before its next synchronous render.
+
+        Erase only the previous live frame, print once, then reset the renderer's
+        origin below the newly printed text. Later redraws cannot erase history.
+        This runs on the UI thread, so input and worker events cannot interleave.
+        """
+        if self._text_theme_preview_visible:
+            tail = self.output.text
+        else:
+            text = self.output.text
+            end = text.rfind("\n") + 1
+            start = self._printed_transcript_length
+            if end > start:
+                document = self.output.buffer.document
+                get_line = self.output.lexer.lex_document(document)
+                first_line = text.count("\n", 0, start)
+                last_line = text.count("\n", 0, end)
+                code_lines = _fenced_code_lines(document)
+                columns = self.application.output.get_size().columns
+                fragments = []
+                for lineno in range(first_line, last_line):
+                    surface = (
+                        " class:transcript.code" if lineno in code_lines else
+                        " class:transcript.user-message"
+                        if _is_user_transcript_line(document, lineno) else ""
+                    )
+                    base = "class:output-field" + surface
+                    fragments.extend(
+                        ("class:output-field " + style + surface, value)
+                        for style, value in get_line(lineno)
+                    )
+                    # EL paints blank cells using the active background without
+                    # adding copyable padding. Don't erase the final character
+                    # when an exactly full row leaves the terminal wrap pending.
+                    cells = get_cwidth(document.lines[lineno])
+                    if not cells or cells % max(1, columns):
+                        fragments.append((base + " [ZeroWidthEscape]", "\x1b[K"))
+                    fragments.append((base, "\n"))
+                self.application.renderer.erase(leave_alternate_screen=False)
+                print_formatted_text(
+                    output=self.application.output,
+                    formatted_text=fragments,
+                    style=self.application.style,
+                )
+                self._printed_transcript_length = end
+                self.application._request_absolute_cursor_position()
+            tail = text[self._printed_transcript_length:]
+        if self.live_output.text != tail:
+            self.live_output.buffer.set_document(
+                Document(tail, len(tail)), bypass_readonly=True,
+            )
 
     def _submit_buffer(self, *, steer: bool) -> None:
         if self._runtime_edit:
@@ -6540,8 +6573,10 @@ class PersistentChatTUI:
                 self.running = False
                 self.activity = "ready"
                 self._start_next()
+        self._flush_transcript()
 
     def _exit(self) -> None:
+        self._hide_text_theme_preview()
         self.shutting_down = True
         if self._permission_request:
             self._answer_permission("n")
@@ -6552,13 +6587,13 @@ class PersistentChatTUI:
     def run(self) -> None:
         output = self.application.output
 
-        def enable_modified_keys() -> None:
+        def prepare_normal_screen() -> None:
             output.write_raw(KITTY_KEYBOARD_PROTOCOL_ON)
             output.write_raw(XTERM_MODIFY_OTHER_KEYS_ON)
             output.flush()
 
         try:
-            self.application.run(pre_run=enable_modified_keys)
+            self.application.run(pre_run=prepare_normal_screen)
         finally:
             output.write_raw(XTERM_MODIFY_OTHER_KEYS_OFF)
             output.write_raw(KITTY_KEYBOARD_PROTOCOL_OFF)
@@ -6572,7 +6607,7 @@ def chat(
     no_tui: bool = typer.Option(
         False,
         "--no-tui",
-        help="use the simple line-oriented chat without the full-screen TUI",
+        help="use the simple line-oriented chat without the terminal TUI",
     ),
 ):
     """Interactive agent session in the current directory."""
