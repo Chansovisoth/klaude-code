@@ -4422,17 +4422,21 @@ def _score_and_filter_results_detailed(
     rejection_reasons = diagnostics["rejection_reasons"]
     uses_discovery = _uses_two_stage_discovery(query)
     uses_source_discovery = _uses_source_discovery(query)
+    validation_enabled = bool(getattr(cfg.web_search, "result_validation_enabled", True))
     strict_filtering = cfg.web_search.strict_result_filtering
     permissive_leads = (
-        not strict_filtering
-        and not uses_discovery
-        and not uses_source_discovery
-        and query.intent
-        in {
-            SearchIntent.BROAD_RESEARCH,
-            SearchIntent.SEMANTIC_DISCOVERY,
-            SearchIntent.STABLE_FACT,
-        }
+        not validation_enabled
+        or (
+            not strict_filtering
+            and not uses_discovery
+            and not uses_source_discovery
+            and query.intent
+            in {
+                SearchIntent.BROAD_RESEARCH,
+                SearchIntent.SEMANTIC_DISCOVERY,
+                SearchIntent.STABLE_FACT,
+            }
+        )
     )
     relevant = (
         list(light_results)
@@ -4473,6 +4477,8 @@ def _score_and_filter_results_detailed(
             metadata["candidate_source"] = True
             metadata["needs_fetch_for_claim_verification"] = True
             metadata["final_answer_evidence"] = False
+            if not validation_enabled:
+                metadata["result_validation"] = "disabled"
         elif uses_source_discovery:
             if not source_discovery.accepted:
                 _increment_reason(rejection_reasons, source_discovery.reason)

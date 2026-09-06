@@ -34,6 +34,64 @@ class ScriptedOllama:
         return response() if callable(response) else deepcopy(response)
 
 
+def test_read_only_review_blocks_model_requested_writes_and_restores_tools():
+    executed = []
+    ollama = ScriptedOllama([
+        tool_call("write_file", path="bad.txt", content="bad"),
+        {"role": "assistant", "content": "Review complete."},
+    ])
+    agent = Agent(
+        ollama, "fake-model",
+        [Tool("write_file", "Write a file", {"type": "object"},
+              lambda **kwargs: executed.append(kwargs))],
+        PermissionGate({"write_file": "allow"}, lambda *_: "y"), "system",
+    )
+    original = agent.tools
+    list(agent.run("Review workspace changes", read_only=True))
+    assert executed == []
+    assert agent.tools is original
+    assert all(not call["tools"] for call in ollama.calls)
+
+
+def test_plan_mode_blocks_writes_but_keeps_read_and_retrieval_tools():
+    ollama = ScriptedOllama([{"role": "assistant", "content": "plan"}])
+    tools = [
+        Tool(name, name, {"type": "object"}, lambda **_kwargs: "ok")
+        for name in ("read_file", "write_file", "web_search")
+    ]
+    agent = Agent(
+        ollama, "fake-model", tools,
+        PermissionGate(
+            {name: "allow" for name in ("read_file", "write_file", "web_search")},
+            lambda *_: "y",
+        ),
+        "system",
+    )
+    agent.plan_mode = True
+    list(agent.run("make a plan"))
+    names = {item["function"]["name"] for item in ollama.calls[0]["tools"]}
+    assert names == {"read_file", "web_search"}
+
+
+def test_disabled_research_tool_is_neither_exposed_nor_reinstated_for_explicit_search():
+    called = []
+    ollama = ScriptedOllama([{"role": "assistant", "content": "No web tool available."}])
+    agent = Agent(
+        ollama,
+        "fake-model",
+        [Tool("web_search", "Search", {"type": "object"}, lambda **kwargs: called.append(kwargs))],
+        PermissionGate({"web_search": "allow"}, lambda *_: "y"),
+        "system",
+        tool_selector=lambda _message, available: list(available),
+    )
+    agent.disabled_tool_names = {"web_search"}
+
+    list(agent.run("Search the web for current news."))
+
+    assert ollama.calls[0]["tools"] == []
+    assert called == []
+
+
 def search_result(query: str, *items: tuple[str, str, str], providers=("mock",)):
     results = [
         {"result_id": f"search_result_{index:03d}", "title": title, "url": url, "snippet": snippet}
@@ -488,8 +546,8 @@ def test_cuda_illegal_instruction_gets_an_actionable_runtime_error():
     )
 
     assert "CUDA illegal instruction" in message
-    assert "Restart the Ollama service" in message
-    assert "num_gpu = 0" in message
+    assert "retry once on CPU" in message
+    assert "GPU-only does not" in message
 
 
 def test_cuda_unspecified_launch_failure_gets_an_actionable_runtime_error():
@@ -498,8 +556,69 @@ def test_cuda_unspecified_launch_failure_gets_an_actionable_runtime_error():
     message = _runtime_error_message(RuntimeError("CUDA error: unspecified launch failure"))
 
     assert "CUDA unspecified launch failure" in message
-    assert "Restart the Ollama service" in message
-    assert "num_gpu = 0" in message
+    assert "retry once on CPU" in message
+    assert "CPU-only" in message
+
+
+def test_cuda_runner_fault_retries_once_on_cpu_when_placement_is_automatic():
+    class GpuFailingOllama:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, model, messages, tools=None, options=None, think=None):
+            self.calls.append({"options": deepcopy(options), "tools": deepcopy(tools)})
+            if len(self.calls) == 1:
+                raise RuntimeError("CUDA error: an illegal instruction was encountered")
+            return {"role": "assistant", "content": "recovered on CPU"}
+
+    ollama = GpuFailingOllama()
+    agent = Agent(
+        ollama,
+        "fake-model",
+        [],
+        PermissionGate({}, lambda _tool, _detail: "y"),
+        "system",
+    )
+    agent.ollama_options = {"num_ctx": 4096}
+
+    events = list(agent.run("Answer directly."))
+
+    assert [call["options"] for call in ollama.calls] == [
+        {"num_ctx": 4096},
+        {"num_ctx": 4096, "num_gpu": 0},
+    ]
+    assert any(
+        event.kind == "progress" and "retrying safely on CPU" in event.payload["stage"]
+        for event in events
+    )
+    assert [event.payload["content"] for event in events if event.kind == "text"] == [
+        "recovered on CPU"
+    ]
+
+
+def test_cuda_runner_fault_does_not_override_explicit_gpu_mode():
+    class ExplicitGpuFailingOllama:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, model, messages, tools=None, options=None, think=None):
+            self.calls.append({"options": deepcopy(options), "tools": deepcopy(tools)})
+            raise RuntimeError("CUDA error: an illegal instruction was encountered")
+
+    ollama = ExplicitGpuFailingOllama()
+    agent = Agent(
+        ollama,
+        "fake-model",
+        [],
+        PermissionGate({}, lambda _tool, _detail: "y"),
+        "system",
+    )
+    agent.ollama_options = {"num_ctx": 4096, "num_gpu": -1}
+
+    events = list(agent.run("Answer directly."))
+
+    assert len(ollama.calls) == 1
+    assert events[-1].kind == "error"
 
 
 def test_code_request_uses_conservative_sampling_without_overriding_user_config():

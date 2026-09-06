@@ -74,6 +74,24 @@ def test_clear_sessions_removes_all_session_turns(tmp_path):
     assert memory.clear_sessions() == {"sessions": 0, "turns": 0}
 
 
+def test_session_names_persist_and_forks_remain_independent(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    memory.log_turn("original", "user", "A question")
+    memory.rename_session("original", "Named conversation")
+    memory.fork_session("original", "fork")
+    memory.log_turn("fork", "assistant", "Fork response")
+    memory.db.close()
+    reopened = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    titles = {s["session_id"]: s["title"] for s in reopened.resumable_sessions()}
+    assert titles == {"original": "Named conversation", "fork": "Named conversation (fork)"}
+    assert len(reopened.load_session("original")) == 1
+    assert len(reopened.load_session("fork")) == 2
+    reopened.delete_session("original")
+    assert reopened.db.execute("SELECT session_id FROM session_names").fetchall() == [("fork",)]
+    reopened.clear_sessions()
+    assert reopened.db.execute("SELECT * FROM session_names").fetchall() == []
+
+
 def test_auto_memory_toggle_and_candidates(tmp_path):
     memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
 

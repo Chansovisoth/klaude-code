@@ -8,6 +8,7 @@ client library redesigns itself.
 from __future__ import annotations
 
 import json
+import socket
 import threading
 from collections.abc import Iterator
 from typing import Any
@@ -50,6 +51,15 @@ class Ollama:
         if client is None and response is None:
             return False
         if response is not None:
+            # close() alone need not wake a recv blocked in another thread.
+            stream = response.extensions.get("network_stream")
+            if stream is not None:
+                try:
+                    connection = stream.get_extra_info("socket")
+                    if connection is not None:
+                        connection.shutdown(socket.SHUT_RDWR)
+                except (AttributeError, OSError):
+                    pass
             response.close()
         if client is not None:
             client.close()

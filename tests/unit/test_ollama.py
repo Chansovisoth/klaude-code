@@ -56,6 +56,38 @@ def test_cancel_active_closes_request_client():
     assert active.closed is True
 
 
+def test_cancel_active_wakes_a_blocked_socket_reader():
+    import socket
+    import threading
+    from types import SimpleNamespace
+
+    reader, writer = socket.socketpair()
+    finished = threading.Event()
+
+    def receive():
+        try:
+            reader.recv(1)
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=receive, daemon=True)
+    worker.start()
+    ollama = Ollama("http://ollama.test")
+    response = SimpleNamespace(
+        extensions={"network_stream": SimpleNamespace(get_extra_info=lambda _key: reader)},
+        close=lambda: None,
+    )
+    ollama._track_request(SimpleNamespace(close=lambda: None), response)
+    try:
+        ollama.cancel_active()
+        assert finished.wait(1), "Cancellation must wake recv without waiting for server data"
+    finally:
+        writer.close()
+        worker.join(timeout=1)
+        reader.close()
+        ollama._client.close()
+
+
 def test_chat_stream_yields_message_fragments_and_records_completion_metadata():
     observed = {}
 

@@ -64,6 +64,9 @@ The canonical command registry lives in
 `apps/cli/src/klaude_cli/main.py`. Never invent Klaude CLI commands, chat slash
 commands, aliases, syntax, or examples. Command information shown to the user
 must come from this registry or from the Typer command implementation.
+Every new chat slash-command handler must add or update its `CHAT_COMMANDS`
+entry in the same change, so `/`, `/help`, focused help, and unknown-command
+suggestions stay synchronized.
 
 Top-level commands currently include:
 
@@ -97,15 +100,84 @@ Chat slash commands currently include:
 - `/help`: print the deterministic command reference directly.
 - `/keybinds`: print only keyboard controls directly. Slash commands belong in
   `/help` and the `/` completion popup.
-- `/settings [CATEGORY]`: configure categorized Theme and Input
-  Field appearance settings plus Runtime controls. Runtime controls persist for
-  future chats in `chat-preferences.json`: Auto lets Ollama choose CPU/GPU placement, CPU-only sets no
-  GPU layers, GPU-preferred requests full offload where possible, and CPU
-  threads/context size offer presets and custom numeric input. Auto Calibrate
+- `/settings [CATEGORY]`: configure categorized Theme, Input Field, Tools, and
+  Runtime controls. Tools persists independent validation toggles for web-search
+  and local-knowledge candidates; turning validation off exposes unvalidated
+  leads only and does not bypass transport, provenance, or fetch safety bounds.
+  Tools also persists independent availability toggles for web search, URL fetch,
+  code search, crawl, Hugging Face search/details/README, and the local knowledge
+  library. Disabled tools are omitted from model schemas and cannot be reinstated
+  by explicit retrieval routing or text-form calls. Tools also persists individual
+  on/off settings for every configured web provider, shown in `provider_order`;
+  disabled providers are excluded from routing without changing their priority order.
+  Tools also has an opt-in Reasoning Activity display for high-level live stages;
+  it must never reveal a model's private chain-of-thought or scratchpad text.
+  Runtime controls persist for
+  future chats in `chat-preferences.json`: Auto and GPU-preferred leave CPU/GPU placement to Ollama,
+  CPU-only sets no GPU layers, and GPU-only persists an explicit maximum-offload
+  request (`num_gpu = -1`). Ollama has no
+  separate hard no-CPU flag, so unsupported hardware may still reject or fall
+  back from that request. CPU threads/context size offer presets and custom
+  numeric input. Auto Calibrate
   derives bounded thread and context targets from local CPU, RAM, and VRAM,
   while keeping device placement automatic. Input border defaults on. Every
-  category includes its own reset action.
+  category includes its own reset action. Runtime also offers scoped external
+  Nano editors for Klaude's `config.toml` and saved runtime preferences; they
+  return to the chat after exit and changes apply to the next chat.
+- `/vim`: toggle Vim editing controls in the TUI composer; invoke it again to
+  return to standard composer controls. The selected mode persists in
+  `chat-preferences.json`.
 - `/models`: list installed Ollama models and mark the active model.
+- `/permissions [TOOL POLICY [save]]`: inspect or set tool policies (`ask`,
+  `allow`, `deny`, or `reset`). Add `save` to persist the setting in chat
+  preferences; without it the change lasts only for this chat.
+- `/plan [on|off]`: toggle planning mode. Planning keeps read-only workspace
+  tools and retrieval available while disabling writes and shell execution.
+- `/compact`: compact stale model context immediately while retaining visible
+  and saved transcript history.
+- `/recap`: show a concise local recap of the current session's recent turns.
+- `/status`: show session ID, model, workspace, context estimate, plan mode,
+  memory mode, and tool count.
+- `/memory [on|off]`: show durable memory status and facts, or toggle automatic
+  memory generation.
+- `/skills`: list installed assistant skills and indexed file counts.
+- `/new`: start a fresh session with the current model and workspace, retaining
+  saved conversations but clearing the terminal view and scrollback. Clears draft attachments and
+  model conversation context.
+- `/rename NAME`: persist a 1–160 character name for the current session. Named
+  sessions use that name in `/resume` and Markdown exports.
+- `/fork`: copy saved turns to a new session ID and continue with the current
+  context; future turns do not modify the original session. Copies a saved name
+  with a `(fork)` suffix. Empty chats become a new empty session.
+- `/export [PATH]`: export saved session turns, timestamps, and code fences as
+  Markdown. Without PATH, create a unique file under the data directory's
+  `exports/`. Explicit paths must be inside the agent workspace; existing files
+  are never overwritten.
+- `/diff`: display staged and unstaged Git patches, plus untracked filenames
+  (not their contents). Each section is limited to 100,000 displayed characters
+  with an explicit truncation notice. Ignored files remain excluded.
+- `/review`: review workspace changes for bugs and regressions with severity
+  and file references. The turn exposes only read_file, list_dir, grep,
+  workspace_info, git_status, and git_diff; write and shell tools are unavailable,
+  even if normal permissions allow them. Tool availability is restored afterward.
+  These six commands work in both TUI and line-oriented chat; finish active and
+  queued work before using them in the TUI.
+- `/resume [SESSION_ID]`: list all saved sessions newest first in a scrollable
+  input picker with age, session ID, and a name derived from the first user turn.
+  Enter resumes the selected session; Escape or cancel leaves the current
+  session unchanged. This picker has no reset action. An explicit ID resumes
+  directly. A successful resume clears the terminal view and scrollback before
+  replaying the selected session's saved user/assistant turns and transcript,
+  retains the current model and workspace, and saves new turns under the selected
+  ID. Finish or cancel active work and queued turns before switching. In
+  line-oriented mode, `/resume` prints the list and prompts for an ID when stdin
+  is interactive; `/resume SESSION_ID` works with non-interactive stdin too.
+  If cancellation is already requested and no turns are queued, `/resume` waits
+  for the worker to exit and then opens the picker or resumes the requested ID
+  automatically. It never switches shared agent state while a worker is active.
+  Cancellation denies pending permission requests and shuts down an active
+  Ollama response socket to wake blocked reads; tools already executing may
+  still need to finish before the switch can proceed.
 - `/model`: open an arrow-key model picker, then an effort picker.
 - `/model NAME`: switch the active chat model, then choose effort while keeping
   chat history. A successful selection is reused at the next chat launch.
@@ -124,7 +196,9 @@ Chat slash commands currently include:
   workspace (for example, `/ls -lha`); positional paths remain jailed there.
 - `/attach PATH`: attach a file or folder as bounded context for the next
   message. Typing `/attach ` offers paths from the current agent workspace;
-  absolute paths are also accepted.
+  absolute paths are also accepted. Inline `@PATH` mentions work anywhere in a
+  TUI message and offer the same suggestions; quote paths containing spaces,
+  such as `@"project notes/brief.md"`.
 - `/theme [NAME]`: open Theme settings for interface and text/code colors;
   an optional NAME sets persistent TUI chrome independently from content
   colors. Built-ins include Crimson Red, Autumn (default), Egg Yolk, Hacker
@@ -141,6 +215,8 @@ All picker modes render their available options inside the input field with a
 visible selected row; long lists scroll with the selection. Picker height obeys
 the same configured input minimum and maximum as the text composer, padding
 short lists to the minimum and scrolling long lists within the maximum.
+Settings pickers group related options under visible, non-selectable section
+titles; keyboard, typed-option, and mouse selection skip those titles.
 Model options and
 the `/models` listing are sorted case-insensitively by full model name. Model,
 effort, theme, settings, and input-height pickers end with `reset to default`
@@ -150,13 +226,15 @@ model. Resetting a model selects the configured coder role if installed;
 resetting effort selects auto. The picker control cursor tracks the selected
 row so Prompt Toolkit does not reset scrolling to row zero. PageUp/PageDown
 navigate and Escape cancels. Theme navigation previews colors without saving;
-cancel restores the original colors. Text previews include a temporary sample
-that is removed without discarding intervening output.
+cancel restores the original colors. Text previews use a temporary dedicated,
+scrollable pane (PageUp/PageDown scroll the samples while Up/Down select a
+theme) that is removed without discarding intervening output.
 
 Interactive chat writes its transcript to ordinary terminal scrollback rather
 than taking over the terminal's alternate screen. This lets the terminal handle
-wheel scrolling and native drag-to-select without Shift. The composer remains a
-Prompt Toolkit input at the bottom of the printed transcript. Alt+Enter inserts a
+wheel scrolling and native drag-to-select without Shift. Startup reserves one
+terminal viewport so the composer begins at the terminal bottom; it remains a
+Prompt Toolkit input below the printed transcript. Alt+Enter inserts a
 newline when distinguishable, Ctrl+J is the legacy-terminal newline fallback,
 repeated Alt+Up edits queued follow-ups from newest to oldest, and Ctrl+C
 interrupts the active response. Ctrl+D exits the chat and discards any unsent
@@ -172,8 +250,9 @@ call may finish before the steering turn starts. Bracketed multiline paste is
 one logical turn. Up/down navigate input history, Tab completes slash commands,
 and the live status line shows activity,
 queue depth, model, effort, context-window use, and last input/output token
-counts. The TUI renders assistant text character by character; `klaude chat
---legacy` retains chunk-at-a-time streaming for debugging. Non-interactive stdin retains line-oriented compatibility and plain
+counts. The TUI renders actual fragments emitted by Ollama as they arrive; it
+must not simulate streaming character by character. Tool-enabled responses may
+still need to assemble before their structured calls are resolved. Non-interactive stdin retains line-oriented compatibility and plain
 output. In the TUI, `/help` category names are underlined, and each user or
 assistant message begins with a full-width gray divider containing the speaker
 name and local date/time. Each session starts with a `Session: <id>` divider
@@ -195,7 +274,8 @@ Enter accepts the highlighted completion and executes the command in one press;
 Tab completes without executing so users can add arguments.
 Mouse capture is enabled only for clickable completion and picker menus; outside
 those menus, terminal scrolling and native dragging select and copy transcript
-text without requiring Shift.
+text without requiring Shift. On Termux, Klaude disables mouse capture even for
+menus so Android swipe scrolling remains native; use keyboard navigation there.
 
 Modified Enter combinations support both Kitty CSI-u and xterm modifyOtherKeys
 escape sequences. The TUI enables both protocols on entry and must restore both
@@ -229,6 +309,9 @@ their surface background across the full terminal width, including blank cells.
 Fill trailing cells without inserting copyable padding or erasing a full row's
 last character while terminal wrapping is pending.
 The terminal's configured scrollback capacity controls how far back it can scroll.
+Explicit `/new` and successful `/resume` switches clear the prior terminal view
+and scrollback; this does not delete saved sessions. Cancelled, missing, or blocked
+resume requests do not clear anything. Ordinary redraws never clear scrollback.
 
 The last successfully selected chat model is stored separately in
 `.klaude/data/chat-preferences.json`. Chat startup uses explicit `--model`
@@ -351,6 +434,9 @@ The agent loop in `packages/core/src/klaude_core/agent.py` handles:
 - context-window protection at each user-turn boundary: stale transcript prose
   is compacted before the request reaches Ollama, while the canonical system
   prompt, newest turn, and separate entity state are retained.
+- if an Ollama CUDA runner aborts while placement is automatic, retry the
+  request once with `num_gpu = 0` and emit only a high-level fallback activity.
+  Never override an explicit CPU-only or GPU-only runtime choice.
 
 Do not use tools for greetings, thanks, introductions, ordinary casual
 conversation, or basic identity questions. Answer identity questions directly as

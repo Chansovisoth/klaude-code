@@ -178,6 +178,10 @@ class Memory:
                 value TEXT NOT NULL
             )"""
         )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS session_names "
+            "(session_id TEXT PRIMARY KEY, name TEXT NOT NULL)"
+        )
         self.db.commit()
 
     # --- durable facts ---------------------------------------------------
@@ -307,17 +311,59 @@ class Memory:
         row = self.db.execute("SELECT session_id FROM turns ORDER BY ts DESC LIMIT 1").fetchone()
         return row[0] if row else None
 
-    def load_session(self, session_id: str) -> list[dict]:
+    def load_session(self, session_id: str, *, timestamps: bool = False) -> list[dict]:
         rows = self.db.execute(
-            "SELECT role, content FROM turns WHERE session_id=? ORDER BY ts", (session_id,)
+            "SELECT role, content, ts FROM turns WHERE session_id=? ORDER BY ts, rowid",
+            (session_id,),
         ).fetchall()
         out = []
-        for role, content in rows:
+        for role, content, ts in rows:
             try:
                 out.append({"role": role, "content": json.loads(content)})
             except json.JSONDecodeError:
                 out.append({"role": role, "content": content})
+            if timestamps:
+                out[-1]["ts"] = ts
         return out
+
+    def resumable_sessions(self) -> list[dict]:
+        """List every saved session newest first, named by its first user turn."""
+        rows = self.db.execute(
+            "SELECT t.session_id, MAX(t.ts), "
+            "(SELECT content FROM turns AS first WHERE first.session_id=t.session_id "
+            "AND first.role='user' ORDER BY first.ts, first.rowid LIMIT 1) "
+            "FROM turns AS t GROUP BY t.session_id ORDER BY MAX(t.ts) DESC, t.session_id"
+        ).fetchall()
+        names = dict(self.db.execute("SELECT session_id, name FROM session_names"))
+        return [
+            {"session_id": session_id, "ts": ts,
+             "title": names.get(session_id) or (
+                 " ".join(_as_text(_decode_content(content)).split())[:160]
+                 if content is not None else "Untitled session")}
+            for session_id, ts, content in rows
+        ]
+
+    def rename_session(self, session_id: str, name: str) -> None:
+        name = " ".join(name.split())
+        if not name or len(name) > 160:
+            raise ValueError("Session name must contain 1–160 characters.")
+        with self.db:
+            self.db.execute(
+                "INSERT OR REPLACE INTO session_names VALUES (?, ?)", (session_id, name),
+            )
+
+    def fork_session(self, source: str, target: str) -> None:
+        with self.db:
+            if self.db.execute("SELECT 1 FROM turns WHERE session_id=?", (target,)).fetchone():
+                raise ValueError("Target session already exists.")
+            self.db.execute(
+                "INSERT INTO turns SELECT ?, ts, role, content FROM turns "
+                "WHERE session_id=? ORDER BY ts, rowid", (target, source),
+            )
+            self.db.execute(
+                "INSERT INTO session_names SELECT ?, name || ' (fork)' "
+                "FROM session_names WHERE session_id=?", (target, source),
+            )
 
     def delete_session(self, session_id: str) -> int:
         session_id = session_id.strip()
@@ -330,7 +376,8 @@ class Memory:
         turns = int(row[0]) if row else 0
         if turns:
             self.db.execute("DELETE FROM turns WHERE session_id=?", (session_id,))
-            self.db.commit()
+        self.db.execute("DELETE FROM session_names WHERE session_id=?", (session_id,))
+        self.db.commit()
         return turns
 
     def session_counts(self) -> dict[str, int]:
@@ -348,7 +395,8 @@ class Memory:
         turns = counts["turns"]
         if turns:
             self.db.execute("DELETE FROM turns")
-            self.db.commit()
+        self.db.execute("DELETE FROM session_names")
+        self.db.commit()
         return {"sessions": sessions, "turns": turns}
 
     def session_tail(self, session_id: str, limit: int = 8) -> list[dict]:

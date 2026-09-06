@@ -73,6 +73,20 @@ scrollback, so normal wheel scrolling and drag-to-select work without Shift.
 Completed lines stay above the live composer through refreshes and resizes;
 Klaude does not trim session history. Your terminal's scrollback limit determines
 how much history it retains.
+Use `/resume` to pick any saved conversation from a list showing age, session ID,
+and session name, or `/resume SESSION_ID` to continue one directly. The current
+model and workspace stay selected. Finish active and queued turns before switching.
+`/new` starts with a clean terminal view; `/resume` clears the previous view and
+replays the selected session. Both clear terminal scrollback without deleting
+saved conversations. `/rename NAME` names the session,
+`/permissions` inspects or changes tool policies, `/plan` enables read-only
+planning, `/compact` reduces stale model context, `/recap` summarizes recent
+turns, `/status` shows runtime state, and `/memory` and `/skills` expose the
+local memory and installed skill controls.
+and `/fork` continues a copy. `/export [PATH]` saves Markdown without overwriting
+existing files (default: the data directory's `exports/` folder).
+Use `/diff` for staged/unstaged patches and untracked filenames, or `/review`
+for a model-assisted review with only read-only workspace tools enabled.
 The input composer follows the transcript. Enter submits a turn; Alt+\ (or
 `/steer TEXT`) prioritizes a correction at the next safe model/tool boundary.
 `/restart` and `/stop` confirm before controlling the local Ollama service and
@@ -90,7 +104,13 @@ across launches; an explicit `--model` overrides and updates that preference.
 Typing `/` as the first input character immediately opens slash-command
 suggestions with descriptions. `/keybinds` lists every keyboard control and
 does not include slash commands or involve the model.
-`/settings` organizes appearance under Theme and Input Field. Chat output uses normal terminal
+`/vim` toggles Vim composer controls; invoke it again to restore the standard
+composer. The selected mode persists across chats.
+`/settings` organizes appearance under Theme and Input Field, plus Tools and Runtime.
+Tools lets you independently turn web-search and local-knowledge result validation on or off.
+Turning validation off exposes unvalidated discovery leads, but retains the normal transport,
+provenance, and fetch safety limits. It also offers an opt-in Reasoning Activity view for
+high-level live stages, not private model scratchpad text. Chat output uses normal terminal
 scrollback, so it has no Klaude-managed border or scrollbar; the rounded input border
 defaults to on. Input Field → Height → Enter min/max accepts two whole numbers
 (for example `2 10`). The composer grows between those limits; valid limits

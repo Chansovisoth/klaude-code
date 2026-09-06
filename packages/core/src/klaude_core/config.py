@@ -311,6 +311,9 @@ class WebSearchConfig:
     fallback_on_unavailable: bool = True
     fallback_on_low_relevance: bool = True
     strict_result_filtering: bool = False
+    # Relevance filtering keeps weak local models from receiving misleading
+    # SERP entries. The interactive Tools setting may relax this per chat.
+    result_validation_enabled: bool = True
     return_unrelated_results: bool = False
     max_provider_attempts: int = 3
     max_results_per_domain: int = 2
@@ -389,6 +392,9 @@ class Config:
     max_code_continuations: int = 2
     max_code_repairs: int = 2
     retrieval_k: int = 6
+    # Keep the knowledge relevance gate on by default; the interactive Tools
+    # setting can expose unvalidated local candidates for troubleshooting.
+    retrieval_validation_enabled: bool = True
     snapshot_retention: int = 3
     crawl_max_depth: int = 2
     crawl_max_pages: int = 50

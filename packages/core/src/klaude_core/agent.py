@@ -3006,10 +3006,23 @@ def _runtime_error_message(error: Exception) -> str:
     if "cuda" in lowered and cuda_fault:
         return (
             f"Ollama's GPU runner crashed (CUDA {cuda_fault}). "
-            "Restart the Ollama service before retrying, or set "
-            "[ollama.options] num_gpu = 0 to isolate the model on CPU."
+            "Auto and GPU-preferred chats retry once on CPU; GPU-only does not. "
+            "If GPU-only continues to fail, switch Runtime to Auto or CPU-only, "
+            "then update or restart the Ollama service before trying GPU again."
         )
     return message
+
+
+def _is_cuda_runner_fault(error: Exception) -> bool:
+    lowered = str(error).lower()
+    return "cuda" in lowered and any(
+        marker in lowered
+        for marker in (
+            "illegal memory access",
+            "illegal instruction",
+            "unspecified launch failure",
+        )
+    )
 
 
 def _recoverable_tool_parser_error(error: Exception) -> bool:
@@ -3451,6 +3464,10 @@ class Agent:
         self.ollama = ollama
         self.model = model
         self.tools = {t.name: t for t in tools}
+        # Chat clients may persistently hide selected retrieval tools. Keep
+        # the canonical registry intact for aliases and diagnostics, but never
+        # expose or execute a disabled tool in a turn.
+        self.disabled_tool_names: set[str] = set()
         self.gate = gate
         self.max_steps = max_steps
         self.max_code_continuations = max(0, min(3, max_code_continuations))
@@ -3465,12 +3482,32 @@ class Agent:
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         self.retrieval_state = RetrievalConversationState()
         self.last_web_research_state: AgenticSearchState | None = None
+        self.plan_mode = False
 
     def set_system_prompt(self, system_prompt: str) -> None:
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0]["content"] = system_prompt
         else:
             self.messages.insert(0, {"role": "system", "content": system_prompt})
+
+    def restore_session(self, turns: list[dict[str, Any]]) -> None:
+        """Restore saved dialogue while keeping this runtime's system prompt."""
+        self.messages = [m for m in self.messages if m.get("role") == "system"][:1]
+        self.retrieval_state = RetrievalConversationState()
+        self.last_web_research_state = None
+        for turn in turns:
+            if turn.get("role") not in {"user", "assistant"}:
+                continue
+            content = turn.get("content", "")
+            if not isinstance(content, str):
+                continue
+            if turn["role"] == "user":
+                _update_retrieval_state_from_user(self.retrieval_state, content, self.messages)
+            self.messages.append({"role": turn["role"], "content": content})
+
+    def compact_now(self) -> None:
+        """Compact stale dialogue immediately using the configured context budget."""
+        self._compact_history([])
 
     def _compact_history(
         self,
@@ -3508,23 +3545,52 @@ class Agent:
             used += cost
         self.messages = [fixed, *reversed(retained)]
 
-    def run(self, user_message: str):
+    def run(self, user_message: str, *, read_only: bool = False):
+        original_tools = self.tools
+        original_prompt = self.messages[0]["content"]
+        if read_only or self.plan_mode:
+            allowed = {"read_file", "list_dir", "grep", "workspace_info", "git_status", "git_diff"}
+            if self.plan_mode and not read_only:
+                allowed.update({
+                    "web_search", "fetch_url", "code_search", "query_knowledge",
+                    "huggingface_search", "huggingface_details", "huggingface_readme",
+                    "search_sessions", "list_recent_sessions", "list_commands",
+                })
+            self.tools = {name: tool for name, tool in original_tools.items() if name in allowed}
+        if self.plan_mode:
+            self.messages[0]["content"] = original_prompt + (
+                "\n\nPlan mode is active. Investigate using read-only tools and propose "
+                "an actionable plan. Do not implement changes, execute shell commands, "
+                "or claim to have done so. The user must leave Plan mode before implementation."
+            )
+        try:
+            yield from self._run(user_message)
+        finally:
+            self.tools = original_tools
+            self.messages[0]["content"] = original_prompt
+
+    def _run(self, user_message: str):
         """Generator of AgentEvent — clients iterate and render."""
         self.messages.append({"role": "user", "content": user_message})
         _update_retrieval_state_from_user(self.retrieval_state, user_message, self.messages)
-        selected_tools = self.tools
+        available_tools = {
+            name: tool for name, tool in self.tools.items()
+            if name not in self.disabled_tool_names
+        }
+        selected_tools = available_tools
         if self.tool_selector is not None:
-            selected_names = self.tool_selector(user_message, self.tools)
+            selected_names = self.tool_selector(user_message, available_tools)
             selected_tools = {
-                name: self.tools[name] for name in selected_names if name in self.tools
+                name: available_tools[name]
+                for name in selected_names if name in available_tools
             }
         required_retrieval_tools = _explicit_retrieval_tools(
             user_message,
-            set(self.tools),
+            set(available_tools),
         )
         for required_tool in required_retrieval_tools:
-            if required_tool in self.tools:
-                selected_tools.setdefault(required_tool, self.tools[required_tool])
+            if required_tool in available_tools:
+                selected_tools.setdefault(required_tool, available_tools[required_tool])
         used_tools: set[str] = set()
         used_tool_calls: set[str] = set()
         search_queries_this_turn: list[str] = []
@@ -3534,6 +3600,7 @@ class Agent:
         code_repair_retried = False
         code_validation_repairs = 0
         tool_parser_retried = False
+        gpu_fallback_retried = False
         retrieval_requirement_retries: set[str] = set()
         source_reference_retried = False
         tools_disabled_for_turn = False
@@ -3660,7 +3727,11 @@ class Agent:
                     research.add_gap(missing_information)
 
             tool = selected_tools.get(name)
-            if tool is None and name in RECOVERABLE_UNADVERTISED_TOOLS:
+            if (
+                tool is None
+                and name not in self.disabled_tool_names
+                and name in RECOVERABLE_UNADVERTISED_TOOLS
+            ):
                 tool = self.tools.get(name)
             if (
                 tool is not None
@@ -4064,7 +4135,10 @@ class Agent:
             try:
                 schemas = active_schemas()
                 stream_chat = getattr(self.ollama, "chat_stream", None)
-                if code_request and not schemas and callable(stream_chat):
+                # With no tool schema, Ollama can yield response fragments as
+                # they are generated. Tool-enabled requests stay assembled so
+                # structured calls remain reliable.
+                if not schemas and callable(stream_chat):
                     streamed_parts: list[str] = []
                     validation_language = _code_validation_language(user_message)
                     last_progress_at = 0.0
@@ -4078,7 +4152,7 @@ class Agent:
                         stage = "reasoning" if fragment.get("thinking") else ""
                         piece = str(fragment.get("content", ""))
                         if piece:
-                            stage = "drafting code"
+                            stage = "drafting code" if code_request else "drafting response"
                         now = time.monotonic()
                         if stage and (stage != progress_stage or now - last_progress_at >= 15.0):
                             progress_stage = stage
@@ -4109,6 +4183,24 @@ class Agent:
                         tools=schemas,
                     )
             except Exception as e:  # surface, don't crash the session
+                # Ollama starts a separate runner for every option set. On a
+                # hybrid model, a CUDA worker can abort while auto-placement
+                # is evaluating a long prompt, even though the same request
+                # is valid on CPU. Retry once only when the request did not
+                # explicitly set GPU layers; explicit CPU/GPU overrides remain
+                # authoritative.
+                if (
+                    not gpu_fallback_retried
+                    and request_options.get("num_gpu") is None
+                    and _is_cuda_runner_fault(e)
+                ):
+                    gpu_fallback_retried = True
+                    request_options["num_gpu"] = 0
+                    yield AgentEvent(
+                        "progress",
+                        {"stage": "GPU runner failed; retrying safely on CPU"},
+                    )
+                    continue
                 if (
                     not tool_parser_retried
                     and active_schemas()

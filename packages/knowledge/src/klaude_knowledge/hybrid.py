@@ -154,6 +154,14 @@ class Knowledge:
         if not libraries:
             return LibraryRoute([], 0.0, "no libraries")
 
+        if not bool(getattr(self.cfg, "retrieval_validation_enabled", True)):
+            return LibraryRoute(
+                libraries[: min(12, len(libraries))],
+                0.0,
+                "validation disabled; searching local candidates",
+                global_search_allowed=True,
+            )
+
         question_terms = _terms(question)
         normalized_question = _normalized(question)
         scored: list[tuple[float, str, str]] = []
@@ -216,6 +224,7 @@ class Knowledge:
         k: int,
     ) -> list[dict]:
         accepted = []
+        validation_enabled = bool(getattr(self.cfg, "retrieval_validation_enabled", True))
         min_vector = self._threshold("retrieval_min_vector_similarity", MIN_VECTOR_SIMILARITY)
         min_overlap = self._threshold("retrieval_min_lexical_overlap", MIN_LEXICAL_OVERLAP)
         min_combined = self._threshold("retrieval_min_combined_confidence", MIN_COMBINED_CONFIDENCE)
@@ -239,11 +248,13 @@ class Knowledge:
                 or overlap >= min_overlap
                 or (hit.get("keyword_rank") is not None and overlap >= min_overlap / 2)
             )
-            if confidence >= threshold and has_backend_evidence:
+            if not validation_enabled or (confidence >= threshold and has_backend_evidence):
                 hit["relevance_score"] = round(confidence, 3)
                 hit["lexical_overlap"] = round(overlap, 3)
                 hit["vector_similarity"] = round(vector_similarity, 3)
                 hit["route_reason"] = route.reason
+                if not validation_enabled:
+                    hit["result_validation"] = "disabled"
                 accepted.append(hit)
         if any(hit.get("rerank_rank") is not None for hit in accepted):
             accepted.sort(

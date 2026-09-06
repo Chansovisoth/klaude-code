@@ -317,6 +317,28 @@ def test_accepted_hits_preserve_optional_reranker_order():
     assert [hit["id"] for hit in accepted] == ["reranker-first", "heuristic-first"]
 
 
+def test_disabled_retrieval_validation_keeps_local_candidate_hits():
+    from klaude_knowledge.hybrid import Knowledge, LibraryRoute
+
+    class RetrievalConfig:
+        retrieval_validation_enabled = False
+        retrieval_min_vector_similarity = 0.99
+        retrieval_min_lexical_overlap = 0.99
+        retrieval_min_combined_confidence = 0.99
+        retrieval_min_global_confidence = 0.99
+
+    knowledge = object.__new__(Knowledge)
+    knowledge.cfg = RetrievalConfig()
+    hits = [{"id": "candidate", "text": "barely related", "vector_distance": 1.0}]
+
+    accepted = knowledge._accepted_hits(
+        "different question", LibraryRoute(["docs"], 0, "test"), hits, 1
+    )
+
+    assert accepted[0]["id"] == "candidate"
+    assert accepted[0]["result_validation"] == "disabled"
+
+
 def test_knowledge_learn_text_skips_unchanged_indexed_source(tmp_path):
     from klaude_knowledge.hybrid import Knowledge
 
