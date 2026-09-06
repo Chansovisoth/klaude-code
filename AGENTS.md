@@ -127,7 +127,6 @@ Chat slash commands currently include:
 - `/vim`: toggle Vim editing controls in the TUI composer; invoke it again to
   return to standard composer controls. The selected mode persists in
   `chat-preferences.json`.
-- `/models`: list installed Ollama models and mark the active model.
 - `/permissions [TOOL POLICY [save]]`: inspect or set tool policies (`ask`,
   `allow`, `deny`, or `reset`). Add `save` to persist the setting in chat
   preferences; without it the change lasts only for this chat.
@@ -181,8 +180,10 @@ Chat slash commands currently include:
 - `/model`: open an arrow-key model picker, then an effort picker.
 - `/model NAME`: switch the active chat model, then choose effort while keeping
   chat history. A successful selection is reused at the next chat launch.
-- `/effort` and `/effort LEVEL`: choose or directly set `auto`, `off`, `low`,
-  `medium`, or `high` reasoning effort for the active session.
+- `/mode [standard|thinking]`: choose whether the active model uses its
+  normal response path or its reasoning path.
+- `/effort` and `/effort LEVEL`: set `low`, `medium`, or `high` reasoning
+  effort only while Thinking mode is active.
 - `/queue [TEXT]`: show pending turns or explicitly append one to the queue.
 - `/steer TEXT`: prioritize a new instruction and interrupt the active turn at
   the next safe model/tool boundary.
@@ -217,13 +218,14 @@ the same configured input minimum and maximum as the text composer, padding
 short lists to the minimum and scrolling long lists within the maximum.
 Settings pickers group related options under visible, non-selectable section
 titles; keyboard, typed-option, and mouse selection skip those titles.
-Model options and
-the `/models` listing are sorted case-insensitively by full model name. Model,
+Cloud model options are sorted case-insensitively by full model name. Local
+model options and the `klaude models` listing are grouped by model family, with the
+family that has the largest tagged model first and variants largest-first. Model,
 effort, theme, settings, and input-height pickers end with `reset to default`
 and `cancel`, except settings submenus with a parent end with `back` instead
 of a redundant cancel option. Cancelling the effort step of a model change restores the prior
 model. Resetting a model selects the configured coder role if installed;
-resetting effort selects auto. The picker control cursor tracks the selected
+resetting effort selects medium. The picker control cursor tracks the selected
 row so Prompt Toolkit does not reset scrolling to row zero. PageUp/PageDown
 navigate and Escape cancels. Theme navigation previews colors without saving;
 cancel restores the original colors. Text previews use a temporary dedicated,

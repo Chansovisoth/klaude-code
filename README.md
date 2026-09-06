@@ -310,6 +310,13 @@ HUGGINGFACE_API_KEY=...
 CRAWL4AI_API_KEY=...
 ```
 
+Cloud chat models are optional and do not replace local Ollama embeddings or
+knowledge indexing. Install their SDKs with `uv sync --extra cloud`, then set
+`OPENAI_API_KEY` and/or `GEMINI_API_KEY`. In chat, `/model` presents Cloud
+(OpenAI API and Gemini API) before Local (Ollama); `klaude models` remains the
+local Ollama diagnostic. A saved cloud selection uses a canonical reference such as
+`openai_api/gpt-5`; older saved bare model names continue to mean Ollama.
+
 Klaude uses relevance-first provider routing for web search. Configured
 providers are tried according to query intent, missing optional keys are skipped
 quietly, DDGS is the preferred keyless fallback when installed, and SearXNG is

@@ -21,6 +21,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from .entities import structured_domains_for_text
 from .ollama import Ollama
+from .model_runtime import ModelInfo, ModelRuntime
 from .permissions import PermissionDenied, PermissionGate
 
 ToolFn = Callable[..., Any]
@@ -3445,7 +3446,7 @@ def _promises_unprovided_code(content: str) -> bool:
 class Agent:
     def __init__(
         self,
-        ollama: Ollama,
+        ollama: Ollama | ModelRuntime,
         model: str,
         tools: list[Tool],
         gate: PermissionGate,
@@ -3460,9 +3461,13 @@ class Agent:
         ollama_code_options: dict[str, Any] | None = None,
         ollama_code_think: bool | str | None = None,
         code_context: str = "",
+        model_info: ModelInfo | None = None,
     ):
+        self.runtime = ollama
+        # Compatibility alias for integrations which still inspect `ollama`.
         self.ollama = ollama
         self.model = model
+        self.model_info = model_info or ModelInfo("ollama", model, model)
         self.tools = {t.name: t for t in tools}
         # Chat clients may persistently hide selected retrieval tools. Keep
         # the canonical registry intact for aliases and diagnostics, but never
@@ -3477,6 +3482,10 @@ class Agent:
         self.ollama_think = ollama_think
         self.ollama_code_options = dict(ollama_code_options or {})
         self.ollama_code_think = ollama_code_think
+        self.reasoning_mode = "thinking" if ollama_think not in {None, False} else "standard"
+        self.reasoning_effort = (
+            str(ollama_think) if isinstance(ollama_think, str) else "medium"
+        )
         self.code_context = code_context.strip()[:2_000]
         self.web_research_budget = (web_research_budget or WebResearchBudget()).bounded()
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -4116,6 +4125,8 @@ class Agent:
                 metadata,
             )
             tool_message = {"role": "tool", "tool_name": name, "content": result}
+            if call.get("id"):
+                tool_message["tool_call_id"] = str(call["id"])
             tool_message["content"] = research_tool_content(name, result)
             if metadata:
                 tool_message["metadata"] = metadata
@@ -4190,7 +4201,8 @@ class Agent:
                 # explicitly set GPU layers; explicit CPU/GPU overrides remain
                 # authoritative.
                 if (
-                    not gpu_fallback_retried
+                    self.model_info.backend == "ollama"
+                    and not gpu_fallback_retried
                     and request_options.get("num_gpu") is None
                     and _is_cuda_runner_fault(e)
                 ):
@@ -4451,6 +4463,8 @@ class Agent:
                     metadata,
                 )
                 tool_message = {"role": "tool", "tool_name": name, "content": result}
+                if call.get("id"):
+                    tool_message["tool_call_id"] = str(call["id"])
                 tool_message["content"] = research_tool_content(name, result)
                 if metadata:
                     tool_message["metadata"] = metadata

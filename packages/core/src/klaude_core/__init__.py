@@ -14,6 +14,7 @@ from .entities import (
 )
 from .memory import Memory
 from .ollama import Ollama, OllamaError
+from .model_runtime import GeminiRuntime, ModelCapabilities, ModelInfo, OllamaRuntime, OpenAIRuntime
 from .permissions import PermissionDenied, PermissionGate
 from .runtime_context import collect_runtime_context, render_runtime_context
 
@@ -23,6 +24,6 @@ __all__ = [
     "EntityRecord", "EntityResolver", "EntityStore", "NameCandidate",
     "QueryCorrection", "QueryNormalization", "WikimediaEntityClient",
     "normalize_name", "structured_domains_for_text", "structured_entity_profile",
-    "Memory", "Ollama", "OllamaError", "PermissionDenied", "PermissionGate",
+    "Memory", "Ollama", "OllamaError", "ModelCapabilities", "ModelInfo", "OllamaRuntime", "OpenAIRuntime", "GeminiRuntime", "PermissionDenied", "PermissionGate",
     "collect_runtime_context", "render_runtime_context",
 ]

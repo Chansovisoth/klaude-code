@@ -7,6 +7,9 @@ dependencies = [
     "klaude-cli",
 ]
 
+[project.optional-dependencies]
+cloud = ["klaude-core[cloud]"]
+
 [tool.uv.workspace]
 members = ["apps/cli", "packages/*"]
 

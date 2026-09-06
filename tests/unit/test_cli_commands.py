@@ -185,9 +185,9 @@ def test_canonical_command_reference_preserves_sections_and_lines():
     assert "\n  search" in reference
     assert "\n  docs update --online" in reference
     assert "\n  /help" in reference
-    assert "\n  /models" in reference
+    assert "\n  /models" not in reference
     assert "\n  /model" in reference
-    assert "use /model NAME to switch directly" in reference
+    assert "Select an available Cloud or Local chat model" in reference
     assert "\n  /effort" in reference
     assert "\n  /restart" in reference
     assert "\n  /stop" in reference
@@ -206,7 +206,7 @@ def test_command_registry_contains_model_commands_separately():
 
     assert "/model" in usages
     assert "/model NAME" in usages
-    assert "/models" in usages
+    assert "/models" not in usages
     assert {"/vim", "/permissions [TOOL POLICY [save]]", "/settings [CATEGORY]"} <= usages
     assert "/nano" not in usages
 
@@ -340,29 +340,19 @@ def test_typo_tolerant_detection_does_not_intercept_unrelated_questions():
 def test_focused_model_help_matches_actual_model_behavior():
     response = format_focused_command_help("what does /model do?", width=90)
 
-    assert "/model\n    Open the model picker, then choose reasoning effort." in response
+    assert "/model\n    Open the model picker, then choose Standard or Thinking mode." in response
     assert (
         "/model NAME\n"
-        "    Select an installed Ollama model, then choose reasoning effort while\n"
+        "    Select an available Cloud or Local model, then choose its reasoning mode while\n"
         "    preserving this conversation."
     ) in response
-    assert "/effort [auto|off|low|medium|high]" in response
+    assert "/mode [standard|thinking]" in response
+    assert "/effort [low|medium|high]" in response
     assert "/model qwen3-coder:30b" in response
-    assert "Use /models to list the available models without switching." in response
+    assert "Use /models" not in response
     assert "/model list" not in response
     assert "/model select" not in response
     assert "/model info" not in response
-
-
-def test_focused_models_help_is_distinct_from_model_help():
-    response = format_focused_command_help("how do I use /models?", width=90)
-
-    assert response == (
-        "/models\n"
-        "    List installed Ollama models and mark the active model."
-    )
-    assert "/model NAME" not in response
-
 
 def test_unknown_command_help_is_deterministic():
     response = format_focused_command_help("what does /reload do?", width=80)
@@ -382,7 +372,7 @@ def test_command_suggestions_come_from_registry_only():
     assert resolution is not None
     assert resolution.exact is None
     assert {spec.usage for spec in resolution.suggestions} <= usages
-    assert "Did you mean /model?" in response
+    assert "Did you mean /mode?" in response
 
 
 def test_focused_docs_and_status_help_use_registry():
@@ -909,7 +899,7 @@ def test_chat_toolbar_shows_model_effort_context_and_last_tokens():
     rendered = "".join(fragment for _style, fragment in _chat_toolbar(state))
 
     assert "gpt-oss:20b" in rendered
-    assert "effort low" in rendered
+    assert "mode low" in rendered
     assert "ctx 2,048/8,192 (25%)" in rendered
     assert "last ↑2,048 ↓512" in rendered
 
@@ -1135,7 +1125,7 @@ def test_persistent_tui_restores_enhanced_keyboard_mode_on_failure(monkeypatch):
     ]
 
 
-def test_session_effort_supports_off_levels_and_model_defaults():
+def test_session_effort_supports_explicit_levels():
     class FakeAgent:
         model = "gpt-oss:20b"
         ollama_think = None
@@ -1153,8 +1143,8 @@ def test_session_effort_supports_off_levels_and_model_defaults():
     assert agent.ollama_code_think is False
 
     _apply_session_effort(agent, cfg, "auto")
-    assert agent.ollama_think is None
-    assert agent.ollama_code_think == "low"
+    assert agent.ollama_think is False
+    assert agent.ollama_code_think is False
 
 
 def _fake_persistent_tui(appearance_path=None, chat_preferences_path=None):
@@ -1490,14 +1480,18 @@ def test_persistent_tui_inline_model_picker_leads_to_effort_picker(tmp_path):
     tui._accept_choice()
 
     assert tui.agent.model == "gpt-oss:20b"
-    assert tui._choice_kind == "effort"
+    assert tui._choice_kind == "mode"
     assert tui.input.text == ""
+    tui._choice_index = tui._choice_values.index("thinking")
+    tui._accept_choice()
+    assert tui._choice_kind == "effort"
     effort_options = "".join(text for _style, text in tui._choice_fragments())
-    assert all(choice in effort_options for choice in ("auto", "off", "low", "medium", "high"))
+    assert all(choice in effort_options for choice in ("low", "medium", "high"))
+    assert "off" not in effort_options and "auto" not in effort_options
 
     tui._accept_choice()
 
-    assert _load_last_chat_model(preferences) == "gpt-oss:20b"
+    assert _load_last_chat_model(preferences) == "ollama/gpt-oss:20b"
 
 
 @pytest.mark.parametrize("key,expected", [(Keys.Down, 0), (Keys.Up, 1)])
@@ -1567,7 +1561,7 @@ def test_backspace_refreshes_slash_command_completion(monkeypatch, key):
     assert starts == [{"select_first": False}]
 
 
-@pytest.mark.parametrize("command,kind", [("/settings", "settings"), ("/model", "model")])
+@pytest.mark.parametrize("command,kind", [("/settings", "settings"), ("/model", "model source")])
 def test_enter_accepts_and_executes_highlighted_command(command, kind):
     tui = _fake_persistent_tui()
     tui._set_input("/")
@@ -1608,10 +1602,11 @@ def test_enter_submits_model_command_when_completion_menu_has_no_selection():
 
     enter(None)
 
-    assert tui._choice_kind == "model"
-    assert tui._choice_values == ["gpt-oss:20b", "qwen3.5:4b", "reset to default", "cancel"]
+    assert tui._choice_kind == "model source"
+    assert tui._choice_values == ["Local", "Cloud", "cancel"]
     rendered = "".join(text for _style, text in tui._choice_fragments())
-    assert rendered == "    gpt-oss:20b\n  › qwen3.5:4b *\n    reset to default\n    cancel"
+    assert "Cloud" in rendered and "Local" in rendered
+    assert "gpt-oss:20b" not in rendered and "qwen3.5:4b" not in rendered
 
 
 @pytest.mark.parametrize("category", ["theme", "input field"])
@@ -1882,6 +1877,8 @@ def test_model_picker_cancels_while_theme_picker_goes_back_to_settings():
     tui._set_input("/model")
     tui._submit_buffer(steer=False)
 
+    assert tui._choice_kind == "model source"
+
     assert tui._choice_values[-1] == "cancel"
     tui._choice_index = len(tui._choice_values) - 1
     tui._accept_choice()
@@ -1904,10 +1901,15 @@ def test_cancel_during_effort_picker_restores_original_model():
     tui = _fake_persistent_tui()
     tui._set_input("/model")
     tui._submit_buffer(steer=False)
+    tui._choice_index = tui._choice_values.index("Local")
+    tui._accept_choice()
     tui._choice_index = tui._choice_values.index("gpt-oss:20b")
     tui._accept_choice()
 
     assert tui.agent.model == "gpt-oss:20b"
+    assert tui._choice_kind == "mode"
+    tui._choice_index = tui._choice_values.index("thinking")
+    tui._accept_choice()
     assert tui._choice_kind == "effort"
     assert tui._choice_values[-1] == "cancel"
     tui._choice_index = len(tui._choice_values) - 1
@@ -1917,14 +1919,17 @@ def test_cancel_during_effort_picker_restores_original_model():
     assert tui.agent.model == "qwen3.5:4b"
 
 
-def test_persistent_tui_models_command_is_sorted_alphabetically():
+def test_persistent_tui_renders_unavailable_picker_options_in_gray():
     tui = _fake_persistent_tui()
-    tui._set_input("/models")
+    tui._begin_choice(
+        "model cloud provider",
+        ["OpenAI — API key not configured", "back"],
+        "back",
+    )
 
-    tui._submit_buffer(steer=False)
+    fragments = tui._choice_fragments()
 
-    listing = tui.output.text.rsplit("[installed models]", maxsplit=1)[1]
-    assert listing.index("gpt-oss:20b") < listing.index("qwen3.5:4b")
+    assert ("class:choice.disabled", "    OpenAI — API key not configured\n") in fragments
 
 
 @pytest.mark.parametrize(
@@ -2855,7 +2860,7 @@ def test_unknown_slash_typo_suggests_registered_command(monkeypatch):
     assert _handle_unknown_slash_command("/modle") is True
     assert printed[0][0][0].plain == (
         "Unknown chat command: /modle\n"
-        "Did you mean /model?\n"
+            "Did you mean /mode?\n"
         "Type /help to see the available commands."
     )
 
@@ -2911,8 +2916,8 @@ def test_followup_command_question_after_direct_reference_uses_registry(monkeypa
     assert printed[1][0][0].plain == format_command_reference(width=100)
     focused = printed[2][0][0].plain
     assert "Yes. `/model` manages the active chat model." in focused
-    assert "/model\n    Open the model picker, then choose reasoning effort." in focused
-    assert "/model NAME\n    Select an installed Ollama model" in focused
+    assert "/model\n    Open the model picker, then choose Standard or Thinking mode." in focused
+    assert "/model NAME\n    Select an available Cloud or Local model" in focused
     assert agent.messages[1]["content"] == _command_reference_context()
     assert agent.messages[-1]["content"] == focused
 

@@ -376,6 +376,7 @@ class Config:
     crawler_user_agent: str = "KlaudeBot/0.2 (+local documentation crawler)"
     web_provider: str = "quality"  # quality | auto | local | exa
     gemini_api_key: str = ""
+    openai_api_key: str = ""
     parallel_api_key: str = ""
     tavily_api_key: str = ""
     firecrawl_api_key: str = ""
@@ -642,6 +643,7 @@ def load_config() -> Config:
     )
 
     web = user.get("web", {})
+    cloud = user.get("cloud", {})
     cfg.web_provider = web.get("provider", os.environ.get("KLAUDE_WEB_PROVIDER", cfg.web_provider))
     if cfg.web_provider not in {"quality", "local", "exa", "auto"}:
         raise ValueError("web.provider must be one of: quality, local, exa, auto")
@@ -951,6 +953,11 @@ def load_config() -> Config:
         for name, current in cfg.web_providers.items()
     }
     cfg.gemini_api_key = web.get("gemini_api_key", _env_value("GEMINI_API_KEY", cfg.gemini_api_key))
+    # Chat-model credentials are deliberately independent from web providers.
+    # GEMINI_API_KEY remains shared with the existing Google search provider.
+    cfg.openai_api_key = str(
+        cloud.get("openai_api_key", _env_value("OPENAI_API_KEY", cfg.openai_api_key)) or ""
+    ).strip()
     cfg.parallel_api_key = web.get(
         "parallel_api_key",
         _env_value("PARALLEL_API_KEY", cfg.parallel_api_key),

@@ -143,6 +143,11 @@
 # enabled = true
 # api_key_env = "GEMINI_API_KEY"
 
+# Optional cloud chat providers.  Keys are normally supplied through the
+# environment rather than committed configuration.
+# [cloud]
+# openai_api_key = "${OPENAI_API_KEY}"
+
 [web.providers.parallel]
 # enabled = true
 # api_key_env = "PARALLEL_API_KEY"

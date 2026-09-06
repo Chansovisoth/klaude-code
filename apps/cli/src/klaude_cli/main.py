@@ -53,12 +53,25 @@ import httpx
 import typer
 from klaude_core import (
     Agent,
+    GeminiRuntime,
     Memory,
+    ModelInfo,
     Ollama,
+    OllamaRuntime,
+    OpenAIRuntime,
     PermissionGate,
     Tool,
     WebResearchBudget,
     load_config,
+)
+from klaude_core.model_runtime import (
+    discover_gemini_models,
+    discover_openai_models,
+    grouped_local_models,
+    load_model_cache,
+    local_model_weight_first_key,
+    newest_model_first_key,
+    save_model_cache,
 )
 from klaude_core.config import CONFIG_DIR, DEFAULT_PERMISSIONS, SOURCE_ROOT
 from klaude_core.dates import find_establishment_date, operating_duration_since
@@ -146,7 +159,8 @@ WEB_SEARCH_PROVIDER_LABELS = {
     "none",
 }
 
-EFFORT_CHOICES = ("auto", "off", "low", "medium", "high")
+REASONING_MODES = ("standard", "thinking")
+EFFORT_CHOICES = ("low", "medium", "high")
 SHIFT_ENTER_SEQUENCES = ("\x1b[13;2u", "\x1b[27;2;13~")
 CTRL_ENTER_SEQUENCES = ("\x1b[13;5u", "\x1b[27;5;13~")
 XTERM_MODIFY_OTHER_KEYS_ON = "\x1b[>4;2m"
@@ -182,6 +196,14 @@ def _choice_section(title: str) -> str:
 
 def _is_choice_section(value: str) -> bool:
     return value.startswith(CHOICE_SECTION_PREFIX)
+
+
+def _is_choice_disabled(value: str) -> bool:
+    return (
+        "API key not configured" in value
+        or "models unavailable" in value
+        or value.startswith("Ollama unavailable")
+    )
 
 
 def _choice_section_title(value: str) -> str:
@@ -579,6 +601,7 @@ TRANSCRIPT_STYLE = Style.from_dict(
         "queue.selected": "reverse bold",
         "choice.item": "#d4d4d4",
         "choice.selected": "reverse bold",
+        "choice.disabled": "#808080",
         "choice.section": "#808080 bold",
     }
 )
@@ -1321,20 +1344,22 @@ def _effort_value_label(value: bool | str | None) -> str:
         return "off"
     if value is True:
         return "on"
-    return str(value) if value else "auto"
+    return str(value) if value else "off"
 
 
 def _agent_effort_label(agent: Agent) -> str:
+    if getattr(agent, "reasoning_mode", "standard") == "standard":
+        return "standard"
     chat_effort = _effort_value_label(agent.ollama_think)
     code_effort = _effort_value_label(agent.ollama_code_think)
     if chat_effort == code_effort:
-        return chat_effort
-    return f"chat:{chat_effort} code:{code_effort}"
+        return f"thinking · {chat_effort}"
+    return f"thinking · chat:{chat_effort} code:{code_effort}"
 
 
 def _chat_prompt_header(state: ChatUIState) -> ANSI:
     width = max(40, min(shutil.get_terminal_size((100, 24)).columns, 120))
-    label = f" klaude  {state.model}  effort:{state.effort} "
+    label = f" klaude  {state.model}  mode:{state.effort} "
     # Leave the final terminal column unused; writing into it makes many PTYs
     # wrap the closing border onto a new line.
     fill = "─" * max(1, width - len(label) - 4)
@@ -1363,7 +1388,7 @@ def _chat_toolbar(state: ChatUIState):
         ("class:bottom-toolbar.model", state.model),
         (
             "class:bottom-toolbar",
-            f"  effort {state.effort}  ctx {used:,}/{context:,} ({percent}%)  ",
+            f"  mode {state.effort}  ctx {used:,}/{context:,} ({percent}%)  ",
         ),
         ("class:bottom-toolbar.tokens", f"last ↑{state.prompt_tokens:,} ↓{state.output_tokens:,}"),
         ("class:bottom-toolbar", " "),
@@ -1650,38 +1675,39 @@ CHAT_COMMANDS = (
         examples=("/settings", "/settings theme", "/settings tools", "/settings runtime"),
     ),
     CommandSpec(
-        "models",
-        CommandSurface.CHAT,
-        "/models",
-        "List installed Ollama models and mark the active model.",
-    ),
-    CommandSpec(
         "model",
         CommandSurface.CHAT,
         "/model",
-        "use /model NAME to switch directly, or select a model and reasoning effort.",
+        "Select an available Cloud or Local chat model and reasoning effort.",
     ),
     CommandSpec(
         "model-name",
         CommandSurface.CHAT,
         "/model NAME",
-        "Switch the active chat model while keeping the current chat history.",
+        "Switch to an available Cloud or Local chat model while keeping history.",
         aliases=("/model [NAME]",),
         examples=("/model", "/model qwen3-coder:30b"),
+    ),
+    CommandSpec(
+        "mode",
+        CommandSurface.CHAT,
+        "/mode [standard|thinking]",
+        "Choose Standard or Thinking mode for the active model.",
+        examples=("/mode", "/mode thinking"),
     ),
     CommandSpec(
         "effort",
         CommandSurface.CHAT,
         "/effort",
-        "Change reasoning effort, or use /effort LEVEL to set it directly.",
+        "Set Thinking-mode effort, or use /effort LEVEL directly.",
     ),
     CommandSpec(
         "effort-level",
         CommandSurface.CHAT,
         "/effort LEVEL",
-        "Set reasoning effort to auto, off, low, medium, or high.",
+        "Set Thinking-mode effort to low, medium, or high.",
         aliases=("/effort [LEVEL]",),
-        examples=("/effort low", "/effort off"),
+        examples=("/effort low", "/effort high"),
     ),
     CommandSpec(
         "queue",
@@ -3168,20 +3194,22 @@ def _format_model_command_help(*, include_yes: bool = False) -> str:
     lines.extend(
         [
             "/model",
-            "    Open the model picker, then choose reasoning effort.",
+            "    Open the model picker, then choose Standard or Thinking mode.",
             "",
             "/model NAME",
-            "    Select an installed Ollama model, then choose reasoning effort while",
+            "    Select an available Cloud or Local model, then choose its reasoning mode while",
             "    preserving this conversation.",
             "",
-            "/effort [auto|off|low|medium|high]",
-            "    Change reasoning effort for the active model.",
+            "/mode [standard|thinking]",
+            "    Choose the active model's reasoning mode.",
+            "",
+            "/effort [low|medium|high]",
+            "    Set effort while Thinking mode is active.",
             "",
             "Examples:",
             "    /model",
             "    /model qwen3-coder:30b",
-            "",
-            "Use /models to list the available models without switching.",
+            "    /model openai_api/gpt-5",
         ]
     )
     return "\n".join(lines)
@@ -4192,9 +4220,10 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, object
     ]
 
     gate = PermissionGate(cfg.permissions, _ask_permission)
+    initial_model = model or cfg.models["coder"]
     agent = Agent(
-        ollama,
-        model or cfg.models["coder"],
+        OllamaRuntime(ollama),
+        initial_model,
         tools,
         gate,
         _system_prompt(memory, runtime_text),
@@ -4203,10 +4232,11 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, object
         max_code_repairs=cfg.max_code_repairs,
         tool_selector=_select_tool_names,
         ollama_options=cfg.ollama_options,
-        ollama_think=cfg.ollama_think_for_model(model or cfg.models["coder"]),
+        ollama_think=cfg.ollama_think_for_model(initial_model),
         ollama_code_options=cfg.ollama_code_options,
-        ollama_code_think=cfg.ollama_code_think_for_model(model or cfg.models["coder"]),
+        ollama_code_think=cfg.ollama_code_think_for_model(initial_model),
         code_context=memory.facts(),
+        model_info=ModelInfo("ollama", initial_model, initial_model),
         web_research_budget=WebResearchBudget(
             max_web_actions=cfg.web_search.behavior.max_web_actions,
             max_search_calls=cfg.web_search.behavior.max_search_calls,
@@ -4217,6 +4247,7 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, object
         ),
     )
     agent.workspace = ws
+    agent.local_ollama = ollama
     agent.workdir = workdir.resolve()
     # These preferences intentionally affect only this interactive agent's
     # tool instances; config.toml remains the durable administrator default.
@@ -4720,8 +4751,129 @@ def _resolve_model(ollama: Ollama, name: str) -> str | None:
     return None
 
 
+def _available_chat_models(cfg, ollama: Ollama) -> list[ModelInfo]:
+    """Return cached cloud catalogs immediately plus live local models.
+
+    Cloud discovery refreshes separately in the background so normal picker
+    navigation never waits on a provider network request.
+    """
+    models: list[ModelInfo] = load_model_cache(cfg.data_dir / "model-cache.json")
+    try:
+        models.extend(ModelInfo("ollama", name, name) for name in ollama.list_models())
+    except Exception:
+        pass
+    return sorted(
+        models,
+        key=lambda item: (
+            item.source != "Cloud",
+            item.provider,
+            local_model_weight_first_key(item)
+            if item.backend == "ollama"
+            else newest_model_first_key(item),
+        ),
+    )
+
+
+def _refresh_cloud_model_cache(cfg) -> None:
+    """Refresh each configured provider without discarding a usable old cache."""
+    path = cfg.data_dir / "model-cache.json"
+    cached = load_model_cache(path)
+    refreshed: list[ModelInfo] = []
+    for backend, key, discover in (
+        ("openai_api", cfg.openai_api_key, discover_openai_models),
+        ("gemini_api", cfg.gemini_api_key, discover_gemini_models),
+    ):
+        current = discover(key) if key else []
+        if current:
+            refreshed.extend(current)
+        else:
+            refreshed.extend(item for item in cached if item.backend == backend)
+    if refreshed:
+        save_model_cache(path, refreshed)
+
+
+def _resolve_chat_model(models: list[ModelInfo], name: str) -> ModelInfo | None:
+    """Exact, prefix, then substring matching; canonical refs disambiguate."""
+    query = name.strip()
+    if not query:
+        return None
+    exact = [item for item in models if query in {item.ref, item.model_id}]
+    if len(exact) == 1:
+        return exact[0]
+    folded = query.casefold()
+    prefix = [item for item in models if item.ref.casefold().startswith(folded) or item.model_id.casefold().startswith(folded)]
+    if len(prefix) == 1:
+        return prefix[0]
+    matches = [item for item in models if folded in item.ref.casefold() or folded in item.model_id.casefold()]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _model_picker_rows(
+    cfg, ollama: Ollama, backend: str, active_model: ModelInfo | None = None,
+) -> tuple[list[str], dict[str, ModelInfo]]:
+    """Model rows for one backend, grouped by local model family when useful."""
+    models = _available_chat_models(cfg, ollama)
+    mapping: dict[str, ModelInfo] = {}
+    rows: list[str] = []
+    available = [item for item in models if item.backend == backend]
+    if backend == "ollama":
+        for family, members in grouped_local_models(available):
+            rows.append(_choice_section(family))
+            for item in members:
+                row = item.model_id
+                rows.append(row)
+                mapping[row] = item
+    else:
+        for item in available:
+            row = item.model_id
+            rows.append(row)
+            mapping[row] = item
+    # Do not make an already-running local session appear model-less merely
+    # because its daemon is temporarily restarting or unreachable. The active
+    # model remains selectable; the diagnostic row explains why discovery is
+    # incomplete. `klaude models` remains the detailed Ollama diagnostic command.
+    if not rows and active_model is not None and active_model.backend == backend:
+        rows.append(active_model.model_id)
+        mapping[active_model.model_id] = active_model
+    if not rows:
+        label = {"ollama": "Ollama", "openai_api": "OpenAI API", "gemini_api": "Gemini API"}[backend]
+        rows.append(f"{label} — models unavailable")
+    elif backend == "ollama" and not any(item.backend == "ollama" for item in models):
+        rows.append("Ollama unavailable — showing active model only")
+    return rows, mapping
+
+
+def _set_agent_model(agent: Agent, cfg, ollama: Ollama, info: ModelInfo) -> None:
+    agent.model = info.model_id
+    agent.model_info = info
+    if info.backend == "ollama":
+        # Unit-test and plugin fakes may already be a compatible runtime.
+        agent.runtime = OllamaRuntime(ollama) if isinstance(ollama, Ollama) else ollama
+    elif info.backend == "openai_api":
+        agent.runtime = OpenAIRuntime(cfg.openai_api_key)
+    elif info.backend == "gemini_api":
+        agent.runtime = GeminiRuntime(cfg.gemini_api_key)
+    else:
+        raise ValueError(f"unsupported model backend: {info.backend}")
+    agent.ollama = agent.runtime
+
+
+def _agent_local_ollama(agent: Agent):
+    return getattr(agent, "local_ollama", agent.ollama)
+
+
+def _agent_model_ref(agent: Agent) -> str:
+    info = getattr(agent, "model_info", None)
+    return info.ref if isinstance(info, ModelInfo) else f"ollama/{agent.model}"
+
+
 def _sorted_model_names(models: list[str]) -> list[str]:
-    return sorted(models, key=lambda value: (value.casefold(), value))
+    infos = [ModelInfo("ollama", value, value) for value in models]
+    return [
+        item.model_id
+        for _family, members in grouped_local_models(infos)
+        for item in members
+    ]
 
 
 def _select_tui_option(
@@ -4744,13 +4896,33 @@ def _select_tui_option(
 
 
 def _apply_session_effort(agent: Agent, cfg, effort: str) -> None:
-    if effort == "auto":
-        agent.ollama_think = cfg.ollama_think_for_model(agent.model)
-        agent.ollama_code_think = cfg.ollama_code_think_for_model(agent.model)
+    # Compatibility for callers carrying a pre-Phase-1 saved "auto" value.
+    # It is intentionally no longer selectable or shown in the UI.
+    if effort in {"auto", "off"}:
+        agent.reasoning_mode = "standard"
+        agent.ollama_think = False
+        agent.ollama_code_think = False
         return
-    value: bool | str = False if effort == "off" else effort
+    agent.reasoning_mode = "thinking"
+    agent.reasoning_effort = effort
+    if getattr(getattr(agent, "model_info", None), "backend", "ollama") != "ollama":
+        # Cloud adapters receive this normalized level and map it only when
+        # their provider supports a reasoning control.
+        agent.ollama_think = effort
+        agent.ollama_code_think = effort
+        return
+    value: bool | str = effort
     agent.ollama_think = value
     agent.ollama_code_think = value
+
+
+def _apply_session_mode(agent: Agent, cfg, mode: str) -> None:
+    agent.reasoning_mode = mode
+    if mode == "standard":
+        agent.ollama_think = False
+        agent.ollama_code_think = False
+        return
+    _apply_session_effort(agent, cfg, getattr(agent, "reasoning_effort", "medium"))
 
 
 def _choose_effort(agent: Agent, cfg, requested: str = "") -> str | None:
@@ -4758,7 +4930,7 @@ def _choose_effort(agent: Agent, cfg, requested: str = "") -> str | None:
     if requested:
         if requested not in EFFORT_CHOICES:
             console.print(
-                "[red]unknown effort[/] — choose auto, off, low, medium, or high"
+                "[red]unknown effort[/] — choose low, medium, or high"
             )
             return None
         selected = requested
@@ -4768,7 +4940,7 @@ def _choose_effort(agent: Agent, cfg, requested: str = "") -> str | None:
             "Reasoning effort",
             f"Choose effort for {agent.model}. ↑/↓ navigate, Enter marks, Tab confirms.",
             list(EFFORT_CHOICES),
-            current if current in EFFORT_CHOICES else "auto",
+            current if current in EFFORT_CHOICES else "medium",
         )
         if selected is None:
             return None
@@ -4776,30 +4948,55 @@ def _choose_effort(agent: Agent, cfg, requested: str = "") -> str | None:
     return selected
 
 
+def _choose_mode(agent: Agent, cfg, requested: str = "") -> str | None:
+    requested = requested.strip().lower()
+    if requested:
+        if requested not in REASONING_MODES:
+            console.print("[red]unknown mode[/] — choose standard or thinking")
+            return None
+        selected = requested
+    else:
+        selected = _select_tui_option(
+            "Reasoning mode",
+            f"Choose reasoning mode for {agent.model}.",
+            list(REASONING_MODES),
+            getattr(agent, "reasoning_mode", "standard"),
+        )
+        if selected is None:
+            return None
+    _apply_session_mode(agent, cfg, selected)
+    return selected
+
+
 def _choose_model_and_effort(agent: Agent, cfg, requested: str = "") -> bool:
     requested = requested.strip()
+    models = _available_chat_models(cfg, _agent_local_ollama(agent))
     if requested:
-        resolved = _resolve_model(agent.ollama, requested)
+        resolved = _resolve_chat_model(models, requested)
         if resolved is None:
-            console.print(f"[red]no unique match for '{requested}'[/] — see /models")
+            console.print(f"[red]no unique Cloud or Local match for '{requested}'[/]")
             return False
     else:
-        installed = _sorted_model_names(agent.ollama.list_models())
+        installed = [item.ref for item in models]
         resolved = _select_tui_option(
             "Select model",
-            "Choose an installed Ollama model. ↑/↓ navigate, Enter marks, Tab confirms.",
+            "Choose an available Cloud or Local model. Cloud is listed first.",
             installed,
-            agent.model,
+            _agent_model_ref(agent),
         )
         if resolved is None:
             return False
+        resolved = next(item for item in models if item.ref == resolved)
     prior_model = agent.model
-    agent.model = resolved
+    prior_info = agent.model_info
+    _set_agent_model(agent, cfg, _agent_local_ollama(agent), resolved)
     if not sys.stdin.isatty() or not sys.stdout.isatty():
-        _apply_session_effort(agent, cfg, "auto")
+        _apply_session_mode(agent, cfg, "standard")
         return True
-    if _choose_effort(agent, cfg) is None:
+    mode = _choose_mode(agent, cfg)
+    if mode is None or (mode == "thinking" and _choose_effort(agent, cfg) is None):
         agent.model = prior_model
+        _set_agent_model(agent, cfg, _agent_local_ollama(agent), prior_info)
         return False
     return True
 
@@ -5297,7 +5494,7 @@ class PersistentChatTUI:
         return [
             ("class:frame.label", "you"),
             ("", f"  {self.ui_state.model}"),
-            ("", f"  effort:{self.ui_state.effort}"),
+            ("", f"  mode:{self.ui_state.effort}"),
         ]
 
     def _composer_rail_style(self) -> str:
@@ -5408,7 +5605,10 @@ class PersistentChatTUI:
                 label = textwrap.shorten(
                     value + active_marker, width=width, placeholder="…",
                 )
-            style = "class:choice.selected" if selected else "class:choice.item"
+            if _is_choice_disabled(value):
+                style = "class:choice.disabled"
+            else:
+                style = "class:choice.selected" if selected else "class:choice.item"
             suffix = "\n" if index < len(self._choice_values) - 1 else ""
             fragments.append((style, f"  {marker} {label}{suffix}"))
         return fragments
@@ -5455,7 +5655,8 @@ class PersistentChatTUI:
             formatted = f"{current:,}"
             return value == (formatted if formatted in self._choice_values else "custom input")
         if kind == "model":
-            return value == self.agent.model
+            choice = getattr(self, "_model_choices", {}).get(value)
+            return choice.ref == _agent_model_ref(self.agent) if choice else value.strip() == self.agent.model
         if kind == "effort":
             return value == _effort_value_label(self.agent.ollama_code_think)
         return False
@@ -5926,7 +6127,7 @@ class PersistentChatTUI:
         direction = 1 if delta >= 0 else -1
         for _ in range(max(1, abs(delta))):
             self._choice_index = (self._choice_index + direction) % len(self._choice_values)
-            while _is_choice_section(self._choice_values[self._choice_index]):
+            while _is_choice_section(self._choice_values[self._choice_index]) or _is_choice_disabled(self._choice_values[self._choice_index]):
                 self._choice_index = (
                     self._choice_index + direction
                 ) % len(self._choice_values)
@@ -5935,7 +6136,7 @@ class PersistentChatTUI:
 
     def _click_choice(self, index: int) -> None:
         """Select once by mouse, then confirm only on a second click."""
-        if _is_choice_section(self._choice_values[index]):
+        if _is_choice_section(self._choice_values[index]) or _is_choice_disabled(self._choice_values[index]):
             return
         if index == self._choice_click_index:
             self._choice_click_index = None
@@ -6017,7 +6218,11 @@ class PersistentChatTUI:
     def _begin_choice(self, kind: str, values: list[str], default: str) -> None:
         exit_choice = "back" if "back" in values else CANCEL_CHOICE
         values = [v for v in values if v not in {RESET_THEME_CHOICE, CANCEL_CHOICE, "back"}]
-        values.extend([exit_choice] if kind == "session" else [RESET_THEME_CHOICE, exit_choice])
+        values.extend(
+            [exit_choice]
+            if kind in {"session", "model source", "model cloud provider"}
+            else [RESET_THEME_CHOICE, exit_choice]
+        )
         if not values:
             self._append(f"\n[error] No {kind} choices are available.\n")
             return
@@ -6025,7 +6230,7 @@ class PersistentChatTUI:
         self._choice_kind = kind
         self._choice_values = values
         self._choice_index = values.index(default) if default in values else 0
-        if _is_choice_section(values[self._choice_index]):
+        if _is_choice_section(values[self._choice_index]) or _is_choice_disabled(values[self._choice_index]):
             self._move_choice(1)
         self._choice_click_index = None
         if kind in {"theme", "text theme"}:
@@ -6038,6 +6243,48 @@ class PersistentChatTUI:
         self.status_error = ""
         self._apply_choice_preview()
         self.application.invalidate()
+
+    def _open_model_source(self) -> None:
+        # Category navigation begins predictably at the first item; the
+        # selected model itself remains highlighted in its final model list.
+        self._begin_choice("model source", ["Local", "Cloud", CANCEL_CHOICE], "Local")
+
+    def _open_cloud_provider(self) -> None:
+        rows = [
+            "OpenAI" if self.cfg.openai_api_key else "OpenAI — API key not configured",
+            "Google" if self.cfg.gemini_api_key else "Google — API key not configured",
+            "back",
+        ]
+        self._begin_choice("model cloud provider", rows, "OpenAI")
+
+    def _open_model_backend(self, backend: str, parent: str) -> None:
+        rows, choices = _model_picker_rows(
+            self.cfg, _agent_local_ollama(self.agent), backend, getattr(self.agent, "model_info", None)
+        )
+        self._model_choices = choices
+        self._model_parent = parent
+        default = next(
+            (row for row, info in choices.items() if info.ref == _agent_model_ref(self.agent)),
+            rows[0],
+        )
+        self._begin_choice("model", [*rows, "back"], default)
+
+    def _finish_reasoning_selection(self) -> None:
+        model_changed = self._choice_prior_model is not None
+        self._choice_kind = None
+        self._choice_values = []
+        self._choice_prior_model = None
+        if model_changed:
+            try:
+                _save_last_chat_model(self.chat_preferences_path, _agent_model_ref(self.agent))
+            except OSError as exc:
+                self.status_error = f"model preference was not saved: {exc}"
+        self.ui_state.update_from_agent(self.agent)
+        self._set_input("")
+        self.activity = "ready" if not self.running else self.activity
+        mode = getattr(self.agent, "reasoning_mode", "standard")
+        detail = mode if mode == "standard" else f"thinking · {_agent_effort_label(self.agent)}"
+        self._append(f"\n[session] model {_agent_model_ref(self.agent)} · {detail} · history kept\n")
 
     def _cancel_choice(self) -> None:
         if self._runtime_edit:
@@ -6069,6 +6316,10 @@ class PersistentChatTUI:
         self._end_choice_preview(restore=True)
         if self._choice_prior_model is not None:
             self.agent.model = self._choice_prior_model
+            prior_info = getattr(self, "_choice_prior_model_info", None)
+            if prior_info is not None:
+                _set_agent_model(self.agent, self.cfg, _agent_local_ollama(self.agent), prior_info)
+                self._choice_prior_model_info = None
         self._choice_prior_model = None
         self._choice_kind = None
         self._choice_values = []
@@ -6091,12 +6342,12 @@ class PersistentChatTUI:
         exact = [
             index
             for index, value in enumerate(self._choice_values)
-            if not _is_choice_section(value) and value.casefold() == response
+            if not _is_choice_section(value) and not _is_choice_disabled(value) and value.casefold() == response
         ]
         matches = exact or [
             index
             for index, value in enumerate(self._choice_values)
-            if not _is_choice_section(value) and value.casefold().startswith(response)
+            if not _is_choice_section(value) and not _is_choice_disabled(value) and value.casefold().startswith(response)
         ]
         if len(matches) != 1:
             self.status_error = (
@@ -6126,6 +6377,35 @@ class PersistentChatTUI:
             return
         if selected == "back" and self._choice_kind in {"theme", "text theme"}:
             self._cancel_choice()
+            return
+        if selected == "back" and self._choice_kind == "model":
+            if getattr(self, "_model_parent", "source") == "cloud":
+                self._open_cloud_provider()
+            else:
+                self._open_model_source()
+            return
+        if self._choice_kind == "model source":
+            if selected == "Cloud":
+                self._open_cloud_provider()
+            elif selected == "Local":
+                self._open_model_backend("ollama", "source")
+            elif selected == CANCEL_CHOICE:
+                self._cancel_choice()
+            return
+        if self._choice_kind == "model cloud provider":
+            if selected == "back":
+                self._open_model_source()
+            elif selected == "OpenAI":
+                self._open_model_backend("openai_api", "cloud")
+            elif selected == "Google":
+                self._open_model_backend("gemini_api", "cloud")
+            return
+        if self._choice_kind == "mode":
+            _apply_session_mode(self.agent, self.cfg, selected)
+            if selected == "thinking":
+                self._begin_choice("effort", [*EFFORT_CHOICES, CANCEL_CHOICE], "medium")
+            else:
+                self._finish_reasoning_selection()
             return
         if self._choice_kind == "runtime device":
             if selected == "back":
@@ -6208,19 +6488,23 @@ class PersistentChatTUI:
                     return
                 selected = default_model
             elif self._choice_kind == "effort":
-                selected = "auto"
+                selected = "medium"
             elif self._choice_kind == "input height":
                 self.appearance.input_height = DEFAULT_INPUT_HEIGHT
                 self.appearance.input_max_height = MAX_INPUT_HEIGHT
         if self._choice_kind == "model":
-            self._choice_prior_model = self.agent.model
-            self.agent.model = selected
-            current = _effort_value_label(self.agent.ollama_code_think)
-            self._begin_choice(
-                "effort",
-                [*EFFORT_CHOICES, RESET_THEME_CHOICE, CANCEL_CHOICE],
-                current,
+            info = getattr(self, "_model_choices", {}).get(
+                selected, ModelInfo("ollama", selected, selected)
             )
+            if info is None:
+                self.status_error = "select a model row"
+                return
+            self._choice_prior_model = self.agent.model
+            self._choice_prior_model_info = getattr(
+                self.agent, "model_info", ModelInfo("ollama", self.agent.model, self.agent.model)
+            )
+            _set_agent_model(self.agent, self.cfg, _agent_local_ollama(self.agent), info)
+            self._begin_choice("mode", [*REASONING_MODES, CANCEL_CHOICE], "standard")
             return
         if self._choice_kind in {"theme", "text theme"}:
             self._apply_appearance_choice(self._choice_kind, selected)
@@ -6245,23 +6529,8 @@ class PersistentChatTUI:
             )
             self._open_settings_category("input field", "height:")
             return
-        model_changed = self._choice_prior_model is not None
         _apply_session_effort(self.agent, self.cfg, selected)
-        self._choice_kind = None
-        self._choice_values = []
-        self._choice_prior_model = None
-        if model_changed:
-            try:
-                _save_last_chat_model(self.chat_preferences_path, self.agent.model)
-            except OSError as exc:
-                self.status_error = f"model preference was not saved: {exc}"
-        self.ui_state.update_from_agent(self.agent)
-        self._set_input("")
-        self.activity = "ready" if not self.running else self.activity
-        self._append(
-            f"\n[session] model {self.agent.model} · effort "
-            f"{_agent_effort_label(self.agent)} · history kept\n"
-        )
+        self._finish_reasoning_selection()
 
     def _apply_appearance_choice(self, kind: str, selected: str) -> None:
         reset = selected == RESET_THEME_CHOICE
@@ -6969,40 +7238,42 @@ class PersistentChatTUI:
             else:
                 self._open_resume()
             return
-        if text == "/models":
-            models = _sorted_model_names(self.agent.ollama.list_models())
-            listing = "\n".join(
-                f"  {name}{'  <- active' if name == self.agent.model else ''}"
-                for name in models
-            )
-            self._append(f"\n[installed models]\n{listing or '  none'}\n")
-            return
         if text == "/model" or text.startswith("/model "):
             requested = text.removeprefix("/model").strip()
             if requested:
-                resolved = _resolve_model(self.agent.ollama, requested)
+                available = _available_chat_models(self.cfg, _agent_local_ollama(self.agent))
+                resolved = _resolve_chat_model(available, requested)
                 if resolved is None:
-                    self._append(f"\n[error] No unique model match for {requested!r}.\n")
+                    self._append(f"\n[error] No unique Cloud or Local model match for {requested!r}. Use a canonical backend/model ID if ambiguous.\n")
                     return
                 self._choice_prior_model = self.agent.model
-                self.agent.model = resolved
-                current = _effort_value_label(self.agent.ollama_code_think)
-                self._begin_choice("effort", [*EFFORT_CHOICES, CANCEL_CHOICE], current)
+                self._choice_prior_model_info = self.agent.model_info
+                _set_agent_model(self.agent, self.cfg, _agent_local_ollama(self.agent), resolved)
+                self._begin_choice("mode", [*REASONING_MODES, CANCEL_CHOICE], "standard")
             else:
-                self._begin_choice(
-                    "model",
-                    [
-                        *_sorted_model_names(self.agent.ollama.list_models()),
-                        CANCEL_CHOICE,
-                    ],
-                    self.agent.model,
-                )
+                self._open_model_source()
+            return
+        if text == "/mode" or text.startswith("/mode "):
+            requested = text.removeprefix("/mode").strip().lower()
+            if requested:
+                if requested not in REASONING_MODES:
+                    self._append("\n[error] Mode must be standard or thinking.\n")
+                    return
+                _apply_session_mode(self.agent, self.cfg, requested)
+                self.ui_state.update_from_agent(self.agent)
+                self._append(f"\n[session] mode {requested}\n")
+            else:
+                current = getattr(self.agent, "reasoning_mode", "standard")
+                self._begin_choice("mode", [*REASONING_MODES, CANCEL_CHOICE], current)
             return
         if text == "/effort" or text.startswith("/effort "):
             requested = text.removeprefix("/effort").strip().lower()
+            if getattr(self.agent, "reasoning_mode", "standard") != "thinking":
+                self._append("\n[error] Effort is available in Thinking mode. Use /mode thinking first.\n")
+                return
             if requested:
                 if requested not in EFFORT_CHOICES:
-                    self._append("\n[error] Effort must be auto, off, low, medium, or high.\n")
+                    self._append("\n[error] Effort must be low, medium, or high.\n")
                     return
                 _apply_session_effort(self.agent, self.cfg, requested)
                 self.ui_state.update_from_agent(self.agent)
@@ -7501,9 +7772,26 @@ def chat(
 ):
     """Interactive agent session in the current directory."""
     cfg = load_config()
+    if cfg.openai_api_key or cfg.gemini_api_key:
+        threading.Thread(
+            target=_refresh_cloud_model_cache,
+            args=(cfg,),
+            name="klaude-model-catalog-refresh",
+            daemon=True,
+        ).start()
     chat_preferences_path = cfg.data_dir / "chat-preferences.json"
     remembered_model = _load_last_chat_model(chat_preferences_path)
-    agent, memory = _build_agent(Path.cwd(), model or remembered_model or None)
+    requested_model = model or remembered_model or ""
+    # A canonical cloud reference cannot be handed to Ollama during startup.
+    agent, memory = _build_agent(
+        Path.cwd(), None if "/" in requested_model else (requested_model or None)
+    )
+    if requested_model:
+        selected = _resolve_chat_model(
+            _available_chat_models(cfg, agent.local_ollama), requested_model
+        )
+        if selected is not None:
+            _set_agent_model(agent, cfg, agent.local_ollama, selected)
     _apply_saved_permissions(agent, chat_preferences_path)
     runtime_preferences, _ = _migrate_runtime_device_preference(
         chat_preferences_path, _load_runtime_preferences(chat_preferences_path)
@@ -7512,16 +7800,16 @@ def chat(
     _apply_tool_validation_preferences(agent, chat_preferences_path)
     _apply_tool_availability_preferences(agent, chat_preferences_path)
     _apply_web_provider_preferences(agent, chat_preferences_path)
-    if remembered_model and not model:
+    if remembered_model and not model and "/" not in remembered_model:
         try:
             installed_models = agent.ollama.list_models()
         except Exception:
             installed_models = []
         if installed_models and remembered_model not in installed_models:
             agent.model = cfg.models["coder"]
-            _apply_session_effort(agent, cfg, "auto")
+            _apply_session_mode(agent, cfg, "standard")
     try:
-        _save_last_chat_model(chat_preferences_path, agent.model)
+        _save_last_chat_model(chat_preferences_path, _agent_model_ref(agent))
     except OSError as exc:
         console.print(f"[yellow]could not save chat model preference:[/] {exc}")
     session_id = str(uuid.uuid4())[:8]
@@ -7685,16 +7973,11 @@ def chat(
             _clear_plain_session_view()
             console.print(Text(_restored_transcript(target, turns, console.width - 1)))
             continue
-        if user_msg == "/models":
-            for m in _sorted_model_names(agent.ollama.list_models()):
-                marker = " [green]<- active[/]" if m == agent.model else ""
-                console.print(f"  {m}{marker}")
-            continue
         if user_msg == "/model" or user_msg.startswith("/model "):
             target = user_msg.removeprefix("/model").strip()
             if _choose_model_and_effort(agent, cfg, target):
                 try:
-                    _save_last_chat_model(chat_preferences_path, agent.model)
+                    _save_last_chat_model(chat_preferences_path, _agent_model_ref(agent))
                 except OSError as exc:
                     console.print(f"[yellow]model preference was not saved:[/] {exc}")
                 ui_state.update_from_agent(agent)
@@ -7705,9 +7988,18 @@ def chat(
             continue
         if user_msg == "/effort" or user_msg.startswith("/effort "):
             target = user_msg.removeprefix("/effort").strip()
+            if getattr(agent, "reasoning_mode", "standard") != "thinking":
+                console.print("[red]effort is available in Thinking mode; use /mode thinking first[/]")
+                continue
             if _choose_effort(agent, cfg, target) is not None:
                 ui_state.update_from_agent(agent)
                 console.print(f"[green]effort: {_agent_effort_label(agent)}[/]")
+            continue
+        if user_msg == "/mode" or user_msg.startswith("/mode "):
+            target = user_msg.removeprefix("/mode").strip()
+            if _choose_mode(agent, cfg, target) is not None:
+                ui_state.update_from_agent(agent)
+                console.print(f"[green]mode: {agent.reasoning_mode}[/]")
             continue
         if _handle_unknown_slash_command(
             user_msg,
@@ -8456,6 +8748,12 @@ def status():
         ),
     )
     modes.add_row(
+        "cloud chat models",
+        "available" if (cfg.openai_api_key or cfg.gemini_api_key) else "not configured",
+        "OpenAI API=" + ("configured" if cfg.openai_api_key else "no key")
+        + "; Gemini API=" + ("configured" if cfg.gemini_api_key else "no key"),
+    )
+    modes.add_row(
         "search billing",
         "on",
         (
@@ -8627,6 +8925,14 @@ def doctor():
     ollama = Ollama(cfg.ollama_url, timeout=5)
     up = ollama.is_up()
     check(f"ollama at {cfg.ollama_url}", up, "start with: ollama serve")
+    for provider, configured, env_name in (
+        ("OpenAI API", bool(cfg.openai_api_key), "OPENAI_API_KEY"),
+        ("Gemini API", bool(cfg.gemini_api_key), "GEMINI_API_KEY"),
+    ):
+        if configured:
+            check(f"{provider} key", True)
+        else:
+            console.print(f"[dim]SKIP[/]  {provider} key  [dim]optional; set {env_name} to enable cloud chat[/]")
 
     if up:
         installed = ollama.list_models()
