@@ -172,10 +172,25 @@ def test_plain_chat_input_uses_an_undecorated_terminal_prompt(monkeypatch):
     assert prompts == ["you> "]
 
 
+def test_bare_cli_launches_the_interactive_chat(monkeypatch):
+    from typer.testing import CliRunner
+
+    calls = []
+    monkeypatch.setattr(
+        "klaude_cli.main.chat",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    result = CliRunner().invoke(app, [])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [{"model": "", "legacy": False, "no_tui": False}]
+
+
 def test_canonical_command_reference_preserves_sections_and_lines():
     reference = format_command_reference(width=100)
 
-    assert reference.startswith("Usage: klaude [OPTIONS] COMMAND [ARGS]...\n\n")
+    assert reference.startswith("Usage: klaude [OPTIONS] [COMMAND] [ARGS]...\n\n")
     assert "\nCLI COMMANDS\n" in reference
     assert "\nDOCS COMMANDS\n" in reference
     assert "\nCHAT COMMANDS\n" in reference
@@ -831,7 +846,7 @@ def test_command_reference_metadata_renders_preformatted(monkeypatch):
     )
 
     _print_assistant_text(
-        "Usage: klaude [OPTIONS] COMMAND [ARGS]...\n\nCLI COMMANDS\n",
+        "Usage: klaude [OPTIONS] [COMMAND] [ARGS]...\n\nCLI COMMANDS\n",
         {"content_type": "command_reference", "preserve_whitespace": True},
     )
 
@@ -963,6 +978,74 @@ def test_slash_completer_lists_every_command_immediately_after_slash():
     assert list(ChatCommandCompleter().get_completions(Document("say /"), None)) == []
 
 
+def test_completion_rows_highlight_the_characters_that_match_the_typed_prefix(tmp_path):
+    source = tmp_path / "stopwatch.md"
+    source.write_text("context")
+    command = next(
+        item
+        for item in ChatCommandCompleter().get_completions(Document("/sto"), None)
+        if item.text == "/stop"
+    )
+    attachment = next(
+        ChatCommandCompleter(workdir_provider=lambda: tmp_path).get_completions(
+            Document("Review @sto"), None
+        )
+    )
+
+    for completion, matched in ((command, "/sto"), (attachment, "sto")):
+        fragments = list(completion.display)
+        assert ("class:suggestion-match-text", matched) in fragments
+        assert any(
+            style == "class:suggestion-unmatched-text" and text.strip()
+            for style, text in fragments
+        )
+        assert "".join(text for _style, text in fragments) == completion.display_text
+
+
+def test_completion_match_color_uses_the_composer_foreground_without_a_new_background():
+    from prompt_toolkit.styles import merge_styles
+    from prompt_toolkit.styles.defaults import default_ui_style
+
+    # Prompt Toolkit merges its own menu styles before application styles.
+    # The regression only appears in that real composition.
+    style = merge_styles([default_ui_style(), _tui_style("autumn", DEFAULT_TEXT_THEME)])
+    matched = style.get_attrs_for_style_str(
+        "class:completion-menu.completion class:suggestion-match-text"
+    )
+    row = style.get_attrs_for_style_str("class:completion-menu.completion")
+    composer = style.get_attrs_for_style_str("class:input-field")
+    status_text = style.get_attrs_for_style_str("class:runtime_text")
+    unmatched = style.get_attrs_for_style_str(
+        "class:completion-menu.completion class:suggestion-unmatched-text"
+    )
+
+    assert matched.color == composer.color
+    assert matched.bgcolor == row.bgcolor
+    assert unmatched.color == status_text.color
+    assert unmatched.bgcolor == row.bgcolor
+
+    selected = style.get_attrs_for_style_str("class:completion-menu.completion.current")
+    assert selected.color == composer.color
+    assert selected.bgcolor == row.bgcolor
+    assert not selected.bold
+    assert not selected.underline
+
+    selected_match = style.get_attrs_for_style_str(
+        "class:completion-menu.completion.current class:suggestion-match-text"
+    )
+    assert selected_match.color == composer.color
+    assert selected_match.bgcolor == row.bgcolor
+    assert not selected_match.bold
+    assert not selected_match.underline
+
+    selected_unmatched = style.get_attrs_for_style_str(
+        "class:completion-menu.completion.current "
+        "class:suggestion-unmatched-text"
+    )
+    assert selected_unmatched.color == composer.color
+    assert selected_unmatched.bgcolor == row.bgcolor
+
+
 def test_inline_attachment_mentions_complete_and_supply_file_or_folder_context(tmp_path):
     folder = tmp_path / "project notes"
     folder.mkdir()
@@ -989,18 +1072,44 @@ def test_inline_attachment_mentions_complete_and_supply_file_or_folder_context(t
     assert "brief.md" in context
 
 
-def test_inline_attachment_completion_is_anchored_at_the_at_sign():
+@pytest.mark.parametrize("fragment", ["", "s", "src/klaude", '"project notes/'])
+def test_inline_attachment_completion_is_anchored_at_the_at_sign(fragment):
     tui = _fake_persistent_tui()
-    original = Document("Review this @s")
-    tui._set_input("Review this @src/klaude")
+    original = Document("Review this @" + fragment)
+    tui._set_input(original.text)
     buffer = tui.input.buffer
     buffer.complete_state = CompletionState(
         original,
-        [Completion("src/klaude_cli", start_position=-len("src/klaude"))],
+        [Completion('"project notes/"', start_position=-len(fragment)),
+         Completion("src/", start_position=-len(fragment))],
         complete_index=None,
     )
 
-    assert tui._completion_anchor_columns() == len("src/klaude")
+    assert tui.input.control.menu_position() == len("Review this @")
+    for index in (0, 1, None):
+        buffer.go_to_completion(index)
+        assert tui.input.control.menu_position() == len("Review this @")
+
+
+def test_exact_command_completion_survives_automatic_completion_and_enter(monkeypatch):
+    tui = _fake_persistent_tui()
+    submitted = []
+    monkeypatch.setattr(tui, "_submit_buffer", lambda **kw: submitted.append(tui.input.text))
+
+    async def type_command():
+        tui._set_input("/sto")
+        await tui.input.buffer._async_completer()
+        tui.input.buffer.insert_text("p", fire_event=False)
+        await tui.input.buffer._async_completer()
+
+    asyncio.run(type_command())
+    state = tui.input.buffer.complete_state
+    assert state is not None
+    assert [item.text for item in state.completions] == ["/stop"]
+    accept = next(binding.handler for binding in tui.key_bindings.bindings
+                  if binding.handler.__name__ == "accept")
+    accept(None)
+    assert submitted == ["/stop"]
 
 
 @pytest.mark.parametrize("key", [(Keys.Backspace,), (Keys.ControlH,)])
@@ -1287,6 +1396,26 @@ def test_persistent_tui_keeps_input_live_and_queues_while_running():
     assert list(tui.pending) == ["explain the tests"]
     assert "[queued 1] explain the tests" in tui.output.text
     assert not tui.input.window.dont_extend_width()
+
+
+def test_session_actions_queue_in_input_order_while_a_turn_is_running(monkeypatch):
+    tui = _fake_persistent_tui()
+    monkeypatch.setattr("klaude_cli.main._chat_status", lambda *_args: "ready")
+    tui.running = True
+    tui._set_input("/status")
+
+    tui._submit_buffer(steer=False)
+
+    assert tui.input.text == ""
+    assert list(tui.pending) == ["/status"]
+    assert type(tui.pending[0]).__name__ == "PendingChatCommand"
+    assert "[queued action 1] /status" in tui.output.text
+
+    tui.running = False
+    tui._start_next()
+
+    assert not tui.pending
+    assert "[status]" in tui.output.text
 
 
 def test_persistent_tui_input_has_empty_state_placeholder():
@@ -1921,15 +2050,17 @@ def test_cancel_during_effort_picker_restores_original_model():
 
 def test_persistent_tui_renders_unavailable_picker_options_in_gray():
     tui = _fake_persistent_tui()
-    tui._begin_choice(
-        "model cloud provider",
-        ["OpenAI — API key not configured", "back"],
-        "back",
-    )
+    tui._open_cloud_provider()
 
     fragments = tui._choice_fragments()
 
     assert ("class:choice.disabled", "    OpenAI — API key not configured\n") in fragments
+    assert tui._choice_values[-3:] == ["back", "", "Tip: add OPENAI_API_KEY and/or GEMINI_API_KEY to config/.env"]
+    assert ("class:choice.disabled", "\n") in fragments
+    assert (
+        "class:choice.disabled",
+        "    Tip: add OPENAI_API_KEY and/or GEMINI_API_KEY to config/.env",
+    ) in fragments
 
 
 @pytest.mark.parametrize(
@@ -2131,6 +2262,29 @@ def test_printed_transcript_background_fills_rows_without_padding(tmp_path):
     assert screen.display[10] == "Y" * 80
     assert screen.display[11].rstrip() == "Y" * 5
     assert tui.output.text == text
+
+
+def test_escape_follows_a_pickers_visible_back_or_cancel_action():
+    tui = _fake_persistent_tui()
+
+    tui._begin_choice("model", ["demo-model", "back"], "demo-model")
+    tui._model_parent = "cloud"
+    tui._dismiss_picker()
+    assert tui._choice_kind == "model cloud provider"
+
+    tui._dismiss_picker()
+    assert tui._choice_kind == "model source"
+
+    tui._dismiss_picker()
+    assert tui._choice_kind is None
+
+    tui._open_settings_category("tools")
+    tui._dismiss_picker()
+    assert tui._choice_kind == "settings"
+
+    tui._begin_choice("input height", ["8 lines", "cancel"], "8 lines")
+    tui._dismiss_picker()
+    assert tui._choice_kind == "input field settings"
 
 
 def test_height_range_rejects_invalid_input_and_persists_valid_range(tmp_path):

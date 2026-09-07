@@ -30,7 +30,7 @@ Prereqs: [Ollama](https://ollama.com/download), Docker, ~10GB disk for models.
 ```bash
 git clone https://github.com/Chansovisoth/klaude-code && cd klaude-code
 make setup          # docker services + uv sync + models for your RAM tier + doctor
-uv run klaude chat  # or: uv tool install --editable apps/cli && klaude chat
+uv run klaude       # or: uv tool install --editable apps/cli && klaude
 ```
 
 `make setup` asks how you want to run Ollama — use an existing install (auto-detected, just press Enter), install system-wide, run it in Docker, point at a remote URL, or skip. Non-interactive installs (`curl | bash`, CI) skip the menu with sane defaults, or force a choice with `--ollama=existing|system|docker|url:URL|skip` and `--no-models`. Model pulls auto-detect your hardware: 32GB+ RAM pulls `qwen3-coder:30b` (30B MoE, the best local coding model that runs on CPU+RAM), 16GB pulls `gpt-oss:20b`, 8GB pulls `qwen3:4b` — and anything you already have is skipped, never re-downloaded.
@@ -39,7 +39,7 @@ uv run klaude chat  # or: uv tool install --editable apps/cli && klaude chat
 
 | Command | What it does |
 |---|---|
-| `klaude chat` | interactive agent session in the current repo |
+| `klaude` | interactive agent session in the current repo (`klaude chat` also works) |
 | `klaude ask "…"` | one-shot question, tools enabled |
 | `klaude learn URL -l nextjs` | ingest docs into a named library |
 | `klaude docs add react https://react.dev/llms.txt -l react` | install refreshable `llms.txt` docs |
@@ -65,7 +65,7 @@ uv run klaude chat  # or: uv tool install --editable apps/cli && klaude chat
 
 `-l` / `--library` is the friendly name for a knowledge bucket. `-c` / `--collection` still works as a compatibility alias.
 
-Inside `klaude chat`, use `/help` to print the command reference
+Inside the interactive chat, use `/help` to print the command reference
 without asking the model to summarize it.
 
 The interactive terminal writes its transcript into ordinary terminal

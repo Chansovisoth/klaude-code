@@ -1,7 +1,8 @@
 """klaude — local-first AI coding agent.
 
 Commands:
-  klaude chat                 interactive agent session in the current repo
+  klaude                      interactive agent session in the current repo
+  klaude chat                 compatibility alias for the interactive session
   klaude ask "question"       one-shot question (tools enabled)
   klaude learn URL|FILE -l X  ingest docs into a named library
   klaude docs add NAME URL    install refreshable llms.txt documentation
@@ -82,6 +83,7 @@ from klaude_core.runtime_context import (
     render_runtime_context,
 )
 from prompt_toolkit import Application, PromptSession
+from prompt_toolkit.buffer import CompletionState
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
@@ -129,7 +131,12 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-app = typer.Typer(add_completion=False, no_args_is_help=True)
+app = typer.Typer(
+    add_completion=False,
+    invoke_without_command=True,
+    no_args_is_help=False,
+    subcommand_metavar="[COMMAND] [ARGS]...",
+)
 docs_app = typer.Typer(
     help="Manage refreshable documentation sources.",
     invoke_without_command=True,
@@ -145,6 +152,15 @@ sessions_app = typer.Typer(
     invoke_without_command=True,
 )
 app.add_typer(sessions_app, name="sessions")
+
+
+@app.callback(invoke_without_command=True)
+def default_command(ctx: typer.Context) -> None:
+    """Launch the interactive session when no subcommand is supplied."""
+    if ctx.invoked_subcommand is None:
+        chat(model="", legacy=False, no_tui=False)
+
+
 console = Console()
 _RUNTIME_CONTEXT_NOTICE_SHOWN = False
 DEFAULT_COMMAND_REFERENCE_WIDTH = 100
@@ -200,9 +216,11 @@ def _is_choice_section(value: str) -> bool:
 
 def _is_choice_disabled(value: str) -> bool:
     return (
-        "API key not configured" in value
+        not value
+        or "API key not configured" in value
         or "models unavailable" in value
         or value.startswith("Ollama unavailable")
+        or value.startswith("Tip: ")
     )
 
 
@@ -879,8 +897,17 @@ def _tui_style(theme: str, text_theme: str):
     output_foreground = next(
         token for token in chrome["output-field"].split() if token.startswith("#")
     )
+
     def foreground(style: str) -> str:
         return next(token for token in style.split() if token.startswith("#"))
+
+    def background(style: str) -> str:
+        return next(
+            token.removeprefix("bg:")
+            for token in style.split()
+            if token.startswith("bg:")
+        )
+
     def blend_hex(background: str, foreground: str, ratio: float) -> str:
         background_rgb = tuple(int(background[index : index + 2], 16) for index in (1, 3, 5))
         foreground_rgb = tuple(int(foreground[index : index + 2], 16) for index in (1, 3, 5))
@@ -898,11 +925,7 @@ def _tui_style(theme: str, text_theme: str):
         0.60 if theme == "crimson-red" else 0.45,
     )
     composer_rail = f"bg:{input_background} {output_background}"
-    footer_path_background = next(
-        token.removeprefix("bg:")
-        for token in chrome["bottom-toolbar"].split()
-        if token.startswith("bg:")
-    )
+    footer_path_background = background(chrome["bottom-toolbar"])
     pygments_name = TEXT_THEME_PYGMENTS.get(
         text_theme,
         TEXT_THEME_PYGMENTS[DEFAULT_TEXT_THEME],
@@ -929,6 +952,31 @@ def _tui_style(theme: str, text_theme: str):
                     "runtime_busy": f"{muted_runtime_text} bold",
                     "runtime_queue": muted_runtime_text,
                     "runtime_error": f"{foreground(chrome['status.error'])} bold",
+                    # Matched suggestion characters should look exactly like
+                    # the text being typed in the composer. Their completion
+                    # row background still comes from the surrounding menu.
+                    # Keep this outside the ``completion-menu.*`` namespace.
+                    # Prompt Toolkit's default ``completion-menu`` rule has a
+                    # gray background that nested fragment classes inherit.
+                    "suggestion-match-text": foreground(chrome["input-field"]),
+                    "suggestion-unmatched-text": muted_runtime_text,
+                    # Selection keeps the existing row surface and decoration,
+                    # but makes the whole candidate use the composer text color.
+                    "completion-menu.completion.current": (
+                        f"{chrome['completion-menu.completion']} "
+                        f"{foreground(chrome['input-field'])} "
+                        "nobold nounderline noreverse"
+                    ),
+                    "completion-menu.completion.current suggestion-match-text": (
+                        foreground(chrome["input-field"])
+                    ),
+                    "completion-menu.completion.current suggestion-unmatched-text": (
+                        foreground(chrome["input-field"])
+                    ),
+                    "completion-menu.meta.completion.current": (
+                        f"{chrome['completion-menu.meta.completion']} "
+                        "nobold nounderline noreverse"
+                    ),
                     "help.command": f"{foreground(chrome['frame.border'])} bold",
                     "transcript.logo": f"{foreground(chrome['frame.border'])} bold",
                     "footer": chrome["input-field"],
@@ -1856,6 +1904,21 @@ def _inline_attachment_completion_fragment(text: str) -> str | None:
     return match.group("fragment") if match else None
 
 
+def _completion_display(text: str, match: str):
+    """Light up the typed part of a completion without changing its value."""
+    if not match:
+        return text
+    start = text.casefold().find(match.casefold())
+    if start < 0:
+        return text
+    end = start + len(match)
+    return [
+        ("", text[:start]),
+        ("class:suggestion-match-text", text[start:end]),
+        ("class:suggestion-unmatched-text", text[end:]),
+    ]
+
+
 class ChatCommandCompleter(Completer):
     """Complete registered slash commands, including immediately after `/`."""
 
@@ -1895,7 +1958,10 @@ class ChatCommandCompleter(Completer):
                     yield Completion(
                         value,
                         start_position=-len(fragment),
-                        display=f"{_attachment_suggestion_icon(entry)} {value}",
+                        display=_completion_display(
+                            f"{_attachment_suggestion_icon(entry)} {value}",
+                            fragment,
+                        ),
                     )
             return
         if not prefix.startswith("/") or any(char.isspace() for char in prefix):
@@ -1913,7 +1979,7 @@ class ChatCommandCompleter(Completer):
                 start_position=-len(prefix),
                 # The menu already provides one outer cell of spacing. These
                 # display-only spaces provide one more on each side.
-                display=f" {command} ",
+                display=_completion_display(f" {command} ", prefix),
                 display_meta=f" {spec.summary} ",
             )
 
@@ -2301,7 +2367,7 @@ def _append_command_section(
 
 
 def format_command_reference(*, width: int | None = None) -> str:
-    lines = ["Usage: klaude [OPTIONS] COMMAND [ARGS]..."]
+    lines = ["Usage: klaude [OPTIONS] [COMMAND] [ARGS]..."]
     _append_command_section(lines, "OPTIONS", OPTION_COMMANDS, width=width)
     _append_command_section(lines, "CLI COMMANDS", CLI_COMMANDS, width=width)
     _append_command_section(lines, "DOCS COMMANDS", DOCS_COMMANDS, width=width)
@@ -5106,6 +5172,10 @@ class PendingChatTurn(str):
         return instance
 
 
+class PendingChatCommand(PendingChatTurn):
+    """A session action that must execute in order, outside a model turn."""
+
+
 class PersistentChatTUI:
     """Normal-screen chat surface with a live input while the agent is running."""
 
@@ -5162,6 +5232,7 @@ class PersistentChatTUI:
         self._printed_transcript_length = 0
         self._review_next = False
         self._pending_resume: str | None = None
+        self._executing_queued_command = False
         self.appearance_path = appearance_path or (cfg.data_dir / "appearance.json")
         self.chat_preferences_path = chat_preferences_path or (
             cfg.data_dir / "chat-preferences.json"
@@ -5256,6 +5327,9 @@ class PersistentChatTUI:
             wrap_lines=True,
             style="class:input-field",
         )
+        self.input.buffer.on_text_changed += self._keep_exact_command_completion
+        self.input.buffer.on_cursor_position_changed += self._keep_exact_command_completion
+        self.input.control.menu_position = self._completion_menu_position
         self.input.control.input_processors.append(
             ConditionalProcessor(
                 InputPlaceholderProcessor(self._composer_placeholder_text),
@@ -5456,7 +5530,6 @@ class PersistentChatTUI:
             floats=[self.completion_float],
             offset_float=self.completion_float,
             offset_columns=3,
-            anchor_columns=self._completion_anchor_columns,
         )
         self.application: Application[None] = Application(
             layout=Layout(root, focused_element=self.input),
@@ -5590,6 +5663,9 @@ class PersistentChatTUI:
         width = max(20, self._transcript_content_width() - 6)
         fragments = []
         for index, value in enumerate(self._choice_values):
+            if not value:
+                fragments.append(("class:choice.disabled", "\n"))
+                continue
             if _is_choice_section(value):
                 suffix = "\n" if index < len(self._choice_values) - 1 else ""
                 fragments.append(
@@ -5734,17 +5810,34 @@ class PersistentChatTUI:
             fragments.append(("class:completion-menu.meta.completion", " " * meta_width))
         return fragments
 
-    def _completion_anchor_columns(self) -> int:
-        """Anchor inline @path suggestions at their mention, not the cursor."""
+    def _keep_exact_command_completion(self, buffer) -> None:
+        """Keep a fully typed slash command available for Enter and Tab."""
+        document = buffer.document
+        prefix = document.text_before_cursor
+        if self._choice_kind or not prefix.startswith("/") or any(
+            char.isspace() for char in prefix
+        ):
+            return
+        completions = list(self.input.completer.get_completions(document, None))
+        if len(completions) == 1 and completions[0].text == prefix:
+            # Seed the state before automatic completion runs: Prompt Toolkit
+            # otherwise removes a sole completion that inserts no new text.
+            buffer.complete_state = CompletionState(document, completions)
+            buffer.on_completions_changed.fire()
+
+    def _completion_menu_position(self) -> int | None:
+        """Anchor to the original token even while navigation replaces it."""
         state = self.input.buffer.complete_state
-        current = self.input.buffer.document
-        mention_fragment = _inline_attachment_completion_fragment(current.text_before_cursor)
-        if mention_fragment is not None:
-            # The float is cursor-relative. Subtracting the current token width
-            # keeps it pinned at @ as that token grows or shrinks.
-            return get_cwidth(mention_fragment)
-        document = state.original_document if state else current
-        return get_cwidth(document.text_before_cursor)
+        document = state.original_document if state else self.input.buffer.document
+        prefix = document.text_before_cursor
+        if prefix.startswith("/attach "):
+            return len("/attach ")
+        mention = _INLINE_ATTACHMENT_COMPLETION.search(prefix)
+        if mention:
+            return mention.start() + 1
+        if prefix.startswith("/"):
+            return 1
+        return None
 
     def _completion_scrollbar_padding_style(self, edge: str) -> str:
         """Continue the thumb into fixed completion padding at either end."""
@@ -5899,7 +5992,7 @@ class PersistentChatTUI:
             )
         )
         def dismiss_picker(event) -> None:
-            self._cancel_choice()
+            self._dismiss_picker()
 
         @bindings.add(
             "escape", filter=Condition(lambda: self.input.buffer.complete_state is not None)
@@ -6217,12 +6310,19 @@ class PersistentChatTUI:
 
     def _begin_choice(self, kind: str, values: list[str], default: str) -> None:
         exit_choice = "back" if "back" in values else CANCEL_CHOICE
+        trailing_hints = (
+            [value for value in values if value.startswith("Tip: ")]
+            if kind == "model cloud provider" else []
+        )
         values = [v for v in values if v not in {RESET_THEME_CHOICE, CANCEL_CHOICE, "back"}]
+        values = [value for value in values if value not in trailing_hints]
         values.extend(
             [exit_choice]
             if kind in {"session", "model source", "model cloud provider"}
             else [RESET_THEME_CHOICE, exit_choice]
         )
+        if trailing_hints:
+            values.extend(["", *trailing_hints])
         if not values:
             self._append(f"\n[error] No {kind} choices are available.\n")
             return
@@ -6254,6 +6354,7 @@ class PersistentChatTUI:
             "OpenAI" if self.cfg.openai_api_key else "OpenAI — API key not configured",
             "Google" if self.cfg.gemini_api_key else "Google — API key not configured",
             "back",
+            "Tip: add OPENAI_API_KEY and/or GEMINI_API_KEY to config/.env",
         ]
         self._begin_choice("model cloud provider", rows, "OpenAI")
 
@@ -6332,6 +6433,23 @@ class PersistentChatTUI:
             self._open_settings_category(parent)
             return
         self.application.invalidate()
+
+    def _dismiss_picker(self) -> None:
+        """Handle Escape as the picker's visible exit action.
+
+        Nested pickers expose ``back`` so Escape should follow that same path.
+        Pickers with only ``cancel`` have no parent to return to and retain the
+        existing cancellation behavior.
+        """
+        if self._choice_kind and "back" in self._choice_values:
+            self._choice_index = self._choice_values.index("back")
+            self._choice_click_index = None
+            self._set_input("")
+            self.status_error = ""
+            self._apply_choice_preview()
+            self._accept_choice()
+            return
+        self._cancel_choice()
 
     def _submit_choice_response(self) -> None:
         """Accept the highlighted row or a uniquely typed picker option."""
@@ -6981,12 +7099,42 @@ class PersistentChatTUI:
                 Document(tail, len(tail)), bypass_readonly=True,
             )
 
+    def _session_action_is_busy(self) -> bool:
+        """Whether an action must wait for earlier queued work to finish."""
+        return bool(
+            self.running
+            or self._ollama_control_action
+            or (self.pending and not self._executing_queued_command)
+        )
+
+    def _queue_session_action(self, text: str) -> None:
+        """Keep an action in its input order instead of rejecting it mid-turn."""
+        self._set_input("")
+        self.pending.append(PendingChatCommand(text))
+        self._append(f"\n[queued action {len(self.pending)}] {text}\n")
+        self.activity = "queued action"
+
+    def _run_queued_action(self, action: PendingChatCommand) -> None:
+        """Run one queued slash command once all preceding model turns ended."""
+        self._executing_queued_command = True
+        try:
+            self._set_input(str(action))
+            self._submit_buffer(steer=False)
+        finally:
+            self._executing_queued_command = False
+            # A few non-picker status actions intentionally leave their input
+            # intact in direct mode. A synthetic queued command must not.
+            if self.input.text == str(action):
+                self._set_input("")
+        if not self.running:
+            self._start_next()
+
     def _resume_session(self, session_id: str) -> None:
         if self.running and self.cancel_requested.is_set() and not self.pending:
             self._pending_resume = session_id
             self._append("\n[session] Will resume when the interrupted turn finishes.\n")
             return
-        if self.running or self.pending or self._ollama_control_action:
+        if self._session_action_is_busy():
             self._append("\n[session] Finish or cancel the active turn and pending queue first.\n")
             return
         turns = self.memory.load_session(session_id, timestamps=True)
@@ -7010,7 +7158,7 @@ class PersistentChatTUI:
             self._pending_resume = ""
             self._append("\n[session] Will open sessions when the interrupted turn finishes.\n")
             return
-        if self.running or self.pending or self._ollama_control_action:
+        if self._session_action_is_busy():
             self._append("\n[session] Finish or cancel the active turn and pending queue first.\n")
             return
         sessions = self.memory.resumable_sessions()
@@ -7073,6 +7221,28 @@ class PersistentChatTUI:
         if not text:
             return
         command, _, argument = text.partition(" ")
+        # These actions modify shared session state, open a modal picker, or
+        # derive output from stable session state. Keep their ordering with
+        # normal queued prompts rather than rejecting them while a worker runs.
+        if (
+            command in {
+                "/compact", "/recap", "/status", "/memory", "/skills",
+                "/permissions", "/plan", "/new", "/rename", "/fork",
+                "/export", "/diff", "/review", "/resume",
+            }
+            and not self._executing_queued_command
+            and self._session_action_is_busy()
+            # `/resume` already has a cancellation-aware handoff that wakes
+            # as soon as the current worker exits; retain that faster path.
+            and not (
+                command == "/resume"
+                and self.running
+                and self.cancel_requested.is_set()
+                and not self.pending
+            )
+        ):
+            self._queue_session_action(text)
+            return
         if command == "/vim":
             self._set_input("")
             if argument.strip():
@@ -7087,7 +7257,7 @@ class PersistentChatTUI:
                 self._append(f"\n[error] could not save composer mode: {exc}\n")
             return
         if command in {"/compact", "/recap", "/status", "/memory", "/skills"}:
-            if self.running or self.pending:
+            if self._session_action_is_busy():
                 self._append("\n[session] Finish or cancel active and queued work first.\n")
                 return
             try:
@@ -7109,7 +7279,7 @@ class PersistentChatTUI:
             return
         if command in {"/permissions", "/plan"}:
             self._set_input("")
-            if self.running or self.pending:
+            if self._session_action_is_busy():
                 self._append("\n[settings] Finish or cancel active and queued work first.\n")
                 return
             try:
@@ -7126,7 +7296,7 @@ class PersistentChatTUI:
         self._history_draft = ""
         command, _, argument = text.partition(" ")
         if command in {"/new", "/rename", "/fork", "/export", "/diff", "/review"}:
-            if self.running or self.pending or self._ollama_control_action:
+            if self._session_action_is_busy():
                 self._append("\n[session] Finish or cancel active and queued work first.\n")
                 return
             try:
@@ -7144,7 +7314,13 @@ class PersistentChatTUI:
                 elif command == "/review":
                     request = _review_request(self.agent)
                     self._review_next = True
-                    self.pending.append(PendingChatTurn(request))
+                    # Later queued input belongs after this action. Put the
+                    # generated review turn at the front when this command
+                    # itself was waiting in that queue.
+                    if self._executing_queued_command:
+                        self.pending.appendleft(PendingChatTurn(request))
+                    else:
+                        self.pending.append(PendingChatTurn(request))
                     self._start_next()
                 else:
                     target = uuid.uuid4().hex[:8]
@@ -7452,9 +7628,15 @@ class PersistentChatTUI:
             or not self.pending
             or self.shutting_down
             or self._queue_edit_index is not None
+            or self._choice_kind is not None
+            or self._runtime_edit is not None
+            or self._height_edit
         ):
             return
         turn = self.pending.popleft()
+        if isinstance(turn, PendingChatCommand):
+            self._run_queued_action(turn)
+            return
         user_msg = str(turn)
         attachment_paths = (
             *getattr(turn, "attachments", ()),

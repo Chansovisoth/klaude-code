@@ -11,9 +11,10 @@ Python `uv` workspace with a Typer/Rich CLI, Ollama model runtime, local memory,
 refreshable knowledge libraries, multi-provider web search, local-first URL
 fetching, and MCP servers for the web and knowledge layers.
 
-The main user-facing executable is `klaude`. The full interactive agent is
-`klaude chat`; the MCP servers expose Klaude's web and knowledge tools to other
-agents, but they are not the full Klaude chat agent.
+The main user-facing executable is `klaude`, which launches the full interactive
+agent with no subcommand. `klaude chat` remains a compatibility alias; the MCP
+servers expose Klaude's web and knowledge tools to other agents, but they are
+not the full Klaude chat agent.
 
 Workspace layout:
 
@@ -70,8 +71,9 @@ suggestions stay synchronized.
 
 Top-level commands currently include:
 
-- `klaude chat`: interactive agent session in the current directory; `--no-tui`
-  uses a simple line-oriented mode for terminal-native text selection/copying.
+- `klaude`: interactive agent session in the current directory; `klaude chat`
+  remains a compatibility alias. `klaude chat --no-tui` uses a simple
+  line-oriented mode for terminal-native text selection/copying.
 - `klaude ask`: one-shot question with tools enabled.
 - `klaude learn`: ingest a URL or local file into a knowledge library.
 - `klaude crawl`: same-domain documentation crawl into a refreshable library.
@@ -249,7 +251,11 @@ unique prefix typed into the composer and confirmed with Enter.
 Cancellation is cooperative at
 the next emitted model/tool event, so an in-flight Ollama HTTP request or tool
 call may finish before the steering turn starts. Bracketed multiline paste is
-one logical turn. Up/down navigate input history, Tab completes slash commands,
+one logical turn. Session actions that require an idle worker (including
+`/permissions`, `/plan`, `/resume`, `/compact`, `/new`, `/fork`, `/export`,
+`/diff`, and `/review`) queue in input order instead of being rejected; a
+picker pauses later queued input until it is completed or cancelled. Up/down
+navigate input history, Tab completes slash commands,
 and the live status line shows activity,
 queue depth, model, effort, context-window use, and last input/output token
 counts. The TUI renders actual fragments emitted by Ollama as they arrive; it
@@ -272,6 +278,14 @@ chat slash command with its registry description. Keep completion sourced from
 While the completion popup is open, Up/Down navigate suggestions instead of
 input history; history navigation resumes when the popup is closed.
 Escape closes the completion popup without altering the current input.
+An exact slash-command match stays visible after its final character is typed.
+Completion rows change only the text color of characters matching the typed
+command or path prefix. Unmatched characters use the muted status-row text
+color. Selection adds no background, font weight, or underline.
+The currently selected suggestion displays its entire candidate text using the
+normal composer input text color; it does not recolor the composer text itself.
+Inline attachment completion stays anchored at its original `@` position while
+typing or navigating suggestions, including quoted paths and wrapped input.
 Enter accepts the highlighted completion and executes the command in one press;
 Tab completes without executing so users can add arguments.
 Mouse capture is enabled only for clickable completion and picker menus; outside

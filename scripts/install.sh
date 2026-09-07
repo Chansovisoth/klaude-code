@@ -224,5 +224,5 @@ fi
 say "running klaude doctor"
 uv run klaude doctor || true
 
-say "done. try:  uv run klaude chat"
+say "done. try:  uv run klaude"
 say "or add to PATH:  uv tool install --editable apps/cli"
