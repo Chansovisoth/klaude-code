@@ -7,6 +7,10 @@ from klaude_core import load_config
 from klaude_web import Web
 
 
+def _bounded_mcp_int(value: int, *, minimum: int, maximum: int) -> int:
+    return max(minimum, min(int(value), maximum))
+
+
 def _search_execution_payload(response) -> dict:
     successful = [name for name in response.providers_succeeded if name]
     if len(successful) > 1:
@@ -37,12 +41,14 @@ def _search_execution_payload(response) -> dict:
 def main() -> None:
     from mcp.server.fastmcp import FastMCP
 
-    web = Web(load_config())
+    cfg = load_config()
+    web = Web(cfg)
     mcp = FastMCP("klaude-web")
 
     @mcp.tool()
     def web_search(query: str, max_results: int = 8) -> str:
         """Search for source leads; inspect snippets, then fetch only promising pages."""
+        max_results = _bounded_mcp_int(max_results, minimum=1, maximum=20)
         return json.dumps(
             _search_execution_payload(web.search_detailed(query, max_results)),
             ensure_ascii=False,
@@ -52,6 +58,7 @@ def main() -> None:
     @mcp.tool()
     def code_search(query: str, max_results: int = 8) -> str:
         """Search programming docs, code examples, and debugging references."""
+        max_results = _bounded_mcp_int(max_results, minimum=1, maximum=20)
         return json.dumps(web.code_search(query, max_results), ensure_ascii=False, indent=1)
 
     @mcp.tool()
@@ -64,6 +71,7 @@ def main() -> None:
         sort: str = "downloads",
     ) -> str:
         """Search Hugging Face Hub models, datasets, or Spaces."""
+        max_results = _bounded_mcp_int(max_results, minimum=1, maximum=50)
         return json.dumps(
             web.huggingface_search(repo_type or type or kind or "model", query, max_results, sort),
             ensure_ascii=False,
@@ -117,6 +125,8 @@ def main() -> None:
         respect_robots: bool = True,
     ) -> str:
         """Politely crawl same-domain pages and return markdown previews as JSON."""
+        max_depth = _bounded_mcp_int(max_depth, minimum=0, maximum=cfg.crawl_max_depth)
+        max_pages = _bounded_mcp_int(max_pages, minimum=1, maximum=cfg.crawl_max_pages)
         crawled = web.crawl_site(
             url,
             max_depth=max_depth,

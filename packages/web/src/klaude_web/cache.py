@@ -15,8 +15,7 @@ class TTLCache:
             # Search/fetch can execute on Klaude's serialized TUI worker.
             self.db = sqlite3.connect(db_path, check_same_thread=False)
             self.db.execute(
-                "CREATE TABLE IF NOT EXISTS cache "
-                "(key TEXT PRIMARY KEY, value TEXT, expires REAL)"
+                "CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT, expires REAL)"
             )
             self.db.commit()
         except sqlite3.Error:
@@ -26,9 +25,7 @@ class TTLCache:
         if self.db is None:
             return None
         try:
-            row = self.db.execute(
-                "SELECT value, expires FROM cache WHERE key=?", (key,)
-            ).fetchone()
+            row = self.db.execute("SELECT value, expires FROM cache WHERE key=?", (key,)).fetchone()
         except sqlite3.Error:
             return None
         if not row:

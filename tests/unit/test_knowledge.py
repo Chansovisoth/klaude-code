@@ -101,9 +101,7 @@ def test_store_migrates_legacy_fts_schema_without_losing_keyword_rows(tmp_path):
         ],
     )
     fts = sqlite3.connect(tmp_path / "fts.db")
-    fts.execute(
-        "CREATE VIRTUAL TABLE chunks USING fts5(id UNINDEXED, collection UNINDEXED, text)"
-    )
+    fts.execute("CREATE VIRTUAL TABLE chunks USING fts5(id UNINDEXED, collection UNINDEXED, text)")
     fts.execute(
         "INSERT INTO chunks (id, collection, text) VALUES (?,?,?)",
         ("abc", "docs", "Legacy keyword search survives migration."),
@@ -631,8 +629,7 @@ def test_agent_web_search_start_metadata_survives_text_form_tool_call():
                 return {
                     "role": "assistant",
                     "content": (
-                        "<function=web_search> "
-                        "<parameter=query>PIU university Cambodia</tool_call>"
+                        "<function=web_search> <parameter=query>PIU university Cambodia</tool_call>"
                     ),
                 }
             return {"role": "assistant", "content": "Verified."}
@@ -935,7 +932,7 @@ def test_followup_school_here_uses_runtime_location_context():
         {
             "role": "system",
             "content": (
-                "<runtime_context machine_generated=\"true\">\n"
+                '<runtime_context machine_generated="true">\n'
                 "- Timezone: Asia/Phnom_Penh\n"
                 "- Approximate country: Cambodia\n"
                 "</runtime_context>"
@@ -963,7 +960,7 @@ def test_followup_at_my_location_does_not_need_country_from_user():
         {
             "role": "system",
             "content": (
-                "<runtime_context machine_generated=\"true\">\n"
+                '<runtime_context machine_generated="true">\n'
                 "- Timezone: Asia/Phnom_Penh\n"
                 "- Approximate country: Cambodia\n"
                 "</runtime_context>"
@@ -1240,9 +1237,7 @@ def test_chairman_followup_keeps_resolved_ais_entity():
     assert state.active_entities == [entity]
     assert state.active_entities[0].mention == "AIS"
     assert state.active_entities[0].canonical_name == "American Intercon School"
-    assert state.last_standalone_query == (
-        "American Intercon School Cambodia chairman"
-    )
+    assert state.last_standalone_query == ("American Intercon School Cambodia chairman")
 
 
 @pytest.mark.parametrize(
@@ -1288,9 +1283,7 @@ def test_leadership_role_followups_preserve_active_entity(followup, role):
     _update_retrieval_state_from_user(state, followup, messages)
 
     assert state.active_entities == [entity]
-    assert state.last_standalone_query == (
-        f"American Intercon School Cambodia {role}"
-    )
+    assert state.last_standalone_query == (f"American Intercon School Cambodia {role}")
 
 
 @pytest.mark.parametrize(
@@ -1434,9 +1427,7 @@ def test_leadership_followup_uses_active_university_context():
         state,
     )
 
-    assert query == (
-        "Paragon International University Cambodia Computer Science department head"
-    )
+    assert query == ("Paragon International University Cambodia Computer Science department head")
     assert "AIS" not in query
     assert "Software" not in query
 
@@ -1543,8 +1534,7 @@ def test_agent_allows_model_planned_search_after_weak_scripted_search():
                 return {
                     "role": "assistant",
                     "content": (
-                        "I haven't been able to find the current head of the "
-                        "CS department."
+                        "I haven't been able to find the current head of the CS department."
                     ),
                 }
             if self.calls == 2:
@@ -1559,8 +1549,7 @@ def test_agent_allows_model_planned_search_after_weak_scripted_search():
                                 "name": "web_search",
                                 "arguments": {
                                     "query": (
-                                        'site:paragoniu.edu.kh "Computer Science" '
-                                        "department head"
+                                        'site:paragoniu.edu.kh "Computer Science" department head'
                                     )
                                 },
                             }
@@ -2053,11 +2042,9 @@ def test_agent_search_does_not_prefetch_candidate_or_verification_links():
     events = list(agent.run("AIS school in Cambodia"))
 
     assert fetched_urls == []
-    assert [
-        event.payload.get("tool")
-        for event in events
-        if event.kind == "tool_result"
-    ] == ["web_search"]
+    assert [event.payload.get("tool") for event in events if event.kind == "tool_result"] == [
+        "web_search"
+    ]
 
 
 @pytest.mark.skip(reason="superseded by model-directed retrieval tests")
@@ -2131,9 +2118,7 @@ def test_agent_queries_local_knowledge_before_web_for_technical_question():
 
     assert events[0].payload["tool"] == "query_knowledge"
     assert not any(
-        event.payload.get("tool") == "web_search"
-        for event in events
-        if event.kind == "tool_start"
+        event.payload.get("tool") == "web_search" for event in events if event.kind == "tool_start"
     )
 
 
@@ -2202,6 +2187,27 @@ def test_agent_rejects_stale_fetch_after_school_constraint():
     assert events[0].payload["metadata"]["rejected_fetch_candidate"] is True
 
 
+def test_knowledge_mcp_mutations_require_explicit_opt_in(monkeypatch):
+    from klaude_knowledge.mcp_server import _mcp_writes_enabled
+
+    monkeypatch.delenv("KLAUDE_MCP_ALLOW_WRITES", raising=False)
+    assert not _mcp_writes_enabled()
+    monkeypatch.setenv("KLAUDE_MCP_ALLOW_WRITES", "1")
+    assert _mcp_writes_enabled()
+
+
+def test_knowledge_mcp_local_paths_are_workspace_jailed(tmp_path):
+    from klaude_knowledge.mcp_server import _mcp_workspace_path
+
+    inside = tmp_path / "docs" / "guide.md"
+    inside.parent.mkdir()
+    inside.write_text("guide")
+
+    assert _mcp_workspace_path("docs/guide.md", tmp_path) == inside
+    with pytest.raises(ValueError, match="inside MCP workspace"):
+        _mcp_workspace_path("../secret.txt", tmp_path)
+
+
 @pytest.mark.skip(reason="superseded by model-directed retrieval tests")
 def test_agent_skips_near_duplicate_web_searches():
     from klaude_core import Agent, PermissionGate, Tool
@@ -2261,8 +2267,7 @@ def test_agent_skips_near_duplicate_web_searches():
 
     assert calls == ["who are Rhett and Link"]
     assert any(
-        event.kind == "tool_result"
-        and event.payload["metadata"].get("duplicate_search_query")
+        event.kind == "tool_result" and event.payload["metadata"].get("duplicate_search_query")
         for event in events
     )
 
@@ -2345,9 +2350,7 @@ def test_agent_does_not_repeat_identical_provider_query_and_options():
         if event.kind == "tool_result"
         and event.payload["metadata"].get("duplicate_search_strategy")
     )
-    assert '"provider":"tavily"' in duplicate.payload["metadata"][
-        "search_attempt_fingerprint"
-    ]
+    assert '"provider":"tavily"' in duplicate.payload["metadata"]["search_attempt_fingerprint"]
 
 
 def test_agent_executes_json_text_form_tool_call():
@@ -2634,9 +2637,7 @@ def test_agent_fetches_only_the_search_result_selected_by_the_model():
                         {
                             "function": {
                                 "name": "fetch_url",
-                                "arguments": {
-                                    "url": "https://www.youtube.com/@Flazeslayer/search"
-                                },
+                                "arguments": {"url": "https://www.youtube.com/@Flazeslayer/search"},
                             }
                         }
                     ],
@@ -2809,8 +2810,7 @@ def test_agent_rewrites_model_raw_result_tool_query_to_recent_topic():
             return {
                 "role": "assistant",
                 "content": (
-                    "<function=web_search> "
-                    "<parameter=query> show me 20 search results </tool_call>"
+                    "<function=web_search> <parameter=query> show me 20 search results </tool_call>"
                 ),
             }
 

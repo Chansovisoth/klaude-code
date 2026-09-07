@@ -150,9 +150,7 @@ def iter_skill_text_files(current_dir: Path) -> list[Path]:
     return sorted(
         p
         for p in current_dir.rglob("*")
-        if p.is_file()
-        and "__MACOSX" not in p.parts
-        and _is_indexable_text_file(p)
+        if p.is_file() and "__MACOSX" not in p.parts and _is_indexable_text_file(p)
     )
 
 
@@ -333,8 +331,7 @@ def recover_skill_packages(cfg: Config) -> int:
                 current_dir=Path(pending["current_dir"]),
                 manifest_path=manifest_path,
                 text_files=[
-                    Path(pending["current_dir"]) / path
-                    for path in pending.get("indexed_files", [])
+                    Path(pending["current_dir"]) / path for path in pending.get("indexed_files", [])
                 ],
                 source_checksum=pending["source_checksum"],
                 previous_sources=[],

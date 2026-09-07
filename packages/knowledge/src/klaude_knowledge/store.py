@@ -51,10 +51,7 @@ class KnowledgeStore:
                 id UNINDEXED, collection UNINDEXED, source UNINDEXED, text
             )"""
         )
-        columns = {
-            row[1]
-            for row in self.fts.execute("PRAGMA table_info(chunks)").fetchall()
-        }
+        columns = {row[1] for row in self.fts.execute("PRAGMA table_info(chunks)").fetchall()}
         if "source" not in columns:
             self.fts.execute("DROP TABLE chunks")
             self.fts.execute(
@@ -225,9 +222,12 @@ class KnowledgeStore:
         if len(sections) != len(chunks):
             raise ValueError("chunk/section count mismatch")
         operation_id = operation_id or str(uuid4())
-        version_id = version_id or hashlib.sha256(
-            f"{operation_id}\0{library}\0{owner}\0{source}\0{checksum}".encode()
-        ).hexdigest()[:32]
+        version_id = (
+            version_id
+            or hashlib.sha256(
+                f"{operation_id}\0{library}\0{owner}\0{source}\0{checksum}".encode()
+            ).hexdigest()[:32]
+        )
         now = time.time()
         rows = [
             {

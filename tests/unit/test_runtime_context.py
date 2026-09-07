@@ -115,8 +115,7 @@ def test_fastfetch_is_preferred_and_invoked_without_shell(tmp_path):
     )
 
     fastfetch_call = next(
-        call for call in calls
-        if call[0][0].endswith("fastfetch") and "-s" in call[0]
+        call for call in calls if call[0][0].endswith("fastfetch") and "-s" in call[0]
     )
     assert result.context.provider == "fastfetch"
     assert fastfetch_call[0] == [
@@ -289,8 +288,7 @@ def test_time_refreshes_while_stable_collection_uses_cache(tmp_path):
     )
 
     fastfetch_runs = [
-        call for call in calls
-        if call[0][0].endswith("fastfetch") and "-s" in call[0]
+        call for call in calls if call[0][0].endswith("fastfetch") and "-s" in call[0]
     ]
     assert len(fastfetch_runs) == 1
     assert one.context.temporal.local_iso != two.context.temporal.local_iso

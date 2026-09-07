@@ -157,9 +157,7 @@ def test_clean_search_query_removes_lookup_wrapper():
 
 
 def test_provider_directive_is_extracted_from_query_text():
-    directive = parse_provider_directive(
-        "Search for American Intercon School Cambodia using Exa."
-    )
+    directive = parse_provider_directive("Search for American Intercon School Cambodia using Exa.")
 
     assert directive.provider == "exa"
     assert directive.strict is True
@@ -238,8 +236,7 @@ def _ais_results():
             "title": "American Intercon School (AIS)",
             "url": "https://americanintercon.edu.kh/about",
             "snippet": (
-                "American Intercon School (AIS) is a Cambodian school with "
-                "campuses in Cambodia."
+                "American Intercon School (AIS) is a Cambodian school with campuses in Cambodia."
             ),
             "provider": "ddgs",
             "provider_rank": 1,
@@ -550,8 +547,7 @@ def test_runtime_location_softly_boosts_ambiguous_local_candidate():
     assert candidates[0].canonical_name == "American Intercon School"
     assert candidates[0].score_breakdown["location_relevance"] <= 0.10
     assert any(
-        candidate.canonical_name == "Automatic Identification System"
-        for candidate in candidates
+        candidate.canonical_name == "Automatic Identification System" for candidate in candidates
     )
 
 
@@ -925,8 +921,7 @@ def test_rhett_and_link_rejects_thomas_rhett_result():
         "title": "Rhett & Link - Mythical",
         "url": "https://mythical.com/pages/rhett-link",
         "snippet": (
-            "Rhett McLaughlin and Link Neal are the comedy duo behind "
-            "Good Mythical Morning."
+            "Rhett McLaughlin and Link Neal are the comedy duo behind Good Mythical Morning."
         ),
         "provider": "google",
         "provider_rank": 1,
@@ -1342,9 +1337,7 @@ def test_synthetic_category_discovery_generalizes(query_text, title, snippet):
     )
 
     assert query.category_discovery is True
-    assert [result["url"] for result in results] == [
-        "https://directory.example/relevant"
-    ]
+    assert [result["url"] for result in results] == ["https://directory.example/relevant"]
 
 
 def test_exact_synthetic_entity_query_remains_strict():
@@ -1466,12 +1459,8 @@ def test_identical_cross_provider_result_sets_are_detected_and_deduplicated():
 
     assert response.providers_attempted == ["tavily", "ddgs"]
     assert len(response.results) == 1
-    assert response.provider_metadata["provider_attempts"][1][
-        "repeated_result_set_of"
-    ] == "tavily"
-    assert response.provider_metadata["provider_attempts"][1][
-        "result_set_similarity"
-    ] == 1.0
+    assert response.provider_metadata["provider_attempts"][1]["repeated_result_set_of"] == "tavily"
+    assert response.provider_metadata["provider_attempts"][1]["result_set_similarity"] == 1.0
 
 
 def test_synthetic_provider_network_failure_falls_back_cleanly():
@@ -1558,8 +1547,7 @@ def test_quality_search_attempts_google_first_when_configured():
                 "title": "Godot Engine - Latest stable release",
                 "url": "https://godotengine.org/article/godot-4-5-stable/",
                 "snippet": (
-                    "The latest stable Godot version is confirmed by "
-                    "the official release notes."
+                    "The latest stable Godot version is confirmed by the official release notes."
                 ),
             }
         ],
@@ -2278,9 +2266,10 @@ def test_strict_exa_failure_does_not_fall_back_to_searxng():
     assert response.providers_succeeded == []
     assert calls == ["exa"]
     assert response.provider_metadata["provider_attempts"][0]["provider"] == "exa"
-    assert "authentication failed" in response.provider_metadata["provider_attempts"][0][
-        "reason"
-    ].lower()
+    assert (
+        "authentication failed"
+        in response.provider_metadata["provider_attempts"][0]["reason"].lower()
+    )
 
 
 def test_exa_401_is_classified_as_authentication_failure(monkeypatch):
@@ -2566,17 +2555,9 @@ def test_provider_returning_irrelevant_results_is_not_provider_failure():
     assert response.results == []
     assert response.provider_metadata["provider"] == "searxng"
     assert response.provider_metadata["providers_returned"] == ["searxng"]
-    assert response.provider_metadata["provider_attempts"][0]["status"] == (
-        "no_candidate_results"
-    )
-    assert any(
-        warning["error_type"] == "CandidateDiscoveryFailed"
-        for warning in response.warnings
-    )
-    assert not any(
-        warning["error_type"] == "NoProviderSucceeded"
-        for warning in response.warnings
-    )
+    assert response.provider_metadata["provider_attempts"][0]["status"] == ("no_candidate_results")
+    assert any(warning["error_type"] == "CandidateDiscoveryFailed" for warning in response.warnings)
+    assert not any(warning["error_type"] == "NoProviderSucceeded" for warning in response.warnings)
 
 
 def test_official_documentation_outranks_seo_tutorials():
@@ -2942,11 +2923,16 @@ def test_stale_failure_does_not_count_toward_a_new_cooldown_window():
     )
 
     assert store.get("google")["consecutive_failures"] == 1
-    assert ProviderRegistry(
-        cfg,
-        state_store=store,
-        now=lambda: current,
-    ).status_for("google").state == ProviderState.AVAILABLE
+    assert (
+        ProviderRegistry(
+            cfg,
+            state_store=store,
+            now=lambda: current,
+        )
+        .status_for("google")
+        .state
+        == ProviderState.AVAILABLE
+    )
 
 
 def test_failure_from_replaced_api_key_does_not_count_toward_cooldown():
@@ -2972,11 +2958,16 @@ def test_failure_from_replaced_api_key_does_not_count_toward_cooldown():
     state = store.get("google")
     assert state["consecutive_failures"] == 1
     assert state["api_key_fingerprint"] == _api_key_fingerprint(cfg.gemini_api_key)
-    assert ProviderRegistry(
-        cfg,
-        state_store=store,
-        now=lambda: now,
-    ).status_for("google").state == ProviderState.AVAILABLE
+    assert (
+        ProviderRegistry(
+            cfg,
+            state_store=store,
+            now=lambda: now,
+        )
+        .status_for("google")
+        .state
+        == ProviderState.AVAILABLE
+    )
 
 
 def test_weak_relevance_falls_back_without_marking_provider_unhealthy():
@@ -3455,3 +3446,10 @@ def test_evidence_sufficiency_requires_authority():
     )
 
     assert not evidence_is_sufficient(query, weak, cfg)
+
+
+def test_web_mcp_numeric_inputs_are_bounded():
+    from klaude_web.mcp_server import _bounded_mcp_int
+
+    assert _bounded_mcp_int(-100, minimum=1, maximum=20) == 1
+    assert _bounded_mcp_int(10_000, minimum=1, maximum=20) == 20

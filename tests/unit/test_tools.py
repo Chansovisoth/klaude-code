@@ -1,4 +1,5 @@
 import subprocess
+import sys
 
 import pytest
 from klaude_tools import GitCommandError, Workspace, build_tools, classify_command
@@ -100,6 +101,51 @@ def test_failed_commit_is_not_reported_as_success(tmp_path):
         ws.git_commit("empty")
 
 
+def test_file_write_refuses_changes_that_appeared_after_startup(tmp_path):
+    _init_repo(tmp_path)
+    ws = Workspace(tmp_path)
+    (tmp_path / "README.md").write_text("user edit\n")
+
+    with pytest.raises(PermissionError, match="changed after Klaude started"):
+        ws.write_file("agent.txt", "agent edit\n")
+
+    assert not (tmp_path / "agent.txt").exists()
+    assert (tmp_path / "README.md").read_text() == "user edit\n"
+
+
+def test_file_write_commits_only_its_target_path(tmp_path):
+    _init_repo(tmp_path)
+    ws = Workspace(tmp_path)
+
+    ws.write_file("agent.txt", "agent edit\n")
+
+    changed = _run(["git", "show", "--pretty=", "--name-only", "HEAD"], tmp_path).stdout
+    assert changed.strip() == "agent.txt"
+    assert _run(["git", "status", "--porcelain"], tmp_path).stdout == ""
+
+
+def test_file_write_handles_spaces_and_quote_characters_in_git_paths(tmp_path):
+    _init_repo(tmp_path)
+    ws = Workspace(tmp_path)
+
+    ws.write_file('odd "name".txt', "agent edit\n")
+
+    changed = _run(["git", "show", "--format=", "--name-only", "-z", "HEAD"], tmp_path).stdout
+    assert 'odd "name".txt' in changed.split("\0")
+    assert _run(["git", "status", "--porcelain"], tmp_path).stdout == ""
+
+
+def test_successful_workspace_recheck_reenables_writes(tmp_path):
+    _init_repo(tmp_path)
+    ws = Workspace(tmp_path)
+    ws.write_enabled = False
+
+    result = ws.ensure_work_branch("clean-target")
+
+    assert result == "working on branch klaude/clean-target"
+    assert ws.write_enabled is True
+
+
 def test_nested_repository_directory_resolves_repo_root(tmp_path):
     _init_repo(tmp_path)
     nested = tmp_path / "packages" / "core"
@@ -140,7 +186,8 @@ def test_dirty_worktree_allows_read_only_shell_commands(tmp_path, monkeypatch):
     assert "exit=0" in ws.run_shell("rg needle .")
     assert "exit=0" in ws.run_shell("find . -type f")
     assert "exit=0" in ws.run_shell("git diff")
-    assert [call[0][0] for call in calls] == ["rg", "find", "git"]
+    assert all(call[0][1:3] == ["-m", "klaude_tools.sandbox"] for call in calls)
+    assert [call[0][call[0].index("--") + 1] for call in calls] == ["rg", "find", "git"]
 
 
 def test_simple_commands_execute_without_shell(tmp_path, monkeypatch):
@@ -155,7 +202,9 @@ def test_simple_commands_execute_without_shell(tmp_path, monkeypatch):
 
     ws.run_shell("ls -la")
 
-    assert calls[0][0] == ["ls", "-la"]
+    sandbox_argv = calls[0][0]
+    assert sandbox_argv[1:3] == ["-m", "klaude_tools.sandbox"]
+    assert sandbox_argv[sandbox_argv.index("--") + 1 :] == ["ls", "-la"]
     assert calls[0][1]["shell"] is False
 
 
@@ -171,7 +220,12 @@ def test_shell_syntax_uses_explicit_shell_path(tmp_path, monkeypatch):
 
     ws.run_shell("rg needle . | head")
 
-    assert calls[0][0] == ["/bin/bash", "-lc", "rg needle . | head"]
+    sandbox_argv = calls[0][0]
+    assert sandbox_argv[sandbox_argv.index("--") + 1 :] == [
+        "/bin/bash",
+        "-lc",
+        "rg needle . | head",
+    ]
     assert calls[0][1]["shell"] is False
 
 
@@ -179,6 +233,72 @@ def test_destructive_git_commands_receive_highest_risk():
     assert classify_command("git reset --hard").risk == "destructive"
     assert classify_command("git clean -fd").risk == "destructive"
     assert classify_command("git push --force origin main").risk == "destructive"
+
+
+def test_destructive_find_and_nested_shell_commands_are_denied(tmp_path):
+    ws = Workspace(tmp_path)
+
+    assert classify_command("find . -delete").risk == "destructive"
+    assert classify_command("bash -c 'rm -rf generated'").risk == "destructive"
+    with pytest.raises(PermissionError, match="destructive command denied"):
+        ws.run_shell("find . -delete")
+
+
+def test_read_only_git_output_option_is_classified_as_writing():
+    assert classify_command("git diff --output=patch.txt").risk == "workspace-writing"
+
+
+def test_shell_rejects_explicit_paths_outside_workspace(tmp_path):
+    ws = Workspace(tmp_path)
+
+    with pytest.raises(PermissionError, match="path escapes workspace"):
+        ws.run_shell("cat /etc/passwd")
+    with pytest.raises(PermissionError, match="path escapes workspace"):
+        ws.run_shell("cat ../../etc/passwd")
+
+
+def test_tools_deny_or_redact_workspace_secrets(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / ".env").write_text("OPENAI_API_KEY=sk-example1234567890\n")
+    ws = Workspace(tmp_path)
+
+    with pytest.raises(PermissionError, match="secret file denied"):
+        ws.read_file("config/.env")
+    with pytest.raises(PermissionError, match="secret file denied"):
+        ws.run_shell("cat config/.env")
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, "sk-example1234567890", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert "sk-example1234567890" not in ws.run_shell("env")
+    assert "[REDACTED]" in ws.run_shell("env")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Landlock is Linux-only")
+def test_successful_shell_write_is_auto_committed(tmp_path):
+    _init_repo(tmp_path)
+    ws = Workspace(tmp_path)
+
+    result = ws.run_shell("touch generated.txt")
+
+    assert "exit=0" in result
+    assert _run(["git", "status", "--porcelain"], tmp_path).stdout == ""
+    changed = _run(["git", "show", "--pretty=", "--name-only", "HEAD"], tmp_path).stdout
+    assert changed.strip() == "generated.txt"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Landlock is Linux-only")
+def test_shell_landlock_blocks_implicit_reads_outside_workspace(tmp_path):
+    ws = Workspace(tmp_path)
+
+    result = ws.run_shell(
+        "/usr/bin/python3 -c \"from pathlib import Path; print(Path('/etc/passwd').read_text())\""
+    )
+
+    assert "exit=1" in result
+    assert "Permission denied" in result
 
 
 def test_run_shell_permission_detail_includes_classified_risk(tmp_path):

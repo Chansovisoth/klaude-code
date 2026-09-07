@@ -112,8 +112,7 @@ def _skip_url(url: str) -> bool:
 def _matches_any(url: str, patterns: list[str]) -> bool:
     path = urlparse(url).path
     return any(
-        fnmatch.fnmatch(url, pattern) or fnmatch.fnmatch(path, pattern)
-        for pattern in patterns
+        fnmatch.fnmatch(url, pattern) or fnmatch.fnmatch(path, pattern) for pattern in patterns
     )
 
 
@@ -164,7 +163,7 @@ def _retry_delay(response: httpx.Response | None, attempt: int, max_delay: float
         parsed = parse_retry_after(retry_after)
         if parsed is not None:
             return min(parsed, max_delay)
-    return min((0.5 * (2 ** attempt)) + random.uniform(0, 0.25), max_delay)
+    return min((0.5 * (2**attempt)) + random.uniform(0, 0.25), max_delay)
 
 
 def _get_with_retries(
@@ -277,7 +276,7 @@ class Robots:
         cached = self._cache[origin]
         if cached is False:
             return False
-        return True if cached is None else cached.can_fetch(self.user_agent, url)
+        return True if cached is None or cached is True else cached.can_fetch(self.user_agent, url)
 
     def sitemap_urls(self, start_url: str) -> list[str]:
         parsed = urlparse(start_url)
@@ -341,8 +340,8 @@ def discover_sitemap_urls(
     candidates = robots.sitemap_urls(start) if robots else []
     candidates.append(f"{_origin(start)}/sitemap.xml")
 
-    seen_sitemaps = set()
-    seen_urls = set()
+    seen_sitemaps: set[str] = set()
+    seen_urls: set[str] = set()
     discovered: list[str] = []
     queue = deque(_normalize_url(url) for url in candidates)
 

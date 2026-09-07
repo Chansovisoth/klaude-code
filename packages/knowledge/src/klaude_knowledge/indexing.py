@@ -6,6 +6,7 @@ import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from klaude_core import Config, Ollama
@@ -78,7 +79,7 @@ class KnowledgeIndexer:
                 version_ids={},
                 chunk_count=0,
             )
-        prepared = []
+        prepared: list[dict[str, Any]] = []
         all_chunk_texts: list[str] = []
         for doc in documents:
             checksum = incoming_checksums[doc.source]
@@ -105,18 +106,18 @@ class KnowledgeIndexer:
 
         staged: dict[str, str] = {}
         cursor = 0
-        for doc in prepared:
-            count = len(doc["texts"])
+        for prepared_doc in prepared:
+            count = len(prepared_doc["texts"])
             doc_vectors = vectors[cursor : cursor + count]
             cursor += count
-            staged[doc["source"]] = self.store.stage_version(
+            staged[prepared_doc["source"]] = self.store.stage_version(
                 library,
                 owner,
-                doc["source"],
-                doc["texts"],
+                prepared_doc["source"],
+                prepared_doc["texts"],
                 doc_vectors,
-                doc["checksum"],
-                sections=doc["sections"],
+                prepared_doc["checksum"],
+                sections=prepared_doc["sections"],
                 operation_id=operation_id,
             )
 

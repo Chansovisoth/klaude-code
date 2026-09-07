@@ -124,9 +124,7 @@ def test_small_qwen_defaults_to_non_thinking_and_allows_override(tmp_path, monke
     assert cfg.ollama_think_for_model("qwen3-coder:30b") is None
     assert cfg.ollama_options["num_predict"] == 2048
 
-    (config_dir / "config.toml").write_text(
-        "[ollama]\nthink = true\ncode_think = 'medium'\n"
-    )
+    (config_dir / "config.toml").write_text("[ollama]\nthink = true\ncode_think = 'medium'\n")
     overridden = load_config()
     assert overridden.ollama_think_for_model("qwen3.5:4b") is True
     assert overridden.ollama_code_think_for_model("qwen3.5:4b") == "medium"
@@ -217,7 +215,7 @@ def test_config_dir_dotenv_precedes_project_dotenv(tmp_path, monkeypatch):
     assert cfg.config_file == config_dir / "config.toml"
 
 
-def test_exa_api_key_uses_project_dotenv_before_provider_construction(tmp_path, monkeypatch):
+def test_exa_api_key_respects_explicit_process_environment(tmp_path, monkeypatch):
     config_dir = tmp_path / "config"
     data_dir = tmp_path / "data"
     config_dir.mkdir()
@@ -230,15 +228,15 @@ def test_exa_api_key_uses_project_dotenv_before_provider_construction(tmp_path, 
 
     cfg = load_config()
 
-    assert cfg.exa_api_key == "from-project-dotenv"
+    assert cfg.exa_api_key == "stale-shell-key"
 
     from klaude_web.providers import ProviderRegistry
 
     provider = ProviderRegistry(cfg).providers["exa"]
-    assert provider.api_key() == "from-project-dotenv"
+    assert provider.api_key() == "stale-shell-key"
 
 
-def test_tavily_api_key_uses_project_dotenv_before_provider_construction(
+def test_tavily_api_key_respects_explicit_process_environment(
     tmp_path,
     monkeypatch,
 ):
@@ -254,15 +252,15 @@ def test_tavily_api_key_uses_project_dotenv_before_provider_construction(
 
     cfg = load_config()
 
-    assert cfg.tavily_api_key == "from-project-tavily"
+    assert cfg.tavily_api_key == "stale-shell-key"
 
     from klaude_web.providers import ProviderRegistry
 
     provider = ProviderRegistry(cfg).providers["tavily"]
-    assert provider.api_key() == "from-project-tavily"
+    assert provider.api_key() == "stale-shell-key"
 
 
-def test_firecrawl_api_key_uses_project_dotenv_before_provider_construction(
+def test_firecrawl_api_key_respects_explicit_process_environment(
     tmp_path,
     monkeypatch,
 ):
@@ -274,18 +272,16 @@ def test_firecrawl_api_key_uses_project_dotenv_before_provider_construction(
     monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
     monkeypatch.setattr(config_module, "SOURCE_ROOT", tmp_path)
     monkeypatch.setenv("FIRECRAWL_API_KEY", "stale-shell-key")
-    (tmp_path / ".env").write_text(
-        "FIRECRAWL_API_KEY=  from-project-firecrawl  # comment\n"
-    )
+    (tmp_path / ".env").write_text("FIRECRAWL_API_KEY=  from-project-firecrawl  # comment\n")
 
     cfg = load_config()
 
-    assert cfg.firecrawl_api_key == "from-project-firecrawl"
+    assert cfg.firecrawl_api_key == "stale-shell-key"
 
     from klaude_web.providers import ProviderRegistry
 
     provider = ProviderRegistry(cfg).providers["firecrawl"]
-    assert provider.api_key() == "from-project-firecrawl"
+    assert provider.api_key() == "stale-shell-key"
 
 
 def test_exa_api_key_does_not_read_alternative_env_names(tmp_path, monkeypatch):

@@ -106,13 +106,9 @@ class Ollama:
                             assembled["role"] = message["role"]
                         for field in ("content", "thinking"):
                             if message.get(field):
-                                assembled[field] = assembled.get(field, "") + str(
-                                    message[field]
-                                )
+                                assembled[field] = assembled.get(field, "") + str(message[field])
                         if isinstance(message.get("tool_calls"), list):
-                            assembled.setdefault("tool_calls", []).extend(
-                                message["tool_calls"]
-                            )
+                            assembled.setdefault("tool_calls", []).extend(message["tool_calls"])
                     if event.get("done"):
                         self.last_chat_metadata = {
                             key: event[key]

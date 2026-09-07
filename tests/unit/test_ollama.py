@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 from klaude_core.ollama import Ollama
 
 
@@ -60,6 +61,16 @@ def test_cancel_active_wakes_a_blocked_socket_reader():
     import socket
     import threading
     from types import SimpleNamespace
+
+    probe_reader, probe_writer = socket.socketpair()
+    try:
+        try:
+            probe_reader.shutdown(socket.SHUT_RDWR)
+        except PermissionError:
+            pytest.skip("test sandbox blocks socket shutdown")
+    finally:
+        probe_reader.close()
+        probe_writer.close()
 
     reader, writer = socket.socketpair()
     finished = threading.Event()

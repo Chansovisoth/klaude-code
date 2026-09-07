@@ -1172,9 +1172,9 @@ Evaluate a lightweight internal model descriptor resembling this concept:
 ModelInfo(
     id=...,
     display_name=...,
-    source=...,       # cloud | local
-    provider=...,     # openai | google | ollama
-    backend=...,      # codex | openai-api | gemini-api | gemini-cli | ollama
+    source=...,  # cloud | local
+    provider=...,  # openai | google | ollama
+    backend=...,  # codex | openai-api | gemini-api | gemini-cli | ollama
     capabilities=...,
 )
 ```

@@ -78,7 +78,7 @@ def _rrf(ranked_lists: list[list[dict]]) -> list[dict]:
                     if value == "" and by_id[hid].get(key):
                         continue
                     by_id[hid][key] = value
-    order = sorted(scores, key=scores.get, reverse=True)
+    order = sorted(scores, key=lambda hit_id: scores[hit_id], reverse=True)
     merged = []
     for rank, hid in enumerate(order, 1):
         hit = by_id[hid]
@@ -204,9 +204,7 @@ class Knowledge:
         scored.sort(key=lambda item: (-item[0], item[1]))
         best = scored[0][0]
         chosen = [
-            candidate
-            for score, candidate, _reason in scored
-            if score >= max(0.7, best - 0.3)
+            candidate for score, candidate, _reason in scored if score >= max(0.7, best - 0.3)
         ]
         return LibraryRoute(chosen[:12], best, scored[0][2])
 
@@ -235,11 +233,7 @@ class Knowledge:
             vector_rank_score = 1.0 / (1.0 + float(hit.get("vector_rank") or 999))
             keyword_rank_score = 1.0 / (1.0 + float(hit.get("keyword_rank") or 999))
             backend_score = max(vector_similarity, keyword_rank_score, vector_rank_score)
-            confidence = (
-                backend_score * 0.45
-                + overlap * 0.35
-                + route.confidence * 0.20
-            )
+            confidence = backend_score * 0.45 + overlap * 0.35 + route.confidence * 0.20
             if route.global_search_allowed:
                 confidence *= 0.85
             threshold = min_global if route.global_search_allowed else min_combined

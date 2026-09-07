@@ -4,6 +4,9 @@ Register in e.g. Claude Code / OpenCode / Cline as:
   command: uv, args: [run, klaude-knowledge-mcp]
 """
 
+import os
+from pathlib import Path
+
 from klaude_core import load_config
 
 from klaude_knowledge import (
@@ -20,12 +23,39 @@ from klaude_knowledge import (
 )
 
 
+def _mcp_writes_enabled() -> bool:
+    return os.environ.get("KLAUDE_MCP_ALLOW_WRITES", "").strip() == "1"
+
+
+def _mcp_workspace_path(value: str, workspace: Path) -> Path:
+    candidate = Path(value).expanduser()
+    resolved = (
+        (workspace / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+    )
+    if not resolved.is_relative_to(workspace):
+        raise ValueError(f"path must stay inside MCP workspace: {workspace}")
+    return resolved
+
+
 def main() -> None:
     from mcp.server.fastmcp import FastMCP
 
     cfg = load_config()
     kn = Knowledge(cfg)
     mcp = FastMCP("klaude-knowledge")
+    writes_allowed = _mcp_writes_enabled()
+    workspace = Path(os.environ.get("KLAUDE_MCP_WORKSPACE", Path.cwd())).resolve()
+
+    def require_writes() -> str:
+        return (
+            ""
+            if writes_allowed
+            else "error: knowledge mutations are disabled; set KLAUDE_MCP_ALLOW_WRITES=1 "
+            "for this MCP server"
+        )
+
+    def workspace_path(value: str) -> Path:
+        return _mcp_workspace_path(value, workspace)
 
     def index_docs(installed) -> int:
         documents = []
@@ -49,6 +79,8 @@ def main() -> None:
     @mcp.tool()
     def learn_url(url: str, collection: str = "", library: str = "") -> str:
         """Fetch a documentation page and store it in a knowledge library."""
+        if error := require_writes():
+            return error
         from klaude_web import Web
 
         target_library = library or collection
@@ -61,11 +93,14 @@ def main() -> None:
     @mcp.tool()
     def learn_file(path: str, collection: str = "", library: str = "") -> str:
         """Index a local text/markdown file into a knowledge library."""
+        if error := require_writes():
+            return error
         target_library = library or collection
         if not target_library:
             return "error: provide a library name"
-        n = kn.learn_file(target_library, path)
-        return f"learned {n} chunks from {path} into library '{target_library}'"
+        safe_path = workspace_path(path)
+        n = kn.learn_file(target_library, str(safe_path))
+        return f"learned {n} chunks from {safe_path} into library '{target_library}'"
 
     @mcp.tool()
     def docs_add(
@@ -76,6 +111,9 @@ def main() -> None:
         max_pages: int = 200,
     ) -> str:
         """Install refreshable llms.txt documentation and index it."""
+        if error := require_writes():
+            return error
+        max_pages = max(1, min(int(max_pages), 500))
         from klaude_web import Web
 
         installed = install_docs_source(
@@ -96,6 +134,10 @@ def main() -> None:
     @mcp.tool()
     def docs_update(name: str, max_pages: int = -1) -> str:
         """Refresh an installed documentation source and snapshot the old current tree."""
+        if error := require_writes():
+            return error
+        if max_pages >= 0:
+            max_pages = max(1, min(int(max_pages), 500))
         from klaude_web import Web
 
         web = Web(cfg)
@@ -128,6 +170,10 @@ def main() -> None:
         respect_robots: bool = True,
     ) -> str:
         """Politely crawl same-domain pages and index them into a knowledge library."""
+        if error := require_writes():
+            return error
+        max_depth = max(0, min(int(max_depth), cfg.crawl_max_depth))
+        max_pages = max(1, min(int(max_pages), cfg.crawl_max_pages))
         from klaude_web import Web
 
         target_library = library or collection
@@ -186,7 +232,12 @@ def main() -> None:
         name: str = "",
     ) -> str:
         """Install a skill ZIP/folder and index it into a knowledge library."""
-        installed = install_skill_package(cfg, path, name=name, library=library or collection)
+        if error := require_writes():
+            return error
+        safe_path = workspace_path(path)
+        installed = install_skill_package(
+            cfg, str(safe_path), name=name, library=library or collection
+        )
         documents = []
         for file, source_uri in zip(
             installed.text_files,

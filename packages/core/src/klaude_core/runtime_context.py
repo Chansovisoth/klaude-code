@@ -19,14 +19,11 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 FASTFETCH_MODULES = (
-    "os:host:kernel:uptime:packages:shell:display:terminal:"
-    "cpu:gpu:memory:swap:disk:localip:locale"
+    "os:host:kernel:uptime:packages:shell:display:terminal:cpu:gpu:memory:swap:disk:localip:locale"
 )
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-SECRETISH_RE = re.compile(
-    r"(?i)\b(api[_-]?key|token|password|secret|ssh|private[_-]?key)\b"
-)
+SECRETISH_RE = re.compile(r"(?i)\b(api[_-]?key|token|password|secret|ssh|private[_-]?key)\b")
 MAX_VALUE_CHARS = 160
 COUNTRY_NAMES = {
     "KH": "Cambodia",
@@ -338,8 +335,7 @@ def parse_fastfetch_json(raw: str) -> tuple[SystemContext, list[str]]:
                 CpuInfo(
                     name=sanitize_text(_first(result_dict, "name", "model", "cpu") or result),
                     logical_threads=_int_or_none(
-                        _first(result_dict, "threads", "logicalCores")
-                        or cores.get("logical")
+                        _first(result_dict, "threads", "logicalCores") or cores.get("logical")
                     ),
                     physical_cores=_int_or_none(
                         _first(result_dict, "physicalCores")
@@ -362,10 +358,7 @@ def parse_fastfetch_json(raw: str) -> tuple[SystemContext, list[str]]:
             system.memory_total_bytes = parse_size_bytes(_first(result_dict, "total"))
             system.memory_used_bytes = parse_size_bytes(_first(result_dict, "used"))
         elif module == "swap":
-            swap_items = [
-                item for item in _listify(result)
-                if isinstance(item, dict)
-            ]
+            swap_items = [item for item in _listify(result) if isinstance(item, dict)]
             if swap_items:
                 totals = [parse_size_bytes(item.get("total")) for item in swap_items]
                 used = [parse_size_bytes(item.get("used")) for item in swap_items]
@@ -380,9 +373,8 @@ def parse_fastfetch_json(raw: str) -> tuple[SystemContext, list[str]]:
                 width = _first(display_dict, "width") or _nested(display_dict, "output", "width")
                 height = _first(display_dict, "height") or _nested(display_dict, "output", "height")
                 resolution = f"{width}x{height}" if width and height else sanitize_text(display)
-                refresh = (
-                    _first(display_dict, "refreshRate", "hz")
-                    or _nested(display_dict, "output", "refreshRate")
+                refresh = _first(display_dict, "refreshRate", "hz") or _nested(
+                    display_dict, "output", "refreshRate"
                 )
                 system.displays.append(
                     DisplayInfo(
@@ -394,11 +386,8 @@ def parse_fastfetch_json(raw: str) -> tuple[SystemContext, list[str]]:
         elif module == "disk":
             for disk in _listify(result):
                 disk_dict = disk if isinstance(disk, dict) else {}
-                bytes_dict = (
-                    disk_dict.get("bytes")
-                    if isinstance(disk_dict.get("bytes"), dict)
-                    else {}
-                )
+                raw_bytes = disk_dict.get("bytes")
+                bytes_dict: dict[str, Any] = raw_bytes if isinstance(raw_bytes, dict) else {}
                 system.disks.append(
                     DiskInfo(
                         mount=sanitize_text(_first(disk_dict, "mountpoint", "mount", "path")),
@@ -505,9 +494,10 @@ def collect_runtime_context(
 ) -> RuntimeContextResult:
     started = time.monotonic()
     now = now or datetime.now().astimezone()
-    if not getattr(cfg, "runtime_context_enabled", True) or getattr(
-        cfg, "runtime_context_provider", "auto"
-    ) == "off":
+    if (
+        not getattr(cfg, "runtime_context_enabled", True)
+        or getattr(cfg, "runtime_context_provider", "auto") == "off"
+    ):
         context = RuntimeContext(
             collected_at=now,
             provider="off",
@@ -730,11 +720,7 @@ def _read_meminfo() -> tuple[int | None, int | None, int | None, int | None]:
     used = total - available if total is not None and available is not None else None
     swap_total = values.get("SwapTotal")
     swap_free = values.get("SwapFree")
-    swap_used = (
-        swap_total - swap_free
-        if swap_total is not None and swap_free is not None
-        else None
-    )
+    swap_used = swap_total - swap_free if swap_total is not None and swap_free is not None else None
     return total, used, swap_total, swap_used
 
 
@@ -902,18 +888,17 @@ def collect_repository_context(workdir: Path, cfg: Any, runner: Runner) -> Repos
         root = Path(root_result.stdout.strip()).resolve()
         branch_result = git("rev-parse", "--abbrev-ref", "HEAD")
         branch = (
-            sanitize_text(branch_result.stdout.strip())
-            if branch_result.returncode == 0
-            else None
+            sanitize_text(branch_result.stdout.strip()) if branch_result.returncode == 0 else None
         )
         detached = branch == "HEAD"
         if detached:
             branch = None
         status_result = git("status", "--porcelain")
-        changed = [
-            line for line in status_result.stdout.splitlines()
-            if line.strip()
-        ] if status_result.returncode == 0 else []
+        changed = (
+            [line for line in status_result.stdout.splitlines() if line.strip()]
+            if status_result.returncode == 0
+            else []
+        )
         try:
             relative_path = str(workdir.resolve().relative_to(root)) or "."
         except ValueError:
@@ -935,7 +920,7 @@ def render_runtime_context(context: RuntimeContext, cfg: Any) -> str:
         return ""
     max_chars = int(getattr(cfg, "runtime_context_max_prompt_characters", 3500))
     lines = [
-        "<runtime_context machine_generated=\"true\">",
+        '<runtime_context machine_generated="true">',
         f"Collected: {context.temporal.local_iso}",
         f"Provider: {context.provider}"
         + (f" ({context.provider_version})" if context.provider_version else ""),
@@ -1121,14 +1106,18 @@ def installation_suggestion(context: RuntimeContext, *, which: Which = shutil.wh
         )
     if which("fastfetch"):
         return None
-    command = {
-        "apt": "apt install fastfetch",
-        "dnf": "dnf install fastfetch",
-        "pacman": "pacman -S fastfetch",
-        "brew": "brew install fastfetch",
-        "scoop": "scoop install fastfetch",
-        "choco": "choco install fastfetch",
-    }.get(manager)
+    command = (
+        {
+            "apt": "apt install fastfetch",
+            "dnf": "dnf install fastfetch",
+            "pacman": "pacman -S fastfetch",
+            "brew": "brew install fastfetch",
+            "scoop": "scoop install fastfetch",
+            "choco": "choco install fastfetch",
+        }.get(manager)
+        if manager
+        else None
+    )
     if command:
         return f"{prefix} Suggested command: {command}"
     return f"{prefix} Check your OS package manager for a Fastfetch package."
@@ -1149,7 +1138,10 @@ def _dataclass_to_dict(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
     if is_dataclass(value):
-        return {k: _dataclass_to_dict(v) for k, v in asdict(value).items()}
+        return {
+            k: _dataclass_to_dict(v)
+            for k, v in asdict(value).items()  # type: ignore[arg-type]
+        }
     if isinstance(value, list):
         return [_dataclass_to_dict(item) for item in value]
     if isinstance(value, dict):

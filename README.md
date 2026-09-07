@@ -90,7 +90,9 @@ for a model-assisted review with only read-only workspace tools enabled.
 The input composer follows the transcript. Enter submits a turn; Alt+\ (or
 `/steer TEXT`) prioritizes a correction at the next safe model/tool boundary.
 `/restart` and `/stop` confirm before controlling the local Ollama service and
-leave the chat session open.
+leave the chat session open. If administrator authentication is required, the
+TUI offers a masked password field and uses it only for a narrow `sudo`
+authentication step; it is not added to chat history or saved session data.
 Up/down recall prior inputs, Tab completes slash commands, and Alt+Enter inserts
 a newline when the terminal reports it distinctly. Ctrl+J is the compatibility
 newline shortcut for terminals such as MobaXterm that collapse modified Enter
@@ -279,11 +281,15 @@ The MCP servers work in Cline/Continue right now — add to your MCP config:
 ```json
 {
   "mcpServers": {
-    "klaude-knowledge": { "command": "uv", "args": ["run", "--directory", "/path/to/klaude-code", "klaude-knowledge-mcp"] },
+    "klaude-knowledge": { "command": "uv", "args": ["run", "--directory", "/path/to/klaude-code", "klaude-knowledge-mcp"], "env": { "KLAUDE_MCP_ALLOW_WRITES": "1", "KLAUDE_MCP_WORKSPACE": "/path/to/allowed/workspace" } },
     "klaude-web":       { "command": "uv", "args": ["run", "--directory", "/path/to/klaude-code", "klaude-web-mcp"] }
   }
 }
 ```
+
+The knowledge MCP is read-only by default. Its learn, docs, crawl, and skill-import
+tools require `KLAUDE_MCP_ALLOW_WRITES=1`. Local file and skill paths are jailed to
+`KLAUDE_MCP_WORKSPACE` (the server working directory when unset).
 
 And because klaude commits every edit on its own branch, VS Code's built-in diff/SCM views already show and review its work. A native extension (chat sidebar over `klaude serve`) is the phase-2 roadmap.
 

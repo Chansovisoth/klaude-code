@@ -30,12 +30,15 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true
+no_site_packages = true
+check_untyped_defs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [dependency-groups]
 dev = [
+    "mypy>=2.3.1",
     "pyte>=0.8.2",
     "pytest>=9.1.1",
     "ruff>=0.14.9",

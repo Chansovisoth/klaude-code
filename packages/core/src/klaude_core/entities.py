@@ -394,7 +394,7 @@ class EntityStore:
                             expires,
                         ),
                     )
-                    entity_id = int(cursor.lastrowid)
+                    entity_id = int(cursor.lastrowid or 0)
                 for alias in aliases:
                     db.execute(
                         """
@@ -567,11 +567,7 @@ class WikimediaEntityClient:
         aliases = tuple(
             alias
             for alias in _dedupe_names(
-                [
-                    str(alias)
-                    for alias in item.get("aliases") or []
-                    if str(alias).strip()
-                ]
+                [str(alias) for alias in item.get("aliases") or [] if str(alias).strip()]
             )
             if normalize_name(alias) != normalize_name(minimal_phrase)
         )
@@ -655,8 +651,10 @@ class EntityResolver:
             context_boost = 0.0
             if entity_type and entry.entity.entity_type == entity_type:
                 context_boost += 3.0
-            if country and entry.entity.country and normalize_name(country) == normalize_name(
-                entry.entity.country
+            if (
+                country
+                and entry.entity.country
+                and normalize_name(country) == normalize_name(entry.entity.country)
             ):
                 context_boost += 4.0
             history_boost = min(
@@ -680,9 +678,9 @@ class EntityResolver:
             current = best_by_entity.get(key)
             if current is None or candidate.final_score > current.final_score:
                 best_by_entity[key] = candidate
-        return sorted(
-            best_by_entity.values(), key=lambda item: item.final_score, reverse=True
-        )[: max(1, limit)]
+        return sorted(best_by_entity.values(), key=lambda item: item.final_score, reverse=True)[
+            : max(1, limit)
+        ]
 
     def resolve_name(
         self,
@@ -695,9 +693,7 @@ class EntityResolver:
         normalized = normalize_name(text)
         if not normalized:
             return None
-        local = self.find_name_candidates(
-            text, entity_type=entity_type, country=country, limit=3
-        )
+        local = self.find_name_candidates(text, entity_type=entity_type, country=country, limit=3)
         accepted = _accepted_candidate(text, local)
         if accepted is not None:
             if accepted.source == "local_entity_cache" and self.store:
@@ -707,9 +703,7 @@ class EntityResolver:
                     and self.wikimedia_client is not None
                     and self.store.metadata_stale(accepted.entity.canonical_name)
                 ):
-                    refreshed = self.wikimedia_client.lookup(
-                        accepted.entity.canonical_name
-                    )
+                    refreshed = self.wikimedia_client.lookup(accepted.entity.canonical_name)
                     if refreshed is not None:
                         self.store.upsert(
                             refreshed,
@@ -756,14 +750,11 @@ class EntityResolver:
                 phrase = original[group[0].start() : group[-1].end()]
                 if not _plausible_name_phrase(phrase):
                     continue
-                candidate = self.resolve_name(
-                    phrase, entity_type=entity_type, country=country
-                )
+                candidate = self.resolve_name(phrase, entity_type=entity_type, country=country)
                 if (
                     candidate
                     and candidate.string_score < 99.9
-                    and normalize_name(phrase)
-                    != normalize_name(candidate.entity.canonical_name)
+                    and normalize_name(phrase) != normalize_name(candidate.entity.canonical_name)
                 ):
                     replacements.append((group[0].start(), group[-1].end(), candidate))
 
@@ -773,9 +764,7 @@ class EntityResolver:
             value = token.group(0)
             if value.casefold() in QUERY_WORDS | RELATIONSHIP_WORDS or value.isdigit():
                 continue
-            candidate = self.resolve_name(
-                value, entity_type=entity_type, country=country
-            )
+            candidate = self.resolve_name(value, entity_type=entity_type, country=country)
             if (
                 candidate
                 and candidate.string_score < 99.9
@@ -869,9 +858,7 @@ class EntityResolver:
             canonical_name=canonical,
             entity_type=str(item.get("entity_type") or "") or None,
             aliases=tuple(
-                str(value).strip()
-                for value in item.get("aliases") or []
-                if str(value).strip()
+                str(value).strip() for value in item.get("aliases") or [] if str(value).strip()
             ),
             source="verified_search",
             country=str(item.get("country") or "") or None,
@@ -892,14 +879,12 @@ def structured_entity_profile(text: str, domain: str = "") -> dict[str, Any] | N
         canonical = normalize_name(item.canonical_name)
         canonical_present = bool(canonical) and f" {canonical} " in f" {lowered} "
         domain_present = bool(item.domain) and (
-            normalized_domain == item.domain
-            or normalized_domain.endswith(f".{item.domain}")
+            normalized_domain == item.domain or normalized_domain.endswith(f".{item.domain}")
         )
         if canonical_present or domain_present:
             matches.append(item)
         elif any(
-            len(normalize_name(alias)) > 4
-            and f" {normalize_name(alias)} " in f" {lowered} "
+            len(normalize_name(alias)) > 4 and f" {normalize_name(alias)} " in f" {lowered} "
             for alias in names
         ):
             matches.append(item)
@@ -924,11 +909,14 @@ def structured_domains_for_text(text: str) -> tuple[str, ...]:
         if not item.domain:
             continue
         names = [item.canonical_name]
-        if any(
-            f" {normalize_name(name)} " in f" {normalized} "
-            for name in names
-            if normalize_name(name)
-        ) and item.domain not in domains:
+        if (
+            any(
+                f" {normalize_name(name)} " in f" {normalized} "
+                for name in names
+                if normalize_name(name)
+            )
+            and item.domain not in domains
+        ):
             domains.append(item.domain)
     return tuple(domains)
 
@@ -987,15 +975,9 @@ def _accepted_candidate(text: str, candidates: list[NameCandidate]) -> NameCandi
     threshold = 82.0 if entity_type == "country" else 87.0
     if len(compact) <= 5:
         threshold = max(threshold, 91.0)
-    camel_or_handle = (
-        text.startswith("@")
-        or bool(re.search(r"[a-z][A-Z]", text))
-        or "_" in text
-    )
+    camel_or_handle = text.startswith("@") or bool(re.search(r"[a-z][A-Z]", text)) or "_" in text
     trusted_single_edit = (
-        edit_distance == 1
-        and best.string_score >= 84.0
-        and best.entity.confidence >= 0.85
+        edit_distance == 1 and best.string_score >= 84.0 and best.entity.confidence >= 0.85
     )
     if trusted_single_edit:
         threshold = min(threshold, 84.0)
@@ -1026,9 +1008,7 @@ def _plausible_name_phrase(text: str) -> bool:
     if len(useful) < 2:
         return False
     return any(
-        word.isupper()
-        or word[:1].isupper()
-        or bool(re.search(r"[a-z][A-Z]", word))
+        word.isupper() or word[:1].isupper() or bool(re.search(r"[a-z][A-Z]", word))
         for word in useful
     )
 

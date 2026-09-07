@@ -1,12 +1,13 @@
 import asyncio
 import inspect
 import json
+import subprocess
 import threading
 from datetime import datetime
-from types import SimpleNamespace
 from importlib.metadata import version as package_version
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from klaude_cli.main import (
@@ -16,42 +17,42 @@ from klaude_cli.main import (
     DEFAULT_INPUT_HEIGHT,
     DEFAULT_TEXT_THEME,
     DEFAULT_TUI_THEME,
-    FETCH_URL_TOOL_DESCRIPTION,
     ESCAPE_SEQUENCE_TIMEOUT,
-    INPUT_PLACEHOLDER_TEXT,
-    InputPlaceholderProcessor,
+    FETCH_URL_TOOL_DESCRIPTION,
     KITTY_KEYBOARD_PROTOCOL_OFF,
     KITTY_KEYBOARD_PROTOCOL_ON,
     LIST_COMMANDS_TOOL_DESCRIPTION,
     MAX_INPUT_HEIGHT,
     MIN_INPUT_HEIGHT,
+    SHIFT_ENTER_SEQUENCES,
+    TEXT_THEME_PREVIEW_BLOCK,
+    TUI_THEME_LABELS,
+    TUI_THEME_STYLES,
     WEATHER_TOOL_DESCRIPTION,
     WEB_SEARCH_TOOL_DESCRIPTION,
     XTERM_MODIFY_OTHER_KEYS_OFF,
     XTERM_MODIFY_OTHER_KEYS_ON,
-    SHIFT_ENTER_SEQUENCES,
     ChatCommandCompleter,
     ChatUIState,
     CommandSurface,
+    InputPlaceholderProcessor,
     PersistentChatTUI,
     TranscriptLexer,
     TUIAppearance,
-    TUI_THEME_LABELS,
-    TUI_THEME_STYLES,
-    TEXT_THEME_PREVIEW_BLOCK,
     _append_tool_capabilities,
     _apply_runtime_context_to_search_config,
+    _apply_runtime_preferences,
+    _apply_session_effort,
     _apply_tool_availability_preferences,
     _apply_web_provider_preferences,
-    _apply_session_effort,
     _bounded_result_count,
     _chat_toolbar,
-    _plan_command,
     _command_reference_context,
     _command_reference_result,
     _control_ollama_service,
-    _fenced_code_lines,
+    _control_ollama_service_with_sudo,
     _diff_syntax_lines,
+    _fenced_code_lines,
     _format_search_response,
     _format_web_results,
     _handle_command_reference_request,
@@ -63,11 +64,12 @@ from klaude_cli.main import (
     _knowledge_libraries_count,
     _load_last_chat_model,
     _load_runtime_preferences,
-    _migrate_runtime_device_preference,
     _load_tui_appearance,
     _message_divider,
+    _migrate_runtime_device_preference,
     _mode_from_permission,
     _online_docs_file,
+    _plan_command,
     _print_assistant_text,
     _print_trace,
     _query_knowledge_display_lines,
@@ -82,11 +84,10 @@ from klaude_cli.main import (
     _select_tool_names,
     _system_prompt,
     _tool_availability_preferences,
-    _web_provider_preferences,
-    _apply_runtime_preferences,
     _tui_style,
     _update_online_docs,
     _web_mode,
+    _web_provider_preferences,
     _web_search_display_lines,
     _web_search_start_metadata,
     app,
@@ -101,7 +102,6 @@ from klaude_cli.main import (
     sessions_delete,
     system_info,
 )
-from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from klaude_core import Agent, AgentEvent, PermissionGate, Tool
 from klaude_core.config import DEFAULT_PERMISSIONS, Config
 from klaude_core.memory import Memory
@@ -117,6 +117,7 @@ from prompt_toolkit.completion import Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.enums import EditingMode
 from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.output import DummyOutput
 from rich.console import Console
@@ -232,10 +233,7 @@ def test_typer_commands_and_registry_do_not_silently_diverge():
         for command in app.registered_commands
     }
     typer_names.update(group.name for group in app.registered_groups)
-    registry_names = {
-        spec.usage.split()[0]
-        for spec in iter_command_specs(CommandSurface.CLI)
-    }
+    registry_names = {spec.usage.split()[0] for spec in iter_command_specs(CommandSurface.CLI)}
 
     assert registry_names == typer_names
 
@@ -308,19 +306,13 @@ def test_command_reference_wraps_narrow_and_aligns_wide():
     assert "  chat                        Interactive agent session" in wide
     assert "  huggingface-details\n      Print Hugging Face Hub" in narrow
     assert "docs add NAME URL -l LIBRARYInstall" not in wide
-    assert (
-        "  docs add NAME URL -l LIBRARY\n"
-        "      Install refreshable llms.txt"
-    ) in narrow
+    assert ("  docs add NAME URL -l LIBRARY\n      Install refreshable llms.txt") in narrow
 
 
 def test_focused_search_command_help_is_not_full_reference():
     response = format_focused_command_help("what command searches the web", width=80)
 
-    assert response == (
-        "klaude search QUERY\n"
-        "    Web search via the configured provider."
-    )
+    assert response == ("klaude search QUERY\n    Web search via the configured provider.")
     assert "CLI COMMANDS" not in response
 
 
@@ -346,9 +338,7 @@ def test_typo_tolerant_command_reference_detection():
 
 def test_typo_tolerant_detection_does_not_intercept_unrelated_questions():
     assert not is_complete_command_reference_request("what programming language should I use")
-    assert not is_complete_command_reference_request(
-        "what database commands should my app support"
-    )
+    assert not is_complete_command_reference_request("what database commands should my app support")
     assert not is_complete_command_reference_request("how should I design a command pattern")
 
 
@@ -368,6 +358,7 @@ def test_focused_model_help_matches_actual_model_behavior():
     assert "/model list" not in response
     assert "/model select" not in response
     assert "/model info" not in response
+
 
 def test_unknown_command_help_is_deterministic():
     response = format_focused_command_help("what does /reload do?", width=80)
@@ -398,8 +389,7 @@ def test_focused_docs_and_status_help_use_registry():
         "klaude docs update NAME\n"
     )
     assert format_focused_command_help("what does the status command do?", width=90) == (
-        "klaude status\n"
-        "    Show configured modes, storage, and tool permissions."
+        "klaude status\n    Show configured modes, storage, and tool permissions."
     )
 
 
@@ -456,16 +446,11 @@ def test_command_reference_renders_as_plain_text(monkeypatch):
 
 
 def test_transcript_lexer_underlines_help_categories_and_grays_message_dividers():
-    document = Document(
-        "CLI COMMANDS\n  chat  Start chat\n"
-        "━━ you · 2026-09-05 12:34:56 ━━━━━━━━━━"
-    )
+    document = Document("CLI COMMANDS\n  chat  Start chat\n━━ you · 2026-09-05 12:34:56 ━━━━━━━━━━")
     get_line = TranscriptLexer().lex_document(document)
 
     assert get_line(0) == [("class:help.category", "CLI COMMANDS")]
-    assert get_line(2) == [
-        ("class:transcript.divider", "━━ you · 2026-09-05 12:34:56 ━━━━━━━━━━")
-    ]
+    assert get_line(2) == [("class:transcript.divider", "━━ you · 2026-09-05 12:34:56 ━━━━━━━━━━")]
 
 
 def test_transcript_lexer_highlights_fenced_code_with_its_language():
@@ -506,23 +491,18 @@ def test_transcript_lexer_accents_help_command_without_restyling_description():
     assert fragments[0] == ("class:help.command", "  /settings [CATEGORY]")
     assert "".join(text for _style, text in fragments[1:]) == "  Configure the interface."
     assert all(style != "class:help.command" for style, _text in fragments[1:])
-    assert _tui_style("autumn", "vscode-dark").get_attrs_for_style_str(
-        "class:help.command"
-    ).color == "f59a78"
+    assert (
+        _tui_style("autumn", "vscode-dark").get_attrs_for_style_str("class:help.command").color
+        == "f59a78"
+    )
 
 
 def test_user_surface_background_preserves_command_and_code_foregrounds():
     style = _tui_style("autumn", "vscode-dark")
 
-    command = style.get_attrs_for_style_str(
-        "class:help.command class:transcript.user-message"
-    )
-    keyword = style.get_attrs_for_style_str(
-        "class:pygments.keyword class:transcript.user-message"
-    )
-    code_keyword = style.get_attrs_for_style_str(
-        "class:pygments.keyword class:transcript.code"
-    )
+    command = style.get_attrs_for_style_str("class:help.command class:transcript.user-message")
+    keyword = style.get_attrs_for_style_str("class:pygments.keyword class:transcript.user-message")
+    code_keyword = style.get_attrs_for_style_str("class:pygments.keyword class:transcript.code")
 
     assert command.color == "f59a78"
     assert keyword.color == "6ebf26"
@@ -538,8 +518,10 @@ def test_code_surface_is_slightly_darker_than_the_composer_for_every_theme(theme
     code = style.get_attrs_for_style_str("class:transcript.code").bgcolor
 
     assert code != composer
-    assert all(int(code[index:index + 2], 16) < int(composer[index:index + 2], 16)
-               for index in (0, 2, 4))
+    assert all(
+        int(code[index : index + 2], 16) < int(composer[index : index + 2], 16)
+        for index in (0, 2, 4)
+    )
 
 
 def test_fenced_code_lines_include_the_fences_and_unclosed_blocks():
@@ -677,6 +659,56 @@ def test_second_batch_chat_commands_show_status_memory_skills_and_recap(tmp_path
     assert "[context] compacted" in output
 
 
+def test_status_submission_clears_exact_match_completion_popup(tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui._set_input("/status")
+    tui._keep_exact_command_completion(tui.input.buffer)
+
+    assert tui.input.buffer.complete_state is not None
+    tui._submit_buffer(steer=False)
+
+    assert tui.input.text == ""
+    assert tui.input.buffer.complete_state is None
+
+
+def test_debug_label_previews_every_label_style_without_waiting_for_idle(tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui.running = True
+    tui._set_input("/debug_label")
+    tui._keep_exact_command_completion(tui.input.buffer)
+
+    tui._submit_buffer(steer=False)
+
+    assert tui.input.text == ""
+    assert tui.input.buffer.complete_state is None
+    assert not tui.pending
+    for label in (
+        "[status]",
+        "[appearance]",
+        "[runtime]",
+        "[permission · example]",
+        "[warning]",
+        "[interrupted at a safe boundary]",
+        "[failed]",
+        "[error]",
+        "[success]",
+        "[memory saved]",
+    ):
+        assert label in tui.output.text
+    assert "[status] Neutral session information\n\n[appearance]" in tui.output.text
+    assert "[memory saved] Green saved-memory notice\n\n" in tui.output.text
+
+
+def test_debug_label_rejects_arguments(tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui._set_input("/debug_label extra")
+
+    tui._submit_buffer(steer=False)
+
+    assert "[error] /debug_label takes no arguments." in tui.output.text
+
+
 def test_plan_mode_toggles():
     tui = _fake_persistent_tui()
     assert _plan_command(tui.agent, "on").startswith("Plan mode on")
@@ -757,6 +789,7 @@ def test_session_commands_rename_fork_export_and_new_preserve_original(tmp_path)
 
 def test_diff_includes_staged_unstaged_and_untracked_names(tmp_path):
     import subprocess
+
     from klaude_cli.main import _workspace_diff
 
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
@@ -782,7 +815,8 @@ def test_review_dispatches_read_only_turn(tmp_path, monkeypatch):
 
 
 def test_resume_line_mode_lists_and_restores_without_sending_command_to_model(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     from typer.testing import CliRunner
 
@@ -797,7 +831,9 @@ def test_resume_line_mode_lists_and_restores_without_sending_command_to_model(
     monkeypatch.setattr("klaude_cli.main._build_agent", lambda *_args: (tui.agent, memory))
 
     result = CliRunner().invoke(
-        app, ["chat", "--no-tui"], input="/resume\n/resume saved\n/quit\n",
+        app,
+        ["chat", "--no-tui"],
+        input="/resume\n/resume saved\n/quit\n",
     )
 
     assert result.exit_code == 0, result.output
@@ -932,35 +968,83 @@ def test_welcome_logo_is_boxed_aligned_and_uses_installed_version():
 def test_transcript_lexer_and_theme_apply_primary_color_to_the_tui_logo():
     logo = _klaude_logo()
     fragments = TranscriptLexer().lex_document(Document(logo))(0)
-    color = _tui_style("autumn", "vscode-dark").get_attrs_for_style_str(
-        "class:transcript.logo"
-    ).color
+    color = (
+        _tui_style("autumn", "vscode-dark").get_attrs_for_style_str("class:transcript.logo").color
+    )
 
     assert fragments == [("class:transcript.logo", logo.splitlines()[0])]
     assert color == "f59a78"
 
 
-def test_transcript_lexer_mutes_ai_activity_like_divider_metadata():
+def test_transcript_lexer_styles_ai_activity_labels_and_mutes_tool_activity():
     document = Document("[reasoning] drafting response\n-> web_search")
     get_line = TranscriptLexer().lex_document(document)
 
-    assert get_line(0) == [("class:transcript.activity", "[reasoning] drafting response")]
+    assert get_line(0) == [
+        ("class:transcript.label.info.edge", "["),
+        ("class:transcript.label.info.word", "REASONING"),
+        ("class:transcript.label.info.edge", "]"),
+        ("", " drafting response"),
+    ]
     assert get_line(1) == [("class:transcript.activity", "-> web_search")]
 
 
-def test_transcript_lexer_colors_error_and_warning_notices():
+def test_transcript_lexer_styles_semantic_and_informational_notice_labels():
     document = Document(
         "[error] connection failed\n"
+        "[failed] request failed\n"
         "[warning] partial results\n"
-        "[appearance] text/code theme: Monokai"
+        "[success] request completed\n"
+        "[memory saved] durable preference\n"
+        "[appearance] text/code theme: Monokai\n"
+        "[runtime] edited config.toml\n"
+        "[status] session details\n"
+        "[interrupted at a safe boundary] user cancelled\n"
+        "[permission · Ollama service] Restart the service?"
     )
     get_line = TranscriptLexer().lex_document(document)
 
-    assert get_line(0) == [("class:transcript.error", "[error] connection failed")]
-    assert get_line(1) == [("class:transcript.warning", "[warning] partial results")]
-    assert get_line(2) == [
-        ("class:transcript.activity", "[appearance] text/code theme: Monokai")
-    ]
+    def badge(kind: str, label: str, body: str):
+        return [
+            (f"class:transcript.label.{kind}.edge", "["),
+            (f"class:transcript.label.{kind}.word", label),
+            (f"class:transcript.label.{kind}.edge", "]"),
+            ("", body),
+        ]
+
+    assert get_line(0) == badge("failed", "ERROR", " connection failed")
+    assert get_line(1) == badge("failed", "FAILED", " request failed")
+    assert get_line(2) == badge("warning", "WARNING", " partial results")
+    assert get_line(3) == badge("success", "SUCCESS", " request completed")
+    assert get_line(4) == badge("success", "MEMORY SAVED", " durable preference")
+    assert get_line(5) == badge("info", "APPEARANCE", " text/code theme: Monokai")
+    assert get_line(6) == badge("info", "RUNTIME", " edited config.toml")
+    assert get_line(7) == badge("info", "STATUS", " session details")
+    assert get_line(8) == badge("warning", "INTERRUPTED AT A SAFE BOUNDARY", " user cancelled")
+    assert get_line(9) == badge("info", "PERMISSION · OLLAMA SERVICE", " Restart the service?")
+
+
+def test_notice_label_theme_uses_footer_brand_foreground_and_semantic_backgrounds():
+    style = _tui_style("crimson-red", "vscode-dark")
+    footer_brand = style.get_attrs_for_style_str("class:footer.brand")
+
+    expected_backgrounds = {
+        "info": "9a9197",
+        "warning": "f3c84b",
+        "failed": "ff6574",
+        "success": "55d985",
+    }
+    for kind, expected_background in expected_backgrounds.items():
+        edge = style.get_attrs_for_style_str(f"class:transcript.label.{kind}.edge")
+        word = style.get_attrs_for_style_str(f"class:transcript.label.{kind}.word")
+        word_on_user_surface = style.get_attrs_for_style_str(
+            f"class:output-field class:transcript.user-message class:transcript.label.{kind}.word"
+        )
+        assert edge.color == edge.bgcolor == expected_background
+        assert word.bgcolor == expected_background
+        assert word.color == footer_brand.color
+        assert word_on_user_surface.bgcolor == expected_background
+        assert word_on_user_surface.color == footer_brand.color
 
 
 def test_slash_completer_lists_every_command_immediately_after_slash():
@@ -968,9 +1052,7 @@ def test_slash_completer_lists_every_command_immediately_after_slash():
     commands = {completion.text for completion in completions}
 
     assert commands == {
-        spec.usage.split()[0]
-        for spec in iter_command_specs(CommandSurface.CHAT)
-        if spec.visible
+        spec.usage.split()[0] for spec in iter_command_specs(CommandSurface.CHAT) if spec.visible
     }
     assert "/keybinds" in commands
     assert "/quit" not in commands
@@ -996,8 +1078,7 @@ def test_completion_rows_highlight_the_characters_that_match_the_typed_prefix(tm
         fragments = list(completion.display)
         assert ("class:suggestion-match-text", matched) in fragments
         assert any(
-            style == "class:suggestion-unmatched-text" and text.strip()
-            for style, text in fragments
+            style == "class:suggestion-unmatched-text" and text.strip() for style, text in fragments
         )
         assert "".join(text for _style, text in fragments) == completion.display_text
 
@@ -1039,8 +1120,7 @@ def test_completion_match_color_uses_the_composer_foreground_without_a_new_backg
     assert not selected_match.underline
 
     selected_unmatched = style.get_attrs_for_style_str(
-        "class:completion-menu.completion.current "
-        "class:suggestion-unmatched-text"
+        "class:completion-menu.completion.current class:suggestion-unmatched-text"
     )
     assert selected_unmatched.color == composer.color
     assert selected_unmatched.bgcolor == row.bgcolor
@@ -1053,16 +1133,12 @@ def test_inline_attachment_mentions_complete_and_supply_file_or_folder_context(t
     source.write_text("Keep this context.")
 
     completer = ChatCommandCompleter(workdir_provider=lambda: tmp_path)
-    folder_completions = list(
-        completer.get_completions(Document("Review @pro"), None)
-    )
+    folder_completions = list(completer.get_completions(Document("Review @pro"), None))
     assert any(completion.text == '"project notes/"' for completion in folder_completions)
 
     tui = _fake_persistent_tui()
     tui.agent.workdir = tmp_path
-    paths = tui._inline_attachment_paths(
-        'Review @"project notes/brief.md" and @"project notes".'
-    )
+    paths = tui._inline_attachment_paths('Review @"project notes/brief.md" and @"project notes".')
     context = tui._attachment_context(paths)
 
     assert paths == (source.resolve(), folder.resolve())
@@ -1080,8 +1156,10 @@ def test_inline_attachment_completion_is_anchored_at_the_at_sign(fragment):
     buffer = tui.input.buffer
     buffer.complete_state = CompletionState(
         original,
-        [Completion('"project notes/"', start_position=-len(fragment)),
-         Completion("src/", start_position=-len(fragment))],
+        [
+            Completion('"project notes/"', start_position=-len(fragment)),
+            Completion("src/", start_position=-len(fragment)),
+        ],
         complete_index=None,
     )
 
@@ -1106,8 +1184,11 @@ def test_exact_command_completion_survives_automatic_completion_and_enter(monkey
     state = tui.input.buffer.complete_state
     assert state is not None
     assert [item.text for item in state.completions] == ["/stop"]
-    accept = next(binding.handler for binding in tui.key_bindings.bindings
-                  if binding.handler.__name__ == "accept")
+    accept = next(
+        binding.handler
+        for binding in tui.key_bindings.bindings
+        if binding.handler.__name__ == "accept"
+    )
     accept(None)
     assert submitted == ["/stop"]
 
@@ -1123,9 +1204,7 @@ def test_backspace_reopens_inline_attachment_completion(monkeypatch, key):
         lambda **kwargs: starts.append(kwargs),
     )
     delete = next(
-        binding.handler
-        for binding in tui.key_bindings.bindings
-        if tuple(binding.keys) == key
+        binding.handler for binding in tui.key_bindings.bindings if tuple(binding.keys) == key
     )
 
     delete(None)
@@ -1139,11 +1218,11 @@ def test_inline_attachment_mention_is_delivered_with_its_message(tmp_path, monke
     source.write_text("Use this brief.")
     tui = _fake_persistent_tui()
     tui.agent.workdir = tmp_path
-    delivered: list[str] = []
+    delivered: list[tuple[str, str | None]] = []
     delivered_event = threading.Event()
 
-    def capture(message, _cancel_event, *, read_only=False):
-        delivered.append(message)
+    def capture(message, _cancel_event, *, model_message=None, read_only=False, turn_id=""):
+        delivered.append((message, model_message))
         delivered_event.set()
 
     monkeypatch.setattr(tui, "_run_turn", capture)
@@ -1151,8 +1230,10 @@ def test_inline_attachment_mention_is_delivered_with_its_message(tmp_path, monke
 
     assert delivered_event.wait(1)
     assert delivered == [
-        "Please review @brief.md.\n\n"
-        f"[Attached file: {source.resolve()}]\nUse this brief."
+        (
+            "Please review @brief.md.",
+            f"Please review @brief.md.\n\n[Attached file: {source.resolve()}]\nUse this brief.",
+        )
     ]
 
 
@@ -1196,8 +1277,7 @@ def test_persistent_tui_keybinds_command_renders_without_model_call():
 def test_persistent_tui_registers_modified_enter_and_interrupt_bindings():
     tui = _fake_persistent_tui()
     handlers = {
-        tuple(binding.keys): binding.handler.__name__
-        for binding in tui.key_bindings.bindings
+        tuple(binding.keys): binding.handler.__name__ for binding in tui.key_bindings.bindings
     }
 
     assert (Keys.ControlM,) in handlers
@@ -1213,7 +1293,9 @@ def test_persistent_tui_restores_enhanced_keyboard_mode_on_failure(monkeypatch):
     monkeypatch.setattr(tui.application.output, "write_raw", writes.append)
     monkeypatch.setattr(tui.application.output, "flush", lambda: None)
     monkeypatch.setattr(
-        tui.application.output, "get_size", lambda: SimpleNamespace(rows=4),
+        tui.application.output,
+        "get_size",
+        lambda: SimpleNamespace(rows=4),
     )
 
     def fail_after_pre_run(pre_run):
@@ -1284,6 +1366,52 @@ def _fake_persistent_tui(appearance_path=None, chat_preferences_path=None):
         def remember(self, fact, source="manual"):
             return True
 
+        def latest_session_event_id(self, _session_id):
+            return 0
+
+        def acquire_session_lease(self, _session_id, _client_id, _turn_id):
+            return True
+
+        def renew_session_lease(self, _session_id, _client_id, _turn_id):
+            return True
+
+        def release_session_lease(self, _session_id, _client_id, _turn_id, **_kwargs):
+            return True
+
+        def update_session_live(self, session_id, **updates):
+            return {
+                "session_id": session_id,
+                "revision": 1,
+                "owner_client_id": updates.get("owner_client_id", ""),
+                "owner_lease_until": updates.get("owner_lease_until", 0.0),
+                "turn_id": updates.get("turn_id", ""),
+                "state": updates.get("state", "idle"),
+                "draft_client_id": updates.get("draft_client_id", ""),
+                "draft": updates.get("draft", ""),
+                "activity": updates.get("activity", "ready"),
+                "partial": updates.get("partial", ""),
+                "queue": updates.get("queue_json", []),
+                "updated_at": 0.0,
+            }
+
+        def update_session_client(self, _session_id, _client_id, *, draft, queue):
+            self.client_state = {"draft": draft, "queue": queue}
+
+        def session_client_states(self, _session_id):
+            return []
+
+        def session_live_state(self, session_id):
+            return self.update_session_live(session_id)
+
+        def session_events_since(self, _session_id, _cursor):
+            return []
+
+        def start_session_turn(self, *_args, **_kwargs):
+            return 1
+
+        def publish_session_event(self, *_args, **_kwargs):
+            return 1
+
     return PersistentChatTUI(
         FakeAgent(),
         FakeMemory(),
@@ -1292,6 +1420,29 @@ def _fake_persistent_tui(appearance_path=None, chat_preferences_path=None):
         appearance_path=appearance_path,
         chat_preferences_path=chat_preferences_path,
     )
+
+
+def test_resumed_tuis_share_live_composers_without_overwriting_each_other(tmp_path):
+    database = tmp_path / "sessions.db"
+    first = _fake_persistent_tui()
+    second = _fake_persistent_tui()
+    first.memory = Memory(tmp_path / "memory.md", database)
+    second.memory = Memory(tmp_path / "memory.md", database)
+
+    first._set_input("draft from first")
+    first.pending.append("queued by first")
+    first._publish_live_composer()
+    second._set_input("draft from second")
+    second._publish_live_composer()
+
+    first._sync_shared_session()
+    second._sync_shared_session()
+
+    assert first._remote_draft == "draft from second"
+    assert second._remote_draft == "draft from first"
+    assert second._remote_queue == ["queued by first"]
+    assert first.input.text == "draft from first"
+    assert second.input.text == "draft from second"
 
 
 def test_tools_settings_persist_independent_validation_toggles(tmp_path):
@@ -1454,21 +1605,15 @@ def test_persistent_tui_composer_uses_a_themed_side_rail_instead_of_a_frame():
 
 
 def test_composer_rail_uses_output_background_on_input_surface():
-    attrs = _tui_style("autumn", "vscode-dark").get_attrs_for_style_str(
-        "class:composer.rail"
-    )
+    attrs = _tui_style("autumn", "vscode-dark").get_attrs_for_style_str("class:composer.rail")
 
     assert attrs.color == "211820"
     assert attrs.bgcolor == "35222a"
 
 
 def test_crimson_red_uses_autumn_neutral_output_background():
-    autumn = _tui_style("autumn", "vscode-dark").get_attrs_for_style_str(
-        "class:output-field"
-    )
-    crimson = _tui_style("crimson-red", "vscode-dark").get_attrs_for_style_str(
-        "class:output-field"
-    )
+    autumn = _tui_style("autumn", "vscode-dark").get_attrs_for_style_str("class:output-field")
+    crimson = _tui_style("crimson-red", "vscode-dark").get_attrs_for_style_str("class:output-field")
 
     assert crimson.bgcolor == autumn.bgcolor == "211820"
 
@@ -1635,8 +1780,7 @@ def test_arrow_keys_prioritize_completion_over_history(key, expected):
         complete_index=None,
     )
     handler = next(
-        binding.handler for binding in tui.key_bindings.bindings
-        if tuple(binding.keys) == (key,)
+        binding.handler for binding in tui.key_bindings.bindings if tuple(binding.keys) == (key,)
     )
 
     handler(None)
@@ -1679,9 +1823,7 @@ def test_backspace_refreshes_slash_command_completion(monkeypatch, key):
         lambda **kwargs: starts.append(kwargs),
     )
     delete = next(
-        binding.handler
-        for binding in tui.key_bindings.bindings
-        if tuple(binding.keys) == key
+        binding.handler for binding in tui.key_bindings.bindings if tuple(binding.keys) == key
     )
 
     delete(None)
@@ -1696,11 +1838,14 @@ def test_enter_accepts_and_executes_highlighted_command(command, kind):
     tui._set_input("/")
     buffer = tui.input.buffer
     buffer.complete_state = CompletionState(
-        buffer.document, [Completion(command, start_position=-1)], complete_index=None,
+        buffer.document,
+        [Completion(command, start_position=-1)],
+        complete_index=None,
     )
     buffer.complete_next()
     enter = next(
-        binding.handler for binding in tui.key_bindings.bindings
+        binding.handler
+        for binding in tui.key_bindings.bindings
         if tuple(binding.keys) == (Keys.ControlM,)
     )
 
@@ -1816,15 +1961,9 @@ def test_footer_separates_runtime_model_spacer_and_keybind_rows():
     status_model = "".join(text for _style, text in tui._status_model_fragments())
     assert "qwen3.5:4b" in status_model
     assert tui.ui_state.effort in status_model
-    assert "klaude v" in "".join(
-        text for _style, text in tui._footer_brand_fragments()
-    )
-    assert "~/klaude-code" in "".join(
-        text for _style, text in tui._footer_path_fragments()
-    )
-    assert "Enter to send/queue" in "".join(
-        text for _style, text in tui._keybind_fragments()
-    )
+    assert "klaude v" in "".join(text for _style, text in tui._footer_brand_fragments())
+    assert "~/klaude-code" in "".join(text for _style, text in tui._footer_path_fragments())
+    assert "Enter to send/queue" in "".join(text for _style, text in tui._keybind_fragments())
 
 
 def test_runtime_settings_control_device_threads_and_context_persist(tmp_path):
@@ -1910,16 +2049,21 @@ def test_pastelle_themes_are_contiguous_rainbow_ordered_and_neutral_surface():
     names = tuple(TUI_THEME_LABELS)
     pastelle = tuple(name for name in names if name.startswith("pastelle-"))
     assert pastelle == (
-        "pastelle-red", "pastelle-orange", "pastelle-yellow", "pastelle-lime",
-        "pastelle-green", "pastelle-cyan", "pastelle-azure", "pastelle-blue",
-        "pastelle-lavender", "pastelle-purple", "pastelle-magenta", "pastelle-pink",
+        "pastelle-red",
+        "pastelle-orange",
+        "pastelle-yellow",
+        "pastelle-lime",
+        "pastelle-green",
+        "pastelle-cyan",
+        "pastelle-azure",
+        "pastelle-blue",
+        "pastelle-lavender",
+        "pastelle-purple",
+        "pastelle-magenta",
+        "pastelle-pink",
     )
-    assert {TUI_THEME_STYLES[name]["output-field"] for name in pastelle} == {
-        "bg:#181818 #e8e8e8"
-    }
-    assert {TUI_THEME_STYLES[name]["input-field"] for name in pastelle} == {
-        "bg:#242424 #f2f2f2"
-    }
+    assert {TUI_THEME_STYLES[name]["output-field"] for name in pastelle} == {"bg:#181818 #e8e8e8"}
+    assert {TUI_THEME_STYLES[name]["input-field"] for name in pastelle} == {"bg:#242424 #f2f2f2"}
 
 
 def test_status_text_has_no_fill_while_footer_uses_input_surface():
@@ -2000,8 +2144,11 @@ def test_termux_disables_mouse_capture_so_touch_scrolling_stays_native(monkeypat
     assert not tui.application.mouse_support()
 
 
-def test_model_picker_cancels_while_theme_picker_goes_back_to_settings():
-    tui = _fake_persistent_tui()
+def test_model_picker_cancels_while_theme_picker_goes_back_to_settings(tmp_path):
+    tui = _fake_persistent_tui(
+        appearance_path=tmp_path / "appearance.json",
+        chat_preferences_path=tmp_path / "chat-preferences.json",
+    )
     original_theme = tui.appearance.theme
     tui._set_input("/model")
     tui._submit_buffer(steer=False)
@@ -2055,7 +2202,11 @@ def test_persistent_tui_renders_unavailable_picker_options_in_gray():
     fragments = tui._choice_fragments()
 
     assert ("class:choice.disabled", "    OpenAI — API key not configured\n") in fragments
-    assert tui._choice_values[-3:] == ["back", "", "Tip: add OPENAI_API_KEY and/or GEMINI_API_KEY to config/.env"]
+    assert tui._choice_values[-3:] == [
+        "back",
+        "",
+        "Tip: add OPENAI_API_KEY and/or GEMINI_API_KEY to config/.env",
+    ]
     assert ("class:choice.disabled", "\n") in fragments
     assert (
         "class:choice.disabled",
@@ -2065,11 +2216,15 @@ def test_persistent_tui_renders_unavailable_picker_options_in_gray():
 
 @pytest.mark.parametrize(
     "minimum,maximum,count,selected,expected_height",
-    [(8, 12, 2, 1, 6), (2, 10, 5, 4, 7), (8, 12, 30, 25, 10),
-     (1, 1, 30, 25, 1), (6, 6, 30, 25, 4)],
+    [(8, 12, 2, 1, 6), (2, 10, 5, 4, 7), (8, 12, 30, 25, 10), (1, 1, 30, 25, 1), (6, 6, 30, 25, 4)],
 )
 def test_live_picker_scrolls_selected_row_into_view(
-    tmp_path, minimum, maximum, count, selected, expected_height,
+    tmp_path,
+    minimum,
+    maximum,
+    count,
+    selected,
+    expected_height,
 ):
     async def exercise():
         tui = _fake_persistent_tui(tmp_path / "appearance.json")
@@ -2095,13 +2250,16 @@ def test_live_picker_scrolls_selected_row_into_view(
             finally:
                 tui.application.exit()
                 await task
+
     asyncio.run(exercise())
 
 
 @pytest.mark.parametrize("responds_to_cpr", [False, True])
 @pytest.mark.parametrize("switch_session", [False, True])
 def test_terminal_scrollback_survives_streaming_refresh_resize_and_preview(
-    tmp_path, responds_to_cpr, switch_session,
+    tmp_path,
+    responds_to_cpr,
+    switch_session,
 ):
     import pyte
     from prompt_toolkit.data_structures import Size
@@ -2131,7 +2289,8 @@ def test_terminal_scrollback_survives_streaming_refresh_resize_and_preview(
                 pass
 
         output = Vt100_Output(
-            Terminal(), lambda: Size(rows=screen.lines, columns=screen.columns),
+            Terminal(),
+            lambda: Size(rows=screen.lines, columns=screen.columns),
             enable_cpr=responds_to_cpr,
         )
 
@@ -2150,7 +2309,7 @@ def test_terminal_scrollback_survives_streaming_refresh_resize_and_preview(
                 await asyncio.sleep(0.05)
                 expected = [f"session message {i:03d}" for i in range(120)]
                 for start in range(0, 120, 12):
-                    tui._append("\n".join(expected[start:start + 12]) + "\n")
+                    tui._append("\n".join(expected[start : start + 12]) + "\n")
                     tui.application._redraw()
                     await asyncio.sleep(0.01)
                 tui._append("streaming par")
@@ -2186,7 +2345,8 @@ def test_terminal_scrollback_survives_streaming_refresh_resize_and_preview(
                     tui.memory.log_turn("session-1", "user", "Original saved conversation")
                     tui.memory.log_turn("other", "user", "Selected saved conversation")
                     tui.agent.restore_session = lambda turns: Agent.restore_session(
-                        tui.agent, turns,
+                        tui.agent,
+                        turns,
                     )
                     tui._set_input("/resume other")
                     tui._submit_buffer(steer=False)
@@ -2235,29 +2395,40 @@ def test_printed_transcript_background_fills_rows_without_padding(tmp_path):
             pass
 
     output = Vt100_Output(
-        Terminal(), lambda: Size(rows=30, columns=80),
-        default_color_depth=ColorDepth.DEPTH_24_BIT, enable_cpr=False,
+        Terminal(),
+        lambda: Size(rows=30, columns=80),
+        default_color_depth=ColorDepth.DEPTH_24_BIT,
+        enable_cpr=False,
     )
     tui.application.output = tui.application.renderer.output = output
     lines = [
-        "━━ Session: test ━━", "hello", "", "━━ you · time ━━",
-        "assistant text", "", "```python", "value = 1", "```",
-        "X" * 80, "Y" * 85,
+        "━━ Session: test ━━",
+        "[success] Green success",
+        "",
+        "━━ you · time ━━",
+        "assistant text",
+        "",
+        "```python",
+        "value = 1",
+        "```",
+        "X" * 80,
+        "Y" * 85,
     ]
     text = "\n".join(lines) + "\n"
     tui.output.buffer.set_document(Document(text, len(text)), bypass_readonly=True)
     tui._flush_transcript()
 
     normal = tui.application.style.get_attrs_for_style_str("class:output-field").bgcolor
-    surface = tui.application.style.get_attrs_for_style_str(
-        "class:transcript.user-message"
-    ).bgcolor
-    code_surface = tui.application.style.get_attrs_for_style_str(
-        "class:transcript.code"
-    ).bgcolor
-    for row in range(12):
+    surface = tui.application.style.get_attrs_for_style_str("class:transcript.user-message").bgcolor
+    code_surface = tui.application.style.get_attrs_for_style_str("class:transcript.code").bgcolor
+    for row in set(range(12)) - {1}:
         expected = code_surface if row in {6, 7, 8} else surface if row in {1, 2} else normal
         assert {screen.buffer[row][column].bg for column in range(80)} == {expected}
+    success = tui.application.style.get_attrs_for_style_str("class:transcript.label.success.word")
+    assert {screen.buffer[1][column].bg for column in range(9)} == {success.bgcolor}
+    assert {screen.buffer[1][column].bg for column in range(9, 80)} == {surface}
+    assert screen.buffer[1][0].fg == success.bgcolor
+    assert {screen.buffer[1][column].fg for column in range(1, 8)} == {success.color}
     assert screen.display[9] == "X" * 80
     assert screen.display[10] == "Y" * 80
     assert screen.display[11].rstrip() == "Y" * 5
@@ -2337,7 +2508,9 @@ def test_text_theme_preview_page_keys_scroll_its_dedicated_pane(monkeypatch):
     tui._move_choice(1)
     scrolls = []
     monkeypatch.setattr(tui.text_theme_preview.window, "_scroll_up", lambda: scrolls.append("up"))
-    monkeypatch.setattr(tui.text_theme_preview.window, "_scroll_down", lambda: scrolls.append("down"))
+    monkeypatch.setattr(
+        tui.text_theme_preview.window, "_scroll_down", lambda: scrolls.append("down")
+    )
     handlers = {
         tuple(binding.keys): binding.handler
         for binding in tui.key_bindings.bindings
@@ -2383,6 +2556,48 @@ def test_persistent_tui_permission_answer_unblocks_worker_request():
     assert tui._permission_request is None
 
 
+def test_active_ollama_service_control_confirms_before_cancelling(monkeypatch):
+    tui = _fake_persistent_tui()
+    tui.running = True
+    cancel_calls = []
+    control_finished = threading.Event()
+    tui.agent.ollama.cancel_active = lambda: cancel_calls.append("cancel") or True
+
+    def approve(_tool, _detail):
+        assert cancel_calls == []
+        return "y"
+
+    def control(action):
+        assert action == "restart"
+        control_finished.set()
+        return True, "Ollama service restarted"
+
+    monkeypatch.setattr(tui, "_ask_permission", approve)
+    monkeypatch.setattr("klaude_cli.main._control_ollama_service", control)
+
+    tui._request_ollama_service_control("restart")
+
+    assert control_finished.wait(2)
+    assert cancel_calls == ["cancel"]
+
+
+def test_cancelled_transport_error_is_not_saved_as_runtime_failure(tmp_path):
+    tui = _fake_persistent_tui()
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui.agent.run = lambda _message: iter(
+        [AgentEvent("error", {"message": "[Errno 9] Bad file descriptor"})]
+    )
+    cancelled = threading.Event()
+    cancelled.set()
+
+    tui._run_turn("hello", cancelled, turn_id="turn-1")
+
+    turns = tui.memory.load_session(tui.session_id)
+    assert [(turn["role"], turn["content"]) for turn in turns] == [("user", "hello")]
+    events = tui.memory.session_events_since(tui.session_id, 0)
+    assert "error" not in {event["kind"] for event in events}
+
+
 def test_ollama_service_control_does_not_attempt_an_interactive_password(monkeypatch):
     from types import SimpleNamespace
 
@@ -2390,10 +2605,13 @@ def test_ollama_service_control_does_not_attempt_an_interactive_password(monkeyp
     monkeypatch.setattr("klaude_cli.main.shutil.which", lambda command: "/usr/bin/systemctl")
     monkeypatch.setattr(
         "klaude_cli.main.subprocess.run",
-        lambda arguments, **kwargs: calls.append((arguments, kwargs)) or SimpleNamespace(
-            returncode=1,
-            stdout="",
-            stderr="Failed to restart ollama.service: Interactive authentication required.\n",
+        lambda arguments, **kwargs: (
+            calls.append((arguments, kwargs))
+            or SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="Failed to restart ollama.service: Interactive authentication required.\n",
+            )
         ),
     )
 
@@ -2421,6 +2639,102 @@ def test_ollama_service_control_gives_a_terminal_command_for_generic_failures(mo
 
     assert not ok
     assert "sudo systemctl restart ollama" in message
+
+
+def test_sudo_ollama_control_keeps_password_out_of_argv_and_service_stdin(monkeypatch):
+    calls = []
+    monkeypatch.setattr("klaude_cli.main.shutil.which", lambda command: f"/usr/bin/{command}")
+
+    def run(arguments, **kwargs):
+        calls.append((arguments, kwargs))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("klaude_cli.main.subprocess.run", run)
+
+    ok, message = _control_ollama_service_with_sudo("restart", "private-password")
+
+    assert ok
+    assert message == "Ollama service restarted"
+    assert calls[0][0] == ["/usr/bin/sudo", "-S", "-p", "", "-v"]
+    assert calls[0][1]["input"] == "private-password\n"
+    assert calls[1][0] == [
+        "/usr/bin/sudo",
+        "-n",
+        "--",
+        "/usr/bin/systemctl",
+        "--no-ask-password",
+        "restart",
+        "ollama",
+    ]
+    assert calls[1][1]["stdin"] is subprocess.DEVNULL
+    assert all("private-password" not in argument for call, _kwargs in calls for argument in call)
+
+
+def test_masked_secret_composer_round_trip_clears_input_and_can_cancel():
+    tui = _fake_persistent_tui()
+    result = []
+
+    worker = threading.Thread(
+        target=lambda: result.append(tui._ask_secret("API key", "Enter API key"))
+    )
+    worker.start()
+    for _attempt in range(20):
+        tui._before_render(None)
+        if tui._secret_request:
+            break
+        threading.Event().wait(0.01)
+
+    assert tui._secret_request is not None
+    password_processor = next(
+        processor
+        for processor in tui.input.control.input_processors
+        if type(getattr(processor, "processor", None)).__name__ == "PasswordProcessor"
+    )
+    assert password_processor.filter()
+    tui._set_input("private-api-key")
+    tui._submit_secret_response()
+    worker.join(2)
+
+    assert result == ["private-api-key"]
+    assert tui.input.text == ""
+    assert tui._secret_request is None
+    assert not password_processor.filter()
+
+    cancelled = threading.Event()
+    tui._secret_request = {
+        "label": "password",
+        "prompt": "Enter password",
+        "value": "should be replaced",
+        "done": cancelled,
+    }
+    tui._set_input("must-not-remain-visible")
+    tui._answer_secret(None)
+    assert cancelled.is_set()
+    assert tui.input.text == ""
+
+
+def test_ollama_control_retries_through_generic_masked_secret_prompt(monkeypatch):
+    tui = _fake_persistent_tui()
+    finished = threading.Event()
+    privileged_calls = []
+    monkeypatch.setattr(tui, "_ask_permission", lambda *_args: "y")
+    monkeypatch.setattr(tui, "_ask_secret", lambda *_args: "private-password")
+    monkeypatch.setattr(
+        "klaude_cli.main._control_ollama_service",
+        lambda _action: (False, "Run `sudo systemctl restart ollama` in a normal terminal"),
+    )
+
+    def privileged(action, password):
+        privileged_calls.append((action, password))
+        finished.set()
+        return True, "Ollama service restarted"
+
+    monkeypatch.setattr("klaude_cli.main._control_ollama_service_with_sudo", privileged)
+
+    tui._request_ollama_service_control("restart")
+
+    assert finished.wait(2)
+    assert privileged_calls == [("restart", "private-password")]
 
 
 def test_persistent_tui_refresh_erases_and_invalidates_current_frame(monkeypatch):
@@ -2579,9 +2893,7 @@ def test_legacy_gpu_preferred_preference_migrates_to_ollama_managed_placement(tm
     raw["runtime_device_mode"] = "gpu-preferred"
     path.write_text(json.dumps(raw))
 
-    preferences, mode = _migrate_runtime_device_preference(
-        path, _load_runtime_preferences(path)
-    )
+    preferences, mode = _migrate_runtime_device_preference(path, _load_runtime_preferences(path))
 
     assert mode == "gpu-preferred"
     assert preferences == {"num_gpu": None, "num_ctx": 4096}
@@ -2595,9 +2907,7 @@ def test_explicit_gpu_only_preference_keeps_the_advanced_offload_override(tmp_pa
     raw["runtime_device_mode"] = "gpu-only"
     path.write_text(json.dumps(raw))
 
-    preferences, mode = _migrate_runtime_device_preference(
-        path, _load_runtime_preferences(path)
-    )
+    preferences, mode = _migrate_runtime_device_preference(path, _load_runtime_preferences(path))
 
     assert mode == "gpu-only"
     assert preferences == {"num_gpu": -1}
@@ -2682,9 +2992,7 @@ def test_persistent_tui_input_height_picker_persists_and_resets(tmp_path):
     assert _load_tui_appearance(path).input_max_height == MAX_INPUT_HEIGHT
     assert tui._choice_kind == "input field settings"
     tui._choice_index = next(
-        index
-        for index, value in enumerate(tui._choice_values)
-        if value == "reset to default"
+        index for index, value in enumerate(tui._choice_values) if value == "reset to default"
     )
     tui._accept_choice()
 
@@ -2714,8 +3022,7 @@ def test_render_suppresses_internal_tool_policy_correction(monkeypatch):
                 {
                     "tool": "list_commands",
                     "result": (
-                        "The command reference is unnecessary for this "
-                        "conversational request."
+                        "The command reference is unnecessary for this conversational request."
                     ),
                     "metadata": {"suppress_user_output": True},
                 },
@@ -2723,7 +3030,7 @@ def test_render_suppresses_internal_tool_policy_correction(monkeypatch):
             yield AgentEvent("text", {"content": "Hi! I'm Klaude."})
 
     class FakeMemory:
-        def log_turn(self, session_id, role, content):
+        def log_turn(self, session_id, role, content, **_kwargs):
             turns.append((session_id, role, content))
 
     monkeypatch.setattr(
@@ -2757,7 +3064,7 @@ def test_render_streams_code_and_logs_only_the_completed_assistant_turn(monkeypa
             )
 
     class FakeMemory:
-        def log_turn(self, session_id, role, content):
+        def log_turn(self, session_id, role, content, **_kwargs):
             turns.append((session_id, role, content))
 
     monkeypatch.setattr(
@@ -2808,7 +3115,7 @@ def test_render_shows_web_search_provider_from_structured_metadata(monkeypatch):
             yield AgentEvent("text", {"content": "AIS is a school candidate."})
 
     class FakeMemory:
-        def log_turn(self, session_id, role, content):
+        def log_turn(self, session_id, role, content, **_kwargs):
             turns.append((session_id, role, content))
 
     monkeypatch.setattr(
@@ -2851,7 +3158,7 @@ def test_render_shows_fetch_url_provider_from_structured_metadata(monkeypatch):
             yield AgentEvent("text", {"content": "Fetched it."})
 
     class FakeMemory:
-        def log_turn(self, session_id, role, content):
+        def log_turn(self, session_id, role, content, **_kwargs):
             turns.append((session_id, role, content))
 
     monkeypatch.setattr(
@@ -2881,7 +3188,7 @@ def test_natural_language_command_reference_uses_direct_renderer(monkeypatch):
             printed.append((args, kwargs))
 
     class FakeMemory:
-        def log_turn(self, session_id, role, content):
+        def log_turn(self, session_id, role, content, **_kwargs):
             turns.append((session_id, role, content))
 
     monkeypatch.setattr("klaude_cli.main.console", FakeConsole())
@@ -2948,8 +3255,7 @@ def test_focused_search_command_request_uses_concise_renderer(monkeypatch):
 
     assert handled is True
     assert printed[0][0][0].plain == (
-        "klaude search QUERY\n"
-        "    Web search via the configured provider."
+        "klaude search QUERY\n    Web search via the configured provider."
     )
     assert "CLI COMMANDS" not in printed[0][0][0].plain
 
@@ -2976,7 +3282,7 @@ def test_unknown_slash_command_is_intercepted_before_model(monkeypatch):
             self.messages = []
 
     class FakeMemory:
-        def log_turn(self, session_id, role, content):
+        def log_turn(self, session_id, role, content, **_kwargs):
             turns.append((session_id, role, content))
 
     monkeypatch.setattr(
@@ -2993,8 +3299,7 @@ def test_unknown_slash_command_is_intercepted_before_model(monkeypatch):
 
     assert handled is True
     assert printed[0][0][0].plain == (
-        "Unknown chat command: /reload\n"
-        "Type /help to see the available commands."
+        "Unknown chat command: /reload\nType /help to see the available commands."
     )
     assert turns[-1] == (
         "session-1",
@@ -3014,7 +3319,7 @@ def test_unknown_slash_typo_suggests_registered_command(monkeypatch):
     assert _handle_unknown_slash_command("/modle") is True
     assert printed[0][0][0].plain == (
         "Unknown chat command: /modle\n"
-            "Did you mean /mode?\n"
+        "Did you mean /mode?\n"
         "Type /help to see the available commands."
     )
 
@@ -3376,8 +3681,7 @@ def test_chat_selector_searches_resolved_university_duration_followup():
         fetched_urls.append(url)
         return {
             "content": (
-                "Paragon International University is among the top universities "
-                "in Cambodia."
+                "Paragon International University is among the top universities in Cambodia."
             ),
             "metadata": {},
         }
@@ -3737,9 +4041,7 @@ def test_do_not_search_removes_retrieval_tools_from_workspace_code_request():
         )
     }
 
-    selected = _select_tool_names(
-        "Edit the Character.gd in this repo, but do not search.", tools
-    )
+    selected = _select_tool_names("Edit the Character.gd in this repo, but do not search.", tools)
 
     assert selected == ["read_file", "edit_file"]
 
@@ -4057,8 +4359,7 @@ def test_knowledge_libraries_count_uses_lightweight_sqlite(tmp_path):
     db_dir.mkdir()
     db = sqlite3.connect(db_dir / "fts.db")
     db.execute(
-        "CREATE TABLE active_sources "
-        "(library TEXT, owner TEXT, source TEXT, version_id TEXT)"
+        "CREATE TABLE active_sources (library TEXT, owner TEXT, source TEXT, version_id TEXT)"
     )
     db.execute("INSERT INTO active_sources VALUES ('react', 'docs:a', 'a', 'v1')")
     db.execute("INSERT INTO active_sources VALUES ('react', 'docs:b', 'b', 'v2')")

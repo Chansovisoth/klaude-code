@@ -8,9 +8,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 
-LOOKUP_PREFIX_RE = re.compile(
-    r"(?i)^\s*(?:who|what|where|when)\s+(?:is|are|was|were)\s+"
-)
+LOOKUP_PREFIX_RE = re.compile(r"(?i)^\s*(?:who|what|where|when)\s+(?:is|are|was|were)\s+")
 RESULT_LIST_PREFIX_RE = re.compile(
     r"(?i)^\s*(?:show|list|give|display|print|return|find|get)\s+"
     r"(?:me\s+)?(?:the\s+)?(?:(?:top|all)\s+)?(?:\d{1,3}\s+)?"
@@ -271,7 +269,7 @@ def _handle_variants(entity: str, max_variants: int = 8) -> list[str]:
         for index, char in enumerate(compact):
             if char.lower() != source:
                 continue
-            candidate = f"{compact[:index]}{replacement}{compact[index + 1:]}"
+            candidate = f"{compact[:index]}{replacement}{compact[index + 1 :]}"
             if candidate.lower() != compact.lower() and candidate not in variants:
                 variants.append(candidate)
             if len(variants) >= max_variants:
@@ -445,14 +443,11 @@ def _result_score(query: str, result: dict, index: int) -> float:
 
     required_entity_matches = min(2, len(entity_terms)) if entity_terms else 0
     strong_entity_match = exact_entity_match or (
-        required_entity_matches > 0
-        and len(entity_title_url_terms) >= required_entity_matches
+        required_entity_matches > 0 and len(entity_title_url_terms) >= required_entity_matches
     )
 
     non_entity_terms = [
-        term
-        for term in terms
-        if term not in entity_terms and term not in activity_terms
+        term for term in terms if term not in entity_terms and term not in activity_terms
     ]
     for term in non_entity_terms:
         if term in title_tokens:

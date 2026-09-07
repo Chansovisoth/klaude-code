@@ -190,14 +190,6 @@ def _load_env_files() -> None:
                 os.environ[key] = value
 
 
-def _dotenv_value(name: str) -> str:
-    for path in _env_paths():
-        value = _parse_env_file(path).get(name)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
 def _env_value(name: str, default: str = "") -> str:
     value = os.environ.get(name, default)
     return value.strip() if isinstance(value, str) else default
@@ -601,9 +593,9 @@ def _validated_ollama_options(raw: object) -> dict[str, Any]:
         value = raw.get(name)
         if value is None:
             continue
-        parsed = float(value)
-        if minimum <= parsed <= maximum:
-            validated[name] = parsed
+        parsed_float = float(value)
+        if minimum <= parsed_float <= maximum:
+            validated[name] = parsed_float
     return validated
 
 
@@ -629,9 +621,7 @@ def load_config() -> Config:
         elif isinstance(think, str) and think.lower() in {"low", "medium", "high"}:
             setattr(cfg.ollama, field_name, think.lower())
     cfg.ollama.options.update(_validated_ollama_options(ollama.get("options", {})))
-    cfg.ollama.code_options.update(
-        _validated_ollama_options(ollama.get("code_options", {}))
-    )
+    cfg.ollama.code_options.update(_validated_ollama_options(ollama.get("code_options", {})))
 
     services = user.get("services", {})
     cfg.ollama_url = services.get("ollama_url", cfg.ollama_url)
@@ -685,9 +675,7 @@ def load_config() -> Config:
         ]
         if ordered:
             missing = [
-                provider
-                for provider in cfg.web_search.provider_order
-                if provider not in ordered
+                provider for provider in cfg.web_search.provider_order if provider not in ordered
             ]
             cfg.web_search.provider_order = [*ordered, *missing]
     cfg.web_search.allow_explicit_provider_fallback = bool(
@@ -763,9 +751,7 @@ def load_config() -> Config:
     cfg.web_search.honor_retry_after = bool(
         search.get("honor_retry_after", cfg.web_search.honor_retry_after)
     )
-    cfg.web_search.cache_enabled = bool(
-        search.get("cache_enabled", cfg.web_search.cache_enabled)
-    )
+    cfg.web_search.cache_enabled = bool(search.get("cache_enabled", cfg.web_search.cache_enabled))
     cfg.web_search.max_disambiguation_queries = int(
         search.get("max_disambiguation_queries", cfg.web_search.max_disambiguation_queries)
     )
@@ -884,21 +870,21 @@ def load_config() -> Config:
     )
 
     fetch = web.get("fetch", {})
-    cfg.web_fetch.timeout_seconds = max(0.1, float(
-        fetch.get("timeout_seconds", cfg.web_fetch.timeout_seconds)
-    ))
-    cfg.web_fetch.max_download_bytes = max(1, int(
-        fetch.get("max_download_bytes", cfg.web_fetch.max_download_bytes)
-    ))
-    cfg.web_fetch.max_content_characters = max(1, int(
-        fetch.get("max_content_characters", cfg.web_fetch.max_content_characters)
-    ))
-    cfg.web_fetch.max_redirects = max(0, int(
-        fetch.get("max_redirects", cfg.web_fetch.max_redirects)
-    ))
-    cfg.web_fetch.cache_ttl_seconds = max(0, int(
-        fetch.get("cache_ttl_seconds", cfg.web_fetch.cache_ttl_seconds)
-    ))
+    cfg.web_fetch.timeout_seconds = max(
+        0.1, float(fetch.get("timeout_seconds", cfg.web_fetch.timeout_seconds))
+    )
+    cfg.web_fetch.max_download_bytes = max(
+        1, int(fetch.get("max_download_bytes", cfg.web_fetch.max_download_bytes))
+    )
+    cfg.web_fetch.max_content_characters = max(
+        1, int(fetch.get("max_content_characters", cfg.web_fetch.max_content_characters))
+    )
+    cfg.web_fetch.max_redirects = max(
+        0, int(fetch.get("max_redirects", cfg.web_fetch.max_redirects))
+    )
+    cfg.web_fetch.cache_ttl_seconds = max(
+        0, int(fetch.get("cache_ttl_seconds", cfg.web_fetch.cache_ttl_seconds))
+    )
 
     entities = user.get("entities", {})
     wikimedia = entities.get("wikimedia", {})
@@ -965,16 +951,14 @@ def load_config() -> Config:
     cfg.tavily_api_key = str(
         web.get(
             "tavily_api_key",
-            _dotenv_value("TAVILY_API_KEY")
-            or _env_value("TAVILY_API_KEY", cfg.tavily_api_key),
+            _env_value("TAVILY_API_KEY", cfg.tavily_api_key),
         )
         or ""
     ).strip()
     cfg.firecrawl_api_key = str(
         web.get(
             "firecrawl_api_key",
-            _dotenv_value("FIRECRAWL_API_KEY")
-            or _env_value("FIRECRAWL_API_KEY", cfg.firecrawl_api_key),
+            _env_value("FIRECRAWL_API_KEY", cfg.firecrawl_api_key),
         )
         or ""
     ).strip()
@@ -985,7 +969,7 @@ def load_config() -> Config:
     cfg.exa_api_key = str(
         web.get(
             "exa_api_key",
-            _dotenv_value("EXA_API_KEY") or _env_value("EXA_API_KEY", cfg.exa_api_key),
+            _env_value("EXA_API_KEY", cfg.exa_api_key),
         )
         or ""
     ).strip()
@@ -1005,9 +989,7 @@ def load_config() -> Config:
     cfg.max_code_continuations = max(
         0, min(3, int(agent.get("max_code_continuations", cfg.max_code_continuations)))
     )
-    cfg.max_code_repairs = max(
-        0, min(3, int(agent.get("max_code_repairs", cfg.max_code_repairs)))
-    )
+    cfg.max_code_repairs = max(0, min(3, int(agent.get("max_code_repairs", cfg.max_code_repairs))))
     cfg.retrieval_k = int(agent.get("retrieval_k", cfg.retrieval_k))
 
     knowledge = user.get("knowledge", {})

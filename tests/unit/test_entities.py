@@ -88,12 +88,8 @@ def test_entity_store_uses_compact_name_and_alias_schema(tmp_path):
 
     assert store.available is True
     with sqlite3.connect(db_path) as db:
-        entity_columns = {
-            row[1] for row in db.execute("PRAGMA table_info(entities)").fetchall()
-        }
-        alias_columns = {
-            row[1] for row in db.execute("PRAGMA table_info(aliases)").fetchall()
-        }
+        entity_columns = {row[1] for row in db.execute("PRAGMA table_info(entities)").fetchall()}
+        alias_columns = {row[1] for row in db.execute("PRAGMA table_info(aliases)").fetchall()}
 
     assert {
         "canonical_name",
@@ -110,9 +106,7 @@ def test_entity_store_uses_compact_name_and_alias_schema(tmp_path):
         "description",
         "domain",
     } <= entity_columns
-    assert {"entity_id", "alias", "normalized_alias", "source", "confidence"} <= (
-        alias_columns
-    )
+    assert {"entity_id", "alias", "normalized_alias", "source", "confidence"} <= (alias_columns)
 
 
 def test_entity_database_follows_configured_data_directory(tmp_path, monkeypatch):

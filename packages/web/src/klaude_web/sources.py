@@ -130,9 +130,7 @@ class SourceRegistry:
             provenance.extend(self.provenance_for_url(final_url))
 
         if existing is None:
-            lead = self._leads_by_url.get(requested_key) or self._leads_by_url.get(
-                final_key
-            )
+            lead = self._leads_by_url.get(requested_key) or self._leads_by_url.get(final_key)
             self._source_counter += 1
             existing = SourceRecord(
                 source_id=f"src_{self._source_counter:03d}",

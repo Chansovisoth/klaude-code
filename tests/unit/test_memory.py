@@ -1,3 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
 from klaude_core.memory import (
     Memory,
     auto_memory_candidates,
@@ -32,6 +35,35 @@ def test_memory_rejects_secret_values(tmp_path):
     assert memory.facts() == ""
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "remember that my API key is sk-proj-example123456",
+        "please remember that my token was ghp_example123456789",
+        "remember Bearer example.token.value12345",
+    ],
+)
+def test_memory_rejects_natural_language_and_known_secret_formats(tmp_path, text):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+
+    assert is_sensitive_memory(text)
+    assert explicit_memory_candidate(text) is None
+    assert memory.remember(text, source="test") is False
+
+
+def test_memory_files_are_private(tmp_path):
+    memory_file = tmp_path / "memory.md"
+    sessions_db = tmp_path / "sessions.db"
+    memory = Memory(memory_file, sessions_db)
+    memory.remember("User prefers local tools", source="test")
+
+    assert sessions_db.stat().st_mode & 0o777 == 0o600
+    assert memory_file.stat().st_mode & 0o777 == 0o600
+    memory.log_turn("session", "user", "private turn")
+    assert (tmp_path / "sessions.db-wal").stat().st_mode & 0o777 == 0o600
+    assert (tmp_path / "sessions.db-shm").stat().st_mode & 0o777 == 0o600
+
+
 def test_session_search_and_recent_sessions(tmp_path):
     memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
     memory.log_turn("s1", "user", "I asked about DanTDM yesterday")
@@ -45,6 +77,130 @@ def test_session_search_and_recent_sessions(tmp_path):
     recent = memory.recent_sessions()
     assert recent[0]["session_id"] == "s2"
     assert recent[1]["session_id"] == "s1"
+
+
+def test_session_keeps_private_model_context_separate_from_visible_turn(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    memory.log_turn(
+        "s1",
+        "user",
+        "Review the attachment",
+        model_content="Review the attachment\n\n[attached file]\nprivate contents",
+    )
+
+    turn = memory.load_session("s1")[0]
+    assert turn["content"] == "Review the attachment"
+    assert "private contents" in turn["model_content"]
+    assert memory.search_sessions("private contents") == []
+
+
+def test_session_events_are_ordered_and_cursor_based(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    first = memory.publish_session_event("s1", "client-a", "activity", {"text": "thinking"})
+    second = memory.publish_session_event(
+        "s1", "client-a", "assistant_delta", {"text": "hello"}, turn_id="turn-a"
+    )
+
+    assert second > first
+    assert [event["id"] for event in memory.session_events_since("s1", first)] == [second]
+    assert memory.latest_session_event_id("s1") == second
+
+
+def test_session_event_replay_is_bounded_without_deleting_saved_turns(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    memory.log_turn("s1", "user", "durable transcript")
+    for index in range(1_005):
+        memory.publish_session_event("s1", "client", "activity", {"text": str(index)})
+
+    removed = memory.prune_session_events("s1", max_events=1_000)
+
+    assert removed == 5
+    assert len(memory.session_events_since("s1", 0, limit=2_000)) == 1_000
+    assert memory.load_session("s1")[0]["content"] == "durable transcript"
+
+
+def test_session_worker_lease_is_exclusive_renewable_and_releasable(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+
+    assert memory.acquire_session_lease("s1", "client-a", "turn-a")
+    assert not memory.acquire_session_lease("s1", "client-b", "turn-b")
+    assert memory.renew_session_lease("s1", "client-a", "turn-a")
+    assert memory.release_session_lease("s1", "client-a", "turn-a")
+    assert memory.acquire_session_lease("s1", "client-b", "turn-b")
+
+
+def test_session_live_state_has_monotonic_revisions_and_shared_draft(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+
+    first = memory.update_session_live(
+        "s1", draft_client_id="client-a", draft="hel", queue_json=["next"]
+    )
+    second = memory.update_session_live("s1", draft="hello")
+
+    assert second["revision"] > first["revision"]
+    assert second["draft"] == "hello"
+    assert second["queue"] == ["next"]
+
+
+def test_session_clients_keep_independent_drafts_and_queues(tmp_path):
+    database = tmp_path / "sessions.db"
+    first = Memory(tmp_path / "memory.md", database)
+    second = Memory(tmp_path / "memory.md", database)
+
+    first.update_session_client("shared", "client-a", draft="hello", queue=["one"])
+    second.update_session_client("shared", "client-b", draft="world", queue=["two"])
+
+    states = {state["client_id"]: state for state in first.session_client_states("shared")}
+    assert states["client-a"]["draft"] == "hello"
+    assert states["client-a"]["queue"] == ["one"]
+    assert states["client-b"]["draft"] == "world"
+    assert states["client-b"]["queue"] == ["two"]
+
+
+def test_concurrent_memory_clients_deduplicate_atomic_writes(tmp_path):
+    memory_file = tmp_path / "memory.md"
+    database = tmp_path / "sessions.db"
+    clients = [Memory(memory_file, database), Memory(memory_file, database)]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda client: client.remember("One durable fact"), clients))
+
+    assert sorted(results) == [False, True]
+    assert memory_file.read_text().count("One durable fact") == 1
+
+
+def test_two_memory_clients_share_atomic_turn_snapshot_and_stream(tmp_path):
+    database = tmp_path / "sessions.db"
+    owner = Memory(tmp_path / "memory.md", database)
+    watcher = Memory(tmp_path / "memory.md", database)
+
+    assert owner.acquire_session_lease("shared", "owner", "turn-1")
+    assert not watcher.acquire_session_lease("shared", "watcher", "turn-2")
+    event_id = owner.start_session_turn(
+        "shared",
+        "owner",
+        "turn-1",
+        "Review this",
+        model_content="Review this\n\n[Attached file]\nprivate",
+    )
+    owner.publish_session_event(
+        "shared", "owner", "assistant_delta", {"text": "Working"}, turn_id="turn-1"
+    )
+
+    snapshot = watcher.session_snapshot("shared")
+
+    assert snapshot["event_cursor"] > event_id
+    assert snapshot["turns"][0]["content"] == "Review this"
+    assert "private" in snapshot["turns"][0]["model_content"]
+    assert snapshot["live"]["partial"] == "Working"
+    assert snapshot["live"]["owner_client_id"] == "owner"
+
+    owner.log_turn("shared", "assistant", "Working")
+    owner.publish_session_event(
+        "shared", "owner", "turn_done", {"suffix": "worked"}, turn_id="turn-1"
+    )
+    assert owner.release_session_lease("shared", "owner", "turn-1")
+    assert watcher.acquire_session_lease("shared", "watcher", "turn-2")
 
 
 def test_delete_one_session_removes_only_that_session(tmp_path):
@@ -133,8 +289,7 @@ def test_forgetting_one_memory_id_removes_only_that_memory(tmp_path):
     memory.remember("User uses Go", source="test")
     memory.remember("User uses Google Drive", source="test")
     target = next(
-        entry for entry in memory.search_facts("User uses")
-        if entry.fact == "User uses Go"
+        entry for entry in memory.search_facts("User uses") if entry.fact == "User uses Go"
     )
 
     result = memory.forget(f"memory:{target.id}")

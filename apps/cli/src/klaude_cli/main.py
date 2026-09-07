@@ -47,6 +47,7 @@ from importlib import resources
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path
+from typing import Any, cast
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -65,6 +66,9 @@ from klaude_core import (
     WebResearchBudget,
     load_config,
 )
+from klaude_core.config import CONFIG_DIR, DEFAULT_PERMISSIONS, SOURCE_ROOT
+from klaude_core.dates import find_establishment_date, operating_duration_since
+from klaude_core.memory import explicit_memory_candidate, is_sensitive_memory
 from klaude_core.model_runtime import (
     discover_gemini_models,
     discover_openai_models,
@@ -74,19 +78,16 @@ from klaude_core.model_runtime import (
     newest_model_first_key,
     save_model_cache,
 )
-from klaude_core.config import CONFIG_DIR, DEFAULT_PERMISSIONS, SOURCE_ROOT
-from klaude_core.dates import find_establishment_date, operating_duration_since
-from klaude_core.memory import explicit_memory_candidate, is_sensitive_memory
 from klaude_core.runtime_context import (
     collect_runtime_context,
     context_to_dict,
     render_runtime_context,
 )
 from prompt_toolkit import Application, PromptSession
-from prompt_toolkit.buffer import CompletionState
-from prompt_toolkit.application.current import get_app
 from prompt_toolkit.application import run_in_terminal
-from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.application.current import get_app
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory, ConditionalAutoSuggest
+from prompt_toolkit.buffer import CompletionState
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.document import Document
@@ -109,19 +110,19 @@ from prompt_toolkit.layout import (
 )
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.menus import CompletionsMenu, CompletionsMenuControl
-from prompt_toolkit.mouse_events import MouseEventType
-from prompt_toolkit.lexers import Lexer, PygmentsLexer
 from prompt_toolkit.layout.processors import ConditionalProcessor, Processor, Transformation
+from prompt_toolkit.layout.screen import Char
+from prompt_toolkit.lexers import Lexer, PygmentsLexer
+from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.renderer import print_formatted_text
 from prompt_toolkit.shortcuts import CompleteStyle, radiolist_dialog
 from prompt_toolkit.styles import Style, merge_styles
 from prompt_toolkit.styles.pygments import style_from_pygments_cls
-from prompt_toolkit.layout.screen import Char
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Label, TextArea
-from pygments.lexers.markup import MarkdownLexer
-from pygments.lexers.diff import DiffLexer
 from pygments.lexers import get_lexer_by_name
+from pygments.lexers.diff import DiffLexer
+from pygments.lexers.markup import MarkdownLexer
 from pygments.lexers.special import TextLexer
 from pygments.styles import get_style_by_name
 from pygments.util import ClassNotFound
@@ -279,21 +280,21 @@ INPUT_HEIGHT_CHOICES = tuple(
 TEXT_THEME_PREVIEW_BLOCK = (
     "\n\n```html\n"
     "<!doctype html>\n"
-    "<main class=\"preview\" data-theme=\"syntax\">\n"
+    '<main class="preview" data-theme="syntax">\n'
     "  <header><h1>Klaude <span>Theme Preview</span></h1></header>\n"
-    "  <button id=\"run\" type=\"button\" aria-pressed=\"false\">Run preview</button>\n"
+    '  <button id="run" type="button" aria-pressed="false">Run preview</button>\n'
     "  <p>Local-first <strong>coding</strong> assistant.</p>\n"
-    "  <output id=\"status\" role=\"status\">Waiting…</output>\n"
+    '  <output id="status" role="status">Waiting…</output>\n'
     "</main>\n"
     "```\n\n"
     "```javascript\n"
-    "const status = { ready: true, tokens: 128, model: \"local\" };\n"
-    "const output = document.querySelector(\"#status\");\n\n"
+    'const status = { ready: true, tokens: 128, model: "local" };\n'
+    'const output = document.querySelector("#status");\n\n'
     "function render({ ready, tokens, model }) {\n"
-    "  const label = ready ? \"READY\" : \"WORKING\";\n"
+    '  const label = ready ? "READY" : "WORKING";\n'
     "  return `${label} · ${tokens.toLocaleString()} tokens · ${model}`;\n"
     "}\n"
-    "document.querySelector(\"#run\").addEventListener(\"click\", () => {\n"
+    'document.querySelector("#run").addEventListener("click", () => {\n'
     "  output.textContent = render({ ...status, ready: !status.ready });\n"
     "});\n"
     "```\n\n"
@@ -307,11 +308,11 @@ TEXT_THEME_PREVIEW_BLOCK = (
     "```\n\n"
     "```json\n"
     "{\n"
-    "  \"theme\": \"monokai\",\n"
-    "  \"preview\": { \"enabled\": true, \"languages\": 8 },\n"
-    "  \"languages\": [\"html\", \"javascript\", \"css\", \"python\", \"cpp\", \"csharp\", \"java\"],\n"
-    "  \"limits\": { \"context\": 8192, \"threads\": 8 },\n"
-    "  \"status\": { \"ready\": true, \"message\": \"Syntax highlighted\" }\n"
+    '  "theme": "monokai",\n'
+    '  "preview": { "enabled": true, "languages": 8 },\n'
+    '  "languages": ["html", "javascript", "css", "python", "cpp", "csharp", "java"],\n'
+    '  "limits": { "context": 8192, "threads": 8 },\n'
+    '  "status": { "ready": true, "message": "Syntax highlighted" }\n'
     "}\n"
     "```\n\n"
     "```python\n"
@@ -320,10 +321,10 @@ TEXT_THEME_PREVIEW_BLOCK = (
     "class Task:\n"
     "    name: str\n"
     "    completed: bool = False\n\n"
-    "def render(task: Task, *, prefix: str = \"preview\") -> str:\n"
-    "    state = \"done\" if task.completed else \"waiting\"\n"
-    "    return f\"{prefix}: {task.name} is {state}\"\n\n"
-    "tasks = [Task(\"Preview syntax\"), Task(\"Save theme\", True)]\n"
+    'def render(task: Task, *, prefix: str = "preview") -> str:\n'
+    '    state = "done" if task.completed else "waiting"\n'
+    '    return f"{prefix}: {task.name} is {state}"\n\n'
+    'tasks = [Task("Preview syntax"), Task("Save theme", True)]\n'
     "for task in tasks:\n"
     "    print(render(task))\n"
     "```\n\n"
@@ -331,10 +332,10 @@ TEXT_THEME_PREVIEW_BLOCK = (
     "#include <iostream>\n"
     "#include <string>\n\n"
     "std::string label(const std::string& theme, bool active) {\n"
-    "  return theme + (active ? \" is active\" : \" is available\");\n"
+    '  return theme + (active ? " is active" : " is available");\n'
     "}\n\n"
     "int main() {\n"
-    "  const std::string theme = \"Monokai\";\n"
+    '  const std::string theme = "Monokai";\n'
     "  std::cout << \"Preview: \" << label(theme, true) << '\\n';\n"
     "  return 0;\n"
     "}\n"
@@ -342,10 +343,10 @@ TEXT_THEME_PREVIEW_BLOCK = (
     "```csharp\n"
     "using System;\n"
     "using System.Collections.Generic;\n\n"
-    "var themes = new List<string> { \"VS Code Dark\", \"Monokai\" };\n"
+    'var themes = new List<string> { "VS Code Dark", "Monokai" };\n'
     "foreach (var theme in themes)\n"
     "{\n"
-    "    Console.WriteLine($\"Previewing {theme.ToUpperInvariant()}\");\n"
+    '    Console.WriteLine($"Previewing {theme.ToUpperInvariant()}");\n'
     "}\n"
     "```\n\n"
     "```java\n"
@@ -353,7 +354,7 @@ TEXT_THEME_PREVIEW_BLOCK = (
     "record Preview(String theme, boolean active) {}\n\n"
     "class ThemePreview {\n"
     "  public static void main(String[] args) {\n"
-    "    var previews = List.of(new Preview(\"Solarized Light\", true));\n"
+    '    var previews = List.of(new Preview("Solarized Light", true));\n'
     "    previews.forEach(item -> System.out.println(item.theme()));\n"
     "  }\n"
     "}\n"
@@ -632,26 +633,16 @@ class TranscriptLexer(Lexer):
     """Markdown highlighting, fenced-code syntax, and transcript chrome."""
 
     _MESSAGE_PREFIXES = ("━━ you · ", "━━ klaude · ")
-    _ACTIVITY_PREFIXES = (
-        "[reasoning] ",
-        "[memory saved] ",
-        "[interrupted",
-        "[ollama] ",
-        "-> ",
-    )
-    _ERROR_PREFIXES = ("[error] ",)
-    _WARNING_PREFIXES = ("[warning] ", "Warnings:")
-    _STATUS_NOTICE = re.compile(r"^\[[a-z][a-z0-9 _-]*\](?:\s|$)", re.IGNORECASE)
+    _ACTIVITY_PREFIXES = ("-> ",)
+    _WARNING_PREFIXES = ("Warnings:",)
+    _STATUS_NOTICE = re.compile(r"^\[(?P<label>[^\]\r\n]+)\](?=\s|$)")
 
     @staticmethod
     def _is_logo_line(line: str) -> bool:
-        return (
-            len(line) == 69
-            and (
-                (line.startswith("╔") and line.endswith("╗"))
-                or (line.startswith("╚") and line.endswith("╝"))
-                or (line.startswith("║") and line.endswith("║"))
-            )
+        return len(line) == 69 and (
+            (line.startswith("╔") and line.endswith("╗"))
+            or (line.startswith("╚") and line.endswith("╝"))
+            or (line.startswith("║") and line.endswith("║"))
         )
 
     def __init__(self) -> None:
@@ -688,6 +679,31 @@ class TranscriptLexer(Lexer):
                 remaining = 0
             remainder.append((style, text))
         return remainder
+
+    @classmethod
+    def _status_notice_fragments(cls, line: str) -> list[tuple[str, str]] | None:
+        """Render a leading status label as a semantic, fixed-width badge."""
+        match = cls._STATUS_NOTICE.match(line)
+        if match is None:
+            return None
+        label = match.group("label")
+        normalized = label.casefold().strip()
+        if normalized == "success" or normalized.endswith(" saved"):
+            kind = "success"
+        elif normalized in {"error", "failed"} or normalized.startswith(("error ", "failed ")):
+            kind = "failed"
+        elif normalized == "warning" or normalized.startswith(("warning ", "interrupted")):
+            kind = "warning"
+        else:
+            kind = "info"
+        edge_style = f"class:transcript.label.{kind}.edge"
+        word_style = f"class:transcript.label.{kind}.word"
+        return [
+            (edge_style, "["),
+            (word_style, label.upper()),
+            (edge_style, "]"),
+            ("", line[match.end() :]),
+        ]
 
     def lex_document(self, document):
         markdown_line = self._markdown.lex_document(document)
@@ -731,11 +747,12 @@ class TranscriptLexer(Lexer):
                 return [("class:help.category", line)]
             if line.startswith(self._MESSAGE_PREFIXES):
                 return [("class:transcript.divider", line)]
-            if line.startswith(self._ERROR_PREFIXES):
-                return [("class:transcript.error", line)]
+            status_notice = self._status_notice_fragments(line)
+            if status_notice is not None:
+                return status_notice
             if line.startswith(self._WARNING_PREFIXES):
                 return [("class:transcript.warning", line)]
-            if line.startswith(self._ACTIVITY_PREFIXES) or self._STATUS_NOTICE.match(line):
+            if line.startswith(self._ACTIVITY_PREFIXES):
                 return [("class:transcript.activity", line)]
             if lineno in code_lines:
                 return code_lines[lineno]
@@ -755,9 +772,7 @@ class TranscriptLexer(Lexer):
 
 def _is_user_transcript_line(document: Document, lineno: int) -> bool:
     """Whether a transcript line belongs to the user block above its divider."""
-    if document.lines[lineno].startswith(
-        ("━━ you · ", "━━ klaude · ", "━━ Session: ")
-    ):
+    if document.lines[lineno].startswith(("━━ you · ", "━━ klaude · ", "━━ Session: ")):
         return False
     for index in range(lineno - 1, -1, -1):
         line = document.lines[index]
@@ -854,16 +869,16 @@ class TranscriptWindow(Window):
             if not user_line and not code_line:
                 continue
             surface_style = (
-                "class:transcript.code"
-                if code_line
-                else "class:transcript.user-message"
+                "class:transcript.code" if code_line else "class:transcript.user-message"
             )
             row = new_screen.data_buffer[write_position.ypos + relative_y]
             for column in range(width):
                 cell = row[start_x + column]
                 row[start_x + column] = Char(
                     cell.char,
-                    f"{cell.style} {surface_style}".strip(),
+                    # Apply the row surface first so explicit lexer colors,
+                    # including semantic badge backgrounds, remain authoritative.
+                    f"{surface_style} {cell.style}".strip(),
                 )
         return visible_rows, rowcol_to_yx
 
@@ -902,11 +917,7 @@ def _tui_style(theme: str, text_theme: str):
         return next(token for token in style.split() if token.startswith("#"))
 
     def background(style: str) -> str:
-        return next(
-            token.removeprefix("bg:")
-            for token in style.split()
-            if token.startswith("bg:")
-        )
+        return next(token.removeprefix("bg:") for token in style.split() if token.startswith("bg:"))
 
     def blend_hex(background: str, foreground: str, ratio: float) -> str:
         background_rgb = tuple(int(background[index : index + 2], 16) for index in (1, 3, 5))
@@ -915,6 +926,7 @@ def _tui_style(theme: str, text_theme: str):
             f"{round(base + (accent - base) * ratio):02x}"
             for base, accent in zip(background_rgb, foreground_rgb, strict=True)
         )
+
     # Code needs a quiet visual boundary from the composer without creating a
     # second theme palette. Darkening the current input surface works for every
     # chrome theme, including the neutral Pastelle family.
@@ -923,6 +935,22 @@ def _tui_style(theme: str, text_theme: str):
         input_background,
         output_foreground,
         0.60 if theme == "crimson-red" else 0.45,
+    )
+    label_backgrounds = {
+        "info": "#9a9197",
+        "warning": "#f3c84b",
+        "failed": "#ff6574",
+        "success": "#55d985",
+    }
+    label_styles = {
+        f"transcript.label.{kind}.edge": f"bg:{color} {color} bold"
+        for kind, color in label_backgrounds.items()
+    }
+    label_styles.update(
+        {
+            f"transcript.label.{kind}.word": f"bg:{color} {output_background} bold"
+            for kind, color in label_backgrounds.items()
+        }
     )
     composer_rail = f"bg:{input_background} {output_background}"
     footer_path_background = background(chrome["bottom-toolbar"])
@@ -936,6 +964,7 @@ def _tui_style(theme: str, text_theme: str):
             style_from_pygments_cls(get_style_by_name(pygments_name)),
             Style.from_dict(
                 {
+                    **label_styles,
                     # Keep the user surface, but do not set a foreground here:
                     # a foreground would override Markdown, command, and code
                     # token colors after TranscriptWindow applies this class.
@@ -974,8 +1003,7 @@ def _tui_style(theme: str, text_theme: str):
                         foreground(chrome["input-field"])
                     ),
                     "completion-menu.meta.completion.current": (
-                        f"{chrome['completion-menu.meta.completion']} "
-                        "nobold nounderline noreverse"
+                        f"{chrome['completion-menu.meta.completion']} nobold nounderline noreverse"
                     ),
                     "help.command": f"{foreground(chrome['frame.border'])} bold",
                     "transcript.logo": f"{foreground(chrome['frame.border'])} bold",
@@ -1100,8 +1128,7 @@ def _load_runtime_preferences(path: Path) -> dict[str, int | None]:
         if value is None and key in raw:
             preferences[key] = None
         elif type(value) is int and (
-            (key == "num_gpu" and value >= -1)
-            or (key != "num_gpu" and value >= 1)
+            (key == "num_gpu" and value >= -1) or (key != "num_gpu" and value >= 1)
         ):
             preferences[key] = value
     return preferences
@@ -1180,17 +1207,12 @@ def _tool_availability_preferences(path: Path) -> dict[str, bool]:
     raw = _load_chat_preferences(path).get("tool_availability", {})
     if not isinstance(raw, dict):
         return {name: True for name in TOOL_AVAILABILITY_LABELS}
-    return {
-        name: raw.get(name) is not False
-        for name in TOOL_AVAILABILITY_LABELS
-    }
+    return {name: raw.get(name) is not False for name in TOOL_AVAILABILITY_LABELS}
 
 
 def _apply_tool_availability_preferences(agent, path: Path) -> None:
     values = _tool_availability_preferences(path)
-    agent.disabled_tool_names = {
-        name for name, enabled in values.items() if not enabled
-    }
+    agent.disabled_tool_names = {name for name, enabled in values.items() if not enabled}
 
 
 def _web_provider_preferences(path: Path, cfg) -> dict[str, bool]:
@@ -1242,9 +1264,12 @@ def _permissions_command(agent, cfg, path: Path, argument: str) -> str:
             for name in names
         )
     parts = argument.split()
-    if (len(parts) not in {2, 3} or parts[0] not in names
-            or parts[1] not in {"ask", "allow", "deny", "reset"}
-            or (len(parts) == 3 and parts[2] != "save")):
+    if (
+        len(parts) not in {2, 3}
+        or parts[0] not in names
+        or parts[1] not in {"ask", "allow", "deny", "reset"}
+        or (len(parts) == 3 and parts[2] != "save")
+    ):
         raise ValueError("Use /permissions TOOL ask|allow|deny|reset [save].")
     name, policy = parts[:2]
     if len(parts) == 3:
@@ -1257,8 +1282,9 @@ def _permissions_command(agent, cfg, path: Path, argument: str) -> str:
             saved[name] = policy
         value["permissions"] = saved
         _write_chat_preferences(path, value)
-    effective = ({**DEFAULT_PERMISSIONS, **cfg.permissions}.get(name, "ask")
-                 if policy == "reset" else policy)
+    effective = (
+        {**DEFAULT_PERMISSIONS, **cfg.permissions}.get(name, "ask") if policy == "reset" else policy
+    )
     agent.gate.policies[name] = effective
     scope = "saved for future chats" if len(parts) == 3 else "this chat only"
     return f"{name}: {effective} · {scope}"
@@ -1267,10 +1293,12 @@ def _permissions_command(agent, cfg, path: Path, argument: str) -> str:
 def _plan_command(agent, argument: str) -> str:
     if argument not in {"", "on", "off"}:
         raise ValueError("Use /plan [on|off].")
-    agent.plan_mode = (not getattr(agent, "plan_mode", False) if not argument
-                       else argument == "on")
-    return ("Plan mode on: read-only investigation; implementation tools disabled."
-            if agent.plan_mode else "Plan mode off: normal tool permissions restored.")
+    agent.plan_mode = not getattr(agent, "plan_mode", False) if not argument else argument == "on"
+    return (
+        "Plan mode on: read-only investigation; implementation tools disabled."
+        if agent.plan_mode
+        else "Plan mode off: normal tool permissions restored."
+    )
 
 
 def _chat_status(agent, memory, session_id: str) -> str:
@@ -1285,6 +1313,22 @@ def _chat_status(agent, memory, session_id: str) -> str:
         f"memory: {'on' if memory.auto_memory_enabled() else 'off'} · "
         f"tools: {len(policies)}"
     )
+
+
+DEBUG_LABEL_EXAMPLES = "\n\n".join(
+    (
+        "[status] Neutral session information",
+        "[appearance] Neutral appearance information",
+        "[runtime] Neutral runtime information",
+        "[permission · example] Neutral extended label",
+        "[warning] Amber warning",
+        "[interrupted at a safe boundary] Amber interruption",
+        "[failed] Red failure",
+        "[error] Red error",
+        "[success] Green success",
+        "[memory saved] Green saved-memory notice",
+    )
+) + "\n"
 
 
 def _chat_recap(agent, session_id: str) -> str:
@@ -1311,6 +1355,7 @@ def _chat_memory(memory, argument: str) -> str:
 
 def _chat_skills(cfg) -> str:
     from klaude_knowledge import list_installed_skills
+
     installed = list_installed_skills(cfg)
     if not installed:
         return "installed skills: (none)"
@@ -1687,18 +1732,41 @@ DOCS_COMMANDS = (
 )
 CHAT_COMMANDS = (
     CommandSpec("help", CommandSurface.CHAT, "/help", "Show this command reference."),
-    CommandSpec("permissions", CommandSurface.CHAT, "/permissions [TOOL POLICY [save]]",
-                "Inspect or set ask/allow/deny or reset tool permissions; save is optional."),
-    CommandSpec("plan", CommandSurface.CHAT, "/plan [on|off]",
-                "Toggle read-only planning; disables implementation tools."),
+    CommandSpec(
+        "permissions",
+        CommandSurface.CHAT,
+        "/permissions [TOOL POLICY [save]]",
+        "Inspect or set ask/allow/deny or reset tool permissions; save is optional.",
+    ),
+    CommandSpec(
+        "plan",
+        CommandSurface.CHAT,
+        "/plan [on|off]",
+        "Toggle read-only planning; disables implementation tools.",
+    ),
     CommandSpec("compact", CommandSurface.CHAT, "/compact", "Compact stale context now."),
-    CommandSpec("recap", CommandSurface.CHAT, "/recap", "Show a concise current conversation recap."),
-    CommandSpec("status", CommandSurface.CHAT, "/status", "Show session, context, model, and memory status."),
-    CommandSpec("memory", CommandSurface.CHAT, "/memory [on|off]", "Show or toggle automatic memory."),
+    CommandSpec(
+        "recap", CommandSurface.CHAT, "/recap", "Show a concise current conversation recap."
+    ),
+    CommandSpec(
+        "status", CommandSurface.CHAT, "/status", "Show session, context, model, and memory status."
+    ),
+    CommandSpec(
+        "debug-label",
+        CommandSurface.CHAT,
+        "/debug_label",
+        "Preview every transcript label style.",
+    ),
+    CommandSpec(
+        "memory", CommandSurface.CHAT, "/memory [on|off]", "Show or toggle automatic memory."
+    ),
     CommandSpec("skills", CommandSurface.CHAT, "/skills", "List installed assistant skills."),
     CommandSpec("vim", CommandSurface.CHAT, "/vim", "Toggle Vim composer keybindings."),
     CommandSpec(
-        "new", CommandSurface.CHAT, "/new", "Start a fresh chat and clear terminal history.",
+        "new",
+        CommandSurface.CHAT,
+        "/new",
+        "Start a fresh chat and clear terminal history.",
     ),
     CommandSpec("rename", CommandSurface.CHAT, "/rename NAME", "Rename this session."),
     CommandSpec("fork", CommandSurface.CHAT, "/fork", "Continue a copy of this conversation."),
@@ -1706,7 +1774,9 @@ CHAT_COMMANDS = (
     CommandSpec("diff", CommandSurface.CHAT, "/diff", "Show Git changes and untracked files."),
     CommandSpec("review", CommandSurface.CHAT, "/review", "Review workspace changes read-only."),
     CommandSpec(
-        "resume", CommandSurface.CHAT, "/resume [SESSION_ID]",
+        "resume",
+        CommandSurface.CHAT,
+        "/resume [SESSION_ID]",
         "Resume a saved conversation; list all sessions with age, ID, and name.",
     ),
     CommandSpec(
@@ -1769,7 +1839,7 @@ CHAT_COMMANDS = (
         CommandSurface.CHAT,
         "/steer TEXT",
         "Prioritize a new instruction and interrupt at the next safe boundary.",
-        examples=("/steer focus only on the parser"),
+        examples=("/steer focus only on the parser",),
     ),
     CommandSpec(
         "cancel",
@@ -1837,7 +1907,9 @@ CHAT_COMMANDS = (
         "/exit",
         "Exit the interactive chat session. (Alternatives: /quit /q)",
     ),
-    CommandSpec("q", CommandSurface.CHAT, "/q", "Exit the interactive chat session.", visible=False),
+    CommandSpec(
+        "q", CommandSurface.CHAT, "/q", "Exit the interactive chat session.", visible=False
+    ),
 )
 PUBLIC_COMMAND_SPECS = CLI_COMMANDS + DOCS_COMMANDS + CHAT_COMMANDS
 _HELP_COMMAND_USAGES = tuple(
@@ -1942,8 +2014,10 @@ class ChatCommandCompleter(Completer):
             try:
                 root = Path(self._workdir_provider()).resolve()
                 candidate = Path(fragment).expanduser()
-                parent = (candidate.parent if candidate.is_absolute() else root / candidate.parent)
-                entries = sorted(parent.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))
+                parent = candidate.parent if candidate.is_absolute() else root / candidate.parent
+                entries = sorted(
+                    parent.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())
+                )
             except OSError:
                 return
             for entry in entries[:100]:
@@ -1992,8 +2066,20 @@ def _attachment_suggestion_icon(path: Path) -> str:
     if suffix in {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus"}:
         return "🎝"
     if suffix in {
-        ".txt", ".md", ".rst", ".toml", ".yaml", ".yml", ".json", ".ini",
-        ".cfg", ".conf", ".env", ".properties", ".xml", ".csv",
+        ".txt",
+        ".md",
+        ".rst",
+        ".toml",
+        ".yaml",
+        ".yml",
+        ".json",
+        ".ini",
+        ".cfg",
+        ".conf",
+        ".env",
+        ".properties",
+        ".xml",
+        ".csv",
     } or path.name.lower() in {"makefile", "dockerfile", "readme", "license"}:
         return "🗎"
     return "🗋"
@@ -2003,10 +2089,7 @@ def _is_termux_terminal() -> bool:
     """Termux touch scrolling must not be converted into terminal mouse input."""
     if os.environ.get("TERMUX_VERSION"):
         return True
-    return any(
-        "/com.termux/" in os.environ.get(name, "")
-        for name in ("PREFIX", "HOME", "TMPDIR")
-    )
+    return any("/com.termux/" in os.environ.get(name, "") for name in ("PREFIX", "HOME", "TMPDIR"))
 
 
 class TwoClickCompletionsMenuControl(CompletionsMenuControl):
@@ -3969,10 +4052,12 @@ def _summarize_recent_memory(agent: Agent, memory: Memory, session_id: str, requ
             getattr(agent, "ollama_options", None)
             or getattr(agent, "ollama_think", None) is not None
         ):
-            kwargs: dict[str, object] = {"options": agent.ollama_options}
-            if agent.ollama_think is not None:
-                kwargs["think"] = agent.ollama_think
-            msg = agent.ollama.chat(agent.model, messages, **kwargs)
+            msg = agent.ollama.chat(
+                agent.model,
+                messages,
+                options=agent.ollama_options,
+                think=agent.ollama_think,
+            )
         else:
             msg = agent.ollama.chat(agent.model, messages)
     except Exception:
@@ -4034,8 +4119,7 @@ def _weather_lookup(location: str = "Phnom Penh, Cambodia", days: int = 3) -> st
     return "\n".join(lines)
 
 
-def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, object]:
-    from klaude_knowledge import Knowledge
+def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory]:
     from klaude_tools import Workspace, build_tools
     from klaude_web import Web
 
@@ -4048,7 +4132,16 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, object
     runtime_result = _runtime_context_result(cfg, workdir)
     _apply_runtime_context_to_search_config(cfg, runtime_result)
     web = Web(cfg)
-    kn = Knowledge(cfg, ollama)
+    knowledge: Any = None
+
+    def get_knowledge():
+        nonlocal knowledge
+        if knowledge is None:
+            from klaude_knowledge import Knowledge
+
+            knowledge = Knowledge(cfg, ollama)
+        return knowledge
+
     runtime_text = render_runtime_context(runtime_result.context, cfg) if runtime_result else ""
     runtime_text = _append_tool_capabilities(
         runtime_text,
@@ -4145,16 +4238,7 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, object
                 },
                 "required": ["url"],
             },
-            lambda url,
-            library="",
-            collection="",
-            name="",
-            max_depth=None,
-            max_pages=None,
-            pattern="*",
-            include_patterns=None,
-            exclude_patterns=None,
-            use_sitemap=False: (
+            lambda url, library="", collection="", name="", max_depth=None, max_pages=None, pattern="*", include_patterns=None, exclude_patterns=None, use_sitemap=False: (  # noqa: E501
                 _crawl_tool_result(
                     cfg,
                     url,
@@ -4248,7 +4332,7 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, object
             },
             lambda question="", query="", library="", collection="": (
                 _query_knowledge_tool_result(
-                    kn,
+                    get_knowledge(),
                     question or query,
                     library,
                     collection,
@@ -4328,7 +4412,7 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, object
         )
         return _system_prompt(memory, refreshed_text)
 
-    agent.set_system_prompt_builder = refreshed_system_prompt
+    agent.system_prompt_builder = refreshed_system_prompt
     _maybe_show_runtime_context_note(runtime_result)
     branch_note = ws.ensure_work_branch(time.strftime("%Y%m%d-%H%M"))
     console.print(f"[dim]{branch_note}[/]")
@@ -4381,9 +4465,7 @@ def _list_agent_directory(agent: Agent, arguments: str = "") -> tuple[bool, str]
         path_tokens.append(token)
     for token in path_tokens:
         candidate = (
-            (current / token).resolve()
-            if not Path(token).is_absolute()
-            else Path(token).resolve()
+            (current / token).resolve() if not Path(token).is_absolute() else Path(token).resolve()
         )
         if not candidate.is_relative_to(current):
             return False, f"path escapes workspace: {token}"
@@ -4444,6 +4526,55 @@ def _control_ollama_service(action: str) -> tuple[bool, str]:
         f"Run `sudo systemctl {action} ollama` in a normal terminal to enter your "
         "password and see the full service error."
     )
+
+
+def _control_ollama_service_with_sudo(action: str, password: str) -> tuple[bool, str]:
+    """Authenticate over stdin, then run a fixed command without forwarding the secret."""
+    if action not in {"restart", "stop"}:
+        return False, f"unsupported Ollama action: {action}"
+    sudo = shutil.which("sudo")
+    systemctl = shutil.which("systemctl")
+    if sudo is None or systemctl is None:
+        return False, "sudo or systemctl is unavailable; manage Ollama with your service manager"
+    try:
+        authentication = subprocess.run(
+            [sudo, "-S", "-p", "", "-v"],
+            input=password + "\n",
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if authentication.returncode:
+            detail = (authentication.stderr or authentication.stdout).strip().splitlines()
+            message = detail[-1] if detail else "authentication failed"
+            return False, f"administrator authentication failed: {message}"
+        completed = subprocess.run(
+            [
+                sudo,
+                "-n",
+                "--",
+                systemctl,
+                "--no-ask-password",
+                action,
+                "ollama",
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"Ollama service {action} timed out"
+    except OSError as exc:
+        return False, f"could not {action} Ollama: {exc}"
+    if completed.returncode == 0:
+        completed_action = "restarted" if action == "restart" else "stopped"
+        return True, f"Ollama service {completed_action}"
+    detail = (completed.stderr or completed.stdout).strip().splitlines()
+    message = detail[-1] if detail else f"sudo exited with status {completed.returncode}"
+    return False, f"could not {action} Ollama: {message}"
 
 
 def _strip_ansi_sgr(value: str) -> str:
@@ -4546,17 +4677,26 @@ def _render(
     ui_state: ChatUIState | None = None,
     plain: bool = False,
     read_only: bool = False,
+    model_message: str | None = None,
 ) -> str:
-    builder = getattr(agent, "set_system_prompt_builder", None)
+    builder = getattr(agent, "system_prompt_builder", None)
     if builder:
         agent.set_system_prompt(builder())
-    memory.log_turn(session_id, "user", user_msg)
+    effective_message = model_message if model_message is not None else user_msg
+    memory.log_turn(
+        session_id,
+        "user",
+        user_msg,
+        model_content=(effective_message if effective_message != user_msg else None),
+    )
     _print_trace(f"-> model [{getattr(agent, 'model', 'local')}] thinking...")
     assistant_text: list[str] = []
     streamed_fragments: list[str] = []
     streamed_logged = False
     pending_tool_start_metadata: dict[str, dict] = {}
-    events = agent.run(user_msg, read_only=True) if read_only else agent.run(user_msg)
+    events = (
+        agent.run(effective_message, read_only=True) if read_only else agent.run(effective_message)
+    )
     for event in events:
         if event.kind == "text_delta" and event.payload.get("content"):
             piece = event.payload["content"]
@@ -4823,7 +4963,19 @@ def _available_chat_models(cfg, ollama: Ollama) -> list[ModelInfo]:
     Cloud discovery refreshes separately in the background so normal picker
     navigation never waits on a provider network request.
     """
-    models: list[ModelInfo] = load_model_cache(cfg.data_dir / "model-cache.json")
+    enabled_backends = {
+        backend
+        for backend, key in (
+            ("openai_api", cfg.openai_api_key),
+            ("gemini_api", cfg.gemini_api_key),
+        )
+        if key
+    }
+    models: list[ModelInfo] = [
+        item
+        for item in load_model_cache(cfg.data_dir / "model-cache.json")
+        if item.backend in enabled_backends
+    ]
     try:
         models.extend(ModelInfo("ollama", name, name) for name in ollama.list_models())
     except Exception:
@@ -4849,7 +5001,9 @@ def _refresh_cloud_model_cache(cfg) -> None:
         ("openai_api", cfg.openai_api_key, discover_openai_models),
         ("gemini_api", cfg.gemini_api_key, discover_gemini_models),
     ):
-        current = discover(key) if key else []
+        if not key:
+            continue
+        current = discover(key)
         if current:
             refreshed.extend(current)
         else:
@@ -4867,15 +5021,26 @@ def _resolve_chat_model(models: list[ModelInfo], name: str) -> ModelInfo | None:
     if len(exact) == 1:
         return exact[0]
     folded = query.casefold()
-    prefix = [item for item in models if item.ref.casefold().startswith(folded) or item.model_id.casefold().startswith(folded)]
+    prefix = [
+        item
+        for item in models
+        if item.ref.casefold().startswith(folded) or item.model_id.casefold().startswith(folded)
+    ]
     if len(prefix) == 1:
         return prefix[0]
-    matches = [item for item in models if folded in item.ref.casefold() or folded in item.model_id.casefold()]
+    matches = [
+        item
+        for item in models
+        if folded in item.ref.casefold() or folded in item.model_id.casefold()
+    ]
     return matches[0] if len(matches) == 1 else None
 
 
 def _model_picker_rows(
-    cfg, ollama: Ollama, backend: str, active_model: ModelInfo | None = None,
+    cfg,
+    ollama: Ollama,
+    backend: str,
+    active_model: ModelInfo | None = None,
 ) -> tuple[list[str], dict[str, ModelInfo]]:
     """Model rows for one backend, grouped by local model family when useful."""
     models = _available_chat_models(cfg, ollama)
@@ -4902,7 +5067,9 @@ def _model_picker_rows(
         rows.append(active_model.model_id)
         mapping[active_model.model_id] = active_model
     if not rows:
-        label = {"ollama": "Ollama", "openai_api": "OpenAI API", "gemini_api": "Gemini API"}[backend]
+        label = {"ollama": "Ollama", "openai_api": "OpenAI API", "gemini_api": "Gemini API"}[
+            backend
+        ]
         rows.append(f"{label} — models unavailable")
     elif backend == "ollama" and not any(item.backend == "ollama" for item in models):
         rows.append("Ollama unavailable — showing active model only")
@@ -4910,22 +5077,28 @@ def _model_picker_rows(
 
 
 def _set_agent_model(agent: Agent, cfg, ollama: Ollama, info: ModelInfo) -> None:
-    agent.model = info.model_id
-    agent.model_info = info
+    runtime: Any
     if info.backend == "ollama":
         # Unit-test and plugin fakes may already be a compatible runtime.
-        agent.runtime = OllamaRuntime(ollama) if isinstance(ollama, Ollama) else ollama
+        runtime = OllamaRuntime(ollama) if isinstance(ollama, Ollama) else ollama
     elif info.backend == "openai_api":
-        agent.runtime = OpenAIRuntime(cfg.openai_api_key)
+        runtime = OpenAIRuntime(cfg.openai_api_key)
+        runtime._client()
     elif info.backend == "gemini_api":
-        agent.runtime = GeminiRuntime(cfg.gemini_api_key)
+        runtime = GeminiRuntime(cfg.gemini_api_key)
+        runtime._sdk()
     else:
         raise ValueError(f"unsupported model backend: {info.backend}")
-    agent.ollama = agent.runtime
+    # Only mutate the active session after configuration and optional SDK
+    # imports have succeeded, so a failed cloud selection preserves its model.
+    agent.model = info.model_id
+    agent.model_info = info
+    agent.runtime = runtime
+    agent.ollama = runtime
 
 
 def _agent_local_ollama(agent: Agent):
-    return getattr(agent, "local_ollama", agent.ollama)
+    return getattr(agent, "local_ollama", None) or getattr(agent.ollama, "ollama", agent.ollama)
 
 
 def _agent_model_ref(agent: Agent) -> str:
@@ -4935,11 +5108,7 @@ def _agent_model_ref(agent: Agent) -> str:
 
 def _sorted_model_names(models: list[str]) -> list[str]:
     infos = [ModelInfo("ollama", value, value) for value in models]
-    return [
-        item.model_id
-        for _family, members in grouped_local_models(infos)
-        for item in members
-    ]
+    return [item.model_id for _family, members in grouped_local_models(infos) for item in members]
 
 
 def _select_tui_option(
@@ -4993,11 +5162,10 @@ def _apply_session_mode(agent: Agent, cfg, mode: str) -> None:
 
 def _choose_effort(agent: Agent, cfg, requested: str = "") -> str | None:
     requested = requested.strip().lower()
+    selected: str | None
     if requested:
         if requested not in EFFORT_CHOICES:
-            console.print(
-                "[red]unknown effort[/] — choose low, medium, or high"
-            )
+            console.print("[red]unknown effort[/] — choose low, medium, or high")
             return None
         selected = requested
     else:
@@ -5016,6 +5184,7 @@ def _choose_effort(agent: Agent, cfg, requested: str = "") -> str | None:
 
 def _choose_mode(agent: Agent, cfg, requested: str = "") -> str | None:
     requested = requested.strip().lower()
+    selected: str | None
     if requested:
         if requested not in REASONING_MODES:
             console.print("[red]unknown mode[/] — choose standard or thinking")
@@ -5044,15 +5213,15 @@ def _choose_model_and_effort(agent: Agent, cfg, requested: str = "") -> bool:
             return False
     else:
         installed = [item.ref for item in models]
-        resolved = _select_tui_option(
+        selected_ref = _select_tui_option(
             "Select model",
             "Choose an available Cloud or Local model. Cloud is listed first.",
             installed,
             _agent_model_ref(agent),
         )
-        if resolved is None:
+        if selected_ref is None:
             return False
-        resolved = next(item for item in models if item.ref == resolved)
+        resolved = next(item for item in models if item.ref == selected_ref)
     prior_model = agent.model
     prior_info = agent.model_info
     _set_agent_model(agent, cfg, _agent_local_ollama(agent), resolved)
@@ -5090,8 +5259,12 @@ def _workspace_diff(agent) -> str:
         ("Untracked files (names only)", ["ls-files", "--others", "--exclude-standard"]),
     ):
         result = subprocess.run(
-            ["git", "-c", "color.ui=false", *args], cwd=root,
-            capture_output=True, text=True, errors="replace", timeout=15,
+            ["git", "-c", "color.ui=false", *args],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=15,
         )
         if result.returncode:
             raise ValueError(result.stderr.strip() or "Git inspection failed.")
@@ -5126,8 +5299,10 @@ def _export_session(memory, session_id: str, agent, cfg, requested: str) -> Path
         directory = cfg.data_dir / "exports"
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{session_id}-{uuid.uuid4().hex[:8]}.md"
-    title = next((s["title"] for s in memory.resumable_sessions()
-                  if s["session_id"] == session_id), "Klaude conversation")
+    title = next(
+        (s["title"] for s in memory.resumable_sessions() if s["session_id"] == session_id),
+        "Klaude conversation",
+    )
     blocks = [f"# {title}\n\nSession: {session_id}\n"]
     for turn in memory.load_session(session_id, timestamps=True):
         content = turn.get("content", "")
@@ -5157,7 +5332,9 @@ def _restored_transcript(session_id: str, turns: list[dict], width: int) -> str:
             continue
         role = "you" if turn["role"] == "user" else "klaude"
         divider = _message_divider(
-            role, width=width, timestamp=datetime.fromtimestamp(turn["ts"]).astimezone(),
+            role,
+            width=width,
+            timestamp=datetime.fromtimestamp(turn["ts"]).astimezone(),
         )
         blocks.append(f"\n{content}\n\n{divider}\n")
     return "".join(blocks)
@@ -5165,6 +5342,8 @@ def _restored_transcript(session_id: str, turns: list[dict], width: int) -> str:
 
 class PendingChatTurn(str):
     """A string-compatible queued message with explicit `/attach` context."""
+
+    attachments: tuple[Path, ...]
 
     def __new__(cls, text: str, attachments: tuple[Path, ...] = ()):
         instance = super().__new__(cls, text)
@@ -5194,6 +5373,20 @@ class PersistentChatTUI:
         self.agent = agent
         self.memory = memory
         self.session_id = session_id
+        self.client_id = uuid.uuid4().hex
+        self._turn_id = ""
+        prune_events = getattr(memory, "prune_session_events", None)
+        if callable(prune_events):
+            prune_events(session_id)
+        self._session_event_cursor = memory.latest_session_event_id(session_id)
+        self._session_live_revision = 0
+        self._last_lease_renewal = 0.0
+        self._last_draft_publish = 0.0
+        self._published_draft = ""
+        self._published_queue: tuple[str, ...] = ()
+        self._remote_draft = ""
+        self._remote_queue: list[str] = []
+        self._watching_remote = False
         self.cfg = cfg
         self.character_stream = character_stream
         self.ui_state = ChatUIState(
@@ -5218,6 +5411,7 @@ class PersistentChatTUI:
         self._choice_index = 0
         self._choice_click_index: int | None = None
         self._choice_prior_model: str | None = None
+        self._choice_prior_model_info: ModelInfo | None = None
         self._choice_preview_appearance: tuple[str, str] | None = None
         self._text_theme_preview_visible = False
         self._text_theme_preview_original: str | None = None
@@ -5227,6 +5421,7 @@ class PersistentChatTUI:
         self._queue_edit_index: int | None = None
         self._queue_edit_draft = ""
         self._permission_request: dict[str, object] | None = None
+        self._secret_request: dict[str, object] | None = None
         self._ollama_control_action: str | None = None
         self._turn_started_at: float | None = None
         self._printed_transcript_length = 0
@@ -5251,8 +5446,7 @@ class PersistentChatTUI:
 
         self.output = TextArea(
             text=(
-                _klaude_logo()
-                + "\n"
+                _klaude_logo() + "\n"
                 "Local-first coding, knowledge, and web research.\n"
                 f"Path: {getattr(agent, 'workdir', Path.cwd())}\n"
                 f"Model: {agent.model}\n"
@@ -5295,7 +5489,8 @@ class PersistentChatTUI:
             style="class:output-field",
         )
         self.live_output_panel = ConditionalContainer(
-            self.live_output, filter=Condition(lambda: bool(self.live_output.text)),
+            self.live_output,
+            filter=Condition(lambda: bool(self.live_output.text)),
         )
         self.text_theme_preview = TextArea(
             read_only=True,
@@ -5313,21 +5508,30 @@ class PersistentChatTUI:
         )
         self.input = TextArea(
             multiline=True,
+            password=Condition(lambda: self._secret_request is not None),
             height=lambda: Dimension(
                 min=self._composer_content_height_limits()[0],
                 max=self._composer_content_height_limits()[1],
             ),
             history=InMemoryHistory(),
-            auto_suggest=AutoSuggestFromHistory(),
+            auto_suggest=ConditionalAutoSuggest(
+                AutoSuggestFromHistory(),
+                Condition(lambda: self._secret_request is None),
+            ),
             completer=ChatCommandCompleter(
                 lambda: getattr(self.agent, "workdir", Path.cwd()),
-                lambda: self._choice_kind is None,
+                lambda: (
+                    self._choice_kind is None
+                    and self._permission_request is None
+                    and self._secret_request is None
+                ),
             ),
             complete_while_typing=True,
             wrap_lines=True,
             style="class:input-field",
         )
         self.input.buffer.on_text_changed += self._keep_exact_command_completion
+        self.input.buffer.on_text_changed += self._composer_text_changed
         self.input.buffer.on_cursor_position_changed += self._keep_exact_command_completion
         self.input.control.menu_position = self._completion_menu_position
         self.input.control.input_processors.append(
@@ -5459,7 +5663,9 @@ class PersistentChatTUI:
         )
         self.queue_panel = ConditionalContainer(
             content=self.queue_window,
-            filter=Condition(lambda: bool(self.pending)),
+            filter=Condition(
+                lambda: bool(self.pending or self._remote_draft or self._remote_queue)
+            ),
         )
         self.input_spacer = Window(
             height=1,
@@ -5471,12 +5677,12 @@ class PersistentChatTUI:
         self._apply_field_settings()
         completion_visible = Condition(
             lambda: bool(
-                self.input.buffer.complete_state
-                and self.input.buffer.complete_state.completions
+                self.input.buffer.complete_state and self.input.buffer.complete_state.completions
             )
         )
         self.completion_menu = TwoClickCompletionsMenu(max_height=12, scroll_offset=1)
         completion_padding = FormattedTextControl(self._completion_padding_fragments)
+
         def completion_scrollbar_track(edge: str) -> Window:
             return Window(
                 width=1,
@@ -5484,6 +5690,7 @@ class PersistentChatTUI:
                 char=" ",
                 style=lambda: self._completion_scrollbar_padding_style(edge),
             )
+
         self.completion_popup = ConditionalContainer(
             content=HSplit(
                 [
@@ -5564,6 +5771,8 @@ class PersistentChatTUI:
                 ("class:frame.label", f"select {self._choice_kind}"),
                 ("", f"  {self._choice_index + 1}/{len(self._choice_values)}"),
             ]
+        if self._secret_request:
+            return [("class:frame.label", f"secret · {self._secret_request['label']}")]
         return [
             ("class:frame.label", "you"),
             ("", f"  {self.ui_state.model}"),
@@ -5571,7 +5780,7 @@ class PersistentChatTUI:
         ]
 
     def _composer_rail_style(self) -> str:
-        if self._permission_request:
+        if self._permission_request or self._secret_request:
             return "class:composer.rail.warning"
         if self.status_error:
             return "class:composer.rail.error"
@@ -5598,7 +5807,8 @@ class PersistentChatTUI:
     def _queue_height(self) -> int:
         start, stop = self._queue_preview_bounds()
         hidden_rows = int(start > 0) + int(stop < len(self.pending))
-        return 2 + (stop - start) + hidden_rows
+        remote_rows = int(bool(self._remote_draft)) + min(2, len(self._remote_queue))
+        return 2 + (stop - start) + hidden_rows + remote_rows
 
     def _queue_preview_bounds(self) -> tuple[int, int]:
         total = len(self.pending)
@@ -5620,6 +5830,15 @@ class PersistentChatTUI:
         queued = list(self.pending)
         start, stop = self._queue_preview_bounds()
         fragments = [("class:queue.title", "• Queued follow-up inputs\n")]
+        if self._remote_draft:
+            draft = textwrap.shorten(
+                " ↵ ".join(self._remote_draft.splitlines()),
+                width=width,
+                placeholder="…",
+            )
+            fragments.append(("class:queue.selected", f"  › remote draft: {draft}\n"))
+        for remote in self._remote_queue[:2]:
+            fragments.append(("class:queue.item", f"  ↳ remote queue: {remote}\n"))
         if start:
             fragments.append(("class:queue.hint", f"  ↳ … {start} earlier\n"))
         for index in range(start, stop):
@@ -5635,9 +5854,7 @@ class PersistentChatTUI:
             marker = "›" if editing else "↳"
             fragments.append((style, f"  {marker} {compact}\n"))
         if stop < len(queued):
-            fragments.append(
-                ("class:queue.hint", f"  ↳ … {len(queued) - stop} later\n")
-            )
+            fragments.append(("class:queue.hint", f"  ↳ … {len(queued) - stop} later\n"))
         hint = (
             "    alt + ↑ earlier · enter save · empty + enter delete"
             if self._queue_edit_index is not None
@@ -5676,10 +5893,12 @@ class PersistentChatTUI:
             marker = "›" if selected else " "
             active_marker = " *" if self._choice_value_is_active(value) else ""
             if self._choice_kind == "session":
-                label = value if len(value) <= width else value[:width - 1] + "…"
+                label = value if len(value) <= width else value[: width - 1] + "…"
             else:
                 label = textwrap.shorten(
-                    value + active_marker, width=width, placeholder="…",
+                    value + active_marker,
+                    width=width,
+                    placeholder="…",
                 )
             if _is_choice_disabled(value):
                 style = "class:choice.disabled"
@@ -5725,14 +5944,20 @@ class PersistentChatTUI:
             current = self.agent.ollama_options.get("num_thread")
             if current is None:
                 return value == "auto (Klaude decides)"
-            return value == (str(current) if str(current) in self._choice_values else "custom input")
+            return value == (
+                str(current) if str(current) in self._choice_values else "custom input"
+            )
         if kind == "context size":
             current = int(self.agent.ollama_options.get("num_ctx", 8192))
             formatted = f"{current:,}"
             return value == (formatted if formatted in self._choice_values else "custom input")
         if kind == "model":
             choice = getattr(self, "_model_choices", {}).get(value)
-            return choice.ref == _agent_model_ref(self.agent) if choice else value.strip() == self.agent.model
+            return (
+                choice.ref == _agent_model_ref(self.agent)
+                if choice
+                else value.strip() == self.agent.model
+            )
         if kind == "effort":
             return value == _effort_value_label(self.agent.ollama_code_think)
         return False
@@ -5784,9 +6009,7 @@ class PersistentChatTUI:
                 if returncode:
                     self.status_error = f"nano exited with status {returncode}"
                 else:
-                    self._append(
-                        f"\n[runtime] edited {label}; changes apply to the next chat.\n"
-                    )
+                    self._append(f"\n[runtime] edited {label}; changes apply to the next chat.\n")
             finally:
                 self.activity = "ready"
                 self.application.invalidate()
@@ -5814,8 +6037,10 @@ class PersistentChatTUI:
         """Keep a fully typed slash command available for Enter and Tab."""
         document = buffer.document
         prefix = document.text_before_cursor
-        if self._choice_kind or not prefix.startswith("/") or any(
-            char.isspace() for char in prefix
+        if (
+            self._choice_kind
+            or not prefix.startswith("/")
+            or any(char.isspace() for char in prefix)
         ):
             return
         completions = list(self.input.completer.get_completions(document, None))
@@ -5824,6 +6049,121 @@ class PersistentChatTUI:
             # otherwise removes a sole completion that inserts no new text.
             buffer.complete_state = CompletionState(document, completions)
             buffer.on_completions_changed.fire()
+
+    def _composer_text_changed(self, _buffer) -> None:
+        # Persist at most once per rendered frame; publishing synchronously for
+        # every keypress would add avoidable SQLite contention.
+        self._last_draft_publish = 0.0
+
+    def _publish_live_composer(self) -> None:
+        if (
+            self.shutting_down
+            or self._choice_kind
+            or self._permission_request
+            or self._secret_request
+        ):
+            return
+        now = time.monotonic()
+        if self._last_draft_publish and now - self._last_draft_publish < 0.1:
+            return
+        draft = self.input.text
+        queue_value = tuple(str(item) for item in self.pending)
+        unchanged = draft == self._published_draft and queue_value == self._published_queue
+        # An unchanged composer still sends a bounded heartbeat so another
+        # process can distinguish a present client from an abandoned draft.
+        if unchanged and self._last_draft_publish and now - self._last_draft_publish < 5.0:
+            return
+        self.memory.update_session_client(
+            self.session_id,
+            self.client_id,
+            draft=draft,
+            queue=list(queue_value),
+        )
+        self._published_draft = draft
+        self._published_queue = queue_value
+        self._last_draft_publish = now
+
+    def _sync_shared_session(self) -> None:
+        now = time.monotonic()
+        if self.running and self._turn_id and now - self._last_lease_renewal >= 5.0:
+            renewed = self.memory.renew_session_lease(
+                self.session_id,
+                self.client_id,
+                self._turn_id,
+            )
+            if not renewed:
+                self.status_error = "session worker lease was lost; interrupting safely"
+                self.cancel_requested.set()
+                self.agent.ollama.cancel_active()
+            self._last_lease_renewal = now
+        self._publish_live_composer()
+        live = self.memory.session_live_state(self.session_id)
+        self._session_live_revision = int(live["revision"])
+        remote_owner = (
+            live["state"] == "running"
+            and live["owner_client_id"] != self.client_id
+            and float(live["owner_lease_until"]) > time.time()
+        )
+        was_watching = self._watching_remote
+        self._watching_remote = bool(remote_owner)
+        active_clients = [
+            state
+            for state in self.memory.session_client_states(self.session_id)
+            if state["client_id"] != self.client_id
+            and time.time() - float(state["updated_at"]) < 30.0
+        ]
+        self._remote_draft = next(
+            (str(state["draft"]) for state in active_clients if state["draft"]),
+            "",
+        )
+        self._remote_queue = [str(value) for state in active_clients for value in state["queue"]]
+        events = self.memory.session_events_since(
+            self.session_id,
+            self._session_event_cursor,
+        )
+        for event in events:
+            self._session_event_cursor = max(self._session_event_cursor, int(event["id"]))
+            if event["client_id"] == self.client_id:
+                continue
+            payload = event["payload"] if isinstance(event["payload"], dict) else {}
+            if event["kind"] == "user_started":
+                text = str(payload.get("text", ""))
+                timestamp = datetime.fromtimestamp(event["ts"]).astimezone()
+                self._append(
+                    f"\n{text}\n\n"
+                    f"{_message_divider('you', width=self._divider_width(), timestamp=timestamp)}\n"
+                )
+            elif event["kind"] == "assistant_delta":
+                text = str(payload.get("text", ""))
+                if text:
+                    self._append(text)
+            elif event["kind"] == "activity":
+                self.activity = str(payload.get("text", "working"))
+            elif event["kind"] == "error":
+                message = str(payload.get("message", "remote worker error"))
+                self.status_error = message
+                self._append(f"\n[error] {message}\n")
+            elif event["kind"] == "turn_done":
+                suffix = str(payload.get("suffix", ""))
+                timestamp = datetime.fromtimestamp(event["ts"]).astimezone()
+                self._append(
+                    "\n\n"
+                    + _message_divider(
+                        "klaude",
+                        width=self._divider_width(),
+                        timestamp=timestamp,
+                        suffix=suffix,
+                    )
+                    + "\n"
+                )
+                self.activity = "ready"
+                self.status_error = ""
+                # The other process owns a separate Agent instance. Refresh
+                # this client's model context before it can consume a queued
+                # follow-up to the newly completed remote turn.
+                self.agent.restore_session(self.memory.load_session(self.session_id))
+        if was_watching and not self._watching_remote and self.pending and not self.running:
+            self._start_next()
 
     def _completion_menu_position(self) -> int | None:
         """Anchor to the original token even while navigation replaces it."""
@@ -5852,11 +6192,22 @@ class PersistentChatTUI:
 
     def _status_fragments(self):
         if self._height_edit:
-            return [("class:runtime_text", self.status_error or
-                     " Enter min max (1–12) · Enter save · Ctrl+C cancel · type reset to default")]
+            return [
+                (
+                    "class:runtime_text",
+                    self.status_error
+                    or " Enter min max (1–12) · Enter save · Ctrl+C cancel · type reset to default",
+                )
+            ]
         used = self.ui_state.prompt_tokens
         context = max(1, self.ui_state.context_window)
         percent = min(100, round(used * 100 / context))
+        if self._secret_request:
+            label = str(self._secret_request["label"])
+            return [
+                ("class:runtime_busy", f" SECRET · {label} "),
+                ("class:runtime_text", "masked · Enter submit · Ctrl+C cancel "),
+            ]
         if self._permission_request:
             tool = str(self._permission_request["tool"])
             return [
@@ -5866,9 +6217,7 @@ class PersistentChatTUI:
         if self._choice_kind:
             typed = self.input.text.strip()
             typed_hint = (
-                f" · typed: {textwrap.shorten(typed, width=24, placeholder='…')}"
-                if typed
-                else ""
+                f" · typed: {textwrap.shorten(typed, width=24, placeholder='…')}" if typed else ""
             )
             preview_hint = (
                 " · PgUp/PgDn scroll preview"
@@ -5953,9 +6302,7 @@ class PersistentChatTUI:
 
     def _set_composer_mode(self, mode: str) -> None:
         self.composer_mode = mode
-        self.application.editing_mode = (
-            EditingMode.VI if mode == "vim" else EditingMode.EMACS
-        )
+        self.application.editing_mode = EditingMode.VI if mode == "vim" else EditingMode.EMACS
         preferences = _load_chat_preferences(self.chat_preferences_path)
         preferences["composer_mode"] = mode
         _write_chat_preferences(self.chat_preferences_path, preferences)
@@ -5987,12 +6334,17 @@ class PersistentChatTUI:
         bindings = KeyBindings()
 
         @bindings.add(
-            "escape", filter=Condition(
+            "escape",
+            filter=Condition(
                 lambda: bool(self._choice_kind) or self._height_edit or self._runtime_edit
-            )
+            ),
         )
         def dismiss_picker(event) -> None:
             self._dismiss_picker()
+
+        @bindings.add("escape", filter=Condition(lambda: self._secret_request is not None))
+        def dismiss_secret(event) -> None:
+            self._answer_secret(None)
 
         @bindings.add(
             "escape", filter=Condition(lambda: self.input.buffer.complete_state is not None)
@@ -6033,6 +6385,9 @@ class PersistentChatTUI:
             if self._choice_kind:
                 self._submit_choice_response()
                 return
+            if self._secret_request:
+                self._submit_secret_response()
+                return
             if self._permission_request:
                 self._submit_permission_response()
                 return
@@ -6070,7 +6425,9 @@ class PersistentChatTUI:
 
         @bindings.add("c-c")
         def cancel(event) -> None:
-            if self._choice_kind or self._height_edit or self._runtime_edit:
+            if self._secret_request:
+                self._answer_secret(None)
+            elif self._choice_kind or self._height_edit or self._runtime_edit:
                 self._cancel_choice()
             elif self._queue_edit_index is not None:
                 self._cancel_queue_edit()
@@ -6128,9 +6485,14 @@ class PersistentChatTUI:
 
     def _set_input(self, text: str) -> None:
         self.input.buffer.set_document(Document(text, len(text)), bypass_readonly=True)
+        # Programmatic replacement starts a new composer state. In particular,
+        # an exact-match completion must not survive after its command runs.
+        self.input.buffer.cancel_completion()
 
     def _composer_placeholder_text(self) -> str:
         """Describe the response expected when the composer is temporarily modal."""
+        if self._secret_request:
+            return str(self._secret_request["prompt"])
         if self._permission_request:
             return "Type y/yes, n/no, or a/always · Enter confirms."
         if self._height_edit:
@@ -6186,9 +6548,7 @@ class PersistentChatTUI:
                     return
                 self._queue_edit_index = max(0, current - 1)
         self._set_input(self.pending[self._queue_edit_index])
-        self.activity = (
-            f"editing queued follow-up {self._queue_edit_index + 1}/{len(self.pending)}"
-        )
+        self.activity = f"editing queued follow-up {self._queue_edit_index + 1}/{len(self.pending)}"
         self.status_error = ""
         self.application.invalidate()
 
@@ -6220,16 +6580,18 @@ class PersistentChatTUI:
         direction = 1 if delta >= 0 else -1
         for _ in range(max(1, abs(delta))):
             self._choice_index = (self._choice_index + direction) % len(self._choice_values)
-            while _is_choice_section(self._choice_values[self._choice_index]) or _is_choice_disabled(self._choice_values[self._choice_index]):
-                self._choice_index = (
-                    self._choice_index + direction
-                ) % len(self._choice_values)
+            while _is_choice_section(
+                self._choice_values[self._choice_index]
+            ) or _is_choice_disabled(self._choice_values[self._choice_index]):
+                self._choice_index = (self._choice_index + direction) % len(self._choice_values)
         self._apply_choice_preview()
         self.application.invalidate()
 
     def _click_choice(self, index: int) -> None:
         """Select once by mouse, then confirm only on a second click."""
-        if _is_choice_section(self._choice_values[index]) or _is_choice_disabled(self._choice_values[index]):
+        if _is_choice_section(self._choice_values[index]) or _is_choice_disabled(
+            self._choice_values[index]
+        ):
             return
         if index == self._choice_click_index:
             self._choice_click_index = None
@@ -6298,9 +6660,7 @@ class PersistentChatTUI:
 
     def _end_choice_preview(self, *, restore: bool) -> None:
         if restore and self._choice_preview_appearance is not None:
-            self.appearance.theme, self.appearance.text_theme = (
-                self._choice_preview_appearance
-            )
+            self.appearance.theme, self.appearance.text_theme = self._choice_preview_appearance
             self.application.style = _tui_style(
                 self.appearance.theme,
                 self.appearance.text_theme,
@@ -6312,7 +6672,8 @@ class PersistentChatTUI:
         exit_choice = "back" if "back" in values else CANCEL_CHOICE
         trailing_hints = (
             [value for value in values if value.startswith("Tip: ")]
-            if kind == "model cloud provider" else []
+            if kind == "model cloud provider"
+            else []
         )
         values = [v for v in values if v not in {RESET_THEME_CHOICE, CANCEL_CHOICE, "back"}]
         values = [value for value in values if value not in trailing_hints]
@@ -6330,7 +6691,9 @@ class PersistentChatTUI:
         self._choice_kind = kind
         self._choice_values = values
         self._choice_index = values.index(default) if default in values else 0
-        if _is_choice_section(values[self._choice_index]) or _is_choice_disabled(values[self._choice_index]):
+        if _is_choice_section(values[self._choice_index]) or _is_choice_disabled(
+            values[self._choice_index]
+        ):
             self._move_choice(1)
         self._choice_click_index = None
         if kind in {"theme", "text theme"}:
@@ -6360,7 +6723,10 @@ class PersistentChatTUI:
 
     def _open_model_backend(self, backend: str, parent: str) -> None:
         rows, choices = _model_picker_rows(
-            self.cfg, _agent_local_ollama(self.agent), backend, getattr(self.agent, "model_info", None)
+            self.cfg,
+            _agent_local_ollama(self.agent),
+            backend,
+            getattr(self.agent, "model_info", None),
         )
         self._model_choices = choices
         self._model_parent = parent
@@ -6385,7 +6751,9 @@ class PersistentChatTUI:
         self.activity = "ready" if not self.running else self.activity
         mode = getattr(self.agent, "reasoning_mode", "standard")
         detail = mode if mode == "standard" else f"thinking · {_agent_effort_label(self.agent)}"
-        self._append(f"\n[session] model {_agent_model_ref(self.agent)} · {detail} · history kept\n")
+        self._append(
+            f"\n[session] model {_agent_model_ref(self.agent)} · {detail} · history kept\n"
+        )
 
     def _cancel_choice(self) -> None:
         if self._runtime_edit:
@@ -6410,7 +6778,7 @@ class PersistentChatTUI:
             "CPU threads": "runtime",
             "context size": "runtime",
             "input height": "input field",
-        }.get(self._choice_kind)
+        }.get(self._choice_kind or "")
         self._height_edit = False
         self._runtime_edit = None
         self._choice_click_index = None
@@ -6460,12 +6828,16 @@ class PersistentChatTUI:
         exact = [
             index
             for index, value in enumerate(self._choice_values)
-            if not _is_choice_section(value) and not _is_choice_disabled(value) and value.casefold() == response
+            if not _is_choice_section(value)
+            and not _is_choice_disabled(value)
+            and value.casefold() == response
         ]
         matches = exact or [
             index
             for index, value in enumerate(self._choice_values)
-            if not _is_choice_section(value) and not _is_choice_disabled(value) and value.casefold().startswith(response)
+            if not _is_choice_section(value)
+            and not _is_choice_disabled(value)
+            and value.casefold().startswith(response)
         ]
         if len(matches) != 1:
             self.status_error = (
@@ -6599,7 +6971,7 @@ class PersistentChatTUI:
         if selected == RESET_THEME_CHOICE:
             if self._choice_kind == "model":
                 default_model = self.cfg.models.get("coder", "")
-                installed = set(self.agent.ollama.list_models())
+                installed = set(_agent_local_ollama(self.agent).list_models())
                 if not default_model or default_model not in installed:
                     self.status_error = "configured default model is not installed"
                     self.application.invalidate()
@@ -6618,9 +6990,7 @@ class PersistentChatTUI:
                 self.status_error = "select a model row"
                 return
             self._choice_prior_model = self.agent.model
-            self._choice_prior_model_info = getattr(
-                self.agent, "model_info", ModelInfo("ollama", self.agent.model, self.agent.model)
-            )
+            self._choice_prior_model_info = getattr(self.agent, "model_info", None)
             _set_agent_model(self.agent, self.cfg, _agent_local_ollama(self.agent), info)
             self._begin_choice("mode", [*REASONING_MODES, CANCEL_CHOICE], "standard")
             return
@@ -6694,7 +7064,9 @@ class PersistentChatTUI:
                 RESET_THEME_CHOICE,
                 CANCEL_CHOICE,
             ]
-            self._begin_choice("theme settings", choices, _settings_choice_default(choices, default))
+            self._begin_choice(
+                "theme settings", choices, _settings_choice_default(choices, default)
+            )
             return
         if category == "input field":
             choices = [
@@ -6749,8 +7121,7 @@ class PersistentChatTUI:
             )
             choices = [
                 _choice_section("DISPLAY"),
-                "reasoning activity: "
-                f"{'on' if self.show_reasoning_activity else 'off'} (toggle)",
+                f"reasoning activity: {'on' if self.show_reasoning_activity else 'off'} (toggle)",
                 _choice_section("RESEARCH TOOLS"),
                 *[
                     f"{label}: {'on' if availability[name] else 'off'} (toggle)"
@@ -6762,15 +7133,16 @@ class PersistentChatTUI:
                     for name in ordered_provider_names
                 ],
                 _choice_section("RESULT VALIDATION"),
-                "web search validation: "
-                f"{'on' if values['web_search'] else 'off'} (toggle)",
+                f"web search validation: {'on' if values['web_search'] else 'off'} (toggle)",
                 "knowledge search validation: "
                 f"{'on' if values['knowledge_search'] else 'off'} (toggle)",
                 "back",
                 RESET_THEME_CHOICE,
                 CANCEL_CHOICE,
             ]
-            self._begin_choice("tools settings", choices, _settings_choice_default(choices, default))
+            self._begin_choice(
+                "tools settings", choices, _settings_choice_default(choices, default)
+            )
             return
         self.appearance = TUIAppearance()
         self._choice_kind = None
@@ -6831,7 +7203,17 @@ class PersistentChatTUI:
                 current = selected.removeprefix("CPU threads: ")
                 self._begin_choice(
                     "CPU threads",
-                    ["auto (Klaude decides)", "1", "2", "4", "8", "12", "16", "custom input", "back"],
+                    [
+                        "auto (Klaude decides)",
+                        "1",
+                        "2",
+                        "4",
+                        "8",
+                        "12",
+                        "16",
+                        "custom input",
+                        "back",
+                    ],
                     current,
                 )
                 return
@@ -6877,9 +7259,7 @@ class PersistentChatTUI:
             else:
                 values = {"web_search": True, "knowledge_search": True}
                 availability = {name: True for name in TOOL_AVAILABILITY_LABELS}
-                providers = {
-                    name: True for name in self.cfg.web_providers
-                }
+                providers = {name: True for name in self.cfg.web_providers}
                 self.show_reasoning_activity = False
                 display["reasoning_activity"] = False
             saved["tool_validation"] = values
@@ -6935,10 +7315,13 @@ class PersistentChatTUI:
         memory = runtime.memory_total_bytes or 0
         budget = vram or memory
         context = (
-            65_536 if budget >= 24 * 1024**3 else
-            32_768 if budget >= 12 * 1024**3 else
-            16_384 if budget >= 8 * 1024**3 else
-            8_192
+            65_536
+            if budget >= 24 * 1024**3
+            else 32_768
+            if budget >= 12 * 1024**3
+            else 16_384
+            if budget >= 8 * 1024**3
+            else 8_192
         )
         # Leave placement to Ollama: it can select supported GPUs and choose a
         # CPU/GPU split that fits the current model and available memory.
@@ -6986,11 +7369,13 @@ class PersistentChatTUI:
         width = self._divider_width()
         updated: list[str] = []
         changed = False
-        prefix = self.output.text[:self._printed_transcript_length]
-        pending = self.output.text[self._printed_transcript_length:]
+        prefix = self.output.text[: self._printed_transcript_length]
+        pending = self.output.text[self._printed_transcript_length :]
         for line in pending.splitlines():
             match = re.match(
-                r"^(━━ )(?P<role>you|klaude) · (?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?: · (?P<suffix>.*?))?\s*━*$",
+                r"^(━━ )(?P<role>you|klaude) · "
+                r"(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
+                r"(?: · (?P<suffix>.*?))?\s*━*$",
                 line,
             )
             if match:
@@ -7066,16 +7451,18 @@ class PersistentChatTUI:
                 last_line = text.count("\n", 0, end)
                 code_lines = _syntax_surface_lines(document)
                 columns = self.application.output.get_size().columns
-                fragments = []
+                fragments: list[tuple[str, str]] = []
                 for lineno in range(first_line, last_line):
                     surface = (
-                        " class:transcript.code" if lineno in code_lines else
-                        " class:transcript.user-message"
-                        if _is_user_transcript_line(document, lineno) else ""
+                        " class:transcript.code"
+                        if lineno in code_lines
+                        else " class:transcript.user-message"
+                        if _is_user_transcript_line(document, lineno)
+                        else ""
                     )
                     base = "class:output-field" + surface
                     fragments.extend(
-                        ("class:output-field " + style + surface, value)
+                        ("class:output-field" + surface + (f" {style}" if style else ""), value)
                         for style, value in get_line(lineno)
                     )
                     # EL paints blank cells using the active background without
@@ -7093,16 +7480,18 @@ class PersistentChatTUI:
                 )
                 self._printed_transcript_length = end
                 self.application._request_absolute_cursor_position()
-            tail = text[self._printed_transcript_length:]
+            tail = text[self._printed_transcript_length :]
         if self.live_output.text != tail:
             self.live_output.buffer.set_document(
-                Document(tail, len(tail)), bypass_readonly=True,
+                Document(tail, len(tail)),
+                bypass_readonly=True,
             )
 
     def _session_action_is_busy(self) -> bool:
         """Whether an action must wait for earlier queued work to finish."""
         return bool(
             self.running
+            or self._watching_remote
             or self._ollama_control_action
             or (self.pending and not self._executing_queued_command)
         )
@@ -7137,21 +7526,53 @@ class PersistentChatTUI:
         if self._session_action_is_busy():
             self._append("\n[session] Finish or cancel the active turn and pending queue first.\n")
             return
-        turns = self.memory.load_session(session_id, timestamps=True)
+        snapshot = self.memory.session_snapshot(session_id)
+        turns = snapshot["turns"]
         if not turns:
             self._append(f"\n[session] No saved session: {session_id}\n")
             return
+        self.memory.clear_session_client(self.session_id, self.client_id)
         self.agent.restore_session(turns)
         self.session_id = session_id
-        self._history = [t["content"] for t in turns if t["role"] == "user"
-                         and isinstance(t["content"], str)]
+        self._session_event_cursor = int(snapshot["event_cursor"])
+        self._session_live_revision = int(snapshot["live"]["revision"])
+        self._published_draft = ""
+        self._published_queue = ()
+        self._remote_draft = ""
+        self._remote_queue = []
+        self._watching_remote = False
+        self._history = [
+            t["content"] for t in turns if t["role"] == "user" and isinstance(t["content"], str)
+        ]
         self._history_index = None
         self._history_draft = ""
         self.ui_state.prompt_tokens = 0
         self.ui_state.output_tokens = 0
         self._clear_session_view()
         self._append(_restored_transcript(session_id, turns, self._divider_width()))
-        self.activity = "session resumed"
+        live = snapshot["live"]
+        active_clients = [
+            state
+            for state in snapshot["clients"]
+            if state["client_id"] != self.client_id
+            and time.time() - float(state["updated_at"]) < 30.0
+        ]
+        self._remote_draft = next(
+            (str(state["draft"]) for state in active_clients if state["draft"]),
+            "",
+        )
+        self._remote_queue = [str(value) for state in active_clients for value in state["queue"]]
+        remote_active = (
+            live["state"] == "running"
+            and live["owner_client_id"] != self.client_id
+            and float(live["owner_lease_until"]) > time.time()
+        )
+        if remote_active:
+            self._watching_remote = True
+            partial = str(live["partial"])
+            if partial and (not turns or turns[-1]["role"] != "assistant"):
+                self._append("\n" + partial)
+        self.activity = str(live["activity"] or "working") if remote_active else "session resumed"
 
     def _open_resume(self) -> None:
         if self.running and self.cancel_requested.is_set() and not self.pending:
@@ -7221,14 +7642,33 @@ class PersistentChatTUI:
         if not text:
             return
         command, _, argument = text.partition(" ")
+        if command == "/debug_label":
+            self._set_input("")
+            if argument.strip():
+                self._append("\n[error] /debug_label takes no arguments.\n")
+            else:
+                self._append("\n" + DEBUG_LABEL_EXAMPLES + "\n")
+            return
         # These actions modify shared session state, open a modal picker, or
         # derive output from stable session state. Keep their ordering with
         # normal queued prompts rather than rejecting them while a worker runs.
         if (
-            command in {
-                "/compact", "/recap", "/status", "/memory", "/skills",
-                "/permissions", "/plan", "/new", "/rename", "/fork",
-                "/export", "/diff", "/review", "/resume",
+            command
+            in {
+                "/compact",
+                "/recap",
+                "/status",
+                "/memory",
+                "/skills",
+                "/permissions",
+                "/plan",
+                "/new",
+                "/rename",
+                "/fork",
+                "/export",
+                "/diff",
+                "/review",
+                "/resume",
             }
             and not self._executing_queued_command
             and self._session_action_is_busy()
@@ -7249,9 +7689,7 @@ class PersistentChatTUI:
                 self._append(f"\n[error] {command} takes no arguments.\n")
                 return
             try:
-                self._set_composer_mode(
-                    "standard" if self.composer_mode == "vim" else "vim"
-                )
+                self._set_composer_mode("standard" if self.composer_mode == "vim" else "vim")
                 self._append(f"\n[composer] {self.composer_mode} mode enabled\n")
             except OSError as exc:
                 self._append(f"\n[error] could not save composer mode: {exc}\n")
@@ -7260,6 +7698,7 @@ class PersistentChatTUI:
             if self._session_action_is_busy():
                 self._append("\n[session] Finish or cancel active and queued work first.\n")
                 return
+            self._set_input("")
             try:
                 if command == "/compact":
                     before = len(self.agent.messages)
@@ -7283,9 +7722,13 @@ class PersistentChatTUI:
                 self._append("\n[settings] Finish or cancel active and queued work first.\n")
                 return
             try:
-                message = (_plan_command(self.agent, argument.strip()) if command == "/plan"
-                           else _permissions_command(self.agent, self.cfg,
-                                                     self.chat_preferences_path, argument.strip()))
+                message = (
+                    _plan_command(self.agent, argument.strip())
+                    if command == "/plan"
+                    else _permissions_command(
+                        self.agent, self.cfg, self.chat_preferences_path, argument.strip()
+                    )
+                )
                 self._append("\n" + message + "\n")
             except (OSError, ValueError) as exc:
                 self._append(f"\n[error] {exc}\n")
@@ -7304,8 +7747,9 @@ class PersistentChatTUI:
                     self.memory.rename_session(self.session_id, argument)
                     self._append(f"\n[session] Renamed to {argument.strip()}\n")
                 elif command == "/export":
-                    path = _export_session(self.memory, self.session_id, self.agent,
-                                           self.cfg, argument.strip())
+                    path = _export_session(
+                        self.memory, self.session_id, self.agent, self.cfg, argument.strip()
+                    )
                     self._append(f"\n[export] {path}\n")
                 elif argument:
                     self._append(f"\n[error] {command} takes no arguments.\n")
@@ -7323,7 +7767,7 @@ class PersistentChatTUI:
                         self.pending.append(PendingChatTurn(request))
                     self._start_next()
                 else:
-                    target = uuid.uuid4().hex[:8]
+                    target = uuid.uuid4().hex
                     if command == "/fork":
                         self.memory.fork_session(self.session_id, target)
                     else:
@@ -7332,6 +7776,13 @@ class PersistentChatTUI:
                         self._pending_attachments.clear()
                         self._clear_session_view()
                     self.session_id = target
+                    self._session_event_cursor = 0
+                    self._session_live_revision = 0
+                    self._published_draft = ""
+                    self._published_queue = ()
+                    self._remote_draft = ""
+                    self._remote_queue = []
+                    self._watching_remote = False
                     self.ui_state.prompt_tokens = 0
                     self.ui_state.output_tokens = 0
                     self._append(
@@ -7381,15 +7832,12 @@ class PersistentChatTUI:
         if text == "/ls" or text.startswith("/ls "):
             ok, message = _list_agent_directory(self.agent, text.removeprefix("/ls").strip())
             message = _strip_ansi_sgr(message)
-            self._append(
-                f"\n[workspace listing]\n{message}\n"
-                if ok else f"\n[error] {message}\n"
-            )
+            self._append(f"\n[workspace listing]\n{message}\n" if ok else f"\n[error] {message}\n")
             return
         if text == "/cd" or text.startswith("/cd "):
             ok, message = _change_agent_directory(self.agent, text.removeprefix("/cd").strip())
             if ok:
-                builder = getattr(self.agent, "set_system_prompt_builder", None)
+                builder = getattr(self.agent, "system_prompt_builder", None)
                 if builder:
                     self.agent.set_system_prompt(builder())
                 self._append(f"\n[workspace] {message}\n")
@@ -7420,7 +7868,10 @@ class PersistentChatTUI:
                 available = _available_chat_models(self.cfg, _agent_local_ollama(self.agent))
                 resolved = _resolve_chat_model(available, requested)
                 if resolved is None:
-                    self._append(f"\n[error] No unique Cloud or Local model match for {requested!r}. Use a canonical backend/model ID if ambiguous.\n")
+                    self._append(
+                        "\n[error] No unique Cloud or Local model match for "
+                        f"{requested!r}. Use a canonical backend/model ID if ambiguous.\n"
+                    )
                     return
                 self._choice_prior_model = self.agent.model
                 self._choice_prior_model_info = self.agent.model_info
@@ -7445,7 +7896,9 @@ class PersistentChatTUI:
         if text == "/effort" or text.startswith("/effort "):
             requested = text.removeprefix("/effort").strip().lower()
             if getattr(self.agent, "reasoning_mode", "standard") != "thinking":
-                self._append("\n[error] Effort is available in Thinking mode. Use /mode thinking first.\n")
+                self._append(
+                    "\n[error] Effort is available in Thinking mode. Use /mode thinking first.\n"
+                )
                 return
             if requested:
                 if requested not in EFFORT_CHOICES:
@@ -7530,9 +7983,7 @@ class PersistentChatTUI:
             return
         self._ollama_control_action = action
         if self.running:
-            self.cancel_requested.set()
-            self.agent.ollama.cancel_active()
-            self.activity = f"cancelling before Ollama {action}"
+            self.activity = f"confirm Ollama {action}"
 
         def control() -> None:
             approved = self._ask_permission(
@@ -7542,8 +7993,29 @@ class PersistentChatTUI:
             if approved not in {"y", "a"}:
                 self._emit("ollama_control", (False, f"Ollama service {action} cancelled"))
                 return
+            if self.running:
+                # Ask first. Setting the shared cancellation flag before the
+                # prompt causes _ask_permission() to auto-deny its own request.
+                self.cancel_requested.set()
+                self.agent.ollama.cancel_active()
             self._emit("activity", f"Ollama {action}ing")
-            self._emit("ollama_control", _control_ollama_service(action))
+            result = _control_ollama_service(action)
+            if not result[0] and "sudo systemctl" in result[1]:
+                password = self._ask_secret(
+                    "administrator password",
+                    f"Enter your administrator password to {action} Ollama.",
+                )
+                if password is None:
+                    self._emit(
+                        "ollama_control",
+                        (False, f"Ollama service {action} cancelled"),
+                    )
+                    return
+                try:
+                    result = _control_ollama_service_with_sudo(action, password)
+                finally:
+                    password = ""
+            self._emit("ollama_control", result)
 
         threading.Thread(
             target=control,
@@ -7553,7 +8025,9 @@ class PersistentChatTUI:
 
     def _attach_path(self, path_text: str) -> None:
         if not path_text:
-            self._append("\n[hint] Use /attach PATH. Type /attach and a space for path suggestions.\n")
+            self._append(
+                "\n[hint] Use /attach PATH. Type /attach and a space for path suggestions.\n"
+            )
             return
         try:
             path = self._resolve_attachment_path(path_text)
@@ -7594,7 +8068,10 @@ class PersistentChatTUI:
             elif path.is_dir():
                 try:
                     entries = list(sorted(path.rglob("*"), key=lambda item: str(item)))[:200]
-                    listing = "\n".join(str(item.relative_to(path)) + ("/" if item.is_dir() else "") for item in entries)
+                    listing = "\n".join(
+                        str(item.relative_to(path)) + ("/" if item.is_dir() else "")
+                        for item in entries
+                    )
                     parts.append(f"[Attached folder: {path}]\n{listing}")
                 except OSError as exc:
                     parts.append(f"[Attached folder unavailable: {path} ({exc})]")
@@ -7631,11 +8108,24 @@ class PersistentChatTUI:
             or self._choice_kind is not None
             or self._runtime_edit is not None
             or self._height_edit
+            or self._permission_request is not None
+            or self._secret_request is not None
+            or self._ollama_control_action is not None
         ):
             return
         turn = self.pending.popleft()
         if isinstance(turn, PendingChatCommand):
             self._run_queued_action(turn)
+            return
+        turn_id = uuid.uuid4().hex
+        if not self.memory.acquire_session_lease(
+            self.session_id,
+            self.client_id,
+            turn_id,
+        ):
+            self.pending.appendleft(turn)
+            self._watching_remote = True
+            self.activity = "watching session worker"
             return
         user_msg = str(turn)
         attachment_paths = (
@@ -7643,10 +8133,10 @@ class PersistentChatTUI:
             *self._inline_attachment_paths(user_msg),
         )
         attachment_context = self._attachment_context(tuple(dict.fromkeys(attachment_paths)))
-        agent_message = (
-            f"{user_msg}\n\n{attachment_context}" if attachment_context else user_msg
-        )
+        agent_message = f"{user_msg}\n\n{attachment_context}" if attachment_context else user_msg
         self.running = True
+        self._turn_id = turn_id
+        self._last_lease_renewal = time.monotonic()
         self._turn_started_at = time.monotonic()
         self.cancel_requested = threading.Event()
         self.activity = "thinking"
@@ -7659,13 +8149,16 @@ class PersistentChatTUI:
         divider_width = self._divider_width()
         now = datetime.now().astimezone()
         self._append(
-            f"\n{user_msg}\n"
-            f"\n{_message_divider('you', width=divider_width, timestamp=now)}\n"
+            f"\n{user_msg}\n\n{_message_divider('you', width=divider_width, timestamp=now)}\n"
         )
         threading.Thread(
             target=self._run_turn,
-            args=(agent_message, self.cancel_requested),
-            kwargs={"read_only": self._review_next},
+            args=(user_msg, self.cancel_requested),
+            kwargs={
+                "model_message": agent_message,
+                "read_only": self._review_next,
+                "turn_id": turn_id,
+            },
             daemon=True,
             name="klaude-agent-turn",
         ).start()
@@ -7676,14 +8169,34 @@ class PersistentChatTUI:
         if not self.shutting_down:
             self.application.invalidate()
 
+    def _publish_shared_event(self, kind: str, payload: object, *, turn_id: str) -> None:
+        """Keep optional cross-process mirroring from breaking the model turn."""
+        try:
+            self.memory.publish_session_event(
+                self.session_id,
+                self.client_id,
+                kind,
+                payload,
+                turn_id=turn_id,
+            )
+        except sqlite3.Error as exc:
+            self._emit("error", f"session sync unavailable: {exc}")
+
     def _emit_assistant_text(self, text: str, *, initial: bool) -> str:
         """Render the actual fragments emitted by the active model response."""
         prefix = "\n" if initial and not text.startswith("\n") else ""
         self._emit("append", prefix + text)
         return text
 
-    def _run_turn(self, user_msg: str, cancel_event: threading.Event,
-                  *, read_only: bool = False) -> None:
+    def _run_turn(
+        self,
+        user_msg: str,
+        cancel_event: threading.Event,
+        *,
+        model_message: str | None = None,
+        read_only: bool = False,
+        turn_id: str = "",
+    ) -> None:
         assistant_parts: list[str] = []
         streamed = False
         assistant_started = False
@@ -7691,29 +8204,46 @@ class PersistentChatTUI:
         cancelled = False
         events = None
         try:
-            builder = getattr(self.agent, "set_system_prompt_builder", None)
+            builder = getattr(self.agent, "system_prompt_builder", None)
             if builder:
                 self.agent.set_system_prompt(builder())
-            self.memory.log_turn(self.session_id, "user", user_msg)
-            events = (self.agent.run(user_msg, read_only=True) if read_only
-                      else self.agent.run(user_msg))
+            effective_message = model_message if model_message is not None else user_msg
+            self.memory.start_session_turn(
+                self.session_id,
+                self.client_id,
+                turn_id,
+                user_msg,
+                model_content=(effective_message if effective_message != user_msg else None),
+            )
+            events = (
+                self.agent.run(effective_message, read_only=True)
+                if read_only
+                else self.agent.run(effective_message)
+            )
             for event in events:
-                if cancel_event.is_set():
+                payload = event.payload
+                if cancel_event.is_set() and event.kind == "error":
+                    # Closing an active HTTP socket is how cancellation wakes a
+                    # blocked model read. Transport fallout such as EBADF is an
+                    # implementation detail, not a session runtime failure.
                     cancelled = True
                     break
-                payload = event.payload
                 if event.kind == "text_delta" and payload.get("content"):
                     piece = payload["content"]
                     streamed = True
                     assistant_parts.append(
                         self._emit_assistant_text(piece, initial=not assistant_started)
                     )
+                    self._publish_shared_event("assistant_delta", {"text": piece}, turn_id=turn_id)
                     assistant_started = True
                 elif event.kind == "text" and payload.get("content"):
                     content = payload["content"]
                     if not (payload.get("metadata") or {}).get("streamed"):
                         assistant_parts.append(
                             self._emit_assistant_text(content, initial=not assistant_started)
+                        )
+                        self._publish_shared_event(
+                            "assistant_delta", {"text": content}, turn_id=turn_id
                         )
                         assistant_started = True
                     self.memory.log_turn(self.session_id, "assistant", content)
@@ -7722,6 +8252,7 @@ class PersistentChatTUI:
                     if tool in {"web_search", "fetch_url"}:
                         pending_metadata[tool] = payload.get("metadata") or {}
                     self._emit("activity", tool)
+                    self._publish_shared_event("activity", {"text": tool}, turn_id=turn_id)
                     if tool not in {
                         "web_search",
                         "fetch_url",
@@ -7750,6 +8281,7 @@ class PersistentChatTUI:
                 elif event.kind == "error":
                     message = payload["message"]
                     self._emit("error", message)
+                    self._publish_shared_event("error", {"message": message}, turn_id=turn_id)
                     self.memory.log_turn(
                         self.session_id,
                         "system",
@@ -7759,8 +8291,14 @@ class PersistentChatTUI:
                     self._emit("append", f"\n-> retry [{payload['reason']}]\n")
                 elif event.kind == "progress":
                     self._emit("activity", payload["stage"])
+                    self._publish_shared_event(
+                        "activity", {"text": payload["stage"]}, turn_id=turn_id
+                    )
                     if self.show_reasoning_activity:
                         self._emit("append", f"\n[reasoning] {payload['stage']}\n")
+                if cancel_event.is_set():
+                    cancelled = True
+                    break
             if cancelled:
                 partial = "".join(assistant_parts).strip()
                 if streamed and partial:
@@ -7774,6 +8312,7 @@ class PersistentChatTUI:
                 self._emit("append", "\n[interrupted]\n")
             else:
                 self._emit("error", str(exc))
+                self._publish_shared_event("error", {"message": str(exc)}, turn_id=turn_id)
                 self.memory.log_turn(
                     self.session_id,
                     "system",
@@ -7803,6 +8342,21 @@ class PersistentChatTUI:
                 + "\n",
             )
             metadata = dict(getattr(self.agent.ollama, "last_chat_metadata", {}))
+            suffix = f"worked for {hours:02d}:{minutes:02d}:{seconds:02d}"
+            self._publish_shared_event(
+                "turn_done",
+                {"suffix": suffix, "cancelled": cancelled},
+                turn_id=turn_id,
+            )
+            try:
+                self.memory.release_session_lease(
+                    self.session_id,
+                    self.client_id,
+                    turn_id,
+                    state="interrupted" if cancelled else "idle",
+                )
+            except sqlite3.Error as exc:
+                self._emit("error", f"session lease cleanup failed: {exc}")
             self._emit("turn_done", {"metadata": metadata, "cancelled": cancelled})
 
     def _ask_permission(self, tool: str, detail: str) -> str:
@@ -7813,11 +8367,44 @@ class PersistentChatTUI:
             "done": threading.Event(),
         }
         self._emit("permission", request)
-        done = request["done"]
+        done = cast(threading.Event, request["done"])
         while not done.wait(0.1):
             if self.shutting_down or self.cancel_requested.is_set():
                 return "n"
         return str(request["answer"])
+
+    def _ask_secret(self, label: str, prompt: str) -> str | None:
+        """Collect one masked value without transcript, session, or preference storage."""
+        request: dict[str, object] = {
+            "label": label,
+            "prompt": prompt,
+            "value": None,
+            "done": threading.Event(),
+        }
+        self._emit("secret", request)
+        done = cast(threading.Event, request["done"])
+        while not done.wait(0.1):
+            if self.shutting_down:
+                return None
+        value = request.pop("value", None)
+        return str(value) if isinstance(value, str) and value else None
+
+    def _submit_secret_response(self) -> None:
+        value = self.input.text
+        self._set_input("")
+        self._answer_secret(value or None)
+
+    def _answer_secret(self, value: str | None) -> None:
+        request = self._secret_request
+        if request is None:
+            return
+        self._set_input("")
+        request["value"] = value
+        done = cast(threading.Event, request["done"])
+        self._secret_request = None
+        self.activity = "secret submitted" if value else "secret entry cancelled"
+        done.set()
+        self.application.invalidate()
 
     def _submit_permission_response(self) -> None:
         response = self.input.text.strip().lower()
@@ -7843,17 +8430,19 @@ class PersistentChatTUI:
         if request is None:
             return
         request["answer"] = answer
-        done = request["done"]
+        done = cast(threading.Event, request["done"])
         self._permission_request = None
         self.activity = "permission accepted" if answer in {"y", "a"} else "permission denied"
         done.set()
         self.application.invalidate()
 
     def _before_render(self, application) -> None:
+        try:
+            self._sync_shared_session()
+        except sqlite3.Error as exc:
+            self.status_error = f"session sync unavailable: {exc}"
         self._refresh_transcript_dividers()
-        self.application.layout.focus(
-            self.choice_control if self._choice_kind else self.input
-        )
+        self.application.layout.focus(self.choice_control if self._choice_kind else self.input)
         while True:
             try:
                 kind, payload = self._events.get_nowait()
@@ -7869,14 +8458,20 @@ class PersistentChatTUI:
             elif kind == "permission" and isinstance(payload, dict):
                 if self.cancel_requested.is_set():
                     payload["answer"] = "n"
-                    payload["done"].set()
+                    cast(threading.Event, payload["done"]).set()
                     continue
                 self._permission_request = payload
+                self._append(f"\n[permission · {payload['tool']}]\n{payload['detail']}\n")
+            elif kind == "secret" and isinstance(payload, dict):
+                self._set_input("")
+                self._secret_request = payload
+                self.activity = "waiting for masked input"
                 self._append(
-                    f"\n[permission · {payload['tool']}]\n{payload['detail']}\n"
+                    f"\n[secret · {payload['label']}]\n{payload['prompt']}\n"
+                    "The value is masked and will not be saved.\n"
                 )
             elif kind == "ollama_control":
-                success, message = payload
+                success, message = cast(tuple[bool, str], payload)
                 self._ollama_control_action = None
                 if success:
                     self._append(f"\n[ollama] {message}\n")
@@ -7887,13 +8482,12 @@ class PersistentChatTUI:
                 metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
                 self.ui_state.model = self.agent.model
                 self.ui_state.effort = _agent_effort_label(self.agent)
-                self.ui_state.context_window = int(
-                    self.agent.ollama_options.get("num_ctx", 8192)
-                )
+                self.ui_state.context_window = int(self.agent.ollama_options.get("num_ctx", 8192))
                 self.ui_state.prompt_tokens = int(metadata.get("prompt_eval_count") or 0)
                 self.ui_state.output_tokens = int(metadata.get("eval_count") or 0)
                 self.ui_state.prompt_tokens_estimated = False
                 self.running = False
+                self._turn_id = ""
                 self.activity = "ready"
                 if self._permission_request and self.cancel_requested.is_set():
                     self._answer_permission("n")
@@ -7911,8 +8505,14 @@ class PersistentChatTUI:
     def _exit(self) -> None:
         self._hide_text_theme_preview()
         self.shutting_down = True
+        try:
+            self.memory.clear_session_client(self.session_id, self.client_id)
+        except sqlite3.Error:
+            pass
         if self._permission_request:
             self._answer_permission("n")
+        if self._secret_request:
+            self._answer_secret(None)
         self.cancel_requested.set()
         self.agent.ollama.cancel_active()
         self.application.exit(result=None)
@@ -7970,10 +8570,10 @@ def chat(
     )
     if requested_model:
         selected = _resolve_chat_model(
-            _available_chat_models(cfg, agent.local_ollama), requested_model
+            _available_chat_models(cfg, _agent_local_ollama(agent)), requested_model
         )
         if selected is not None:
-            _set_agent_model(agent, cfg, agent.local_ollama, selected)
+            _set_agent_model(agent, cfg, _agent_local_ollama(agent), selected)
     _apply_saved_permissions(agent, chat_preferences_path)
     runtime_preferences, _ = _migrate_runtime_device_preference(
         chat_preferences_path, _load_runtime_preferences(chat_preferences_path)
@@ -7984,7 +8584,7 @@ def chat(
     _apply_web_provider_preferences(agent, chat_preferences_path)
     if remembered_model and not model and "/" not in remembered_model:
         try:
-            installed_models = agent.ollama.list_models()
+            installed_models = _agent_local_ollama(agent).list_models()
         except Exception:
             installed_models = []
         if installed_models and remembered_model not in installed_models:
@@ -7994,7 +8594,7 @@ def chat(
         _save_last_chat_model(chat_preferences_path, _agent_model_ref(agent))
     except OSError as exc:
         console.print(f"[yellow]could not save chat model preference:[/] {exc}")
-    session_id = str(uuid.uuid4())[:8]
+    session_id = uuid.uuid4().hex
     ui_state = ChatUIState(
         model=agent.model,
         effort=_agent_effort_label(agent),
@@ -8023,12 +8623,11 @@ def chat(
             )
         )
     prompt_session = None if no_tui else _new_chat_prompt_session()
+    line_attachments: list[Path] = []
     while True:
         try:
             user_msg = (
-                _read_plain_chat_input()
-                if no_tui
-                else _read_chat_input(prompt_session, ui_state)
+                _read_plain_chat_input() if no_tui else _read_chat_input(prompt_session, ui_state)
             )
         except (EOFError, KeyboardInterrupt):
             break
@@ -8037,15 +8636,68 @@ def chat(
         if user_msg in {"/quit", "/exit", "/q"}:
             break
         command, _, argument = user_msg.partition(" ")
+        if command == "/debug_label":
+            if argument.strip():
+                console.print(Text("/debug_label takes no arguments."))
+            else:
+                _print_preformatted_text(DEBUG_LABEL_EXAMPLES)
+            continue
+        if command == "/keybinds":
+            if argument.strip():
+                console.print(Text("/keybinds takes no arguments."))
+            else:
+                _print_preformatted_text(format_chat_keybind_reference())
+            continue
+        if command == "/attach":
+            value = argument.strip().strip('"')
+            if not value:
+                console.print(Text("Use /attach PATH; it will be included with the next message."))
+                continue
+            base = Path(getattr(agent, "workdir", Path.cwd())).resolve()
+            candidate = Path(value).expanduser()
+            try:
+                path = (candidate if candidate.is_absolute() else base / candidate).resolve(
+                    strict=True
+                )
+            except OSError as exc:
+                console.print(Text(f"Error: cannot attach path: {exc}"))
+                continue
+            line_attachments.append(path)
+            console.print(Text(f"Attached {path}; included with the next message."))
+            continue
+        if command in {"/queue", "/steer", "/cancel"}:
+            if command == "/steer" and argument.strip():
+                user_msg = argument.strip()
+                command = ""
+            else:
+                message = {
+                    "/queue": (
+                        "No pending turns in line-oriented mode; enter the next message directly."
+                    ),
+                    "/steer": "Use /steer TEXT, or enter the instruction directly.",
+                    "/cancel": "No model turn is active while line-oriented input is waiting.",
+                }[command]
+                console.print(Text(message))
+                continue
+        if command in {"/settings", "/theme"}:
+            console.print(
+                Text(
+                    f"{command} uses the interactive TUI picker. "
+                    "Run `klaude` in a terminal to change it."
+                )
+            )
+            continue
         if command == "/vim":
             if argument.strip():
                 console.print(Text(f"{command} takes no arguments."))
                 continue
-            value = _load_chat_preferences(chat_preferences_path)
-            value["composer_mode"] = "vim" if _composer_mode(chat_preferences_path) != "vim" else "standard"
+            preferences = _load_chat_preferences(chat_preferences_path)
+            preferences["composer_mode"] = (
+                "vim" if _composer_mode(chat_preferences_path) != "vim" else "standard"
+            )
             try:
-                _write_chat_preferences(chat_preferences_path, value)
-                console.print(Text(f"Composer mode saved: {value['composer_mode']}."))
+                _write_chat_preferences(chat_preferences_path, preferences)
+                console.print(Text(f"Composer mode saved: {preferences['composer_mode']}."))
             except OSError as exc:
                 console.print(Text(f"Error: {exc}"))
             continue
@@ -8068,9 +8720,11 @@ def chat(
             continue
         if command in {"/permissions", "/plan"}:
             try:
-                message = (_plan_command(agent, argument.strip()) if command == "/plan"
-                           else _permissions_command(agent, cfg, chat_preferences_path,
-                                                     argument.strip()))
+                message = (
+                    _plan_command(agent, argument.strip())
+                    if command == "/plan"
+                    else _permissions_command(agent, cfg, chat_preferences_path, argument.strip())
+                )
                 console.print(Text(message))
             except (OSError, ValueError) as exc:
                 console.print(Text(f"Error: {exc}"))
@@ -8088,10 +8742,17 @@ def chat(
                 elif command == "/diff":
                     console.print(Text(_workspace_diff(agent)))
                 elif command == "/review":
-                    _render(agent, memory, session_id, _review_request(agent), ui_state,
-                            plain=no_tui, read_only=True)
+                    _render(
+                        agent,
+                        memory,
+                        session_id,
+                        _review_request(agent),
+                        ui_state,
+                        plain=no_tui,
+                        read_only=True,
+                    )
                 else:
-                    target = uuid.uuid4().hex[:8]
+                    target = uuid.uuid4().hex
                     if command == "/fork":
                         memory.fork_session(session_id, target)
                     else:
@@ -8171,7 +8832,9 @@ def chat(
         if user_msg == "/effort" or user_msg.startswith("/effort "):
             target = user_msg.removeprefix("/effort").strip()
             if getattr(agent, "reasoning_mode", "standard") != "thinking":
-                console.print("[red]effort is available in Thinking mode; use /mode thinking first[/]")
+                console.print(
+                    "[red]effort is available in Thinking mode; use /mode thinking first[/]"
+                )
                 continue
             if _choose_effort(agent, cfg, target) is not None:
                 ui_state.update_from_agent(agent)
@@ -8194,7 +8857,34 @@ def chat(
             continue
         if _handle_explicit_memory_request(user_msg, agent, memory, session_id):
             continue
-        _render(agent, memory, session_id, user_msg, ui_state, plain=no_tui)
+        model_message = None
+        if line_attachments:
+            attachment_parts: list[str] = []
+            for path in tuple(dict.fromkeys(line_attachments)):
+                if path.is_file():
+                    attachment_parts.append(
+                        f"[Attached file: {path}]\n"
+                        + path.read_text(encoding="utf-8", errors="replace")[:32768]
+                    )
+                elif path.is_dir():
+                    entries = sorted(path.rglob("*"), key=lambda item: str(item))[:200]
+                    listing = "\n".join(
+                        str(item.relative_to(path)) + ("/" if item.is_dir() else "")
+                        for item in entries
+                    )
+                    attachment_parts.append(f"[Attached folder: {path}]\n{listing}")
+            if attachment_parts:
+                model_message = user_msg + "\n\n" + "\n\n".join(attachment_parts)
+            line_attachments.clear()
+        _render(
+            agent,
+            memory,
+            session_id,
+            user_msg,
+            ui_state,
+            plain=no_tui,
+            model_message=model_message,
+        )
         for fact in memory.auto_remember_turn(user_msg):
             console.print(f"[dim]memory saved: {fact}[/]")
     console.print("[dim]bye[/]")
@@ -8204,7 +8894,7 @@ def chat(
 def ask(question: str, model: str = typer.Option("", help="override model")):
     """One-shot question with tools enabled."""
     agent, memory = _build_agent(Path.cwd(), model or None)
-    session_id = str(uuid.uuid4())[:8]
+    session_id = uuid.uuid4().hex
     if _handle_unknown_slash_command(
         question,
         agent=agent,
@@ -8932,8 +9622,10 @@ def status():
     modes.add_row(
         "cloud chat models",
         "available" if (cfg.openai_api_key or cfg.gemini_api_key) else "not configured",
-        "OpenAI API=" + ("configured" if cfg.openai_api_key else "no key")
-        + "; Gemini API=" + ("configured" if cfg.gemini_api_key else "no key"),
+        "OpenAI API="
+        + ("configured" if cfg.openai_api_key else "no key")
+        + "; Gemini API="
+        + ("configured" if cfg.gemini_api_key else "no key"),
     )
     modes.add_row(
         "search billing",
@@ -9107,21 +9799,40 @@ def doctor():
     ollama = Ollama(cfg.ollama_url, timeout=5)
     up = ollama.is_up()
     check(f"ollama at {cfg.ollama_url}", up, "start with: ollama serve")
-    for provider, configured, env_name in (
-        ("OpenAI API", bool(cfg.openai_api_key), "OPENAI_API_KEY"),
-        ("Gemini API", bool(cfg.gemini_api_key), "GEMINI_API_KEY"),
+    for provider, configured, env_name, sdk_check in (
+        (
+            "OpenAI API",
+            bool(cfg.openai_api_key),
+            "OPENAI_API_KEY",
+            lambda: OpenAIRuntime(cfg.openai_api_key)._client(),
+        ),
+        (
+            "Gemini API",
+            bool(cfg.gemini_api_key),
+            "GEMINI_API_KEY",
+            lambda: GeminiRuntime(cfg.gemini_api_key)._sdk(),
+        ),
     ):
         if configured:
-            check(f"{provider} key", True)
+            try:
+                sdk_check()
+            except (ImportError, RuntimeError, ValueError) as exc:
+                check(f"{provider} adapter", False, str(exc))
+            else:
+                check(f"{provider} adapter", True)
         else:
-            console.print(f"[dim]SKIP[/]  {provider} key  [dim]optional; set {env_name} to enable cloud chat[/]")
+            console.print(
+                f"[dim]SKIP[/]  {provider} key  "
+                f"[dim]optional; set {env_name} to enable cloud chat[/]"
+            )
 
     if up:
         installed = ollama.list_models()
         for role, model in cfg.models.items():
             if not model:
                 continue
-            have = any(m.startswith(model.split(":")[0]) for m in installed)
+            expected = model if ":" in model else f"{model}:latest"
+            have = model in installed or expected in installed
             check(f"model {role}: {model}", have, f"run: ollama pull {model}")
 
     try:
@@ -9132,13 +9843,18 @@ def doctor():
             params={"q": "test", "format": "json"},
             timeout=8,
         )
-        check(
-            f"searxng at {cfg.searxng_url}",
-            r.status_code == 200,
-            "docker compose up -d; ensure 'json' in search.formats",
-        )
+        if r.status_code == 200:
+            console.print(f"[green]OK[/]  searxng at {cfg.searxng_url}")
+        else:
+            console.print(
+                f"[yellow]WARN[/] searxng at {cfg.searxng_url} "
+                "[dim](optional if another search provider is available)[/]"
+            )
     except Exception:
-        check(f"searxng at {cfg.searxng_url}", False, "docker compose up -d")
+        console.print(
+            f"[yellow]WARN[/] searxng at {cfg.searxng_url} "
+            "[dim](optional if another search provider is available; docker compose up -d)[/]"
+        )
 
     provider_statuses = search_provider_statuses(cfg)
     has_available_provider = any(
@@ -9231,10 +9947,44 @@ def doctor():
         "[dim]--   huggingface hub "
         f"({'authenticated' if cfg.huggingface_api_key else 'public; add HUGGINGFACE_API_KEY'})[/]"
     )
-    auto_memory = (
-        "enabled" if Memory(cfg.memory_file, cfg.sessions_db).auto_memory_enabled() else "disabled"
-    )
+    memory = Memory(cfg.memory_file, cfg.sessions_db)
+    auto_memory = "enabled" if memory.auto_memory_enabled() else "disabled"
     console.print(f"[dim]--   auto memory ({auto_memory})[/]")
+
+    integrity = memory.db.execute("PRAGMA quick_check").fetchone()
+    check(
+        "sessions database integrity",
+        bool(integrity and integrity[0] == "ok"),
+        "back up the data directory before repairing sessions.db",
+    )
+
+    probe = "import lancedb,sys; db=lancedb.connect(sys.argv[1]); db.list_tables()"
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", probe, str(cfg.knowledge_dir)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        check("knowledge store", False, "LanceDB connection timed out after 10 seconds")
+    else:
+        probe_details = (completed.stderr or completed.stdout).strip().splitlines()
+        check(
+            "knowledge store",
+            completed.returncode == 0,
+            probe_details[-1][:200] if probe_details else "LanceDB connection failed",
+        )
+
+    for secret_file in (cfg.config_dir / ".env", cfg.config_dir / "searxng.env"):
+        if secret_file.exists():
+            private = secret_file.stat().st_mode & 0o077 == 0
+            check(
+                f"secret permissions {secret_file}",
+                private,
+                f"run: chmod 600 {secret_file}",
+            )
 
     check(f"data dir {cfg.data_dir}", cfg.data_dir.exists() and cfg.data_dir.is_dir())
     console.print(f"\n[dim]hardware tier: {cfg.tier} -> coder model {cfg.models['coder']}[/]")

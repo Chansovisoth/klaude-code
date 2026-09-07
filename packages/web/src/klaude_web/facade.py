@@ -33,8 +33,8 @@ from .providers import (
 from .search import SearchResponse, searx_search_detailed
 from .sources import SourceRegistry
 
-SEARCH_TTL = 3600       # 1 hour
-PAGE_TTL = 24 * 3600    # 24 hours
+SEARCH_TTL = 3600  # 1 hour
+PAGE_TTL = 24 * 3600  # 24 hours
 
 
 def _cacheable_search_response(response: SearchResponse) -> bool:
@@ -102,9 +102,7 @@ class Web:
             if hit is not None:
                 cached_response = SearchResponse(**hit)
                 if _cacheable_search_response(cached_response):
-                    return self._finalize_search_response(
-                        cached_response, search_query, resolver
-                    )
+                    return self._finalize_search_response(cached_response, search_query, resolver)
         response = self._search_uncached_detailed(
             search_query.normalized_text or original_query,
             max_results,
@@ -125,12 +123,8 @@ class Web:
         metadata = dict(response.provider_metadata or {})
         metadata["original_text"] = search_query.original_text
         metadata["normalized_text"] = search_query.normalized_text
-        metadata["corrections"] = [
-            correction.to_dict() for correction in search_query.corrections
-        ]
-        metadata["query_provenance"] = [
-            item.to_dict() for item in search_query.query_provenance
-        ]
+        metadata["corrections"] = [correction.to_dict() for correction in search_query.corrections]
+        metadata["query_provenance"] = [item.to_dict() for item in search_query.query_provenance]
         learned = resolver.learn_from_search_metadata(metadata)
         if learned is not None:
             metadata["entity_cache"] = {
@@ -154,9 +148,7 @@ class Web:
             if queries:
                 lines.append(f"Queries: {queries}")
             if result_count is not None and plausible is not None:
-                lines.append(
-                    f"Returned {result_count} results; {plausible} plausible candidates."
-                )
+                lines.append(f"Returned {result_count} results; {plausible} plausible candidates.")
             metadata["display_lines"] = lines
         results = self._source_registry().register_search_results(
             search_query.normalized_text or search_query.text,
@@ -240,9 +232,7 @@ class Web:
         try:
             result = self._fetch_uncached_detailed(requested_url)
         except UnsafeURL as exc:
-            result = self._fetch_failure(
-                requested_url, exc, "unsafe_url", transient=False
-            )
+            result = self._fetch_failure(requested_url, exc, "unsafe_url", transient=False)
             sources.register_failure(requested_url, result)
             return result
         except FetchPageError as exc:
@@ -306,9 +296,7 @@ class Web:
             "extraction_status": "not_available",
             "provider": "none",
             "provider_label": "none",
-            "attempted_providers": list(
-                getattr(exc, "attempted_providers", ()) or ()
-            ),
+            "attempted_providers": list(getattr(exc, "attempted_providers", ()) or ()),
             "successful_providers": [],
             "cache_hit": False,
             "redirect_count": int(getattr(exc, "redirect_count", 0) or 0),
@@ -462,10 +450,10 @@ class Web:
                 provider=provider,
                 provider_strict=provider_strict,
             )
-        if (
-            self.cfg.web_search.strategy == "quality"
-            and self.cfg.web_provider in {"quality", "auto"}
-        ):
+        if self.cfg.web_search.strategy == "quality" and self.cfg.web_provider in {
+            "quality",
+            "auto",
+        }:
             return quality_search(
                 self.cfg,
                 query,
@@ -601,8 +589,7 @@ class Web:
             if (
                 self.cfg.web_provider == "auto"
                 and self.cfg.exa_api_key
-                and exc.failure_class
-                in {"empty_extraction", "unsupported_content_type"}
+                and exc.failure_class in {"empty_extraction", "unsupported_content_type"}
                 and exc.final_url
             ):
                 safe_url = validate_public_url(exc.final_url)

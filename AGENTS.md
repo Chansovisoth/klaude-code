@@ -139,6 +139,10 @@ Chat slash commands currently include:
 - `/recap`: show a concise local recap of the current session's recent turns.
 - `/status`: show session ID, model, workspace, context estimate, plan mode,
   memory mode, and tool count.
+- `/debug_label`: temporarily print representative neutral, warning, failure,
+  error, success, interruption, permission, and saved-memory labels through the
+  real transcript renderer for visual theme testing. It takes no arguments and
+  may be removed or hidden after label styling stabilizes.
 - `/memory [on|off]`: show durable memory status and facts, or toggle automatic
   memory generation.
 - `/skills`: list installed assistant skills and indexed file counts.
@@ -178,7 +182,12 @@ Chat slash commands currently include:
   automatically. It never switches shared agent state while a worker is active.
   Cancellation denies pending permission requests and shuts down an active
   Ollama response socket to wake blocked reads; tools already executing may
-  still need to finish before the switch can proceed.
+  still need to finish before the switch can proceed. Resuming a session from
+  another process follows its live model activity and emitted response deltas.
+  A renewable SQLite lease permits only one model worker per session, while
+  every connected client keeps an independent shared draft and pending queue;
+  one client's composer must never overwrite another's. Session and turn IDs
+  use full random UUID hex values rather than display-truncated identifiers.
 - `/model`: open an arrow-key model picker, then an effort picker.
 - `/model NAME`: switch the active chat model, then choose effort while keeping
   chat history. A successful selection is reused at the next chat launch.
@@ -190,7 +199,19 @@ Chat slash commands currently include:
 - `/steer TEXT`: prioritize a new instruction and interrupt the active turn at
   the next safe model/tool boundary.
 - `/cancel`: interrupt the active turn at the next safe boundary.
-- `/restart` and `/stop`: restart or stop the local Ollama service after confirmation; these controls do not exit the chat session.
+- `/restart` and `/stop`: restart or stop the local Ollama service after confirmation;
+  these controls do not exit the chat session. When a response is active, ask
+  for confirmation before setting its cancellation flag, then close the active
+  model transport and perform the service action. Socket-close errors caused by
+  that requested cancellation are interruption details, not saved runtime
+  failures. If unprivileged systemctl reports that `sudo` is required, the TUI
+  may request the administrator password through the generic masked-secret
+  composer. Authenticate with `sudo -S -v`, then run only the fixed allowlisted
+  systemctl command through `sudo -n`; never place the secret in argv, the child
+  service stdin, environment variables, transcript, sessions, preferences,
+  shared drafts, completion, or input history. Clear the composer on submit,
+  Escape, Ctrl+C, and exit. The same modal is the foundation for future API-key
+  entry, but secret persistence still belongs only in private `config/.env`.
 - `/refresh`: discard and redraw the current TUI frame without changing session state, for clearing terminal-render artifacts.
 - `/cd [PATH]`: show or change the agent workspace directory. Relative paths
   resolve from the current agent directory; the process cwd is unchanged.
@@ -272,6 +293,15 @@ The intro displays the current agent workspace path. `/cd` updates that path,
 the workspace jail, repository context, and the next system-prompt runtime
 context; it validates that the target exists and is a directory.
 
+Leading bracketed transcript labels render as compact semantic badges without
+changing their copyable text width. Informational labels such as `status`,
+`appearance`, and `runtime` use neutral gray; `warning` uses amber; `failed` and
+`error` use red; and `success` plus saved-memory notices use green. Label words
+are uppercase and use the same foreground as the footer version badge. The
+bracket glyphs use the badge background as their foreground so they act as
+one-cell visual padding, while text after the label keeps the normal transcript
+color.
+
 Typing `/` at the beginning of the input must immediately offer every registered
 chat slash command with its registry description. Keep completion sourced from
 `CHAT_COMMANDS`; do not maintain a second command-name list.
@@ -288,6 +318,8 @@ Inline attachment completion stays anchored at its original `@` position while
 typing or navigating suggestions, including quoted paths and wrapped input.
 Enter accepts the highlighted completion and executes the command in one press;
 Tab completes without executing so users can add arguments.
+After a command executes, clear its composer text and completion state so an
+exact-match suggestion cannot remain visible over an empty or completed input.
 Mouse capture is enabled only for clickable completion and picker menus; outside
 those menus, terminal scrolling and native dragging select and copy transcript
 text without requiring Shift. On Termux, Klaude disables mouse capture even for
@@ -421,6 +453,13 @@ tuning. Host-level Ollama daemon settings such as model storage path, keepalive,
 parallelism, and daemon context length belong to the Ollama systemd service,
 Docker service, or whatever launcher the user chose.
 
+Cloud runtime requests are stateless: OpenAI Responses calls set `store=false`
+and surface refusal and failed-stream events instead of silently producing an
+empty reply. Gemini 3 models use thinking levels; Gemini 2.5 models use bounded
+thinking budgets, including budget zero for supported Flash requests. Provider
+model discovery must reject blank keys and filter obviously incompatible audio,
+image, moderation, realtime, transcription, TTS, and search-preview models.
+
 ## Agent And Tool Routing
 
 The system prompt is `packages/core/src/klaude_core/prompts/system.md`.
@@ -503,6 +542,15 @@ must not edit or commit until the user commits or stashes their changes.
 - destructive commands such as `rm`, `rmdir`, `shred`, and `truncate` are
   denied by the tool implementation.
 
+On Linux, model-initiated shell commands run in a fresh fail-closed Landlock
+process. Read-only commands can read the workspace; mutating commands can write
+only there and to an isolated temporary home. Explicit outside paths and common
+destructive nested commands are rejected before execution. Secret files are
+denied through file tools and explicit shell paths, sensitive environment
+variables are removed, and returned shell/grep output is redacted. Successful
+shell mutations are auto-committed under the repository mutation lock; a failed
+command that leaves changes disables further writes for safety.
+
 Do not expose file write or shell tools merely because the user asks a tutorial
 or framework question. Favor `query_knowledge`, `code_search`, and `web_search`
 until the user asks to inspect or modify workspace files.
@@ -514,6 +562,13 @@ Durable memory and episodic session recall are separate:
 - `memory.md` stores concise durable facts injected into every chat.
 - `sessions.db` stores previous conversation turns for `klaude sessions`,
   `klaude session-search`, `klaude memory search`, and follow-up recall.
+
+The session database uses WAL mode, a busy timeout, process-safe worker leases,
+ordered live events, and per-client composer rows. Visible transcript content is
+stored separately from attachment-enriched model content so search and exports
+do not disclose private attachment text. Durable `memory.md` mutations use an
+advisory process lock plus atomic replacement. Ephemeral event replay is bounded;
+saved turns remain the canonical transcript.
 
 Save only high-signal preferences, repeated corrections, project decisions,
 durable goals, and important external references. Do not save one-off trivia,
@@ -790,6 +845,10 @@ configured, then trafilatura. This is important for files like
 - `list_collections`
 - `list_skills`
 - `docs_list`
+
+Knowledge MCP mutations are disabled unless its process receives
+`KLAUDE_MCP_ALLOW_WRITES=1`. Local file and skill-package inputs remain jailed to
+`KLAUDE_MCP_WORKSPACE`, or the MCP server working directory when it is unset.
 
 MCP access from Codex, Claude Code, OpenCode, Cline, Roo, or Continue is
 separate from native Klaude chat. Adding Klaude MCP servers to another agent

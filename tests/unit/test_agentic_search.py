@@ -36,15 +36,25 @@ class ScriptedOllama:
 
 def test_read_only_review_blocks_model_requested_writes_and_restores_tools():
     executed = []
-    ollama = ScriptedOllama([
-        tool_call("write_file", path="bad.txt", content="bad"),
-        {"role": "assistant", "content": "Review complete."},
-    ])
+    ollama = ScriptedOllama(
+        [
+            tool_call("write_file", path="bad.txt", content="bad"),
+            {"role": "assistant", "content": "Review complete."},
+        ]
+    )
     agent = Agent(
-        ollama, "fake-model",
-        [Tool("write_file", "Write a file", {"type": "object"},
-              lambda **kwargs: executed.append(kwargs))],
-        PermissionGate({"write_file": "allow"}, lambda *_: "y"), "system",
+        ollama,
+        "fake-model",
+        [
+            Tool(
+                "write_file",
+                "Write a file",
+                {"type": "object"},
+                lambda **kwargs: executed.append(kwargs),
+            )
+        ],
+        PermissionGate({"write_file": "allow"}, lambda *_: "y"),
+        "system",
     )
     original = agent.tools
     list(agent.run("Review workspace changes", read_only=True))
@@ -60,7 +70,9 @@ def test_plan_mode_blocks_writes_but_keeps_read_and_retrieval_tools():
         for name in ("read_file", "write_file", "web_search")
     ]
     agent = Agent(
-        ollama, "fake-model", tools,
+        ollama,
+        "fake-model",
+        tools,
         PermissionGate(
             {name: "allow" for name in ("read_file", "write_file", "web_search")},
             lambda *_: "y",
@@ -508,8 +520,7 @@ def test_ollama_tool_xml_unexpected_eof_retries_once_without_tool_schemas():
             self.calls.append({"messages": deepcopy(messages), "tools": deepcopy(tools)})
             if len(self.calls) == 1:
                 raise RuntimeError(
-                    'ollama /api/chat 500: {"error":"XML syntax error on line 3: '
-                    'unexpected EOF"}'
+                    'ollama /api/chat 500: {"error":"XML syntax error on line 3: unexpected EOF"}'
                 )
             return {"role": "assistant", "content": "recovered answer"}
 
@@ -685,6 +696,55 @@ def test_validated_code_request_buffers_until_mechanical_validation_passes():
     assert "Use snake_case names." in ollama.messages[0]["content"]
 
 
+def test_closing_stream_preserves_partial_assistant_in_agent_history():
+    class StreamingOllama:
+        last_chat_metadata = {}
+
+        def chat_stream(self, model, messages, options=None, think=None):
+            yield {"role": "assistant", "content": "partial response"}
+            yield {"role": "assistant", "content": " never consumed"}
+
+    agent = Agent(
+        StreamingOllama(),
+        "fake-model",
+        [],
+        PermissionGate({}, lambda _tool, _detail: "y"),
+        "system",
+    )
+    events = agent.run("hello")
+    while next(events).kind != "text_delta":
+        pass
+    events.close()
+
+    assert agent.messages[-1] == {
+        "role": "assistant",
+        "content": "partial response",
+        "interrupted": True,
+    }
+
+
+def test_restore_session_uses_model_context_without_exposing_it_as_visible_content():
+    agent = Agent(
+        ScriptedOllama([]),
+        "fake-model",
+        [],
+        PermissionGate({}, lambda _tool, _detail: "y"),
+        "system",
+    )
+
+    agent.restore_session(
+        [
+            {
+                "role": "user",
+                "content": "Review the attachment",
+                "model_content": "Review the attachment\n\n[attached file]\nprivate contents",
+            }
+        ]
+    )
+
+    assert agent.messages[-1]["content"].endswith("private contents")
+
+
 def test_invalid_gdscript_gets_one_targeted_validation_repair():
     class RepairingOllama:
         def __init__(self):
@@ -694,9 +754,7 @@ def test_invalid_gdscript_gets_one_targeted_validation_repair():
         def chat_stream(self, model, messages, options=None, think=None):
             self.calls.append(deepcopy(messages))
             if len(self.calls) == 1:
-                content = (
-                    "```gdscript\nif ready:\n\tpass\nvalue = 1\nelse:\n\tpass\n```"
-                )
+                content = "```gdscript\nif ready:\n\tpass\nvalue = 1\nelse:\n\tpass\n```"
             else:
                 content = "```gdscript\nif ready:\n\tvalue = 1\nelse:\n\tvalue = 2\n```"
             yield {"role": "assistant", "content": content}
@@ -793,7 +851,7 @@ def test_gdscript_action_constraints_stop_at_get_vector_arguments():
     from klaude_core.agent import _code_validation_diagnostics
 
     request = (
-        'Write GDScript. Use Input.get_vector('
+        "Write GDScript. Use Input.get_vector("
         '"move_left", "move_right", "move_up", "move_down"); '
         'call move_and_slide correctly; attack on "melee_attack"; only damage bodies '
         "that implement take_damage."

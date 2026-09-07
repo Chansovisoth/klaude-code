@@ -10,10 +10,15 @@ Design rules:
 
 from __future__ import annotations
 
+import fcntl
 import fnmatch
+import os
 import re
 import shlex
 import subprocess
+import sys
+import tempfile
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -84,6 +89,13 @@ GIT_MUTATION_SUBCOMMANDS = {
     "tag",
 }
 DESTRUCTIVE_GIT_SUBCOMMANDS = {"clean", "gc", "reset"}
+SHELL_EXECUTABLES = {"bash", "dash", "fish", "ksh", "sh", "zsh"}
+SAFE_EXTERNAL_PATHS = {Path("/dev/null")}
+SENSITIVE_ENV_NAME_RE = re.compile(r"(?i)(?:api[_-]?key|token|secret|password|credential)")
+SENSITIVE_VALUE_RE = re.compile(
+    r"(?i)(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{12,}|"
+    r"AIza[A-Za-z0-9_-]{20,}|Bearer\s+[A-Za-z0-9._~+/-]{12,})"
+)
 
 
 @dataclass(frozen=True)
@@ -162,8 +174,30 @@ def classify_command(command: str) -> CommandClassification:
     if _has_shell_syntax(command, argv):
         return CommandClassification(argv, "shell-composed or unknown", True, "shell syntax")
     name = Path(argv[0]).name
+    if name in SHELL_EXECUTABLES and "-c" in argv:
+        command_index = argv.index("-c") + 1
+        if command_index < len(argv):
+            nested = classify_command(argv[command_index])
+            if nested.risk == "destructive":
+                return CommandClassification(
+                    argv, "destructive", True, "destructive nested shell command"
+                )
+    lowered = command.casefold()
+    if re.search(
+        r"(?:^|[;&|()\s])(?:sudo\s+)?(?:\S*/)?(?:rm|rmdir|shred|truncate)(?:\s|$)",
+        lowered,
+    ):
+        return CommandClassification(argv, "destructive", True, "destructive nested command")
     if name == "git":
         risk, reason = _classify_git(argv)
+        if risk == "read-only inspection" and any(
+            token == "--output" or token.startswith("--output=") for token in argv
+        ):
+            risk, reason = "workspace-writing", "git output file"
+    elif name == "find" and any(
+        token in {"-delete", "-exec", "-execdir", "-ok", "-okdir"} for token in argv
+    ):
+        risk, reason = "destructive", "find action"
     elif name in READ_ONLY_COMMANDS:
         risk, reason = "read-only inspection", name
     elif name in DESTRUCTIVE_COMMANDS:
@@ -211,11 +245,34 @@ class Workspace:
             raise GitCommandError(argv, out.returncode, out.stdout, out.stderr)
         return (out.stdout + out.stderr).strip()
 
+    def _status_paths(self) -> list[str]:
+        """Return literal dirty paths without C-style quoting ambiguities."""
+        raw = self._git("status", "--porcelain=v1", "-z")
+        records = raw.split("\0") if raw else []
+        paths: list[str] = []
+        index = 0
+        while index < len(records):
+            record = records[index]
+            index += 1
+            if not record:
+                continue
+            if len(record) < 4:
+                raise RuntimeError("could not parse Git status safely")
+            status = record[:2]
+            paths.append(record[3:])
+            if "R" in status or "C" in status:
+                if index >= len(records) or not records[index]:
+                    raise RuntimeError("could not parse Git rename safely")
+                paths.append(records[index])
+                index += 1
+        return paths
+
     def _is_repo(self) -> bool:
         return self.repo_root is not None
 
     def ensure_work_branch(self, task_slug: str = "session") -> str:
         """Called once at session start: refuse dirty trees, branch off."""
+        self.write_enabled = True
         if not self._is_repo():
             return "not a git repo — edits will not be auto-committed"
         try:
@@ -242,6 +299,35 @@ class Workspace:
                 "working tree is dirty; commit or stash your changes before AI edits"
             )
 
+    def _require_clean_repo(self) -> None:
+        self._require_write_enabled()
+        if self._is_repo() and self._git("status", "--porcelain"):
+            self.write_enabled = False
+            raise PermissionError(
+                "working tree changed after Klaude started; commit or stash those changes "
+                "before AI edits"
+            )
+
+    @contextmanager
+    def _mutation_lock(self):
+        if not self._is_repo():
+            yield
+            return
+        git_dir = self._git("rev-parse", "--git-dir")
+        lock_path = Path(git_dir)
+        if not lock_path.is_absolute():
+            repo_root = self.repo_root
+            if repo_root is None:
+                raise RuntimeError("Git repository root disappeared during mutation")
+            lock_path = (repo_root / lock_path).resolve()
+        lock_path.mkdir(parents=True, exist_ok=True)
+        with (lock_path / "klaude-agent.lock").open("a+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
     def _require_command_allowed(self, classification: CommandClassification) -> None:
         if classification.risk == "destructive":
             raise PermissionError(
@@ -250,66 +336,207 @@ class Workspace:
         if classification.risk != "read-only inspection":
             self._require_write_enabled()
 
-    def _commit(self, message: str) -> None:
+    def _commit(self, message: str, path: Path) -> None:
         if self.auto_commit and self._is_repo():
-            self._git("add", "-A")
-            self._git("commit", "-m", f"klaude: {message}")
+            repo_root = self.repo_root
+            if repo_root is None:
+                return
+            relative = path.resolve().relative_to(repo_root).as_posix()
+            unexpected = [changed for changed in self._status_paths() if changed != relative]
+            if unexpected:
+                self.write_enabled = False
+                raise PermissionError(
+                    "concurrent workspace changes detected; Klaude left its edit uncommitted "
+                    "to avoid capturing user-owned work"
+                )
+            self._git("add", "--", relative)
+            self._git("commit", "--only", "-m", f"klaude: {message}", "--", relative)
+
+    def _commit_all(self, message: str) -> None:
+        if not self.auto_commit or not self._is_repo():
+            return
+        paths = list(dict.fromkeys(self._status_paths()))
+        if not paths:
+            return
+        self._git("add", "-A", "--", *paths)
+        self._git("commit", "--only", "-m", f"klaude: {message}", "--", *paths)
+
+    @staticmethod
+    def _is_sensitive_path(path: Path) -> bool:
+        name = path.name.casefold()
+        if name.endswith(".example") or name.endswith(".sample"):
+            return False
+        return name in {
+            ".env",
+            "searxng.env",
+            "credentials.json",
+            "id_rsa",
+            "id_ed25519",
+        } or name.endswith((".pem", ".key", ".p12", ".pfx"))
+
+    def _sensitive_values(self) -> set[str]:
+        values = {
+            value
+            for name, value in os.environ.items()
+            if SENSITIVE_ENV_NAME_RE.search(name) and len(value) >= 8
+        }
+        for path in (
+            self.root / ".env",
+            self.root / "config/.env",
+            self.root / "config/searxng.env",
+        ):
+            if not path.is_file():
+                continue
+            try:
+                lines = path.read_text(errors="replace").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                value = stripped.split("=", 1)[1].strip().strip("\"'")
+                if len(value) >= 8:
+                    values.add(value)
+        return values
+
+    def _redact(self, text: str) -> str:
+        for value in sorted(self._sensitive_values(), key=len, reverse=True):
+            text = text.replace(value, "[REDACTED]")
+        return SENSITIVE_VALUE_RE.sub("[REDACTED]", text)
+
+    def _validate_command_paths(self, argv: list[str]) -> None:
+        for index, token in enumerate(argv):
+            if index == 0 or "://" in token:
+                continue
+            candidate = token.split("=", 1)[1] if token.startswith("-") and "=" in token else token
+            candidate_path = Path(candidate)
+            if self._is_sensitive_path(candidate_path):
+                raise PermissionError(f"shell access to secret file denied: {candidate}")
+            if candidate.startswith("/"):
+                path = Path(candidate).resolve()
+                if path in SAFE_EXTERNAL_PATHS or path.is_relative_to(self.root):
+                    continue
+                raise PermissionError(f"shell path escapes workspace: {candidate}")
+            if candidate == ".." or candidate.startswith("../") or "/../" in candidate:
+                path = (self.root / candidate).resolve()
+                if not path.is_relative_to(self.root):
+                    raise PermissionError(f"shell path escapes workspace: {candidate}")
 
     # --- tool implementations ---------------------------------------------
     def read_file(self, path: str) -> str:
-        text = self._jail(path).read_text()
+        target = self._jail(path)
+        if self._is_sensitive_path(target):
+            raise PermissionError(f"access to secret file denied: {path}")
+        text = target.read_text()
         return text[:MAX_READ] + ("\n...[truncated]" if len(text) > MAX_READ else "")
 
     def write_file(self, path: str, content: str) -> str:
-        self._require_write_enabled()
-        p = self._jail(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content)
-        self._commit(f"write {path}")
+        with self._mutation_lock():
+            self._require_clean_repo()
+            p = self._jail(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content)
+            self._commit(f"write {path}", p)
         return f"wrote {len(content)} chars to {path}"
 
     def edit_file(self, path: str, old_str: str, new_str: str) -> str:
-        self._require_write_enabled()
-        p = self._jail(path)
-        text = p.read_text()
-        n = text.count(old_str)
-        if n == 0:
-            return "error: old_str not found in file"
-        if n > 1:
-            return f"error: old_str appears {n} times — make it unique"
-        p.write_text(text.replace(old_str, new_str, 1))
-        self._commit(f"edit {path}")
+        with self._mutation_lock():
+            self._require_clean_repo()
+            p = self._jail(path)
+            text = p.read_text()
+            n = text.count(old_str)
+            if n == 0:
+                return "error: old_str not found in file"
+            if n > 1:
+                return f"error: old_str appears {n} times — make it unique"
+            p.write_text(text.replace(old_str, new_str, 1))
+            self._commit(f"edit {path}", p)
         return f"edited {path}"
 
     def list_dir(self, path: str = ".") -> str:
         p = self._jail(path)
         entries = sorted(p.iterdir(), key=lambda e: (e.is_file(), e.name))
-        lines = [f"{'d' if e.is_dir() else 'f'} {e.relative_to(self.root)}" for e in entries
-                 if e.name not in {".git", "node_modules", "__pycache__", ".venv"}]
+        lines = [
+            f"{'d' if e.is_dir() else 'f'} {e.relative_to(self.root)}"
+            for e in entries
+            if e.name not in {".git", "node_modules", "__pycache__", ".venv"}
+        ]
         return "\n".join(lines[:300]) or "(empty)"
 
     def grep(self, pattern: str, path: str = ".") -> str:
         out = subprocess.run(
-            ["grep", "-rIn", "--max-count=3",
-             "--exclude-dir=.git", "--exclude-dir=node_modules",
-             "--exclude-dir=__pycache__", "--exclude-dir=.venv",
-             pattern, str(self._jail(path))],
-            capture_output=True, text=True, timeout=30,
+            [
+                "grep",
+                "-rIn",
+                "--max-count=3",
+                "--exclude-dir=.git",
+                "--exclude-dir=node_modules",
+                "--exclude-dir=__pycache__",
+                "--exclude-dir=.venv",
+                "--exclude=.env",
+                "--exclude=searxng.env",
+                "--exclude=*.pem",
+                "--exclude=*.key",
+                pattern,
+                str(self._jail(path)),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
-        text = out.stdout.strip()
+        text = self._redact(out.stdout.strip())
         return text[:10_000] if text else "(no matches)"
 
     def run_shell(self, command: str) -> str:
         classification = classify_command(command)
         self._require_command_allowed(classification)
-        argv = (
-            ["/bin/bash", "-lc", command]
-            if classification.uses_shell
-            else classification.argv
-        )
-        out = subprocess.run(argv, shell=False, cwd=self.root,
-                             capture_output=True, text=True, timeout=SHELL_TIMEOUT)
-        result = f"exit={out.returncode}\n{out.stdout}{out.stderr}"
+        self._validate_command_paths(classification.argv)
+        argv = ["/bin/bash", "-lc", command] if classification.uses_shell else classification.argv
+        writable = classification.risk != "read-only inspection"
+        lock = self._mutation_lock() if writable else nullcontext()
+        with lock:
+            if writable:
+                self._require_clean_repo()
+            with tempfile.TemporaryDirectory(prefix="klaude-shell-") as temporary:
+                safe_environment = {
+                    name: value
+                    for name, value in os.environ.items()
+                    if not SENSITIVE_ENV_NAME_RE.search(name)
+                }
+                env = {
+                    **safe_environment,
+                    "HOME": temporary,
+                    "TMPDIR": temporary,
+                    "XDG_CACHE_HOME": f"{temporary}/cache",
+                    "XDG_CONFIG_HOME": f"{temporary}/config",
+                }
+                sandbox_argv = [
+                    sys.executable,
+                    "-m",
+                    "klaude_tools.sandbox",
+                    "--workspace",
+                    str(self.root),
+                    "--temporary",
+                    temporary,
+                ]
+                if writable:
+                    sandbox_argv.append("--writable")
+                sandbox_argv.extend(["--", *argv])
+                out = subprocess.run(
+                    sandbox_argv,
+                    shell=False,
+                    cwd=self.root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=SHELL_TIMEOUT,
+                )
+            if out.returncode == 0 and writable:
+                self._commit_all(f"run {classification.reason}")
+            elif out.returncode != 0 and writable and self._is_repo() and self._status_paths():
+                self.write_enabled = False
+        result = self._redact(f"exit={out.returncode}\n{out.stdout}{out.stderr}")
         return result[:12_000]
 
     def git_status(self) -> str:
@@ -358,33 +585,53 @@ def build_tools(ws: Workspace) -> list[Tool]:
         return {"type": "object", "properties": props, "required": required}
 
     return [
-        Tool("read_file", "Read a file from the workspace.",
-             obj({"path": S}, ["path"]), ws.read_file),
-        Tool("list_dir", "List files in a workspace directory.",
-             obj({"path": S}, []), ws.list_dir),
-        Tool("workspace_info",
-             "Show only the current working directory and repository root. "
-             "Use for where-am-I and pwd questions; omit hardware/system specs.",
-             obj({}, []), ws.workspace_info),
-        Tool("grep", "Search file contents for a pattern (recursive).",
-             obj({"pattern": S, "path": S}, ["pattern"]), ws.grep),
-        Tool("write_file", "Create or overwrite a file with content.",
-             obj({"path": S, "content": S}, ["path", "content"]), ws.write_file,
-             detail=lambda a: f"write {a.get('path')} ({len(a.get('content', ''))} chars)"),
-        Tool("edit_file",
-             "Edit a file by replacing an exact unique string with a new string.",
-             obj({"path": S, "old_str": S, "new_str": S}, ["path", "old_str", "new_str"]),
-             ws.edit_file,
-             detail=lambda a: f"edit {a.get('path')}: '{str(a.get('old_str'))[:60]}...'"),
-        Tool("run_shell", "Run a command in the workspace. Returns exit code and output.",
-             obj({"command": S}, ["command"]), ws.run_shell,
-             detail=lambda a: (
-                 f"$ {a.get('command')}\n"
-                 f"risk={classify_command(str(a.get('command', ''))).risk}"
-             )),
+        Tool(
+            "read_file", "Read a file from the workspace.", obj({"path": S}, ["path"]), ws.read_file
+        ),
+        Tool("list_dir", "List files in a workspace directory.", obj({"path": S}, []), ws.list_dir),
+        Tool(
+            "workspace_info",
+            "Show only the current working directory and repository root. "
+            "Use for where-am-I and pwd questions; omit hardware/system specs.",
+            obj({}, []),
+            ws.workspace_info,
+        ),
+        Tool(
+            "grep",
+            "Search file contents for a pattern (recursive).",
+            obj({"pattern": S, "path": S}, ["pattern"]),
+            ws.grep,
+        ),
+        Tool(
+            "write_file",
+            "Create or overwrite a file with content.",
+            obj({"path": S, "content": S}, ["path", "content"]),
+            ws.write_file,
+            detail=lambda a: f"write {a.get('path')} ({len(a.get('content', ''))} chars)",
+        ),
+        Tool(
+            "edit_file",
+            "Edit a file by replacing an exact unique string with a new string.",
+            obj({"path": S, "old_str": S, "new_str": S}, ["path", "old_str", "new_str"]),
+            ws.edit_file,
+            detail=lambda a: f"edit {a.get('path')}: '{str(a.get('old_str'))[:60]}...'",
+        ),
+        Tool(
+            "run_shell",
+            "Run a command in the workspace. Returns exit code and output.",
+            obj({"command": S}, ["command"]),
+            ws.run_shell,
+            detail=lambda a: (
+                f"$ {a.get('command')}\nrisk={classify_command(str(a.get('command', ''))).risk}"
+            ),
+        ),
         Tool("git_status", "Show git status.", obj({}, []), ws.git_status),
         Tool("git_diff", "Show the current working-tree diff.", obj({}, []), ws.git_diff),
-        Tool("git_commit", "Commit all current changes with a message.",
-             obj({"message": S}, ["message"]), ws.git_commit,
-             detail=lambda a: f"git commit -m '{a.get('message')}'"),
+        Tool(
+            "git_commit",
+            "Commit all current changes with a message.",
+            obj({"message": S}, ["message"]),
+            ws.git_commit,
+            detail=lambda a: f"git commit -m '{a.get('message')}'",
+        ),
     ]

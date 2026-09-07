@@ -109,6 +109,12 @@ case "$OLLAMA_MODE" in
     ;;
 esac
 
+OLLAMA_URL_RE='^https?://[^[:space:]"\\]+$'
+if [[ ! $OLLAMA_URL =~ $OLLAMA_URL_RE ]]; then
+  warn "invalid Ollama URL: expected an http:// or https:// URL without spaces"
+  exit 1
+fi
+
 # 3. local runtime/config home -----------------------------------------------
 if [ -n "${KLAUDE_HOME:-}" ]; then
   DEFAULT_CONFIG_DIR="$KLAUDE_HOME/config"
@@ -132,8 +138,8 @@ if [ ! -f "$ENV_FILE" ]; then
     say "installing provider secrets template at ${ENV_FILE}"
     cp "$ENV_EXAMPLE" "$ENV_FILE"
   fi
-  chmod 600 "$ENV_FILE"
 fi
+chmod 600 "$ENV_FILE"
 
 SEARXNG_ENV_FILE="$KLAUDE_CONFIG_DIR/searxng.env"
 SEARXNG_ENV_EXAMPLE="config/examples/searxng.env"
@@ -144,8 +150,8 @@ if [ ! -f "$SEARXNG_ENV_FILE" ]; then
     SEARXNG_SECRET_VALUE=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
   fi
   sed "s/^SEARXNG_SECRET=.*/SEARXNG_SECRET=${SEARXNG_SECRET_VALUE}/" "$SEARXNG_ENV_EXAMPLE" > "$SEARXNG_ENV_FILE"
-  chmod 600 "$SEARXNG_ENV_FILE"
 fi
+chmod 600 "$SEARXNG_ENV_FILE"
 
 ONLINE_DOCS_FILE="$KLAUDE_CONFIG_DIR/online-docs.txt"
 ONLINE_DOCS_EXAMPLE="config/examples/online-docs.txt"
@@ -177,8 +183,8 @@ else
 fi
 
 # 5. python workspace ---------------------------------------------------------
-say "syncing python workspace (uv sync)"
-uv sync
+say "syncing python workspace with cloud adapters (uv sync --extra cloud)"
+uv sync --extra cloud
 
 # 6. models by hardware tier ---------------------------------------------------
 if [ "$NO_MODELS" = "1" ]; then
@@ -193,7 +199,7 @@ else
   INSTALLED=$(curl -fsS --max-time 5 "${OLLAMA_URL}/api/tags" 2>/dev/null \
               | grep -o '"name":"[^"]*"' | cut -d'"' -f4 || true)
   for m in $MODELS; do
-    if echo "$INSTALLED" | grep -q "^${m%%:*}"; then
+    if printf '%s\n' "$INSTALLED" | grep -Fxq "$m"; then
       say "already have $m -- skipping"
     else
       say "pulling $m"
@@ -214,15 +220,46 @@ if [ ! -f "$CFG" ]; then
 fi
 if [ "$OLLAMA_URL" != "http://localhost:11434" ]; then
   say "writing ollama_url = ${OLLAMA_URL} to ${CFG}"
-  if grep -q '^\[services\]' "$CFG"; then
-    sed -i "/^\[services\]/a ollama_url = \"${OLLAMA_URL}\"" "$CFG"
-  else
-    printf '\n[services]\nollama_url = "%s"\n' "$OLLAMA_URL" >> "$CFG"
-  fi
+  CFG_TMP=$(mktemp "${CFG}.tmp.XXXXXX")
+  awk -v value="$OLLAMA_URL" '
+    BEGIN { in_services=0; saw_services=0; wrote_url=0 }
+    /^\[services\][[:space:]]*$/ {
+      in_services=1
+      saw_services=1
+      print
+      next
+    }
+    /^\[/ {
+      if (in_services && !wrote_url) {
+        print "ollama_url = \"" value "\""
+        wrote_url=1
+      }
+      in_services=0
+    }
+    in_services && /^[[:space:]]*ollama_url[[:space:]]*=/ {
+      if (!wrote_url) {
+        print "ollama_url = \"" value "\""
+        wrote_url=1
+      }
+      next
+    }
+    { print }
+    END {
+      if (in_services && !wrote_url) print "ollama_url = \"" value "\""
+      if (!saw_services) {
+        print ""
+        print "[services]"
+        print "ollama_url = \"" value "\""
+      }
+    }
+  ' "$CFG" > "$CFG_TMP"
+  mv "$CFG_TMP" "$CFG"
 fi
 
 say "running klaude doctor"
-uv run klaude doctor || true
+if ! uv run klaude doctor; then
+  warn "doctor found issues; review the FAIL lines above after setup completes"
+fi
 
 say "done. try:  uv run klaude"
 say "or add to PATH:  uv tool install --editable apps/cli"

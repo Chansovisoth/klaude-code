@@ -20,8 +20,8 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from .entities import structured_domains_for_text
-from .ollama import Ollama
 from .model_runtime import ModelInfo, ModelRuntime
+from .ollama import Ollama
 from .permissions import PermissionDenied, PermissionGate
 
 ToolFn = Callable[..., Any]
@@ -1143,15 +1143,15 @@ def _recent_retrieval_was_weak(messages: list[dict[str, Any]]) -> bool:
             continue
         tool_name = message.get("tool_name")
         content = str(message.get("content", ""))
-        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        raw_metadata = message.get("metadata")
+        metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
         if tool_name == "fetch_url":
             return not _useful_fetch_result(content)
         if tool_name != "web_search":
             continue
-        provider_metadata = (
-            metadata.get("provider_metadata")
-            if isinstance(metadata.get("provider_metadata"), dict)
-            else {}
+        raw_provider_metadata = metadata.get("provider_metadata")
+        provider_metadata: dict[str, Any] = (
+            raw_provider_metadata if isinstance(raw_provider_metadata, dict) else {}
         )
         accepted_count = metadata.get(
             "accepted_result_count",
@@ -2467,21 +2467,21 @@ def rewrite_followup_query(
         terms = _followup_detail_terms(term_source)
         terms.extend(_recent_disambiguation_terms(messages, topic, terms))
         if state:
-            entity = state.active_entities[0] if state.active_entities else None
+            active_entity = state.active_entities[0] if state.active_entities else None
             if (
-                entity
-                and entity.entity_type
-                and entity.entity_type not in {term.lower() for term in terms}
+                active_entity
+                and active_entity.entity_type
+                and active_entity.entity_type not in {term.lower() for term in terms}
             ):
-                inferred.append(entity.entity_type)
-                terms.append(entity.entity_type)
+                inferred.append(active_entity.entity_type)
+                terms.append(active_entity.entity_type)
             if (
-                entity
-                and entity.location
-                and entity.location.lower() not in {term.lower() for term in terms}
+                active_entity
+                and active_entity.location
+                and active_entity.location.lower() not in {term.lower() for term in terms}
             ):
-                inferred.append(entity.location)
-                terms.append(entity.location)
+                inferred.append(active_entity.location)
+                terms.append(active_entity.location)
         for constraint in explicit:
             if constraint.lower() not in {term.lower() for term in terms}:
                 terms.append(constraint)
@@ -3107,10 +3107,7 @@ def _bounded_fetched_evidence(
     for start in range(header_size, len(content), stride):
         window = content[start : start + window_size]
         lowered_window = lowered[start : start + window_size]
-        score = sum(
-            lowered_window.count(term) * (1.0 + min(len(term), 24) / 8.0)
-            for term in terms
-        )
+        score = sum(lowered_window.count(term) * (1.0 + min(len(term), 24) / 8.0) for term in terms)
         if score:
             candidates.append((score, start, window.strip()))
     candidates.sort(key=lambda item: (-item[0], item[1]))
@@ -3120,8 +3117,7 @@ def _bounded_fetched_evidence(
     for _score, start, window in candidates:
         end = start + len(window)
         overlaps_selected = any(
-            start < prior_end and end > prior_start
-            for prior_start, prior_end in selected_ranges
+            start < prior_end and end > prior_start for prior_start, prior_end in selected_ranges
         )
         if overlaps_selected:
             continue
@@ -3244,9 +3240,7 @@ def _gdscript_validation_diagnostics(code: str, user_message: str = "") -> list[
         re.IGNORECASE,
     ):
         arguments = match.group("arguments")
-        requested_actions.update(
-            re.findall(r"[\"']([a-zA-Z_][a-zA-Z0-9_]*)[\"']", arguments)
-        )
+        requested_actions.update(re.findall(r"[\"']([a-zA-Z_][a-zA-Z0-9_]*)[\"']", arguments))
         requested_actions.update(re.findall(r"\bmove_[a-zA-Z0-9_]+\b", arguments))
     for match in re.finditer(
         r"Input\.get_vector\s+with\s+(?P<arguments>[^.;\n]{1,160})",
@@ -3254,9 +3248,7 @@ def _gdscript_validation_diagnostics(code: str, user_message: str = "") -> list[
         re.IGNORECASE,
     ):
         arguments = match.group("arguments")
-        requested_actions.update(
-            re.findall(r"[\"']([a-zA-Z_][a-zA-Z0-9_]*)[\"']", arguments)
-        )
+        requested_actions.update(re.findall(r"[\"']([a-zA-Z_][a-zA-Z0-9_]*)[\"']", arguments))
         requested_actions.update(re.findall(r"\bmove_[a-zA-Z0-9_]+\b", arguments))
     for match in re.finditer(
         r"input actions?\s+(?P<actions>[^.;\n]{1,160})",
@@ -3264,9 +3256,7 @@ def _gdscript_validation_diagnostics(code: str, user_message: str = "") -> list[
         re.IGNORECASE,
     ):
         actions = match.group("actions")
-        requested_actions.update(
-            re.findall(r"[\"']([a-zA-Z_][a-zA-Z0-9_]*)[\"']", actions)
-        )
+        requested_actions.update(re.findall(r"[\"']([a-zA-Z_][a-zA-Z0-9_]*)[\"']", actions))
         requested_actions.update(re.findall(r"\bmove_[a-zA-Z0-9_]+\b", actions))
     for match in re.finditer(
         r"\battack(?:\s+input)?(?:\s+action|\s+on)\s+[\"']"
@@ -3323,13 +3313,10 @@ def _gdscript_validation_diagnostics(code: str, user_message: str = "") -> list[
                 "intersect_shape colliders are not restricted to PhysicsBody2D as requested"
             )
 
-    if (
-        re.search(
-            r"\b(?:implement|has(?:\s+the)?\s+method)\b.{0,40}\btake_damage\b",
-            lowered_request,
-        )
-        and not re.search(r"\.has_method\s*\(\s*&?[\"']take_damage[\"']\s*\)", code)
-    ):
+    if re.search(
+        r"\b(?:implement|has(?:\s+the)?\s+method)\b.{0,40}\btake_damage\b",
+        lowered_request,
+    ) and not re.search(r"\.has_method\s*\(\s*&?[\"']take_damage[\"']\s*\)", code):
         diagnostics.append(
             'the request requires a take_damage capability check; use has_method("take_damage")'
         )
@@ -3389,33 +3376,53 @@ def _explicit_retrieval_tools(
         )
     )
     required: list[str] = []
-    if not search_disabled and "query_knowledge" in available_tools and re.search(
-        r"\b(?:search|query|check|look up)\b.{0,50}"
-        r"\b(?:knowledge|library|learned docs?|local docs?)\b",
-        lowered,
+    if (
+        not search_disabled
+        and "query_knowledge" in available_tools
+        and re.search(
+            r"\b(?:search|query|check|look up)\b.{0,50}"
+            r"\b(?:knowledge|library|learned docs?|local docs?)\b",
+            lowered,
+        )
     ):
         required.append("query_knowledge")
-    if not search_disabled and "code_search" in available_tools and re.search(
-        r"\b(?:code[- ]search|search (?:the )?(?:code|programming) docs?)\b",
-        lowered,
+    if (
+        not search_disabled
+        and "code_search" in available_tools
+        and re.search(
+            r"\b(?:code[- ]search|search (?:the )?(?:code|programming) docs?)\b",
+            lowered,
+        )
     ):
         required.append("code_search")
-    if not search_disabled and "web_search" in available_tools and re.search(
-        r"\b(?:search (?:the )?web|web search|browse (?:the )?web|"
-        r"look (?:it |this )?up online|search online|check online)\b",
-        lowered,
+    if (
+        not search_disabled
+        and "web_search" in available_tools
+        and re.search(
+            r"\b(?:search (?:the )?web|web search|browse (?:the )?web|"
+            r"look (?:it |this )?up online|search online|check online)\b",
+            lowered,
+        )
     ):
         required.append("web_search")
-    elif not search_disabled and "web_search" in available_tools and re.search(
-        r"\b(?:current|latest|today|recent|real[- ]time)\b.{0,40}"
-        r"\b(?:public|result|status|news|price|version|release|documentation)\b",
-        lowered,
+    elif (
+        not search_disabled
+        and "web_search" in available_tools
+        and re.search(
+            r"\b(?:current|latest|today|recent|real[- ]time)\b.{0,40}"
+            r"\b(?:public|result|status|news|price|version|release|documentation)\b",
+            lowered,
+        )
     ):
         required.append("web_search")
-    if not search_disabled and "fetch_url" in available_tools and re.search(
-        r"\b(?:fetch|open|read|visit)\b.{0,100}"
-        r"\b(?:url|web ?page|page|site|search result|documentation)\b",
-        lowered,
+    if (
+        not search_disabled
+        and "fetch_url" in available_tools
+        and re.search(
+            r"\b(?:fetch|open|read|visit)\b.{0,100}"
+            r"\b(?:url|web ?page|page|site|search result|documentation)\b",
+            lowered,
+        )
     ):
         required.append("fetch_url")
     if "git_status" in available_tools and re.search(
@@ -3483,15 +3490,20 @@ class Agent:
         self.ollama_code_options = dict(ollama_code_options or {})
         self.ollama_code_think = ollama_code_think
         self.reasoning_mode = "thinking" if ollama_think not in {None, False} else "standard"
-        self.reasoning_effort = (
-            str(ollama_think) if isinstance(ollama_think, str) else "medium"
-        )
+        self.reasoning_effort = str(ollama_think) if isinstance(ollama_think, str) else "medium"
         self.code_context = code_context.strip()[:2_000]
         self.web_research_budget = (web_research_budget or WebResearchBudget()).bounded()
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         self.retrieval_state = RetrievalConversationState()
         self.last_web_research_state: AgenticSearchState | None = None
         self.plan_mode = False
+        # Host integrations may attach workspace-aware services. Defining the
+        # extension seam here keeps those capabilities explicit and typed.
+        self.workspace: Any = None
+        self.local_ollama: Ollama | None = ollama if isinstance(ollama, Ollama) else None
+        self.workdir: Any = None
+        self.tool_config: Any = None
+        self.system_prompt_builder: Callable[[], str] | None = None
 
     def set_system_prompt(self, system_prompt: str) -> None:
         if self.messages and self.messages[0].get("role") == "system":
@@ -3507,7 +3519,7 @@ class Agent:
         for turn in turns:
             if turn.get("role") not in {"user", "assistant"}:
                 continue
-            content = turn.get("content", "")
+            content = turn.get("model_content", turn.get("content", ""))
             if not isinstance(content, str):
                 continue
             if turn["role"] == "user":
@@ -3560,11 +3572,20 @@ class Agent:
         if read_only or self.plan_mode:
             allowed = {"read_file", "list_dir", "grep", "workspace_info", "git_status", "git_diff"}
             if self.plan_mode and not read_only:
-                allowed.update({
-                    "web_search", "fetch_url", "code_search", "query_knowledge",
-                    "huggingface_search", "huggingface_details", "huggingface_readme",
-                    "search_sessions", "list_recent_sessions", "list_commands",
-                })
+                allowed.update(
+                    {
+                        "web_search",
+                        "fetch_url",
+                        "code_search",
+                        "query_knowledge",
+                        "huggingface_search",
+                        "huggingface_details",
+                        "huggingface_readme",
+                        "search_sessions",
+                        "list_recent_sessions",
+                        "list_commands",
+                    }
+                )
             self.tools = {name: tool for name, tool in original_tools.items() if name in allowed}
         if self.plan_mode:
             self.messages[0]["content"] = original_prompt + (
@@ -3583,15 +3604,13 @@ class Agent:
         self.messages.append({"role": "user", "content": user_message})
         _update_retrieval_state_from_user(self.retrieval_state, user_message, self.messages)
         available_tools = {
-            name: tool for name, tool in self.tools.items()
-            if name not in self.disabled_tool_names
+            name: tool for name, tool in self.tools.items() if name not in self.disabled_tool_names
         }
         selected_tools = available_tools
         if self.tool_selector is not None:
             selected_names = self.tool_selector(user_message, available_tools)
             selected_tools = {
-                name: available_tools[name]
-                for name in selected_names if name in available_tools
+                name: available_tools[name] for name in selected_names if name in available_tools
             }
         required_retrieval_tools = _explicit_retrieval_tools(
             user_message,
@@ -3658,9 +3677,7 @@ class Agent:
             return schemas
 
         def model_messages() -> list[dict[str, Any]]:
-            if _code_request(user_message) and (
-                not selected_tools or tools_disabled_for_turn
-            ):
+            if _code_request(user_message) and (not selected_tools or tools_disabled_for_turn):
                 return [
                     {"role": "system", "content": direct_code_system_prompt},
                     *self.messages[1:],
@@ -4102,46 +4119,8 @@ class Agent:
                 metadata = attach_research_metadata(metadata)
             return name, args, tool, result, metadata
 
-        planned_results: list[str] = []
         # Retrieval is model-led. The host enforces tool safety and budgets but
         # never synthesizes a search or knowledge query from the user's words.
-        for call in ():
-            name, args, tool, result, metadata = yield from execute_tool_call(call)
-            if tool is not None and tool.return_direct:
-                self.messages.append({"role": "assistant", "content": result})
-                payload = {"content": result}
-                if metadata:
-                    payload["metadata"] = metadata
-                yield AgentEvent("text", payload)
-                yield AgentEvent("done", {})
-                return
-            yield AgentEvent(
-                "tool_result",
-                {"tool": name, "result": result, "metadata": metadata},
-            )
-            _update_retrieval_state_from_tool_result(
-                self.retrieval_state,
-                name,
-                metadata,
-            )
-            tool_message = {"role": "tool", "tool_name": name, "content": result}
-            if call.get("id"):
-                tool_message["tool_call_id"] = str(call["id"])
-            tool_message["content"] = research_tool_content(name, result)
-            if metadata:
-                tool_message["metadata"] = metadata
-            self.messages.append(tool_message)
-            if name == "web_search" and _wants_raw_search_results(user_message):
-                planned_results.append(result)
-
-        if planned_results:
-            content = "\n\n".join(planned_results)
-            self.messages.append({"role": "assistant", "content": content})
-            record_finish(content)
-            yield AgentEvent("text", {"content": content})
-            yield AgentEvent("done", finish_payload())
-            return
-
         for _step in range(self.max_steps):
             try:
                 schemas = active_schemas()
@@ -4154,27 +4133,41 @@ class Agent:
                     validation_language = _code_validation_language(user_message)
                     last_progress_at = 0.0
                     progress_stage = ""
-                    for fragment in stream_chat(
-                        self.model,
-                        model_messages(),
-                        options=request_options,
-                        think=request_think,
-                    ):
-                        stage = "reasoning" if fragment.get("thinking") else ""
-                        piece = str(fragment.get("content", ""))
-                        if piece:
-                            stage = "drafting code" if code_request else "drafting response"
-                        now = time.monotonic()
-                        if stage and (stage != progress_stage or now - last_progress_at >= 15.0):
-                            progress_stage = stage
-                            last_progress_at = now
-                            yield AgentEvent("progress", {"stage": stage})
-                        if not piece:
-                            continue
-                        streamed_parts.append(piece)
-                        if not validation_language:
-                            streamed_any = True
-                            yield AgentEvent("text_delta", {"content": piece})
+                    stream_completed = False
+                    try:
+                        for fragment in stream_chat(
+                            self.model,
+                            model_messages(),
+                            options=request_options,
+                            think=request_think,
+                        ):
+                            stage = "reasoning" if fragment.get("thinking") else ""
+                            piece = str(fragment.get("content", ""))
+                            if piece:
+                                stage = "drafting code" if code_request else "drafting response"
+                            now = time.monotonic()
+                            if stage and (
+                                stage != progress_stage or now - last_progress_at >= 15.0
+                            ):
+                                progress_stage = stage
+                                last_progress_at = now
+                                yield AgentEvent("progress", {"stage": stage})
+                            if not piece:
+                                continue
+                            streamed_parts.append(piece)
+                            if not validation_language:
+                                streamed_any = True
+                                yield AgentEvent("text_delta", {"content": piece})
+                        stream_completed = True
+                    finally:
+                        if not stream_completed and streamed_parts:
+                            self.messages.append(
+                                {
+                                    "role": "assistant",
+                                    "content": "".join(streamed_parts),
+                                    "interrupted": True,
+                                }
+                            )
                     msg = {"role": "assistant", "content": "".join(streamed_parts)}
                 elif request_options or request_think is not None:
                     chat_kwargs: dict[str, Any] = {
@@ -4232,8 +4225,14 @@ class Agent:
 
             self.messages.append(msg)
             content = msg.get("content", "")
-            tool_calls = msg.get("tool_calls") or _parse_text_tool_calls(
-                content, set() if tools_disabled_for_turn else set(selected_tools)
+            raw_tool_calls = msg.get("tool_calls")
+            tool_calls: list[dict[str, Any]] = (
+                [call for call in raw_tool_calls if isinstance(call, dict)]
+                if isinstance(raw_tool_calls, list)
+                else _parse_text_tool_calls(
+                    content,
+                    set() if tools_disabled_for_turn else set(selected_tools),
+                )
             )
 
             if not tool_calls:
@@ -4447,10 +4446,10 @@ class Agent:
                 name, args, tool, result, metadata = yield from execute_tool_call(call)
                 if tool is not None and tool.return_direct:
                     self.messages.append({"role": "assistant", "content": result})
-                    payload = {"content": result}
+                    direct_payload: dict[str, Any] = {"content": result}
                     if metadata:
-                        payload["metadata"] = metadata
-                    yield AgentEvent("text", payload)
+                        direct_payload["metadata"] = metadata
+                    yield AgentEvent("text", direct_payload)
                     yield AgentEvent("done", {})
                     return
                 yield AgentEvent(
