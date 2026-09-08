@@ -149,6 +149,10 @@ Chat slash commands currently include:
 - `/new`: start a fresh session with the current model and workspace, retaining
   saved conversations but clearing the terminal view and scrollback. Clears draft attachments and
   model conversation context.
+- `/clear`: erase only the current terminal view and scrollback. Keep the same
+  session ID, saved turns, model context, attachments, queue, and active work;
+  later messages continue in the same session, and `/resume` can replay saved
+  sessions. It takes no arguments and does not wait for the worker to become idle.
 - `/rename NAME`: persist a 1–160 character name for the current session. Named
   sessions use that name in `/resume` and Markdown exports.
 - `/fork`: copy saved turns to a new session ID and continue with the current

@@ -1315,20 +1315,23 @@ def _chat_status(agent, memory, session_id: str) -> str:
     )
 
 
-DEBUG_LABEL_EXAMPLES = "\n\n".join(
-    (
-        "[status] Neutral session information",
-        "[appearance] Neutral appearance information",
-        "[runtime] Neutral runtime information",
-        "[permission · example] Neutral extended label",
-        "[warning] Amber warning",
-        "[interrupted at a safe boundary] Amber interruption",
-        "[failed] Red failure",
-        "[error] Red error",
-        "[success] Green success",
-        "[memory saved] Green saved-memory notice",
+DEBUG_LABEL_EXAMPLES = (
+    "\n\n".join(
+        (
+            "[status] Neutral session information",
+            "[appearance] Neutral appearance information",
+            "[runtime] Neutral runtime information",
+            "[permission · example] Neutral extended label",
+            "[warning] Amber warning",
+            "[interrupted at a safe boundary] Amber interruption",
+            "[failed] Red failure",
+            "[error] Red error",
+            "[success] Green success",
+            "[memory saved] Green saved-memory notice",
+        )
     )
-) + "\n"
+    + "\n"
+)
 
 
 def _chat_recap(agent, session_id: str) -> str:
@@ -1767,6 +1770,12 @@ CHAT_COMMANDS = (
         CommandSurface.CHAT,
         "/new",
         "Start a fresh chat and clear terminal history.",
+    ),
+    CommandSpec(
+        "clear",
+        CommandSurface.CHAT,
+        "/clear",
+        "Clear only the terminal view; keep the current chat session.",
     ),
     CommandSpec("rename", CommandSurface.CHAT, "/rename NAME", "Rename this session."),
     CommandSpec("fork", CommandSurface.CHAT, "/fork", "Continue a copy of this conversation."),
@@ -7642,6 +7651,13 @@ class PersistentChatTUI:
         if not text:
             return
         command, _, argument = text.partition(" ")
+        if command == "/clear":
+            self._set_input("")
+            if argument.strip():
+                self._append("\n[error] /clear takes no arguments.\n")
+            else:
+                self._clear_session_view()
+            return
         if command == "/debug_label":
             self._set_input("")
             if argument.strip():
@@ -8636,6 +8652,15 @@ def chat(
         if user_msg in {"/quit", "/exit", "/q"}:
             break
         command, _, argument = user_msg.partition(" ")
+        if command == "/clear":
+            if argument.strip():
+                console.print(Text("/clear takes no arguments."))
+            elif console.is_terminal:
+                console.file.write("\x1b[3J\x1b[2J\x1b[H")
+                console.file.flush()
+            else:
+                console.print(Text("Terminal view clearing requires an interactive terminal."))
+            continue
         if command == "/debug_label":
             if argument.strip():
                 console.print(Text("/debug_label takes no arguments."))

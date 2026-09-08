@@ -709,6 +709,44 @@ def test_debug_label_rejects_arguments(tmp_path):
     assert "[error] /debug_label takes no arguments." in tui.output.text
 
 
+def test_clear_erases_only_terminal_view_and_keeps_live_session_state(tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui.memory.log_turn(tui.session_id, "user", "Saved question")
+    tui.agent.messages.append({"role": "user", "content": "Model context"})
+    tui.pending.append("Queued follow-up")
+    tui.running = True
+    tui._append("Old visible transcript\n")
+    original_messages = list(tui.agent.messages)
+
+    tui._set_input("/clear")
+    tui._keep_exact_command_completion(tui.input.buffer)
+    tui._submit_buffer(steer=False)
+
+    assert tui.output.text == ""
+    assert tui.live_output.text == ""
+    assert tui.input.text == ""
+    assert tui.input.buffer.complete_state is None
+    assert tui.session_id == "session-1"
+    assert tui.agent.messages == original_messages
+    assert list(tui.pending) == ["Queued follow-up"]
+    assert tui.running
+    assert [turn["content"] for turn in tui.memory.load_session(tui.session_id)] == [
+        "Saved question"
+    ]
+
+
+def test_clear_rejects_arguments_without_erasing_transcript(tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui._append("Keep this visible\n")
+    tui._set_input("/clear now")
+
+    tui._submit_buffer(steer=False)
+
+    assert "Keep this visible" in tui.output.text
+    assert "[error] /clear takes no arguments." in tui.output.text
+
+
 def test_plan_mode_toggles():
     tui = _fake_persistent_tui()
     assert _plan_command(tui.agent, "on").startswith("Plan mode on")
