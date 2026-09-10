@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Advance development package identities to `0.2.0a4` so unreleased work never
+  reuses the published alpha.3 artifacts. Run CI for every pushed branch as well
+  as pull requests and manual dispatches.
+- Normalize exact Ollama, OpenAI/Codex, and Gemini token usage in the live
+  footer, retain estimates when a provider omits usage, and mirror only bounded,
+  whitelisted provider metadata to clients following a session through
+  `/resume`.
+- Enforce provider/model tool capability declarations when building each
+  request: models without native tool support receive no tool schemas, and the
+  same per-turn capability snapshot explains why those tools are unavailable.
+- Add a provider-independent progress governor, immutable per-request capability
+  snapshots, bounded unavailable-tool recovery, durable stale-worker recovery,
+  crash/interruption fixtures, and stricter OpenAI/Codex stream completion and
+  tool-item validation.
+- Add Python 3.11-3.13 CI, production mypy, Ruff, and a five-wheel isolated
+  installation/CLI smoke gate. Track the workspace `uv.lock` so frozen CI and
+  clean-checkout builds use the exact dependency graph validated for release.
 - Fix picker scrolling by tracking the selected row in the renderer; add
   PageUp/PageDown navigation and Escape cancellation. Standardize reset and
   cancel rows across selection menus, preview theme changes, and support
@@ -17,9 +34,9 @@
 - Render all picker options as a highlighted, scrollable list inside the input
   field, add visible cancellation to model/effort/theme flows, and sort model
   pickers and model listings alphabetically.
-- Replace the blocking terminal chat loop with a persistent full-screen layout:
+- Replace the blocking terminal chat loop with a persistent normal-screen layout:
   output stays above a full-width live input, background turns leave typing
-  available, multiple inputs queue, Ctrl+Enter or `/steer` can prioritize a new
+  available, multiple inputs queue, Alt+Backslash or `/steer` can prioritize a new
   instruction, Alt+Enter inserts a newline, and Ctrl+C interrupts at the next
   safe boundary. Enable Kitty and xterm modified-key reporting only while the
   TUI is active, restore both on exit, and provide Ctrl+J as a newline fallback
@@ -27,7 +44,7 @@
 - Show queued follow-up inputs in a compact live strip above the composer and
   provide a queue editor: repeated Alt+Up walks from newest to oldest, Enter
   saves, empty text plus Enter deletes, and queue consumption pauses during edits.
-- Add a branded alternate-screen welcome view with a boxed block Klaude logo
+- Add a branded normal-screen welcome view with a boxed block Klaude logo
   and current package version, plus persistent, independent TUI appearance
   controls: Autumn chrome by default plus Pastelle Pink, Hacker
   Green, and Neon Synth; separate VS Code Dark, GitHub Dark, Monokai, and
@@ -46,7 +63,8 @@
 - Add `/keybinds` for a deterministic keyboard-only reference, and
   show described slash-command suggestions immediately when input starts with
   `/`.
-- Bound the default agent loop to eight model steps per turn and recover from
+- Bound the default agent loop to 20 model steps per turn, expose persistent
+  Safe/Balanced/Extended/Custom limits from 1-64, and recover from
   Qwen/Ollama tool-XML `unexpected EOF` failures with one tool-free retry.
 - Show safe reasoning/drafting progress, prevent reasoning-only blind retries,
   and validate Python/GDScript before displaying code, with at most two

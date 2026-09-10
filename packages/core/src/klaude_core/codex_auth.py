@@ -25,7 +25,7 @@ CODEX_DEVICE_URL = "https://auth.openai.com/codex/device"
 CODEX_RESPONSES_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _CLIENT_NAME = "klaude_code"
 _CLIENT_TITLE = "Klaude"
-_CLIENT_VERSION = "0.2.0a3"
+_CLIENT_VERSION = "0.2.0a4"
 _SENSITIVE_TEXT = re.compile(
     r"(?i)(bearer\s+)[^\s]+|\beyJ[A-Za-z0-9_-]{20,}(?:\.[A-Za-z0-9_-]+){1,2}\b"
 )

@@ -101,6 +101,7 @@ from klaude_cli.main import (
     _plan_command,
     _print_assistant_text,
     _print_trace,
+    _public_model_metadata,
     _query_knowledge_display_lines,
     _read_chat_input,
     _read_plain_chat_input,
@@ -4278,6 +4279,86 @@ def test_persistent_tui_replaces_live_context_estimate_with_exact_tokens():
     assert tui.ui_state.output_tokens == 120
     assert tui.ui_state.prompt_tokens_estimated is False
     assert tui.running is False
+
+
+def test_persistent_tui_reads_openai_usage_without_losing_missing_estimate():
+    tui = _fake_persistent_tui()
+    tui.ui_state.prompt_tokens = 3000
+    tui.ui_state.output_tokens = 40
+    tui.ui_state.prompt_tokens_estimated = True
+
+    tui._events.put(
+        (
+            "turn_done",
+            {"metadata": {"usage": {"input_tokens": 2400, "output_tokens": 120}}},
+        )
+    )
+    tui._before_render(None)
+
+    assert tui.ui_state.prompt_tokens == 2400
+    assert tui.ui_state.output_tokens == 120
+    assert tui.ui_state.prompt_tokens_estimated is False
+
+    tui.ui_state.prompt_tokens = 2800
+    tui.ui_state.prompt_tokens_estimated = True
+    tui._events.put(("turn_done", {"metadata": {"provider": "openai_codex"}}))
+    tui._before_render(None)
+
+    assert tui.ui_state.prompt_tokens == 2800
+    assert tui.ui_state.prompt_tokens_estimated is True
+
+
+def test_resumed_observer_receives_cloud_token_usage(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    observer = _fake_persistent_tui(tmp_path / "appearance.json")
+    observer.memory = memory
+    observer.session_id = "shared"
+    observer.agent.restore_session = lambda _turns: None
+    observer.ui_state.prompt_tokens = 3000
+    observer.ui_state.prompt_tokens_estimated = True
+    memory.publish_session_event(
+        "shared",
+        "remote-owner",
+        "turn_done",
+        {
+            "model_metadata": {
+                "provider": "openai_codex",
+                "response_id": "resp_public",
+                "usage": {"input_tokens": 2500, "output_tokens": 175},
+            }
+        },
+        turn_id="remote-turn",
+    )
+
+    observer._sync_shared_session()
+
+    assert observer.ui_state.prompt_tokens == 2500
+    assert observer.ui_state.output_tokens == 175
+    assert observer.ui_state.prompt_tokens_estimated is False
+
+
+def test_shared_model_metadata_is_secret_free_and_bounded():
+    public = _public_model_metadata(
+        {
+            "provider": "openai_codex",
+            "response_id": "resp_public",
+            "status": "completed",
+            "access_token": "secret",
+            "headers": {"authorization": "Bearer secret"},
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 4,
+                "input_tokens_details": {"cached_tokens": 7},
+            },
+        }
+    )
+
+    assert public == {
+        "provider": "openai_codex",
+        "response_id": "resp_public",
+        "status": "completed",
+        "usage": {"input_tokens": 12, "output_tokens": 4},
+    }
 
 
 def test_persistent_tui_permission_answer_unblocks_worker_request():

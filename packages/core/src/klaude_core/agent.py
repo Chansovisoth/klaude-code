@@ -4096,7 +4096,7 @@ class Agent:
         self.last_web_research_state = research
 
         def active_schemas() -> list[dict[str, Any]]:
-            if tools_disabled_for_turn:
+            if tools_disabled_for_turn or not self.model_info.capabilities.supports_tools:
                 return []
             schemas: list[dict[str, Any]] = []
             for name, tool in selected_tools.items():
@@ -4135,6 +4135,8 @@ class Agent:
             unavailable: dict[str, str] = {}
             for name in registered_tools - callable_names:
                 reason = unavailable_reasons.get(name)
+                if reason is None and not self.model_info.capabilities.supports_tools:
+                    reason = "selected provider/model does not support tool calling"
                 if reason is None and effective_permissions.get(name) == "deny":
                     reason = "permission policy deny"
                 if reason is None and name in retired_tools:

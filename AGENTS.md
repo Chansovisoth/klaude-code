@@ -6,7 +6,7 @@ this file before diving into implementation details.
 
 ## Project Summary
 
-`klaude-code` is a local-first AI coding agent, version `0.2.0a2`. It runs as a
+`klaude-code` is a local-first AI coding agent, version `0.2.0a4`. It runs as a
 Python `uv` workspace with a Typer/Rich CLI, Ollama model runtime, local memory,
 refreshable knowledge libraries, multi-provider web search, local-first URL
 fetching, and MCP servers for the web and knowledge layers.
@@ -49,6 +49,8 @@ in an isolated temporary virtual environment, imports each public package, and
 runs the installed `klaude --help`. Jobs use bounded timeouts and cancel
 superseded runs. `make check` mirrors the local unit, lint, and production-type
 validation surface; `make package-smoke` runs the separate distribution check.
+The root `uv.lock` is tracked release input; update it deliberately whenever
+workspace metadata or dependencies change, and keep CI installation frozen.
 
 ## User-Facing Terms
 
@@ -576,6 +578,9 @@ secret values, environment contents, or repository-instruction file contents
   `/status`, agent completion event, and shared `turn_done` event serialize this
   same snapshot; permission changes are therefore visible on the next request.
   The permission gate and immutable tool preflight remain the execution authority.
+  A provider/model declaring that it does not support tools receives no tool
+  schemas even when turn routing selected candidates; the capability snapshot
+  reports those candidates as unavailable for that request.
 
 When the user explicitly asks for the complete command list, use the
 deterministic command-reference handler and preserve its formatting. When the
@@ -679,7 +684,11 @@ closed instead of being treated as successful output. Codex reconciles streamed
 tool/reasoning items against the authoritative completed response, deduplicates
 items by provider ID, and falls back to completed response text when a transport
 omits text deltas. Non-secret response IDs and terminal status are retained as
-runtime metadata for diagnostics, but are not used as server-side continuation
+runtime metadata for diagnostics. Exact Ollama, OpenAI/Codex, and Gemini
+input/output token counts feed the local footer and are mirrored to `/resume`
+observers through a bounded, whitelisted completion payload. Missing or malformed
+provider usage must not erase an existing estimated context count. Runtime
+metadata is not used as server-side continuation
 while `store=false`; conversation continuity remains local replay plus Codex's
 encrypted reasoning items. Cloud context accounting uses discovered provider
 model metadata

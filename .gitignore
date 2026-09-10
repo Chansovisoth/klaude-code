@@ -6,7 +6,6 @@ __pycache__/
 .pytest_cache/
 dist/
 *.egg-info/
-uv.lock
 logs/
 .klaude/
 /config/config.toml

@@ -1968,9 +1968,88 @@ class ChatUIState:
         self.effort = _agent_effort_label(agent)
         self.context_window = _agent_context_window(agent)
         metadata = getattr(agent.ollama, "last_chat_metadata", {})
-        self.prompt_tokens = int(metadata.get("prompt_eval_count") or 0)
-        self.output_tokens = int(metadata.get("eval_count") or 0)
-        self.prompt_tokens_estimated = False
+        _apply_token_usage(self, metadata)
+
+
+def _metadata_mapping(value: object) -> dict[str, Any]:
+    """Return a shallow public mapping for SDK usage objects and plain dictionaries."""
+    if isinstance(value, dict):
+        return value
+    dumper = getattr(value, "model_dump", None)
+    if callable(dumper):
+        dumped = dumper()
+        return dumped if isinstance(dumped, dict) else {}
+    result: dict[str, Any] = {}
+    for name in (
+        "input_tokens",
+        "output_tokens",
+        "prompt_token_count",
+        "candidates_token_count",
+    ):
+        item = getattr(value, name, None)
+        if item is not None:
+            result[name] = item
+    return result
+
+
+def _token_usage(metadata: object) -> tuple[int, int] | None:
+    """Normalize exact Ollama, OpenAI Responses, and Gemini token counters."""
+    outer = _metadata_mapping(metadata)
+    usage = _metadata_mapping(outer.get("usage"))
+    prompt = outer.get("prompt_eval_count")
+    output = outer.get("eval_count")
+    if prompt is None:
+        prompt = usage.get("input_tokens", usage.get("prompt_token_count"))
+    if output is None:
+        output = usage.get("output_tokens", usage.get("candidates_token_count"))
+    if prompt is None and output is None:
+        return None
+    try:
+        return max(0, int(prompt or 0)), max(0, int(output or 0))
+    except (TypeError, ValueError):
+        return None
+
+
+def _apply_token_usage(state: ChatUIState, metadata: object) -> bool:
+    usage = _token_usage(metadata)
+    if usage is None:
+        return False
+    state.prompt_tokens, state.output_tokens = usage
+    state.prompt_tokens_estimated = False
+    return True
+
+
+def _public_model_metadata(metadata: object) -> dict[str, Any]:
+    """Whitelist non-secret provider diagnostics safe for session observers."""
+    source = _metadata_mapping(metadata)
+    public = {
+        key: source[key]
+        for key in (
+            "provider",
+            "response_id",
+            "status",
+            "prompt_eval_count",
+            "eval_count",
+            "done",
+            "done_reason",
+        )
+        if source.get(key) is not None
+    }
+    usage = _metadata_mapping(source.get("usage"))
+    if usage:
+        public["usage"] = {
+            key: usage[key]
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "total_tokens",
+                "prompt_token_count",
+                "candidates_token_count",
+                "total_token_count",
+            )
+            if usage.get(key) is not None
+        }
+    return public
 
 
 def _effort_value_label(value: bool | str | None) -> str:
@@ -6471,6 +6550,9 @@ def _render(
                 {
                     "cancelled": interrupted,
                     "failed": turn_failed,
+                    "model_metadata": _public_model_metadata(
+                        getattr(getattr(agent, "ollama", None), "last_chat_metadata", {})
+                    ),
                     "turn_capabilities": getattr(agent, "last_turn_capabilities", {}),
                 },
             )
@@ -8232,6 +8314,7 @@ class PersistentChatTUI:
                 if detail:
                     self._append(f"\n[session] {detail}\n")
             elif event["kind"] == "turn_done":
+                _apply_token_usage(self.ui_state, payload.get("model_metadata"))
                 if payload.get("recovered"):
                     reason = str(payload.get("reason", "remote worker ended unexpectedly"))
                     self._append(f"\n[interrupted] {reason}; saved output is preserved.\n")
@@ -11295,7 +11378,9 @@ class PersistentChatTUI:
                 )
                 + "\n",
             )
-            metadata = dict(getattr(self.agent.ollama, "last_chat_metadata", {}))
+            metadata = _public_model_metadata(
+                getattr(self.agent.ollama, "last_chat_metadata", {})
+            )
             suffix = f"worked for {elapsed_label}"
             self._publish_shared_event(
                 "turn_done",
@@ -11303,6 +11388,7 @@ class PersistentChatTUI:
                     "suffix": suffix,
                     "cancelled": cancelled,
                     "failed": turn_failed,
+                    "model_metadata": metadata,
                     "turn_capabilities": getattr(
                         self.agent, "last_turn_capabilities", {}
                     ),
@@ -11634,9 +11720,7 @@ class PersistentChatTUI:
                 self.ui_state.model = self.agent.model
                 self.ui_state.effort = _agent_effort_label(self.agent)
                 self.ui_state.context_window = _agent_context_window(self.agent)
-                self.ui_state.prompt_tokens = int(metadata.get("prompt_eval_count") or 0)
-                self.ui_state.output_tokens = int(metadata.get("eval_count") or 0)
-                self.ui_state.prompt_tokens_estimated = False
+                _apply_token_usage(self.ui_state, metadata)
                 self.running = False
                 self._turn_id = ""
                 self.activity = "ready"

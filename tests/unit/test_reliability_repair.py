@@ -9,6 +9,7 @@ from klaude_cli.main import (
 )
 from klaude_core import Agent, AgentEvent, PermissionGate, Tool
 from klaude_core.memory import Memory
+from klaude_core.model_runtime import ModelCapabilities, ModelInfo
 from klaude_tools import Workspace, build_tools, classify_command
 
 
@@ -454,6 +455,34 @@ def test_live_permission_policy_is_explicit_in_turn_capabilities():
     assert agent.last_turn_capabilities["callable_tools"] == ["write_file"]
     assert agent.last_turn_capabilities["unavailable_tools"]["edit_file"] == (
         "permission policy deny"
+    )
+
+
+def test_provider_without_tool_support_receives_no_schemas():
+    runtime = Runtime([{"role": "assistant", "content": "I cannot call tools here."}])
+    agent = Agent(
+        runtime,
+        "text-only",
+        [Tool("inspect", "inspect", {}, lambda: pytest.fail("must not execute"))],
+        PermissionGate({"inspect": "allow"}, lambda *_: pytest.fail("must not prompt")),
+        "system",
+        tool_selector=lambda *_: ["inspect"],
+        model_info=ModelInfo(
+            "fake",
+            "text-only",
+            "Text only",
+            ModelCapabilities(supports_tools=False),
+        ),
+    )
+
+    events = list(agent.run("inspect this"))
+
+    assert runtime.requests[0][1] == []
+    assert [event.kind for event in events] == ["text", "done"]
+    assert agent.last_turn_capabilities["provider"]["supports_tools"] is False
+    assert agent.last_turn_capabilities["callable_tools"] == []
+    assert agent.last_turn_capabilities["unavailable_tools"]["inspect"] == (
+        "selected provider/model does not support tool calling"
     )
 
 
