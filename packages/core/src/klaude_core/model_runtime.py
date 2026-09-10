@@ -10,20 +10,47 @@ from __future__ import annotations
 import base64
 import json
 import re
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from .codex_auth import CODEX_RESPONSES_BASE_URL, CodexAuthError, CodexAuthManager
 from .ollama import Ollama
 
 BACKEND_METADATA = {
     "ollama": ("Local", "Ollama"),
     "openai_api": ("Cloud", "OpenAI"),
     "gemini_api": ("Cloud", "Google"),
+    "openai_codex": ("Cloud", "OpenAI Codex"),
     # Reserved for later agent bridges; they are intentionally not runnable.
     "codex": ("Cloud", "OpenAI"),
     "gemini_cli": ("Cloud", "Google"),
 }
+
+
+def is_chat_model_id(backend: str, model_id: str) -> bool:
+    """Conservatively exclude endpoint-specific models from chat pickers."""
+    if backend not in {"openai_api", "openai_codex"}:
+        return True
+    value = model_id.casefold()
+    return not any(
+        marker in value
+        for marker in (
+            "audio",
+            "dall-e",
+            "embed",
+            "gpt-image",
+            "moderation",
+            "realtime",
+            "search-api",
+            "search-preview",
+            "sora",
+            "transcrib",
+            "tts",
+            "whisper",
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -67,13 +94,28 @@ def load_model_cache(path: Path) -> list[ModelInfo]:
             continue
         backend = item.get("backend")
         model_id = item.get("model_id")
-        if backend not in {"openai_api", "gemini_api"} or not isinstance(model_id, str):
+        if (
+            backend not in {"openai_api", "openai_codex", "gemini_api"}
+            or not isinstance(model_id, str)
+            or not is_chat_model_id(backend, model_id)
+        ):
             continue
         result.append(
             ModelInfo(
                 backend,
                 model_id,
                 str(item.get("display_name") or model_id),
+                capabilities=ModelCapabilities(
+                    effort_levels=tuple(item.get("effort_levels") or ())
+                    or ModelCapabilities().effort_levels,
+                    supports_tools=bool(item.get("supports_tools", True)),
+                    context_window=(
+                        int(item["context_window"])
+                        if isinstance(item.get("context_window"), int)
+                        and int(item["context_window"]) > 0
+                        else None
+                    ),
+                ),
                 released_at=int(item.get("released_at") or 0),
             )
         )
@@ -88,10 +130,14 @@ def save_model_cache(path: Path, models: list[ModelInfo]) -> None:
                 "backend": item.backend,
                 "model_id": item.model_id,
                 "display_name": item.display_name,
+                "effort_levels": list(item.capabilities.effort_levels),
+                "supports_tools": item.capabilities.supports_tools,
+                "context_window": item.capabilities.context_window,
                 "released_at": item.released_at,
             }
             for item in models
-            if item.backend in {"openai_api", "gemini_api"}
+            if item.backend in {"openai_api", "openai_codex", "gemini_api"}
+            and is_chat_model_id(item.backend, item.model_id)
         ]
     }
     try:
@@ -278,26 +324,52 @@ class OpenAIRuntime:
             raise RuntimeError("OpenAI API support requires `klaude-core[cloud]`.") from exc
         return OpenAI(api_key=self.api_key)
 
-    @staticmethod
-    def _input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _response_create(self, **kwargs: Any):
+        return self._client().responses.create(**kwargs)
+
+    @classmethod
+    def _input(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # Responses function calls are a protocol pair. History compaction,
+        # cancellation, or restoration must never send only one side: an
+        # orphaned function_call_output makes the entire conversation fail.
+        call_ids = {
+            str(call.get("id", ""))
+            for message in messages
+            if message.get("role") == "assistant"
+            for call in message.get("tool_calls", []) or []
+            if isinstance(call, dict) and call.get("id")
+        }
+        output_ids = {
+            str(message.get("tool_call_id", ""))
+            for message in messages
+            if message.get("role") == "tool" and message.get("tool_call_id")
+        }
+        complete_call_ids = call_ids & output_ids
         result: list[dict[str, Any]] = []
         for message in messages:
             role = message.get("role")
+            result.extend(cls._provider_input_items(message))
             if role == "tool":
+                call_id = str(message.get("tool_call_id", ""))
+                if not call_id or call_id not in complete_call_ids:
+                    continue
                 result.append(
                     {
                         "type": "function_call_output",
-                        "call_id": message.get("tool_call_id", ""),
+                        "call_id": call_id,
                         "output": _content(message),
                     }
                 )
             elif role == "assistant" and message.get("tool_calls"):
                 for call in message["tool_calls"]:
+                    call_id = str(call.get("id", ""))
+                    if not call_id or call_id not in complete_call_ids:
+                        continue
                     fn = call.get("function", {})
                     result.append(
                         {
                             "type": "function_call",
-                            "call_id": call.get("id", ""),
+                            "call_id": call_id,
                             "name": fn.get("name", ""),
                             "arguments": fn.get("arguments", "{}"),
                         }
@@ -305,6 +377,10 @@ class OpenAIRuntime:
             elif role in {"system", "user", "assistant"}:
                 result.append({"role": role, "content": _content(message)})
         return result
+
+    @staticmethod
+    def _provider_input_items(_message: dict[str, Any]) -> list[dict[str, Any]]:
+        return []
 
     @staticmethod
     def _tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -337,7 +413,7 @@ class OpenAIRuntime:
         }
         if think not in {None, False, "off", "auto"}:
             kwargs["reasoning"] = {"effort": str(think)}
-        response = self._client().responses.create(**kwargs)
+        response = self._response_create(**kwargs)
         self._record(response)
         self._raise_for_terminal_response(response)
         return self._message(response)
@@ -357,7 +433,7 @@ class OpenAIRuntime:
         }
         if think not in {None, False, "off", "auto"}:
             kwargs["reasoning"] = {"effort": str(think)}
-        self._active_response = self._client().responses.create(**kwargs)
+        self._active_response = self._response_create(**kwargs)
         try:
             for event in self._active_response:
                 kind = getattr(event, "type", "")
@@ -369,6 +445,14 @@ class OpenAIRuntime:
                     response = getattr(event, "response", None)
                     self._record(response)
                     self._raise_for_terminal_response(response)
+                    terminal = self._message(response)
+                    metadata = {
+                        key: value
+                        for key, value in terminal.items()
+                        if key not in {"role", "content"}
+                    }
+                    if metadata:
+                        yield {"role": "assistant", "content": "", **metadata}
                 elif kind in {"response.failed", "response.incomplete"}:
                     response = getattr(event, "response", None)
                     self._record(response)
@@ -387,7 +471,7 @@ class OpenAIRuntime:
     def _record(self, response: Any) -> None:
         usage = getattr(response, "usage", None)
         self.last_chat_metadata = {
-            "provider": "openai_api",
+            "provider": self.backend,
             "usage": usage.model_dump()
             if usage is not None and hasattr(usage, "model_dump")
             else usage,
@@ -446,6 +530,281 @@ class OpenAIRuntime:
             closer()
             return True
         return False
+
+
+class CodexRuntime(OpenAIRuntime):
+    """Responses adapter authenticated by the official Codex app-server."""
+
+    backend = "openai_codex"
+
+    def __init__(self, auth: CodexAuthManager | None = None):
+        self.auth = auth or CodexAuthManager()
+        self.last_chat_metadata: dict[str, Any] = {}
+        self._active_response: Any = None
+        self._session_id = str(uuid.uuid4())
+
+    def _client(self, *, refresh: bool = False):
+        try:
+            from openai import OpenAI
+        except ImportError as exc:  # pragma: no cover - depends on optional extra
+            raise RuntimeError("OpenAI Codex support requires `klaude-core[cloud]`.") from exc
+        credentials = self.auth.credentials(refresh=refresh)
+        version = credentials.broker_version.rsplit("/", 1)[-1]
+        headers = {
+            "ChatGPT-Account-ID": credentials.account_id,
+            "originator": _CLIENT_ORIGINATOR,
+            "session_id": self._session_id,
+        }
+        if version:
+            headers["version"] = version
+        return OpenAI(
+            api_key=credentials.access_token,
+            base_url=CODEX_RESPONSES_BASE_URL,
+            default_headers=headers,
+            max_retries=0,
+        )
+
+    def _response_create(self, **kwargs: Any):
+        # The ChatGPT-authenticated Codex Responses backend rejects buffered
+        # requests.  Enforce this at the transport boundary as well as at the
+        # public chat methods so a future internal caller cannot accidentally
+        # send stream=false (or omit the flag).
+        kwargs["stream"] = True
+        kwargs.setdefault("include", ["reasoning.encrypted_content"])
+        try:
+            return self._client().responses.create(**kwargs)
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 401:
+                raise
+            try:
+                return self._client(refresh=True).responses.create(**kwargs)
+            except Exception as refreshed_exc:
+                if getattr(refreshed_exc, "status_code", None) == 401:
+                    raise CodexAuthError(
+                        "OpenAI Codex authentication expired or was revoked. Run "
+                        "`klaude auth login openai-codex` again."
+                    ) from None
+                raise
+
+    def chat(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        options: dict[str, Any] | None = None,
+        think: bool | str | None = None,
+    ) -> dict[str, Any]:
+        """Assemble a mandatory Codex stream for Klaude's tool loop."""
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "input": self._input(messages),
+            "tools": self._tools(tools),
+            "stream": True,
+            "store": False,
+        }
+        if think not in {None, False, "off", "auto"}:
+            kwargs["reasoning"] = {"effort": str(think)}
+        self._active_response = self._response_create(**kwargs)
+        completed = None
+        text_parts: list[str] = []
+        refusals: list[str] = []
+        calls: list[dict[str, Any]] = []
+        reasoning_items: list[dict[str, Any]] = []
+        try:
+            for event in self._active_response:
+                kind = getattr(event, "type", "")
+                if kind == "response.output_text.delta":
+                    text_parts.append(str(getattr(event, "delta", "") or ""))
+                elif kind == "response.refusal.delta":
+                    refusals.append(str(getattr(event, "delta", "") or ""))
+                elif kind == "response.output_item.done":
+                    item = getattr(event, "item", None)
+                    call = self._tool_call_item(item)
+                    if call:
+                        calls.append(call)
+                    reasoning = self._reasoning_item(item)
+                    if reasoning:
+                        reasoning_items.append(reasoning)
+                elif kind == "response.completed":
+                    completed = getattr(event, "response", None)
+                elif kind in {"response.failed", "response.incomplete"}:
+                    response = getattr(event, "response", None)
+                    self._record(response)
+                    self._raise_for_terminal_response(response, fallback=kind)
+                elif kind == "error":
+                    error = getattr(event, "error", None)
+                    detail = (
+                        error.get("message")
+                        if isinstance(error, dict)
+                        else getattr(error, "message", None)
+                    )
+                    raise RuntimeError(str(detail or "OpenAI Codex response failed."))
+        finally:
+            self._active_response = None
+        if completed is None:
+            raise RuntimeError("OpenAI Codex stream ended without a completed response.")
+        self._record(completed)
+        self._raise_for_terminal_response(completed)
+        content = "".join(text_parts) or "".join(refusals)
+        return {
+            "role": "assistant",
+            "content": content,
+            **({"tool_calls": calls} if calls else {}),
+            **({"codex_reasoning_items": reasoning_items} if reasoning_items else {}),
+        }
+
+    def chat_stream(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        options: dict[str, Any] | None = None,
+        think: bool | str | None = None,
+    ):
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "input": self._input(messages),
+            "stream": True,
+            "store": False,
+        }
+        if think not in {None, False, "off", "auto"}:
+            kwargs["reasoning"] = {"effort": str(think)}
+        self._active_response = self._response_create(**kwargs)
+        completed = False
+        try:
+            for event in self._active_response:
+                kind = getattr(event, "type", "")
+                if kind in {"response.output_text.delta", "response.refusal.delta"}:
+                    yield {"role": "assistant", "content": getattr(event, "delta", "") or ""}
+                elif kind == "response.output_item.done":
+                    reasoning = self._reasoning_item(getattr(event, "item", None))
+                    if reasoning:
+                        yield {
+                            "role": "assistant",
+                            "content": "",
+                            "codex_reasoning_items": [reasoning],
+                        }
+                elif kind == "response.completed":
+                    response = getattr(event, "response", None)
+                    self._record(response)
+                    self._raise_for_terminal_response(response)
+                    completed = True
+                elif kind in {"response.failed", "response.incomplete"}:
+                    response = getattr(event, "response", None)
+                    self._record(response)
+                    self._raise_for_terminal_response(response, fallback=kind)
+                elif kind == "error":
+                    error = getattr(event, "error", None)
+                    detail = (
+                        error.get("message")
+                        if isinstance(error, dict)
+                        else getattr(error, "message", None)
+                    )
+                    raise RuntimeError(str(detail or "OpenAI Codex response failed."))
+        finally:
+            self._active_response = None
+        if not completed:
+            raise RuntimeError("OpenAI Codex stream ended without a completed response.")
+
+    @staticmethod
+    def _tool_call_item(item: Any) -> dict[str, Any] | None:
+        if getattr(item, "type", "") != "function_call":
+            return None
+        return {
+            "id": getattr(item, "call_id", ""),
+            "function": {
+                "name": getattr(item, "name", ""),
+                "arguments": getattr(item, "arguments", "{}"),
+            },
+        }
+
+    @staticmethod
+    def _reasoning_item(item: Any) -> dict[str, Any] | None:
+        if getattr(item, "type", "") != "reasoning":
+            return None
+        item_id = getattr(item, "id", None)
+        encrypted = getattr(item, "encrypted_content", None)
+        if not item_id or not encrypted:
+            return None
+        # Responses reasoning input items require both `id` and `summary`, even
+        # when the summary is empty. Preserve only the provider-issued opaque
+        # continuation state; it stays in message metadata and is never
+        # rendered as assistant text.
+        summary: list[dict[str, Any]] = []
+        for part in getattr(item, "summary", None) or []:
+            if isinstance(part, dict):
+                dumped = dict(part)
+            elif hasattr(part, "model_dump"):
+                dumped = part.model_dump(exclude_none=True)
+            else:
+                kind = getattr(part, "type", None)
+                text = getattr(part, "text", None)
+                dumped = {
+                    **({"type": str(kind)} if kind else {}),
+                    **({"text": str(text)} if text is not None else {}),
+                }
+            if dumped:
+                summary.append(dumped)
+        return {
+            "id": str(item_id),
+            "type": "reasoning",
+            "summary": summary,
+            "encrypted_content": str(encrypted),
+        }
+
+    @staticmethod
+    def _provider_input_items(message: dict[str, Any]) -> list[dict[str, Any]]:
+        items = message.get("codex_reasoning_items", [])
+        return [dict(item) for item in items if isinstance(item, dict)]
+
+    @staticmethod
+    def _message(response: Any) -> dict[str, Any]:
+        message = OpenAIRuntime._message(response)
+        reasoning_items = []
+        for item in getattr(response, "output", []) or []:
+            reasoning = CodexRuntime._reasoning_item(item)
+            if reasoning:
+                reasoning_items.append(reasoning)
+        if reasoning_items:
+            message["codex_reasoning_items"] = reasoning_items
+        return message
+
+
+_CLIENT_ORIGINATOR = "klaude_code"
+
+
+def discover_codex_models(auth: CodexAuthManager | None = None) -> list[ModelInfo]:
+    """Return the account-aware model catalog from official Codex."""
+    try:
+        listed = (auth or CodexAuthManager()).list_models()
+    except Exception:
+        return []
+    result: list[ModelInfo] = []
+    for item in listed:
+        model_id = item.get("model") or item.get("id")
+        if not isinstance(model_id, str) or not model_id or item.get("hidden") is True:
+            continue
+        efforts = []
+        for option in item.get("supportedReasoningEfforts", []) or []:
+            value = option.get("reasoningEffort") if isinstance(option, dict) else option
+            if isinstance(value, str) and value:
+                efforts.append(value)
+        capabilities = ModelCapabilities(
+            effort_levels=tuple(efforts) or ModelCapabilities().effort_levels,
+            supports_tools=True,
+            # The stable app-server catalog does not currently publish context
+            # limits. Use a deliberately conservative cloud fallback rather
+            # than inheriting a much smaller local Ollama num_ctx value.
+            context_window=128_000,
+        )
+        result.append(
+            ModelInfo(
+                "openai_codex",
+                model_id,
+                str(item.get("displayName") or model_id),
+                capabilities=capabilities,
+            )
+        )
+    return sorted(result, key=newest_model_first_key)
 
 
 class GeminiRuntime:
@@ -624,19 +983,7 @@ def discover_openai_models(api_key: str) -> list[ModelInfo]:
         if (
             isinstance(model_id, str)
             and model_id
-            and not any(
-                marker in model_id.casefold()
-                for marker in (
-                    "embed",
-                    "audio",
-                    "image",
-                    "moderation",
-                    "realtime",
-                    "transcrib",
-                    "tts",
-                    "search-preview",
-                )
-            )
+            and is_chat_model_id("openai_api", model_id)
         ):
             result.append(
                 ModelInfo(

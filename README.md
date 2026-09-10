@@ -16,7 +16,7 @@ done — committed on branch klaude/20260712-1430
 ## What it does
 
 - **Codes with you**: reads, edits, greps, runs shell commands — each destructive action behind a y/n/always permission gate.
-- **Learns documentation**: `klaude learn https://nextjs.org/docs -l nextjs` scrapes, chunks, embeds, and stores docs in a named library. For multi-page sites, `klaude crawl https://docs.example -l docs` politely follows same-domain links and stores a refreshable docs source. The agent then answers from *your* knowledge base before touching the web (hybrid BM25 + vector + rerank retrieval).
+- **Learns documentation**: tell the chat `Learn this page and save it to knowledge: https://nextjs.org/docs`, or use `klaude learn https://nextjs.org/docs -l nextjs`. A chat request learns one page by default, infers a library name from the domain when you omit one, and asks before writing persistent knowledge. Explicitly ask to learn the documentation site or multiple pages to use the bounded same-domain crawler. The agent then answers from *your* knowledge base before touching the web (hybrid BM25 + vector + rerank retrieval).
 - **Searches the web privately**: self-hosted SearXNG (70+ engines, no keys, no limits) + a clean-markdown fetch cascade. Optional providers such as Exa and Tavily can be enabled with API keys in `config/.env`.
 - **Learns names locally**: RapidFuzz corrects conservative country, software, and entity-name typos against stable vocabulary and a compact local SQLite cache. An optional keyless Wikidata fallback can teach Klaude new canonical names and aliases without making search depend on Wikimedia.
 - **Git-native**: never touches your branch. Works on `klaude/<task>`, one commit per edit — review everything with `git diff`, or in VS Code's Source Control panel, and revert any single action.
@@ -58,6 +58,9 @@ uv run klaude       # or: uv tool install --editable apps/cli && klaude
 | `klaude memory status` | inspect memory settings and locations |
 | `klaude memory list` | list durable saved memories |
 | `klaude memory search "DanTDM"` | search previous conversation sessions |
+| `klaude auth login openai-codex` | sign in with a ChatGPT account using Codex device authentication |
+| `klaude auth status openai-codex` | inspect Codex account authentication without exposing credentials |
+| `klaude auth logout openai-codex` | sign out and remove credentials managed by official Codex |
 | `klaude session-search "DanTDM"` | search previous conversation sessions |
 | `klaude status` | show configured modes, storage, and tool permissions |
 | `klaude system-info --json` | inspect normalized runtime context given to the model |
@@ -79,11 +82,15 @@ model and workspace stay selected. Finish active and queued turns before switchi
 `/new` starts with a clean terminal view; `/resume` clears the previous view and
 replays the selected session. Both clear terminal scrollback without deleting
 saved conversations. `/rename NAME` names the session,
-`/permissions` inspects or changes tool policies, `/plan` enables read-only
+`/permission` opens persistent ask/allow/deny tool settings, `/plan` enables read-only
 planning, `/compact` reduces stale model context, `/recap` summarizes recent
-turns, `/status` shows runtime state, and `/memory` and `/skills` expose the
-local memory and installed skill controls.
-and `/fork` continues a copy. `/export [PATH]` saves Markdown without overwriting
+turns, `/status` shows runtime state and remaining context; with OpenAI Codex it
+also shows the live five-hour, weekly, and Luna Reserve usage windows reported
+by the official Codex app-server. `/memory` and `/skills` expose the local memory
+and installed skill controls.
+`/init` inspects the workspace and creates or carefully updates its root
+`AGENTS.md` for future coding agents. `/fork` continues a copy. `/export [PATH]`
+saves Markdown without overwriting
 existing files (default: the data directory's `exports/` folder).
 Use `/diff` for staged/unstaged patches and untracked filenames, or `/review`
 for a model-assisted review with only read-only workspace tools enabled.
@@ -145,9 +152,11 @@ Terminals that implement neither protocol may collapse modified Enter into
 ordinary Enter before any terminal application can inspect it; use Ctrl+J for a
 newline and `/steer TEXT` for terminal-independent steering in that case.
 
-Multiline clipboard pastes are submitted as one chat turn. Explicit web or
-local-library search requests get one bounded compliance retry if a small model
-tries to answer from memory instead of calling the requested retrieval tool.
+Multiline clipboard pastes are submitted as one chat turn. Pastes of 1,000 or
+more characters appear as a compact `[Pasted 1,234 chars]` marker in the
+composer; Klaude still submits and saves the complete original text. Explicit
+web or local-library search requests get one bounded compliance retry if a small
+model tries to answer from memory instead of calling the requested retrieval tool.
 When a prompt explicitly requests both discovery and page reading, Klaude
 requires both model-directed operations and keeps query-relevant excerpts from
 long fetched pages within the local model's context. Explicit no-search wording
@@ -308,6 +317,7 @@ Optional provider keys use the `PROVIDER_API_KEY` pattern:
 
 ```bash
 GEMINI_API_KEY=...
+BRAVE_SEARCH_API_KEY=...
 PARALLEL_API_KEY=...
 TAVILY_API_KEY=...
 EXA_API_KEY=...
@@ -317,16 +327,26 @@ CRAWL4AI_API_KEY=...
 ```
 
 Cloud chat models are optional and do not replace local Ollama embeddings or
-knowledge indexing. Install their SDKs with `uv sync --extra cloud`, then set
-`OPENAI_API_KEY` and/or `GEMINI_API_KEY`. In chat, `/model` presents Cloud
-(OpenAI API and Gemini API) before Local (Ollama); `klaude models` remains the
-local Ollama diagnostic. A saved cloud selection uses a canonical reference such as
-`openai_api/gpt-5`; older saved bare model names continue to mean Ollama.
+knowledge indexing. Install their SDKs with `uv sync --extra cloud`. For a
+ChatGPT-backed Codex model, install the official `codex` CLI and run
+`klaude auth login openai-codex`; Klaude delegates device login, secure storage,
+refresh, and logout to that installation and never copies its tokens. OpenAI API
+key access remains a separate provider configured with `OPENAI_API_KEY`, and
+Gemini API access uses `GEMINI_API_KEY`. In chat, `/model` groups OpenAI Codex,
+OpenAI API, and Gemini API under Cloud, with Ollama under Local. `klaude models`
+remains the local Ollama diagnostic. Saved selections use canonical references
+such as `openai_codex/gpt-5.6-sol` or `openai_api/gpt-5`; older saved bare model
+names continue to mean Ollama.
 
 Klaude uses relevance-first provider routing for web search. Configured
 providers are tried according to query intent, missing optional keys are skipped
-quietly, DDGS is the preferred keyless fallback when installed, and SearXNG is
-the final fallback. Tavily is an optional hosted Search provider: queries leave
+quietly, and keyless Brave website search through the local DDGS adapter is the
+default first provider. DDGS metasearch and local SearXNG are the next free
+fallbacks. No API credential or per-query fee is required for those adapters,
+but third-party websites can change access rules, throttle traffic, or present a
+bot challenge at any time. The optional `brave_api` provider uses the official
+Brave Search API when `BRAVE_SEARCH_API_KEY` is configured and may incur charges.
+Tavily is an optional hosted Search provider: queries leave
 your machine, free monthly credits are limited, and Klaude falls back to other
 providers when Tavily is missing, invalid, rate-limited, unavailable, or out of
 credits. Search/fetch evidence remains temporary and is not written to memory or
@@ -340,6 +360,28 @@ compact per-turn action/source trace, and enforces the configurable
 `[web.search.behavior]` action, search, fetch, per-domain, and consecutive-failure
 budgets. When a budget is exhausted, Klaude answers from the evidence already
 gathered and identifies material uncertainty instead of discarding the work.
+
+Browsing and learning are deliberately separate. `fetch_url` supplies temporary
+evidence for the current turn, while an explicit request such as `Learn this
+page into my react library: URL` exposes the permission-gated `learn_source`
+tool. It accepts public HTTP(S) sources, rejects credentials embedded in URLs,
+indexes a single page by default, and crawls only when the user explicitly asks
+for a site, documentation set, or multiple pages. Site learning remains bounded
+by the crawler's same-domain, robots, depth, page-count, and path constraints.
+
+For explicit reachability, status-code, or redirect diagnostics, Klaude also
+provides a restricted `http_probe` tool. It returns bounded response metadata
+from public HTTP(S) endpoints without exposing request headers, credentials,
+bodies, cookies, proxy settings, or page content to the model. Failed or
+disabled web tools never silently fall back to `curl` or other shell networking.
+
+Interactive chats show concise activity updates by default. The footer tracks
+live states such as working, exploring, editing, running, learning, and waiting,
+while the transcript retains completed `[EXPLORED]`, `[EDITED]`, `[RAN]`, and
+`[LEARNED]` milestones.
+These updates describe observable tool activity only—not private model
+reasoning—and remain visible to clients following or resuming the session. They
+can be disabled under `/settings` → Tools → Activity Updates.
 
 Tavily integration status:
 
@@ -380,8 +422,11 @@ allow_paid_overage = false
 allow_auto_recharge = false
 ```
 
-To force a legacy provider for compatibility, set `[web] provider = "local"` for
-SearXNG-only search or `provider = "exa"` for Exa-only search.
+To prioritize one provider with compatibility fallbacks, set `[web] provider =
+"local"` for SearXNG-only search, `provider = "brave"` for Brave-first search,
+`provider = "brave_api"` for the official paid API, or `provider = "exa"` for
+Exa-first search. A query can explicitly select keyless Brave with wording such
+as `using Brave` or `provider: brave`.
 
 Hugging Face Hub lookup is separate from web search and works against public
 models, datasets, and Spaces by default. Add `HUGGINGFACE_API_KEY` to `config/.env`

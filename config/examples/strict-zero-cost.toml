@@ -12,7 +12,10 @@ allow_paid_overage = false
 allow_auto_recharge = false
 
 [web.search]
-provider_order = ["ddgs", "searxng"]
+provider_order = ["brave", "ddgs", "searxng"]
+
+[web.providers.brave_api]
+enabled = false
 
 [web.providers.google]
 enabled = false

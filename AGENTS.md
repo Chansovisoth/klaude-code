@@ -26,11 +26,13 @@ Workspace layout:
   retrieval planning.
 - `packages/tools_local`: workspace file, grep, shell, and git tools with a
   workspace jail, dirty-tree write lockout, command risk classification, and
-  auto-commit support when writes are enabled.
+  auto-commit support when writes are enabled. Shell commands prefer the active
+  workspace's `.venv/bin` and `node_modules/.bin`, then use a deterministic
+  system `PATH`, without Klaude's launcher virtualenv or Python-path variables.
 - `packages/knowledge`: chunking, LanceDB vector storage, SQLite FTS5, atomic
   indexing, refreshable docs sources, skill package imports, hybrid retrieval,
   and the knowledge MCP server.
-- `packages/web`: relevance-first search routing, provider clients, SearXNG
+- `packages/web`: relevance-first search routing, provider clients, Brave Search, SearXNG
   compatibility, web cache, direct/Crawl4AI/trafilatura/Exa fetch cascade,
   bounded same-domain crawler, Hugging Face Hub helpers, and the web MCP server.
 - `config/examples`: tracked examples for local app config, provider secrets,
@@ -87,9 +89,13 @@ Top-level commands currently include:
 - `klaude huggingface-search/details/readme`: Hugging Face Hub integration.
 - `klaude models`: list installed Ollama models and Klaude role assignment.
 - `klaude remember`: append a durable fact.
+- `klaude auth login/status/logout openai-codex`: manage ChatGPT account
+  authentication through the installed official Codex app-server. This is
+  separate from `OPENAI_API_KEY` authentication.
 - `klaude memory status/on/off/list/add/forget/search`: durable memory and
   session recall controls.
-- `klaude sessions`: list recent sessions.
+- `klaude sessions`: list recent sessions by effective name and prefix sessions
+  with an unexpired running worker lease using the same green `[ACTIVE]` badge.
 - `klaude sessions delete SESSION_ID`: delete one session after confirmation.
 - `klaude sessions clear`: delete all sessions after confirmation.
 - `klaude session-search`: search prior conversation sessions.
@@ -100,20 +106,60 @@ Top-level commands currently include:
 Chat slash commands currently include:
 
 - `/help`: print the deterministic command reference directly.
+- `/init`: start a scoped model turn that inspects the current workspace and
+  creates or carefully updates its root `AGENTS.md`. It may use repository read,
+  search, workspace-info, and file write/edit tools, but never shell, web, or Git
+  mutation tools. It modifies no other file, preserves useful existing guidance,
+  and reports honestly when permissions or the dirty-worktree boundary prevent
+  writing. It takes no arguments and queues in input order while work is active.
 - `/keybinds`: print only keyboard controls directly. Slash commands belong in
   `/help` and the `/` completion popup.
-- `/settings [CATEGORY]`: configure categorized Theme, Input Field, Tools, and
-  Runtime controls. Tools persists independent validation toggles for web-search
+- `/settings [CATEGORY]`: configure categorized Theme, Input Field, Models,
+  Memory, Skills, Tools, Permissions, and Runtime controls. Models opens the same source, provider, model,
+  mode, and effort selection flow as `/model`. Tools persists independent
+  validation toggles for web-search
   and local-knowledge candidates; turning validation off exposes unvalidated
   leads only and does not bypass transport, provenance, or fetch safety bounds.
   Tools also persists independent availability toggles for web search, URL fetch,
-  code search, crawl, Hugging Face search/details/README, and the local knowledge
-  library. Disabled tools are omitted from model schemas and cannot be reinstated
+  restricted HTTP endpoint probing, code search, persistent source learning,
+  crawl, Hugging Face search/details/README, and the local knowledge library.
+  Disabled tools are omitted from model schemas and cannot be reinstated
   by explicit retrieval routing or text-form calls. Tools also persists individual
   on/off settings for every configured web provider, shown in `provider_order`;
   disabled providers are excluded from routing without changing their priority order.
-  Tools also has an opt-in Reasoning Activity display for high-level live stages;
-  it must never reveal a model's private chain-of-thought or scratchpad text.
+  Tools also has an Activity Updates toggle, enabled by default, for concise
+  high-level live stages and completed milestones. The footer keeps its compact
+  Braille-spinner presentation while active, with progressive states and a
+  compact unit-based elapsed value such as `⠋ WORKING 4s`, `⠙ EXPLORING 7s`,
+  `⠹ EDITING 11s`, `⠸ RUNNING 16s`, `⠼ LEARNING 18s`, and `⠴ WAITING 20s`.
+  Transcript badges retain only completed outcomes such as `[EXPLORED] (9s)`,
+  `[EDITED] (30s)`, `[RAN]`, `[LEARNED]`,
+  `APPROVED`, `DENIED`, and `CANCELLED`; never persist generic `WORKING` or
+  `WAITING` milestones. Updates must come from real model/tool/permission events and
+  must never reveal a model's private chain-of-thought or scratchpad text. They
+  are persisted with the session and mirrored to clients following via `/resume`.
+  `WAITING` is a live footer state when Klaude needs user input, including a
+  permission decision, or after a running command has remained without a result
+  for five seconds. A command begins as `RUNNING`, becomes `WAITING` only while
+  quiet, and completes as `RAN` or `FAILED`. Permission waits complete as
+  `APPROVED`, `DENIED`, or `CANCELLED`; never persist `WAITED`.
+  Permissions presents one `Current configuration` row above grouped, aligned
+  per-tool rows. Entering it opens Custom, Balanced, Cautious, Read Only, and
+  Full Access presets. Custom is first and selected whenever the effective map
+  does not exactly match a preset. Moving through presets updates a temporary,
+  scrollable preview containing every registered tool, grouped with blank lines
+  and its exact ask/allow/deny policy; PageUp/PageDown scroll that preview.
+  Highlighting `reset to default` previews the configured default policy map
+  before Enter applies it.
+  Enter applies and persists a preset. Enter on a tool row cycles
+  ask -> allow -> deny -> ask and persists the custom map; exact preset matches
+  are detected automatically. Reset restores configured defaults. Hard workspace,
+  transport, and command-safety boundaries remain effective under Full Access.
+  Memory shows a persistent Automatic Memory toggle, the durable-fact count,
+  and up to eight recent facts; reset restores automatic memory to on. Skills
+  is a read-only inventory of installed skills with their library and indexed
+  file counts, plus the canonical `klaude import-skill` hint. It does not expose
+  a fake enable/disable control because per-skill activation is not implemented.
   Runtime controls persist for
   future chats in `chat-preferences.json`: Auto and GPU-preferred leave CPU/GPU placement to Ollama,
   CPU-only sets no GPU layers, and GPU-only persists an explicit maximum-offload
@@ -129,20 +175,41 @@ Chat slash commands currently include:
 - `/vim`: toggle Vim editing controls in the TUI composer; invoke it again to
   return to standard composer controls. The selected mode persists in
   `chat-preferences.json`.
-- `/permissions [TOOL POLICY [save]]`: inspect or set tool policies (`ask`,
-  `allow`, `deny`, or `reset`). Add `save` to persist the setting in chat
-  preferences; without it the change lasts only for this chat.
+- `/permission`: open the Permissions settings page directly. It takes no
+  arguments; permission changes are made and persisted through that page.
 - `/plan [on|off]`: toggle planning mode. Planning keeps read-only workspace
   tools and retrieval available while disabling writes and shell execution.
 - `/compact`: compact stale model context immediately while retaining visible
   and saved transcript history.
 - `/recap`: show a concise local recap of the current session's recent turns.
-- `/status`: show session ID, model, workspace, context estimate, plan mode,
-  memory mode, and tool count.
-- `/debug_label`: temporarily print representative neutral, warning, failure,
-  error, success, interruption, permission, and saved-memory labels through the
-  real transcript renderer for visual theme testing. It takes no arguments and
-  may be removed or hidden after label styling stabilizes.
+- `/status`: available immediately even while a local or remote model turn is
+  working. Show session ID and effective name, model, reasoning mode and effort,
+  workspace, context estimate and approximate remaining context tokens, plan mode,
+  effective permission-policy counts,
+  memory mode, tool count, and applicable repository `AGENTS.md` paths. Until
+  native repository-instruction loading is implemented, detected `AGENTS.md`
+  files must be labeled `not yet injected` rather than implying that the model
+  received them. The effective session name is a saved assigned/generated name
+  when one exists, otherwise the normalized first user input (up to 160
+  characters). Capture that fallback synchronously when the first turn starts
+  so live `/status` never races the worker's database write. Render status as
+  aligned label/value columns, with additional `AGENTS.md` paths on blank-label
+  continuation rows.
+  When the active provider is OpenAI Codex, also read the official app-server's
+  current non-secret rate-limit buckets and show the five-hour, weekly, and Luna
+  Reserve weekly percentages remaining with local reset times when reported.
+  Link to `https://chatgpt.com/codex/settings/usage`; never infer missing windows
+  or expose credentials when the app-server is unavailable.
+- `/debug_label`: show all temporary visual diagnostics in one place. It prints
+  the complete transcript-label vocabulary, grouped into neutral information,
+  activity outcomes, input outcomes, warnings/failures, and success. Include
+  realistic `INPUT`, `SECRET`, permission, session, workspace, queue, tool
+  outcome, interruption, and saved-memory examples through the real renderer,
+  plus a real closing-divider sample with `worked for 1m 11s`. When no worker is
+  active it also starts a model-free footer preview using the real Braille
+  animation, beginning at `1m 11s` and cycling through Working, Exploring,
+  Editing, Running, and Waiting. Invoke it again or press Ctrl+C to stop the live
+  preview. It takes no arguments and may be removed after styling stabilizes.
 - `/memory [on|off]`: show durable memory status and facts, or toggle automatic
   memory generation.
 - `/skills`: list installed assistant skills and indexed file counts.
@@ -169,21 +236,34 @@ Chat slash commands currently include:
   and file references. The turn exposes only read_file, list_dir, grep,
   workspace_info, git_status, and git_diff; write and shell tools are unavailable,
   even if normal permissions allow them. Tool availability is restored afterward.
-  These six commands work in both TUI and line-oriented chat; finish active and
-  queued work before using them in the TUI.
+  These six commands work in both TUI and line-oriented chat. `/diff` is a live,
+  read-only snapshot and may run during active work; finish active and queued
+  work before using the other state-dependent actions in the TUI.
 - `/resume [SESSION_ID]`: list all saved sessions newest first in a scrollable
   input picker with age, session ID, and a name derived from the first user turn.
+  Sessions whose unexpired renewable worker lease is still running prefix the
+  name with an `[ACTIVE]` badge. The badge uses a green background and green
+  bracket glyphs with dark label text, matching Klaude's compact semantic-label
+  treatment. Refresh active badges while the picker remains open and preserve
+  the currently selected session as labels change.
   Enter resumes the selected session; Escape or cancel leaves the current
   session unchanged. This picker has no reset action. An explicit ID resumes
   directly. A successful resume clears the terminal view and scrollback before
   replaying the selected session's saved user/assistant turns and transcript,
   retains the current model and workspace, and saves new turns under the selected
-  ID. Finish or cancel active work and queued turns before switching. In
-  line-oriented mode, `/resume` prints the list and prompts for an ID when stdin
-  is interactive; `/resume SESSION_ID` works with non-interactive stdin too.
-  If cancellation is already requested and no turns are queued, `/resume` waits
-  for the worker to exit and then opens the picker or resumes the requested ID
-  automatically. It never switches shared agent state while a worker is active.
+  ID. Bare `/resume` opens the picker immediately during local or remote work
+  without interrupting that work; cancelling the picker leaves the active turn
+  and its queue untouched. Selecting a different valid session during a local
+  turn requests cooperative cancellation, discards queued items belonging to
+  the old session with a visible notice, and switches only after the worker
+  reaches its safe completion boundary. Invalid IDs and the already-open session
+  do not interrupt the worker. A client only observing a remote worker may detach
+  and switch immediately because it owns no model worker state. In line-oriented
+  mode, `/resume` prints the list and prompts for an ID when stdin is interactive;
+  `/resume SESSION_ID` works with non-interactive stdin too. It never switches
+  shared agent state while a local worker is active. `/resume` dispatch also
+  remains available while the composer is showing a permission, masked-secret,
+  or structured user-input wait; cancelling its picker returns to that prompt.
   Cancellation denies pending permission requests and shuts down an active
   Ollama response socket to wake blocked reads; tools already executing may
   still need to finish before the switch can proceed. Resuming a session from
@@ -192,9 +272,15 @@ Chat slash commands currently include:
   every connected client keeps an independent shared draft and pending queue;
   one client's composer must never overwrite another's. Session and turn IDs
   use full random UUID hex values rather than display-truncated identifiers.
+  An observing client must show the shared progressive activity (`WORKING`,
+  `EXPLORING`, `EDITING`, `RUNNING`, `LEARNING`, or `WAITING`) while that remote worker lease
+  is active with the same animated Braille indicator even though its own local
+  worker flag is false, and return to `★ READY` after the remote lease is
+  released or expires.
 - `/model`: open an arrow-key model picker, then an effort picker.
 - `/model NAME`: switch the active chat model, then choose effort while keeping
-  chat history. A successful selection is reused at the next chat launch.
+  chat history. A successful selection is reused at the next chat launch and
+  saved as a session update so `/resume` and observing clients show the change.
 - `/mode [standard|thinking]`: choose whether the active model uses its
   normal response path or its reasoning path.
 - `/effort` and `/effort LEVEL`: set `low`, `medium`, or `high` reasoning
@@ -203,8 +289,10 @@ Chat slash commands currently include:
 - `/steer TEXT`: prioritize a new instruction and interrupt the active turn at
   the next safe model/tool boundary.
 - `/cancel`: interrupt the active turn at the next safe boundary.
-- `/restart` and `/stop`: restart or stop the local Ollama service after confirmation;
-  these controls do not exit the chat session. When a response is active, ask
+- `/start`, `/restart`, and `/stop`: start, restart, or stop the local
+  Ollama service after confirmation; these controls do not exit the chat
+  session. Starting an already-running service is non-disruptive. When a
+  response is active, restart and stop ask
   for confirmation before setting its cancellation flag, then close the active
   model transport and perform the service action. Socket-close errors caused by
   that requested cancellation are interruption details, not saved runtime
@@ -243,8 +331,16 @@ All picker modes render their available options inside the input field with a
 visible selected row; long lists scroll with the selection. Picker height obeys
 the same configured input minimum and maximum as the text composer, padding
 short lists to the minimum and scrolling long lists within the maximum.
+When a settings action rebuilds its picker, keep the selector on the same
+logical row even when that row's displayed value changes.
 Settings pickers group related options under visible, non-selectable section
 titles; keyboard, typed-option, and mouse selection skip those titles.
+Unavailable provider and model options remain gray but can be highlighted with
+the keyboard or mouse; pressing Enter or confirming them performs no action and
+keeps the picker open. Blank spacer and informational tip rows remain
+non-selectable. Endpoint-specific OpenAI media, transcription, embedding,
+moderation, realtime, and search-only models are excluded from live and cached
+chat catalogs.
 Cloud model options are sorted case-insensitively by full model name. Local
 model options and the `klaude models` listing are grouped by model family, with the
 family that has the largest tagged model first and variants largest-first. Model,
@@ -261,38 +357,67 @@ theme) that is removed without discarding intervening output.
 
 Interactive chat writes its transcript to ordinary terminal scrollback rather
 than taking over the terminal's alternate screen. This lets the terminal handle
-wheel scrolling and native drag-to-select without Shift. Startup reserves one
+wheel scrolling and native drag-to-select without Shift. Every interactive
+startup first clears the visible terminal and its scrollback, then reserves one
 terminal viewport so the composer begins at the terminal bottom; it remains a
 Prompt Toolkit input below the printed transcript. Alt+Enter inserts a
 newline when distinguishable, Ctrl+J is the legacy-terminal newline fallback,
 repeated Alt+Up edits queued follow-ups from newest to oldest, and Ctrl+C
 interrupts the active response. Ctrl+D exits the chat and discards any unsent
-input. Enter saves a queue edit; empty text plus Enter
-deletes that item. Pending inputs render in a compact live strip immediately
+input. Enter saves a queue edit; Alt+Backslash promotes the selected edited
+follow-up to the front of the queue and steers the active turn at its next safe
+boundary, without losing that follow-up's attachments or leaving a duplicate.
+Queued session actions cannot be converted into model steering messages. Empty
+text plus Enter deletes that item. Pending inputs render in a compact live strip immediately
 above the input field, and automatic queue consumption pauses during editing.
 Permission prompts accept `y`/`yes`, `n`/`no`, or `a`/`always` typed in the
-composer and confirmed with Enter; picker prompts also accept a full option or
+composer and confirmed with Enter. Pressing Enter on an empty permission prompt
+allows only that invocation, exactly like `y`; it does not activate process-wide
+`always`. Picker prompts also accept a full option or
 unique prefix typed into the composer and confirmed with Enter.
-Cancellation is cooperative at
+The model-facing `request_user_input` tool presents its public question above a
+modal composer with bounded options below the still-editable text area. Up/Down
+changes the highlighted option without overwriting typed text. Enter submits
+the typed custom response when non-empty, otherwise the highlighted option;
+Alt+Enter inserts a newline. Escape first clears a non-empty draft, then cancels
+when the draft is empty. Requests and answers are persisted and mirrored so a
+client following an active resumed session can see and answer the same prompt.
+Line-oriented interactive chat accepts an option number or arbitrary text,
+while non-interactive clients return an unavailable result instead of blocking.
+Direct greetings, transformations, and self-contained code generation omit the
+input tool schema when no decision is indicated. Decision-oriented or
+tool-using turns retain it; after one answer its schema is removed for the rest
+of that turn so a model cannot reopen the same modal repeatedly.
+Bracketed clipboard pastes of 1,000 characters or more render as a compact
+`[Pasted 1,234 chars]` marker in the composer while retaining the complete text
+for submission, history, queued turns, attachments, and the model. Smaller
+pastes remain directly visible and editable. Cancellation is cooperative at
 the next emitted model/tool event, so an in-flight Ollama HTTP request or tool
 call may finish before the steering turn starts. Bracketed multiline paste is
-one logical turn. Session actions that require an idle worker (including
-`/permissions`, `/plan`, `/resume`, `/compact`, `/new`, `/fork`, `/export`,
-`/diff`, and `/review`) queue in input order instead of being rejected; a
-picker pauses later queued input until it is completed or cancelled. Up/down
+one logical turn. Snapshot commands (`/status`, `/recap`, `/skills`, `/diff`,
+and bare `/memory`) run immediately during local or remote work. State-changing
+or turn-starting actions that require an idle worker
+(including `/plan`, `/compact`, `/init`, `/new`, `/rename`,
+`/fork`, `/export`, and `/review`) queue in input order instead of being rejected;
+a picker pauses later queued input until it is completed or cancelled. `/resume`
+is the exception described above: its picker is always available, and selecting
+a different session safely interrupts local work before switching. Up/down
 navigate input history, Tab completes slash commands,
 and the live status line shows activity,
 queue depth, model, effort, context-window use, and last input/output token
 counts. The TUI renders actual fragments emitted by Ollama as they arrive; it
 must not simulate streaming character by character. Tool-enabled responses may
 still need to assemble before their structured calls are resolved. Non-interactive stdin retains line-oriented compatibility and plain
-output. In the TUI, `/help` category names are underlined, and each user or
+output. Line-oriented and one-shot turns use the same renewable session lease,
+durable start/result/completion events, partial-output preservation, and
+failed/interrupted finalization as TUI turns. In the TUI, `/help` category names are underlined, and each user or
 assistant message begins with a full-width gray divider containing the speaker
 name and local date/time. Each session starts with a `Session: <id>` divider
 after the logo and intro; the composer is labeled `you`, and each turn closes
 the actual user message with its `you` divider and the streamed assistant output
 with its Klaude divider; the
-closing Klaude divider includes the elapsed `worked for HH:MM:SS` duration.
+closing Klaude divider includes a compact unit-based duration such as
+`worked for 11s`, `worked for 1m 11s`, or `worked for 1h 01m 11s`.
 The intro displays the current agent workspace path. `/cd` updates that path,
 the workspace jail, repository context, and the next system-prompt runtime
 context; it validates that the target exists and is a directory.
@@ -305,6 +430,31 @@ are uppercase and use the same foreground as the footer version badge. The
 bracket glyphs use the badge background as their foreground so they act as
 one-cell visual padding, while text after the label keeps the normal transcript
 color.
+High-level completed activity labels (`explored`, `edited`, and `ran`) use the
+neutral informational badge treatment. Permission outcomes use `APPROVED`,
+`DENIED`, or `CANCELLED`, never `WAITED`. They summarize only observable actions
+and their public arguments; they never contain hidden model reasoning. Failed
+tool milestones use the existing red `FAILED` badge.
+Consecutive built-in file edits show grouped file counts, added/removed line
+totals, and bounded line-numbered patch previews with filename-based syntax
+colors. Counts describe the operations in the group (repeated edits accumulate).
+Capture edit metadata before auto-commit clears the working-tree diff. Persist
+and mirror these summaries for resume and export; omit patch metadata from model
+context. No-op edits show `UNCHANGED`, commits show `COMMITTED`, and unsuccessful
+shell exit codes show `FAILED`. Completed activity rows include whole-turn
+elapsed time, for example `[EDITED] (30s) 3 files (+53 -0)`. The live footer
+uses the theme's original static status styling and animates only its Braille
+frame while a local or remote worker is active; printed history is static. The elapsed clock starts once per
+turn and is shared through session live state so `/resume` observers do not
+restart it. Generic `WORKING` disappears without becoming `WORKED`. Patch
+previews cover write_file/edit_file; shell-driven edits are reported as command
+execution.
+Mechanical fenced-code validation applies only when the user explicitly asks
+for a standalone code artifact in the answer. Language names, filenames,
+attachments, reviews, explanations, and workspace edits do not turn prose into
+a code-only response; rejected repair candidates never remain in model history.
+The keybind footer omits the default Standard composer label; it shows a `Vim
+composer` prefix only while Vim mode is enabled.
 
 Typing `/` at the beginning of the input must immediately offer every registered
 chat slash command with its registry description. Keep completion sourced from
@@ -324,6 +474,9 @@ Enter accepts the highlighted completion and executes the command in one press;
 Tab completes without executing so users can add arguments.
 After a command executes, clear its composer text and completion state so an
 exact-match suggestion cannot remain visible over an empty or completed input.
+Left and Right move continuously across logical newline boundaries: Left at the
+start of a later line lands at the end of the previous line, and Right at the
+end of an earlier line lands at the start of the next line.
 Mouse capture is enabled only for clickable completion and picker menus; outside
 those menus, terminal scrolling and native dragging select and copy transcript
 text without requiring Shift. On Termux, Klaude disables mouse capture even for
@@ -370,6 +523,23 @@ The last successfully selected chat model is stored separately in
 first, then that saved model, then the configured coder role. If the saved model
 is no longer installed, startup falls back to the configured coder role. Do not
 silently choose a different model for performance reasons.
+
+Every model turn receives a refreshed, machine-generated, secret-free active
+configuration block in its system prompt. It identifies the selected model and
+backend, reasoning mode and effort, plan mode, allowlisted runtime options,
+configured chat providers, enabled and disabled tools, effective permission
+counts, web-provider toggle count and routing order, retrieval validation, memory mode, workspace and
+detected-but-not-yet-injected `AGENTS.md` paths, plus current appearance,
+composer, and activity-update settings. Refresh it from effective in-memory
+state before each turn so changes made through `/settings`, `/permission`,
+`/model`, `/mode`, and `/plan` are visible to the next model request. Provider
+toggles describe configuration, not live reachability. Never include API keys,
+secret values, environment contents, or repository-instruction file contents
+in this block; the schemas attached to the current request remain the authority
+for which tools the model may call. The per-turn capability block lists the
+effective `ALLOW`, `ASK`, and `DENY` policy for those callable schemas so a
+permission change is visible on the next request; the gate still remains the
+execution authority.
 
 When the user explicitly asks for the complete command list, use the
 deterministic command-reference handler and preserve its formatting. When the
@@ -421,6 +591,14 @@ SearXNG should read only `config/searxng.env`; do not pass all provider API keys
 into Docker services that only need one secret. Do not print `.env`,
 `searxng.env`, or expanded Docker Compose configs containing values.
 
+The default `brave` provider is keyless website search through the local DDGS
+adapter with `backend="brave"`; it is distinct from the optional paid
+`brave_api` provider, which uses `BRAVE_SEARCH_API_KEY` and the official Brave
+Web Search API. Keyless Brave, generic DDGS, and local SearXNG precede paid
+providers by default. Website-backed adapters may still be throttled or changed
+externally, so preserve bounded retries and provider fallbacks. Keep
+`brave_api` subject to the conservative billing policy.
+
 Use `docker compose config --no-env-resolution --no-interpolate` when validating
 Compose shape without exposing secrets.
 
@@ -459,10 +637,21 @@ Docker service, or whatever launcher the user chose.
 
 Cloud runtime requests are stateless: OpenAI Responses calls set `store=false`
 and surface refusal and failed-stream events instead of silently producing an
-empty reply. Gemini 3 models use thinking levels; Gemini 2.5 models use bounded
-thinking budgets, including budget zero for supported Flash requests. Provider
-model discovery must reject blank keys and filter obviously incompatible audio,
-image, moderation, realtime, transcription, TTS, and search-preview models.
+empty reply. Cloud context accounting uses discovered provider model metadata
+and never inherits saved Ollama `num_ctx` or GPU/thread tuning; when the Codex
+catalog omits a limit, discovery records a conservative 128K fallback. Responses
+history emits function calls and outputs only as complete call-ID pairs so a
+cancelled or compacted turn cannot send an orphaned protocol item. OpenAI Codex
+account auth is a distinct `openai_codex` backend:
+the official Codex app-server owns device-code login, credential persistence,
+refresh, logout, and account-aware model discovery; Klaude requests an in-memory
+access token from that broker and keeps its own agent/tool loop. Never copy or
+log those credentials, hardcode the official OAuth client identity, or merge
+this provider with `openai_api`. Gemini 3 models use thinking levels; Gemini 2.5
+models use bounded thinking budgets, including budget zero for supported Flash
+requests. Provider model discovery must reject blank keys and filter obviously
+incompatible audio, image, moderation, realtime, transcription, TTS, and
+search-preview models.
 
 ## Agent And Tool Routing
 
@@ -488,11 +677,19 @@ The agent loop in `packages/core/src/klaude_core/agent.py` handles:
   fetch must perform both model-directed operations, and a requested source URL
   receives one answer-only compliance retry if omitted.
 - a configurable per-turn model/tool step ceiling (`[agent] max_steps`, default
-  8 and clamped to 1-20) so malformed or weak-model tool behavior cannot run
-  indefinitely on slow hardware.
-- context-window protection at each user-turn boundary: stale transcript prose
-  is compacted before the request reaches Ollama, while the canonical system
-  prompt, newest turn, and separate entity state are retained.
+  20 and clamped to 1-64) so malformed or weak-model tool behavior cannot run
+  indefinitely. When completed tool work reaches the ceiling, make one final
+  tool-free synthesis request. If it cannot produce an answer, report that the
+  safety limit was reached, preserve completed work, and tell the user how to
+  continue instead of exposing an internal `step budget exhausted` error.
+- normalized Codex usage-limit failures that show the account plan and reset
+  time when supplied, link to the official usage page, and suggest waiting or
+  selecting another configured provider without printing the raw API payload.
+- context-window protection at each user-turn boundary: stale dialogue is
+  compacted in whole user-turn units so tool calls never separate from their
+  outputs. A bounded extractive recap preserves public user/assistant context;
+  tool output, private metadata, and opaque reasoning are excluded. The
+  canonical system prompt, newest turn, and separate entity state are retained.
 - if an Ollama CUDA runner aborts while placement is automatic, retry the
   request once with `num_gpu = 0` and emit only a high-level fallback activity.
   Never override an explicit CPU-only or GPU-only runtime choice.
@@ -525,6 +722,46 @@ incompatible prior meanings. Never reuse "school" when the clarified target is
 "university", and never let an older acronym interpretation steer later queries.
 
 ## Tool Safety And Git Discipline
+
+Diagnostic and execution routing separates inspection from edit/commit intent.
+OS disk questions expose `storage_usage`, a metadata-only inspection of root
+filesystem capacity and fixed system categories plus the current account's home.
+It accepts no model-supplied paths or commands, reads no file contents, follows
+no directory symlinks, skips other filesystems, and bounds each category to
+8,000 entries and 0.5 seconds with at most 128 pending directory descriptors.
+Incomplete totals are labeled lower bounds; other users' homes are excluded.
+The tool defaults to ask and appears in Permissions as OS storage usage.
+Ordinary shell paths, including glob expansions, remain workspace-scoped.
+
+Each model request receives a capability block derived from its actual schemas,
+with reasons for unavailable tools. Short repair follow-ups retain the previous
+request's selected capabilities when they contain no new tool intent. Short
+execution follow-ups use preceding fenced commands as disambiguating context.
+Alternate bare tool XML is detected, never evaluated; one structured-call repair
+is permitted before a visible error. Arguments are checked against the built-in
+schema subset before preflight and approval. Repeated non-web tool failures stop
+the approach; skipped duplicate calls render SKIPPED rather than RAN.
+
+Tool preflight checks paths and write locks before asking permission, and execution
+rechecks mutable conditions. Read-only pipelines are classified component by
+component; unknown evaluation/control syntax and output redirection remain risky.
+Only stderr redirection to `/dev/null` is accepted as read-only. Shell pipelines
+run without login/startup configuration and with pipefail. Dirty user changes
+must never be staged, committed, stashed, reset, or cleaned by the model to
+unblock execution. The user resolves that state; read-only work can continue.
+
+`a`/`always` grants are kept separately from saved policies for this process only.
+Explicit Permissions settings changes/reset clear those temporary grants; saving
+settings cannot accidentally make a process grant permanent.
+
+Tool audit records contain an execution ID, phase, executed flag, exit code,
+output character count, and outcome; they omit arguments and output content.
+These system records stay out of model context. Resume snapshots identify
+user_started events without turn_done (excluding an active lease), recover saved
+public deltas, and show an interruption notice without rewriting historical rows.
+Observers report an expired remote lease. Runtime failures and cancellations
+preserve partial public output and replay a corresponding failure/interruption.
+This cannot recover deltas never written before an abrupt process kill.
 
 Workspace tools are jailed to the workspace root. `read_file`, `list_dir`,
 `grep`, `workspace_info`, `git_status`, and `git_diff` are read-only. Write
@@ -652,6 +889,17 @@ an enabled reranker's order remains authoritative after thresholding.
 `klaude learn` fetches or reads one source and stores it under owner
 `learn:<source>`. It is idempotent for unchanged content and writes raw cache
 files under `docs-cache/<library>/` after successful indexing.
+
+Natural-language chat requests can perform the same persistent action through
+the native `learn_source` tool. Expose it only for explicit learn/save/ingest/
+index/archive intent, never for ordinary reading or “learn about” questions.
+The tool accepts public HTTP(S) sources and rejects credentials embedded in a
+URL before permission is requested. It infers a library from the hostname when
+the user omits one, indexes one page by default, and uses site scope only when
+the user explicitly asks for a documentation set, website crawl, or multiple
+pages. Site scope reuses the bounded same-domain crawler and, absent explicit
+include patterns, stays within the URL subtree supplied by the user. Persistent
+learning defaults to `ask`; approval is distinct from temporary web retrieval.
 
 `klaude docs add` installs an `llms.txt` source by fetching the index plus
 same-domain Markdown/text links. `klaude docs update` refreshes `llms.txt` and
@@ -824,6 +1072,16 @@ The preferred default cascade is direct text first, then Crawl4AI when
 configured, then trafilatura. This is important for files like
 `https://react.dev/llms.txt`, which should not go through HTML extraction.
 
+`http_probe` is a metadata-only endpoint diagnostic, not a page-reading or
+search fallback. It accepts only HEAD or GET to public HTTP(S) targets on ports
+80 and 443, follows the same DNS and redirect safety boundary, ignores ambient
+proxy configuration, and exposes no model-controlled headers, credentials,
+bodies, cookies, or TLS settings. It returns status, final URL, content type,
+declared content length, redirect count, and elapsed time without retaining a
+response body. Never invoke `curl`, `wget`, or shell networking automatically
+when web tools fail or are disabled; shell networking remains an explicitly
+requested action behind the ordinary `run_shell` permission gate.
+
 ## MCP Surfaces
 
 `klaude-web-mcp` exposes:
@@ -831,6 +1089,7 @@ configured, then trafilatura. This is important for files like
 - `web_search`
 - `code_search`
 - `fetch_url`
+- `http_probe`
 - `crawl_site`
 - `huggingface_search`
 - `huggingface_details`

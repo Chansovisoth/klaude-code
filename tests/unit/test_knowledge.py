@@ -492,6 +492,28 @@ def test_strong_lexical_candidates_can_pass_without_vector_match(tmp_path, monke
     assert hits[0]["relevance_score"] >= 0.32
 
 
+def test_exact_versioned_keyword_match_survives_semantic_rejection():
+    from klaude_knowledge.hybrid import LibraryRoute, _exact_lexical_fallback
+
+    hits = _exact_lexical_fallback(
+        "Godot 4.7",
+        LibraryRoute(["godot"], 0.9, "exact library name"),
+        [
+            {
+                "id": "godot-47",
+                "text": "Godot Docs - 4.7 branch with the official engine documentation.",
+                "source": "https://docs.godotengine.org/en/4.7/",
+                "keyword_rank": 1,
+                "vector_distance": 20.0,
+            }
+        ],
+        3,
+    )
+
+    assert hits
+    assert hits[0]["route_reason"].endswith("exact lexical fallback")
+
+
 def test_global_retrieval_uses_stricter_thresholds(tmp_path):
     from klaude_knowledge.hybrid import Knowledge
 
@@ -604,7 +626,7 @@ def test_agent_executes_text_form_tool_call():
     events = list(agent.run("look it up"))
 
     assert events[0].kind == "tool_start"
-    assert events[0].payload == {
+    assert {k: v for k, v in events[0].payload.items() if k != "execution_id"} == {
         "tool": "web_search",
         "args": {"query": "Dieng city country"},
     }
@@ -724,7 +746,7 @@ def test_agent_web_search_start_metadata_survives_structured_tool_call():
     assert events[1].payload["metadata"]["provider"] == "google"
 
 
-def test_agent_resolves_search_alias_to_web_search_even_after_selector_miss():
+def test_agent_requests_repair_for_search_alias_when_schema_was_not_exposed():
     from klaude_core import Agent, PermissionGate, Tool
 
     class FakeOllama:
@@ -758,17 +780,9 @@ def test_agent_resolves_search_alias_to_web_search_even_after_selector_miss():
 
     events = list(agent.run("AIS school in cambodia"))
 
-    assert events[0].kind == "tool_start"
-    assert events[0].payload["tool"] == "web_search"
-    assert events[1].payload["metadata"]["web_research"]["budgets"] == {
-        "web_actions_used": 1,
-        "max_web_actions": 6,
-        "search_calls_used": 1,
-        "max_search_calls": 3,
-        "fetch_calls_used": 0,
-        "max_fetch_calls": 4,
-    }
-    assert "found AIS school Cambodia" in events[1].payload["result"]
+    assert events[0].kind == "retry"
+    assert not any(event.kind in {"tool_start", "tool_result"} for event in events)
+    assert events[-1].kind == "done"
 
 
 def test_tool_aliases_resolve_to_existing_canonical_tools():
@@ -2386,7 +2400,7 @@ def test_agent_executes_json_text_form_tool_call():
     events = list(agent.run("do you have local knowledge of C++?"))
 
     assert events[0].kind == "tool_start"
-    assert events[0].payload == {
+    assert {k: v for k, v in events[0].payload.items() if k != "execution_id"} == {
         "tool": "query_knowledge",
         "args": {"query": "C++"},
     }
@@ -2431,7 +2445,7 @@ def test_agent_executes_text_form_tool_call_with_newline_before_close():
     events = list(agent.run("more about them"))
 
     assert events[0].kind == "tool_start"
-    assert events[0].payload == {
+    assert {k: v for k, v in events[0].payload.items() if k != "execution_id"} == {
         "tool": "web_search",
         "args": {"query": "FlazeSlayer YouTube channel"},
     }
@@ -2476,7 +2490,7 @@ def test_agent_strips_text_form_closing_tags_from_tool_args():
     events = list(agent.run("what games"))
 
     assert events[0].kind == "tool_start"
-    assert events[0].payload == {
+    assert {k: v for k, v in events[0].payload.items() if k != "execution_id"} == {
         "tool": "fetch_url",
         "args": {"url": "https://www.twitch.tv/flaze_slayer"},
     }
@@ -2522,7 +2536,7 @@ def test_agent_rewrites_vague_search_followup_with_recent_topic():
     events = list(agent.run("what games"))
 
     assert events[0].kind == "tool_start"
-    assert events[0].payload == {
+    assert {k: v for k, v in events[0].payload.items() if k != "execution_id"} == {
         "tool": "web_search",
         "args": {"query": "FlazeSlayer games"},
     }
@@ -2583,7 +2597,7 @@ def test_agent_followup_last_name_uses_person_name_not_university_acronym():
 
     events = list(agent.run("what is their last name"))
 
-    assert events[0].payload == {
+    assert {k: v for k, v in events[0].payload.items() if k != "execution_id"} == {
         "tool": "web_search",
         "args": {"query": "Chansovisoth Wattanak"},
     }
@@ -2741,7 +2755,7 @@ def test_agent_directly_returns_requested_search_result_count():
     events = list(agent.run("show me 20 results about FlazeSlayer"))
 
     assert [event.kind for event in events] == ["tool_start", "tool_result", "text", "done"]
-    assert events[0].payload == {
+    assert {k: v for k, v in events[0].payload.items() if k != "execution_id"} == {
         "tool": "web_search",
         "args": {"query": "FlazeSlayer", "max_results": 20},
     }
@@ -2789,7 +2803,7 @@ def test_agent_raw_result_followup_uses_recent_topic_without_command_words():
 
     events = list(agent.run("show me 20 search results"))
 
-    assert events[0].payload == {
+    assert {k: v for k, v in events[0].payload.items() if k != "execution_id"} == {
         "tool": "web_search",
         "args": {"query": "FlazeSlayer", "max_results": 20},
     }
@@ -2841,7 +2855,7 @@ def test_agent_rewrites_model_raw_result_tool_query_to_recent_topic():
 
     events = list(agent.run("more results"))
 
-    assert events[0].payload == {
+    assert {k: v for k, v in events[0].payload.items() if k != "execution_id"} == {
         "tool": "web_search",
         "args": {"query": "FlazeSlayer"},
     }
@@ -2992,7 +3006,7 @@ def test_agent_runs_web_search_before_no_info_answer():
     events = list(agent.run("who is FlazeSlayer"))
 
     assert events[0].kind == "tool_start"
-    assert events[0].payload == {
+    assert {k: v for k, v in events[0].payload.items() if k != "execution_id"} == {
         "tool": "web_search",
         "args": {"query": "who is FlazeSlayer"},
     }
@@ -3040,7 +3054,7 @@ def test_agent_fallback_search_uses_recent_topic_for_pronoun_followup():
     events = list(agent.run("do they play minecraft"))
 
     assert events[0].kind == "tool_start"
-    assert events[0].payload == {
+    assert {k: v for k, v in events[0].payload.items() if k != "execution_id"} == {
         "tool": "web_search",
         "args": {"query": "FlazeSlayer play minecraft"},
     }
@@ -3115,7 +3129,8 @@ def test_agent_return_direct_tool_preserves_structured_metadata():
 
     assert [event.kind for event in events] == ["tool_start", "text", "done"]
     assert events[1].payload["content"].endswith("\n\nCLI COMMANDS")
-    assert events[1].payload["metadata"] == metadata
+    assert all(events[1].payload["metadata"][key] == value for key, value in metadata.items())
+    assert events[1].payload["metadata"]["execution_id"] == events[0].payload["execution_id"]
 
 
 def test_structured_and_text_form_list_commands_render_identically():
@@ -3164,7 +3179,13 @@ def test_structured_and_text_form_list_commands_render_identically():
     structured_events = list(make_agent(StructuredOllama()).run("show commands"))
     text_form_events = list(make_agent(TextFormOllama()).run("show commands"))
 
-    assert structured_events[1].payload == text_form_events[1].payload
+    assert structured_events[1].payload["content"] == text_form_events[1].payload["content"]
+    structured_metadata = dict(structured_events[1].payload["metadata"])
+    text_form_metadata = dict(text_form_events[1].payload["metadata"])
+    structured_execution_id = structured_metadata.pop("execution_id")
+    text_form_execution_id = text_form_metadata.pop("execution_id")
+    assert structured_execution_id != text_form_execution_id
+    assert structured_metadata == text_form_metadata
 
 
 def test_agent_rejects_unnecessary_structured_list_commands_for_casual_prompt():
@@ -3378,8 +3399,8 @@ def test_unknown_text_form_tool_call_produces_clean_tool_error():
                     "role": "assistant",
                     "content": "<function=unknown_tool> <parameter=query> x </tool_call>",
                 }
-            assert messages[-1]["role"] == "tool"
-            assert "unknown tool 'unknown_tool'" in messages[-1]["content"]
+            assert messages[-1]["role"] == "system"
+            assert "invalid or unavailable" in messages[-1]["content"]
             return {"role": "assistant", "content": "I cannot use that tool."}
 
     tool = Tool(
@@ -3398,12 +3419,9 @@ def test_unknown_text_form_tool_call_produces_clean_tool_error():
 
     events = list(agent.run("use a tool"))
 
-    assert events[0].kind == "tool_result"
-    assert events[0].payload["result"] == "error: unknown tool 'unknown_tool'"
-    assert not any(
-        event.kind == "text" and "<function=unknown_tool>" in event.payload.get("content", "")
-        for event in events
-    )
+    assert [event.kind for event in events] == ["retry", "text", "done"]
+    assert events[1].payload["content"] == "I cannot use that tool."
+    assert all("<function=unknown_tool>" not in str(event.payload) for event in events)
 
 
 def test_model_can_select_one_of_multiple_structured_search_results():

@@ -10,6 +10,7 @@ from klaude_web.fetch import (
     canonicalize_public_url,
     fetch_page,
     fetch_page_detailed,
+    probe_public_url,
     validate_public_url,
 )
 
@@ -172,6 +173,58 @@ def test_redirect_to_private_address_is_rejected_before_second_request():
         )
 
     assert calls == ["https://example.com/start"]
+
+
+def test_http_probe_returns_metadata_without_reading_page_content():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            204,
+            headers={"content-type": "text/plain", "content-length": "123"},
+            request=request,
+        )
+
+    result = probe_public_url(
+        "https://example.com/health",
+        resolver=public_resolver,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.method == "HEAD"
+    assert result.status_code == 204
+    assert result.content_type == "text/plain"
+    assert result.content_length == 123
+    assert result.final_url == "https://example.com/health"
+    assert [request.method for request in requests] == ["HEAD"]
+
+
+def test_http_probe_revalidates_redirect_and_blocks_nonstandard_port():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(
+            302,
+            headers={"location": "https://example.com:8443/admin"},
+            request=request,
+        )
+
+    with pytest.raises(UnsafeURL, match="standard web ports"):
+        probe_public_url(
+            "https://example.com/start",
+            method="GET",
+            resolver=public_resolver,
+            transport=httpx.MockTransport(handler),
+        )
+
+    assert calls == ["https://example.com/start"]
+
+
+def test_http_probe_rejects_methods_outside_bounded_schema():
+    with pytest.raises(ValueError, match="HEAD or GET"):
+        probe_public_url("https://example.com/", method="POST")
 
 
 @pytest.mark.parametrize(

@@ -491,6 +491,7 @@ class RetryPolicy:
 
 SENSITIVE_ENV_KEYS = (
     "GEMINI_API_KEY",
+    "BRAVE_SEARCH_API_KEY",
     "PARALLEL_API_KEY",
     "TAVILY_API_KEY",
     "EXA_API_KEY",
@@ -501,6 +502,8 @@ SENSITIVE_ENV_KEYS = (
 )
 
 WEB_PROVIDER_NAMES = {
+    "brave",
+    "brave_api",
     "google",
     "parallel",
     "tavily",
@@ -533,6 +536,9 @@ PROVIDER_ALIAS = {
     "duckduckgo_search": "ddgs",
     "ddg": "ddgs",
     "ddgs": "ddgs",
+    "brave": "brave",
+    "brave_search": "brave",
+    "brave_api": "brave_api",
     "google": "google",
     "gemini": "google",
     "parallel": "parallel",
@@ -565,7 +571,7 @@ ALLOWED_QUERY_PROVENANCE_SOURCES = {
 
 DEFAULT_ENTITY_RESOLVER = EntityResolver()
 
-PAID_PROVIDERS = {"google", "parallel", "tavily", "exa", "firecrawl"}
+PAID_PROVIDERS = {"brave_api", "google", "parallel", "tavily", "exa", "firecrawl"}
 PRIMARY_SOURCE_HINTS = {
     "docs.",
     "developer.",
@@ -840,6 +846,7 @@ def _domain(url: str) -> str:
 
 def _provider_api_key(cfg: Config, name: str) -> str:
     attr = {
+        "brave_api": "brave_search_api_key",
         "google": "gemini_api_key",
         "parallel": "parallel_api_key",
         "tavily": "tavily_api_key",
@@ -902,7 +909,8 @@ def parse_provider_directive(text: str) -> ProviderDirective:
 def sanitize_semantic_search_query(text: str) -> str:
     cleaned = _remove_control_fragments(text)
     provider_names = (
-        "google|gemini|parallel|tavily|exa|firecrawl|ddgs|ddg|duckduckgo|searx|searxng|local"
+        "brave|brave_search|brave_api|google|gemini|parallel|tavily|exa|firecrawl|ddgs|ddg|"
+        "duckduckgo|searx|searxng|local"
     )
     cleaned = re.sub(
         rf"(?i)\b(?:using|with|via)\s+(?:{provider_names})\b",
@@ -1410,13 +1418,21 @@ def build_search_query(
 
 def route_for_intent(intent: SearchIntent) -> list[str]:
     routes = {
-        SearchIntent.ACRONYM_EXPANSION: ["google", "tavily", "parallel", "ddgs", "searxng"],
-        SearchIntent.DEFINITION: ["google", "tavily", "parallel", "ddgs", "searxng"],
-        SearchIntent.CURRENT_FACT: ["google", "tavily", "parallel", "ddgs", "searxng"],
-        SearchIntent.EXACT_ENTITY: ["google", "tavily", "parallel", "ddgs", "searxng"],
-        SearchIntent.LOCAL_ENTITY: ["google", "tavily", "parallel", "ddgs", "searxng"],
-        SearchIntent.BREAKING_NEWS: ["google", "tavily", "parallel", "ddgs", "searxng"],
+        SearchIntent.ACRONYM_EXPANSION: [
+            "brave",
+            "google",
+            "tavily",
+            "parallel",
+            "ddgs",
+            "searxng",
+        ],
+        SearchIntent.DEFINITION: ["brave", "google", "tavily", "parallel", "ddgs", "searxng"],
+        SearchIntent.CURRENT_FACT: ["brave", "google", "tavily", "parallel", "ddgs", "searxng"],
+        SearchIntent.EXACT_ENTITY: ["brave", "google", "tavily", "parallel", "ddgs", "searxng"],
+        SearchIntent.LOCAL_ENTITY: ["brave", "google", "tavily", "parallel", "ddgs", "searxng"],
+        SearchIntent.BREAKING_NEWS: ["brave", "google", "tavily", "parallel", "ddgs", "searxng"],
         SearchIntent.RECENT_SOFTWARE: [
+            "brave",
             "google",
             "tavily",
             "exa",
@@ -1424,6 +1440,7 @@ def route_for_intent(intent: SearchIntent) -> list[str]:
             "searxng",
         ],
         SearchIntent.TECHNICAL_DOCUMENTATION: [
+            "brave",
             "google",
             "exa",
             "tavily",
@@ -1433,6 +1450,7 @@ def route_for_intent(intent: SearchIntent) -> list[str]:
         SearchIntent.SEMANTIC_DISCOVERY: [
             "exa",
             "parallel",
+            "brave",
             "google",
             "tavily",
             "ddgs",
@@ -1440,15 +1458,16 @@ def route_for_intent(intent: SearchIntent) -> list[str]:
         ],
         SearchIntent.BROAD_RESEARCH: [
             "parallel",
+            "brave",
             "google",
             "tavily",
             "exa",
             "ddgs",
             "searxng",
         ],
-        SearchIntent.BROAD_TOPIC: ["google", "tavily", "parallel", "ddgs", "searxng"],
+        SearchIntent.BROAD_TOPIC: ["brave", "google", "tavily", "parallel", "ddgs", "searxng"],
     }
-    return routes.get(intent, ["google", "tavily", "parallel", "ddgs", "searxng"])
+    return routes.get(intent, ["brave", "google", "tavily", "parallel", "ddgs", "searxng"])
 
 
 def search_cache_ttl(query: SearchQuery) -> int:
@@ -1532,12 +1551,23 @@ def _retryable_http_status(status_code: int) -> bool:
     return status_code in {429, 502, 503, 504}
 
 
+def _brave_retry_after_header(response: httpx.Response) -> str | None:
+    retry_after = response.headers.get("Retry-After")
+    if retry_after:
+        return retry_after
+    # Brave reports one reset value per active quota window.  The first is the
+    # short burst window and is the only useful delay for an inline retry.
+    rate_limit_reset = response.headers.get("X-RateLimit-Reset")
+    return rate_limit_reset.split(",", 1)[0].strip() if rate_limit_reset else None
+
+
 def request_json_with_retries(
     request: Callable[[], httpx.Response],
     *,
     policy: RetryPolicy,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], datetime] = _now_utc,
+    retry_after_header: Callable[[httpx.Response], str | None] | None = None,
 ) -> dict:
     attempt = 0
     while True:
@@ -1554,7 +1584,11 @@ def request_json_with_retries(
                 retry_at = None
                 if response.status_code == 429 and policy.honor_retry_after:
                     retry_at_seconds = _retry_after_seconds(
-                        response.headers.get("Retry-After"),
+                        (
+                            retry_after_header(response)
+                            if retry_after_header is not None
+                            else response.headers.get("Retry-After")
+                        ),
                         now,
                     )
                     if retry_at_seconds is not None:
@@ -1565,7 +1599,13 @@ def request_json_with_retries(
                     retry_at=retry_at,
                     transient=retryable,
                 ) from exc
-            delay = _retry_delay(attempt, response, policy, now)
+            delay = _retry_delay(
+                attempt,
+                response,
+                policy,
+                now,
+                retry_after_header=retry_after_header,
+            )
             sleep(delay)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             if attempt >= policy.max_attempts:
@@ -1582,9 +1622,16 @@ def _retry_delay(
     response: httpx.Response | None,
     policy: RetryPolicy,
     now: Callable[[], datetime],
+    *,
+    retry_after_header: Callable[[httpx.Response], str | None] | None = None,
 ) -> float:
     if response is not None and policy.honor_retry_after:
-        retry_after = _retry_after_seconds(response.headers.get("Retry-After"), now)
+        header_value = (
+            retry_after_header(response)
+            if retry_after_header is not None
+            else response.headers.get("Retry-After")
+        )
+        retry_after = _retry_after_seconds(header_value, now)
         if retry_after is not None:
             return min(retry_after, policy.maximum_retry_delay_seconds)
     base = policy.base_retry_delay_ms / 1000
@@ -1812,6 +1859,162 @@ class BaseProvider:
             sleep=self.sleep,
             now=self.now,
         )
+
+
+class BraveAPIProvider(BaseProvider):
+    name = "brave_api"
+    requires_key = True
+    capabilities = ProviderCapabilities(
+        web_results=True,
+        news=True,
+        date_filtering=True,
+        country_filtering=True,
+    )
+    supported_intents = set(SearchIntent)
+
+    def search(self, query: SearchQuery) -> SearchResponse:
+        search_text = _brave_query(provider_primary_query(query), query.exclude_domains)
+        params: dict[str, str | int | bool] = {
+            "q": search_text,
+            "count": max(1, min(int(query.result_limit or 5), 20)),
+            "safesearch": "moderate",
+            "spellcheck": True,
+            "text_decorations": False,
+            "extra_snippets": True,
+            "result_filter": "web",
+        }
+        if query.country:
+            params["country"] = query.country.upper()
+        if query.language:
+            params["search_lang"] = query.language.split("-", 1)[0].lower()
+        freshness = _brave_freshness(query.freshness, self.now())
+        if freshness:
+            params["freshness"] = freshness
+
+        def request() -> httpx.Response:
+            client = self.http_client or httpx
+            return client.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                headers={
+                    "Accept": "application/json",
+                    "Accept-Encoding": "gzip",
+                    "X-Subscription-Token": self.api_key(),
+                },
+                params=params,
+                timeout=self.provider_config.timeout_seconds,
+            )
+
+        try:
+            data = request_json_with_retries(
+                request,
+                policy=self.retry_policy(),
+                sleep=self.sleep,
+                now=self.now,
+                retry_after_header=_brave_retry_after_header,
+            )
+        except ProviderSearchError as exc:
+            raise _brave_provider_error(exc, self.api_key()) from exc
+        return _brave_search_response(query, data, search_text)
+
+
+def _brave_query(text: str, exclude_domains: list[str]) -> str:
+    terms = [text, *(f"-site:{domain}" for domain in exclude_domains[:10])]
+    words = " ".join(" ".join(terms).split()).split()
+    return " ".join(words[:75])[:600].rstrip()
+
+
+def _brave_freshness(value: str | None, now: datetime) -> str:
+    if value == "1d":
+        return "pd"
+    if value == "30d":
+        return "pm"
+    if value == "90d":
+        end = now.date()
+        start = end - timedelta(days=90)
+        return f"{start.isoformat()}to{end.isoformat()}"
+    return ""
+
+
+def _brave_provider_error(exc: ProviderSearchError, api_key: str) -> ProviderSearchError:
+    cause = exc.__cause__
+    response = cause.response if isinstance(cause, httpx.HTTPStatusError) else None
+    if response is None:
+        return exc
+    try:
+        payload = response.json()
+    except (ValueError, TypeError):
+        payload = {}
+    error = payload.get("error") if isinstance(payload, dict) else {}
+    code = str(error.get("code") or "") if isinstance(error, dict) else ""
+    detail = str(error.get("detail") or "") if isinstance(error, dict) else ""
+    if api_key:
+        detail = detail.replace(api_key, "[redacted]")
+    detail = redact_secrets(detail)
+    state = ProviderState.QUOTA_EXHAUSTED if code == "QUOTA_LIMITED" else exc.state
+    message = f"Brave Search {code or f'HTTP {response.status_code}'}"
+    if detail:
+        message += f": {detail[:300]}"
+    return ProviderSearchError(
+        state,
+        message,
+        retry_at=exc.retry_at,
+        transient=exc.transient and state != ProviderState.QUOTA_EXHAUSTED,
+    )
+
+
+def _brave_search_response(
+    query: SearchQuery,
+    data: dict,
+    search_text: str,
+) -> SearchResponse:
+    web = data.get("web") if isinstance(data.get("web"), dict) else {}
+    items = web.get("results") if isinstance(web, dict) else []
+    results: list[dict] = []
+    for index, item in enumerate(items or [], 1):
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "")
+        snippets = [str(item.get("description") or "").strip()]
+        snippets.extend(
+            str(value).strip()
+            for value in item.get("extra_snippets") or []
+            if str(value).strip()
+        )
+        snippet = "\n".join(dict.fromkeys(value for value in snippets if value))[:4_000]
+        results.append(
+            SearchResult(
+                title=str(item.get("title") or url),
+                url=url,
+                snippet=snippet,
+                provider="brave_api",
+                provider_rank=index,
+                domain=_domain(url),
+                published_at=_parse_datetime(item.get("page_age")),
+                metadata={
+                    "matched_query": search_text,
+                    "age": item.get("age"),
+                    "language": item.get("language"),
+                    "evidence_level": EvidenceLevel.SEARCH_SNIPPET.value,
+                    "untrusted_web_evidence": True,
+                },
+            ).to_dict()
+        )
+    raw_query_metadata = data.get("query")
+    query_metadata: dict = raw_query_metadata if isinstance(raw_query_metadata, dict) else {}
+    return SearchResponse(
+        results=results,
+        queries_attempted=[search_text],
+        providers_attempted=["brave_api"],
+        providers_succeeded=["brave_api"] if results else [],
+        provider_metadata={
+            "brave_api": {
+                "reported_search_count": 1,
+                "estimated_cost": 0.0,
+                "altered_query": query_metadata.get("altered"),
+                "more_results_available": query_metadata.get("more_results_available"),
+            }
+        },
+    )
 
 
 class GoogleGroundedProvider(BaseProvider):
@@ -2695,13 +2898,78 @@ class DDGSProvider(BaseProvider):
                 transient=True,
             )
         response = _dict_items_response(self.name, query, collected)
+        results = response.results[: max(1, query.result_limit)]
         return SearchResponse(
-            results=response.results,
+            results=results,
             warnings=warnings,
             queries_attempted=attempted,
             queries_failed=failed,
             providers_attempted=[self.name] if attempted else [],
-            providers_succeeded=[self.name] if response.results else [],
+            providers_succeeded=[self.name] if results else [],
+        )
+
+
+class BraveWebProvider(DDGSProvider):
+    """Keyless Brave web search through DDGS's local Brave adapter."""
+
+    name = "brave"
+
+    def search(self, query: SearchQuery) -> SearchResponse:
+        collected: list[dict] = []
+        warnings: list[dict] = []
+        attempted: list[str] = []
+        failed: list[str] = []
+        variants = provider_query_variants(
+            query,
+            max_queries=max(1, self.cfg.web_search.max_disambiguation_queries),
+        )
+        per_query = max(query.result_limit, 8)
+        DDGS = self._ddgs_class()
+        for variant in variants:
+            attempted.append(variant)
+            try:
+                with DDGS(timeout=self.provider_config.timeout_seconds) as client:
+                    raw_items = client.text(
+                        variant,
+                        region=_ddgs_region(query),
+                        safesearch="moderate",
+                        timelimit=_ddgs_timelimit(query.freshness),
+                        max_results=per_query,
+                        backend="brave",
+                    )
+                collected.extend(list(raw_items))
+            except Exception as exc:
+                failed.append(variant)
+                warnings.append(
+                    SearchWarning(
+                        self.name,
+                        variant,
+                        type(exc).__name__,
+                        redact_secrets(exc),
+                    ).to_dict()
+                )
+        if not collected and failed:
+            raise ProviderSearchError(
+                ProviderState.DEGRADED,
+                "all keyless Brave expanded queries failed",
+                transient=True,
+            )
+        response = _dict_items_response(self.name, query, collected)
+        results = response.results[: max(1, query.result_limit)]
+        return SearchResponse(
+            results=results,
+            warnings=warnings,
+            queries_attempted=attempted,
+            queries_failed=failed,
+            providers_attempted=[self.name] if attempted else [],
+            providers_succeeded=[self.name] if results else [],
+            provider_metadata={
+                self.name: {
+                    "transport": "ddgs",
+                    "backend": "brave",
+                    "estimated_cost": 0.0,
+                }
+            },
         )
 
 
@@ -2880,6 +3148,10 @@ def _ddgs_region(query: SearchQuery) -> str:
     if query.country and query.country.upper() == "KH":
         return "kh-en"
     return "wt-wt"
+
+
+def _ddgs_timelimit(freshness: str | None) -> str | None:
+    return {"1d": "d", "30d": "m", "90d": "y"}.get(str(freshness or ""))
 
 
 def provider_query_variants(query: SearchQuery, max_queries: int = 6) -> list[str]:
@@ -3349,6 +3621,8 @@ class ProviderRegistry:
         self.now = now
         self.state_store = state_store or ProviderStateStore(cfg.web_provider_state_file, now=now)
         default_providers: list[SearchProvider] = [
+            BraveWebProvider(cfg, now=now),
+            BraveAPIProvider(cfg, now=now),
             GoogleGroundedProvider(cfg, now=now),
             ParallelProvider(cfg, now=now),
             TavilyProvider(cfg, now=now),
@@ -3532,6 +3806,10 @@ class ProviderRegistry:
     def _ordered_names(self, intent: SearchIntent) -> list[str]:
         if self.cfg.web_provider == "local":
             return ["searxng"]
+        if self.cfg.web_provider == "brave":
+            return ["brave", "ddgs", "searxng"]
+        if self.cfg.web_provider == "brave_api":
+            return ["brave_api", "brave", "ddgs", "searxng"]
         if self.cfg.web_provider == "exa":
             return ["exa", "ddgs", "searxng"]
         configured = [name for name in self.cfg.web_search.provider_order if name in self.providers]

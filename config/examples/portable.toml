@@ -16,7 +16,7 @@
 provider = "quality"
 
 [web.search]
-provider_order = ["google", "parallel", "exa", "ddgs", "tavily", "firecrawl", "searxng"]
+provider_order = ["brave", "ddgs", "searxng", "brave_api", "google", "parallel", "exa", "tavily", "firecrawl"]
 
 [permissions]
 # run_shell = "ask"

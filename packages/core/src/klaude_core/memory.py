@@ -230,6 +230,7 @@ class Memory:
                 owner_lease_until REAL NOT NULL DEFAULT 0,
                 turn_id TEXT NOT NULL DEFAULT '',
                 state TEXT NOT NULL DEFAULT 'idle',
+                turn_started_at REAL NOT NULL DEFAULT 0,
                 draft_client_id TEXT NOT NULL DEFAULT '',
                 draft TEXT NOT NULL DEFAULT '',
                 activity TEXT NOT NULL DEFAULT 'ready',
@@ -238,6 +239,22 @@ class Memory:
                 updated_at REAL NOT NULL
             )"""
         )
+        live_columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(session_live)").fetchall()
+        }
+        if "turn_started_at" not in live_columns:
+            try:
+                self.db.execute(
+                    "ALTER TABLE session_live ADD COLUMN turn_started_at REAL NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                # Another resumed client may finish the additive migration
+                # after this process inspected the legacy schema.
+                migrated_columns = {
+                    row[1] for row in self.db.execute("PRAGMA table_info(session_live)").fetchall()
+                }
+                if "turn_started_at" not in migrated_columns:
+                    raise
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS session_clients (
                 session_id TEXT NOT NULL,
@@ -599,6 +616,60 @@ class Memory:
                 live = self.session_live_state(session_id)
                 clients = self.session_client_states(session_id)
                 cursor = self.latest_session_event_id(session_id)
+                # Recover a truthful view without rewriting historical records. A process
+                # kill cannot run finally; user_started minus turn_done is the durable clue.
+                events = []
+                after = 0
+                while True:
+                    batch = self.session_events_since(session_id, after, limit=2_000)
+                    events.extend(batch)
+                    if len(batch) < 2_000:
+                        break
+                    after = batch[-1]["id"]
+                started = {e["turn_id"]: e for e in events if e["kind"] == "user_started"}
+                finished = {e["turn_id"] for e in events if e["kind"] == "turn_done"}
+                by_turn: dict[str, list[dict]] = {}
+                for event in events:
+                    by_turn.setdefault(event["turn_id"], []).append(event)
+                active = (
+                    live.get("turn_id")
+                    if live.get("state") == "running"
+                    and live.get("owner_lease_until", 0) > time.time()
+                    else None
+                )
+                for turn_id in started:
+                    if turn_id in finished or turn_id == active:
+                        continue
+                    related = by_turn[turn_id]
+                    stamp = max(e["ts"] for e in related) + 0.000001
+                    partial = "".join(
+                        str(e["payload"].get("text", ""))
+                        for e in related
+                        if e["kind"] == "assistant_delta"
+                    )
+                    if partial and not any(t.get("content") == partial for t in turns):
+                        turns.append({"role": "assistant", "content": partial, "ts": stamp})
+                    turns.append(
+                        {
+                            "role": "system",
+                            "ts": stamp,
+                            "content": {
+                                "event": "runtime_error",
+                                "message": "Interrupted: this turn has no completion record. "
+                                "Its worker ended "
+                                "or lost its lease; saved output above is preserved.",
+                            },
+                        }
+                    )
+                turns.sort(key=lambda item: item["ts"])
+                if live.get("state") == "running" and not active:
+                    live = {
+                        **live,
+                        "state": "interrupted",
+                        "activity": "ready",
+                        "owner_client_id": "",
+                        "owner_lease_until": 0,
+                    }
                 self.db.commit()
             except Exception:
                 self.db.rollback()
@@ -661,6 +732,7 @@ class Memory:
             "owner_lease_until",
             "turn_id",
             "state",
+            "turn_started_at",
             "draft_client_id",
             "draft",
             "activity",
@@ -692,7 +764,8 @@ class Memory:
         with self._db_lock:
             row = self.db.execute(
                 "SELECT revision, owner_client_id, owner_lease_until, turn_id, state, "
-                "draft_client_id, draft, activity, partial, queue_json, updated_at "
+                "turn_started_at, draft_client_id, draft, activity, partial, queue_json, "
+                "updated_at "
                 "FROM session_live WHERE session_id=?",
                 (session_id,),
             ).fetchone()
@@ -704,6 +777,7 @@ class Memory:
                 "owner_lease_until": 0.0,
                 "turn_id": "",
                 "state": "idle",
+                "turn_started_at": 0.0,
                 "draft_client_id": "",
                 "draft": "",
                 "activity": "ready",
@@ -711,7 +785,7 @@ class Memory:
                 "queue": [],
                 "updated_at": 0.0,
             }
-        queue_value = _decode_content(row[9])
+        queue_value = _decode_content(row[10])
         return {
             "session_id": session_id,
             "revision": int(row[0]),
@@ -719,12 +793,13 @@ class Memory:
             "owner_lease_until": float(row[2]),
             "turn_id": row[3],
             "state": row[4],
-            "draft_client_id": row[5],
-            "draft": row[6],
-            "activity": row[7],
-            "partial": row[8],
+            "turn_started_at": float(row[5]),
+            "draft_client_id": row[6],
+            "draft": row[7],
+            "activity": row[8],
+            "partial": row[9],
             "queue": queue_value if isinstance(queue_value, list) else [],
-            "updated_at": float(row[10]),
+            "updated_at": float(row[11]),
         }
 
     def acquire_session_lease(
@@ -742,21 +817,28 @@ class Memory:
             self.db.execute("BEGIN IMMEDIATE")
             try:
                 row = self.db.execute(
-                    "SELECT owner_client_id, owner_lease_until FROM session_live "
+                    "SELECT owner_client_id, owner_lease_until, turn_id FROM session_live "
                     "WHERE session_id=?",
                     (session_id,),
                 ).fetchone()
-                if row and row[0] not in {"", client_id} and float(row[1]) > now:
+                if (
+                    row
+                    and row[0]
+                    and float(row[1]) > now
+                    and (row[0] != client_id or row[2] != turn_id)
+                ):
                     self.db.rollback()
                     return False
                 self.db.execute(
                     "INSERT INTO session_live "
                     "(session_id, revision, owner_client_id, owner_lease_until, turn_id, "
-                    "state, activity, partial, updated_at) VALUES (?,?,?,?,?,?,?,?,?) "
+                    "state, turn_started_at, activity, partial, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(session_id) DO UPDATE SET "
                     "revision=session_live.revision+1, owner_client_id=excluded.owner_client_id, "
                     "owner_lease_until=excluded.owner_lease_until, turn_id=excluded.turn_id, "
-                    "state='running', activity='thinking', partial='', "
+                    "state='running', turn_started_at=excluded.turn_started_at, "
+                    "activity='thinking', partial='', "
                     "updated_at=excluded.updated_at",
                     (
                         session_id,
@@ -765,6 +847,7 @@ class Memory:
                         lease_until,
                         turn_id,
                         "running",
+                        now,
                         "thinking",
                         "",
                         now,
@@ -787,8 +870,16 @@ class Memory:
         with self._db_lock, self.db:
             cursor = self.db.execute(
                 "UPDATE session_live SET owner_lease_until=?, updated_at=? "
-                "WHERE session_id=? AND owner_client_id=? AND turn_id=? AND state='running'",
-                (time.time() + max(5.0, float(ttl)), time.time(), session_id, client_id, turn_id),
+                "WHERE session_id=? AND owner_client_id=? AND turn_id=? AND state='running' "
+                "AND owner_lease_until>?",
+                (
+                    time.time() + max(5.0, float(ttl)),
+                    time.time(),
+                    session_id,
+                    client_id,
+                    turn_id,
+                    time.time(),
+                ),
             )
         return cursor.rowcount == 1
 
@@ -803,7 +894,8 @@ class Memory:
         with self._db_lock, self.db:
             cursor = self.db.execute(
                 "UPDATE session_live SET revision=revision+1, owner_client_id='', "
-                "owner_lease_until=0, turn_id='', state=?, activity='ready', partial='', "
+                "owner_lease_until=0, turn_id='', state=?, turn_started_at=0, "
+                "activity='ready', partial='', "
                 "updated_at=? WHERE session_id=? AND owner_client_id=? AND turn_id=?",
                 (state, time.time(), session_id, client_id, turn_id),
             )
@@ -859,6 +951,14 @@ class Memory:
                 "FROM turns AS t GROUP BY t.session_id ORDER BY MAX(t.ts) DESC, t.session_id"
             ).fetchall()
             names = dict(self.db.execute("SELECT session_id, name FROM session_names"))
+            active = {
+                row[0]
+                for row in self.db.execute(
+                    "SELECT session_id FROM session_live "
+                    "WHERE state='running' AND owner_lease_until>?",
+                    (time.time(),),
+                )
+            }
         return [
             {
                 "session_id": session_id,
@@ -869,9 +969,27 @@ class Memory:
                     if content is not None
                     else "Untitled session"
                 ),
+                "active": session_id in active,
             }
             for session_id, ts, content in rows
         ]
+
+    def session_title(self, session_id: str) -> str:
+        """Return the explicit name or the same derived title used by `/resume`."""
+        with self._db_lock:
+            named = self.db.execute(
+                "SELECT name FROM session_names WHERE session_id=?", (session_id,)
+            ).fetchone()
+            if named:
+                return str(named[0])
+            first = self.db.execute(
+                "SELECT content FROM turns WHERE session_id=? AND role='user' "
+                "ORDER BY ts, rowid LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        if not first:
+            return "Untitled session"
+        return " ".join(_as_text(_decode_content(first[0])).split())[:160] or "Untitled session"
 
     def rename_session(self, session_id: str, name: str) -> None:
         name = " ".join(name.split())
@@ -905,12 +1023,11 @@ class Memory:
             return 0
         with self._db_lock, self.db:
             row = self.db.execute(
-                "SELECT COUNT(*) FROM turns WHERE session_id=?",
+                "SELECT COUNT(*) FROM turns WHERE session_id=? AND role IN ('user','assistant')",
                 (session_id,),
             ).fetchone()
             turns = int(row[0]) if row else 0
-            if turns:
-                self.db.execute("DELETE FROM turns WHERE session_id=?", (session_id,))
+            self.db.execute("DELETE FROM turns WHERE session_id=?", (session_id,))
             self.db.execute("DELETE FROM session_names WHERE session_id=?", (session_id,))
             self.db.execute("DELETE FROM session_events WHERE session_id=?", (session_id,))
             self.db.execute("DELETE FROM session_live WHERE session_id=?", (session_id,))
@@ -920,7 +1037,8 @@ class Memory:
     def session_counts(self) -> dict[str, int]:
         with self._db_lock:
             row = self.db.execute(
-                "SELECT COUNT(DISTINCT session_id), COUNT(*) FROM turns"
+                "SELECT COUNT(DISTINCT session_id), COUNT(*) FROM turns "
+                "WHERE role IN ('user','assistant')"
             ).fetchone()
         return {
             "sessions": int(row[0]) if row else 0,
@@ -930,12 +1048,12 @@ class Memory:
     def clear_sessions(self) -> dict[str, int]:
         with self._db_lock, self.db:
             row = self.db.execute(
-                "SELECT COUNT(DISTINCT session_id), COUNT(*) FROM turns"
+                "SELECT COUNT(DISTINCT session_id), COUNT(*) FROM turns "
+                "WHERE role IN ('user','assistant')"
             ).fetchone()
             sessions = int(row[0]) if row else 0
             turns = int(row[1]) if row else 0
-            if turns:
-                self.db.execute("DELETE FROM turns")
+            self.db.execute("DELETE FROM turns")
             self.db.execute("DELETE FROM session_names")
             self.db.execute("DELETE FROM session_events")
             self.db.execute("DELETE FROM session_live")
@@ -945,7 +1063,8 @@ class Memory:
     def session_tail(self, session_id: str, limit: int = 8) -> list[dict]:
         with self._db_lock:
             rows = self.db.execute(
-                "SELECT role, content FROM turns WHERE session_id=? ORDER BY ts DESC LIMIT ?",
+                "SELECT role, content FROM turns WHERE session_id=? "
+                "AND role IN ('user','assistant') ORDER BY ts DESC LIMIT ?",
                 (session_id, limit),
             ).fetchall()
         out = []
@@ -956,16 +1075,37 @@ class Memory:
     def recent_sessions(self, limit: int = 10) -> list[dict]:
         with self._db_lock:
             rows = self.db.execute(
-                "SELECT session_id, MAX(ts), COUNT(*) FROM turns "
-                "GROUP BY session_id ORDER BY MAX(ts) DESC LIMIT ?",
+                "SELECT session_id, MAX(ts), "
+                "SUM(CASE WHEN role IN ('user','assistant') THEN 1 ELSE 0 END) FROM turns "
+                "GROUP BY session_id "
+                "HAVING SUM(CASE WHEN role IN ('user','assistant') THEN 1 ELSE 0 END) > 0 "
+                "ORDER BY MAX(ts) DESC LIMIT ?",
                 (limit,),
             ).fetchall()
             preview_rows = {
                 session_id: self.db.execute(
-                    "SELECT role, content FROM turns WHERE session_id=? ORDER BY ts DESC LIMIT 1",
+                    "SELECT role, content FROM turns WHERE session_id=? "
+                    "AND role IN ('user','assistant') ORDER BY ts DESC LIMIT 1",
                     (session_id,),
                 ).fetchone()
                 for session_id, _ts, _count in rows
+            }
+            first_user_rows = {
+                session_id: self.db.execute(
+                    "SELECT content FROM turns WHERE session_id=? AND role='user' "
+                    "ORDER BY ts, rowid LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+                for session_id, _ts, _count in rows
+            }
+            names = dict(self.db.execute("SELECT session_id, name FROM session_names"))
+            active = {
+                row[0]
+                for row in self.db.execute(
+                    "SELECT session_id FROM session_live "
+                    "WHERE state='running' AND owner_lease_until>?",
+                    (time.time(),),
+                )
             }
         sessions = []
         for session_id, ts, count in rows:
@@ -980,32 +1120,88 @@ class Memory:
                     "date": time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)),
                     "turns": count,
                     "preview": preview,
+                    "title": names.get(session_id)
+                    or (
+                        " ".join(_as_text(_decode_content(first_user_rows[session_id][0])).split())[
+                            :160
+                        ]
+                        if first_user_rows[session_id]
+                        else "Untitled session"
+                    ),
+                    "active": session_id in active,
                 }
             )
         return sessions
 
     def search_sessions(self, query: str, limit: int = 8) -> list[dict]:
-        terms = [t.lower() for t in re.findall(r"[\w.-]+", query) if len(t) > 1]
+        stopwords = {
+            "a",
+            "about",
+            "all",
+            "any",
+            "did",
+            "do",
+            "from",
+            "have",
+            "i",
+            "in",
+            "it",
+            "me",
+            "my",
+            "of",
+            "other",
+            "please",
+            "remember",
+            "remembered",
+            "session",
+            "sessions",
+            "something",
+            "tell",
+            "that",
+            "the",
+            "this",
+            "to",
+            "what",
+            "which",
+            "you",
+        }
+        raw_terms = [t.casefold() for t in re.findall(r"[\w.-]+", query) if len(t) > 1]
+        terms = [term for term in raw_terms if term not in stopwords]
+        if not terms:
+            terms = [
+                re.sub(r"(?:ing|ed|s)$", "", term)
+                for term in raw_terms
+                if term not in {"other", "session", "sessions"}
+            ]
+            terms = [term for term in terms if len(term) > 2]
         if not terms:
             return []
-        where = " AND ".join("lower(content) LIKE ?" for _ in terms)
+        where = " OR ".join("lower(content) LIKE ?" for _ in terms)
         params = [f"%{term}%" for term in terms]
         with self._db_lock:
             rows = self.db.execute(
-                f"SELECT session_id, ts, role, content FROM turns WHERE {where} "
+                f"SELECT session_id, ts, role, content FROM turns WHERE "
+                f"role IN ('user','assistant') AND {where} "
                 "ORDER BY ts DESC LIMIT ?",
-                (*params, limit),
+                (*params, max(limit * 20, 100)),
             ).fetchall()
-        hits = []
+        ranked: list[tuple[int, float, dict]] = []
         for session_id, ts, role, content in rows:
             text = _as_text(_decode_content(content))
-            hits.append(
-                {
-                    "session_id": session_id,
-                    "ts": ts,
-                    "date": time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)),
-                    "role": role,
-                    "content": text[:1000],
-                }
+            folded = text.casefold()
+            matches = sum(term in folded for term in terms)
+            ranked.append(
+                (
+                    matches,
+                    float(ts),
+                    {
+                        "session_id": session_id,
+                        "ts": ts,
+                        "date": time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)),
+                        "role": role,
+                        "content": text[:1000],
+                    },
+                )
             )
-        return hits
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [item[2] for item in ranked[:limit]]

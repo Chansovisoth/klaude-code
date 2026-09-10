@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import fcntl
 import fnmatch
+import glob
 import os
 import re
 import shlex
@@ -20,6 +21,7 @@ import sys
 import tempfile
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from klaude_core import Tool
@@ -29,7 +31,65 @@ SHELL_TIMEOUT = 120
 GIT_TIMEOUT = 60
 GIT_ERROR_OUTPUT_LIMIT = 2_000
 
+
+def _edit_result(path: str, before: str, after: str, message: str) -> dict:
+    """Capture operation-local changes before auto-commit clears the Git diff."""
+    old, new = before.splitlines(keepends=True), after.splitlines(keepends=True)
+    matcher = SequenceMatcher(None, old, new)
+    added = removed = 0
+    for opcode, i, j, a, b in matcher.get_opcodes():
+        if opcode in {"replace", "delete"}:
+            removed += j - i
+        if opcode in {"replace", "insert"}:
+            added += b - a
+    rows: list[str] = []
+    for group in matcher.get_grouped_opcodes(2):
+        if rows:
+            rows.append("         ⋮")
+        for tag, i, j, a, b in group:
+            if tag in {"equal", "delete", "replace"}:
+                for offset, line in enumerate(old[i:j]):
+                    number = a + offset + 1 if tag == "equal" else i + offset + 1
+                    code = line.rstrip("\r\n")
+                    code = code[:500] + ("…" if len(code) > 500 else "")
+                    rows.append(f"{number:7} {' ' if tag == 'equal' else '-'} {code}")
+                    if not line.endswith(("\n", "\r")):
+                        rows.append("         \\ No newline at end of file")
+                    if len(rows) > 120:
+                        break
+            if tag in {"insert", "replace"}:
+                for n in range(a, b):
+                    if len(rows) > 120:
+                        break
+                    code = new[n].rstrip("\r\n")
+                    code = code[:500] + ("…" if len(code) > 500 else "")
+                    rows.append(f"{n + 1:7} + {code}")
+                    if not new[n].endswith(("\n", "\r")):
+                        rows.append("         \\ No newline at end of file")
+            if len(rows) > 120:
+                break
+        if len(rows) > 120:
+            break
+    truncated = len(rows) > 120
+    return {
+        "content": message,
+        "metadata": {
+            "edit": {
+                "path": path,
+                "added": added,
+                "removed": removed,
+                "lines": rows[:120],
+                "truncated": truncated,
+                "changed": before != after,
+            }
+        },
+    }
+
+
 READ_ONLY_COMMANDS = {
+    "df",
+    "du",
+    "sort",
     "cat",
     "file",
     "find",
@@ -171,9 +231,62 @@ def classify_command(command: str) -> CommandClassification:
     argv = _split_command(command)
     if not argv:
         return CommandClassification([], "shell-composed or unknown", True, "parse error")
+    if re.search(
+        r"(?:^|[;&|()\s])(?:sudo\s+)?(?:\S*/)?(?:rm|rmdir|shred|truncate)(?:\s|$)",
+        command.casefold(),
+    ):
+        return CommandClassification(argv, "destructive", True, "destructive command")
+    if re.search(r"\bgit\s+(?:reset|clean|gc)\b", command):
+        return CommandClassification(argv, "destructive", True, "destructive Git command")
     if _has_shell_syntax(command, argv):
-        return CommandClassification(argv, "shell-composed or unknown", True, "shell syntax")
+        return _classify_pipeline(command, argv)
+    return _classify_argv(argv, command)
+
+
+def _classify_pipeline(command: str, argv: list[str]) -> CommandClassification:
+    """Recognize only read pipelines; all evaluation and control syntax fails closed."""
+    unknown = CommandClassification(argv, "shell-composed or unknown", True, "shell syntax")
+    if any(char in command for char in "$`\n\r"):
+        return unknown
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;<>()")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return unknown
+    segments: list[list[str]] = [[]]
+    i = 0
+    while i < len(tokens):
+        if tokens[i : i + 3] == ["2", ">", "/dev/null"]:
+            i += 3
+            continue
+        token = tokens[i]
+        if token == "|":
+            if not segments[-1]:
+                return unknown
+            segments.append([])
+        elif token and all(char in "|&;<>()" for char in token):
+            return unknown
+        else:
+            segments[-1].append(token)
+        i += 1
+    if not segments[-1]:
+        return unknown
+    classifications = [_classify_argv(part, shlex.join(part)) for part in segments]
+    if any(item.risk == "destructive" for item in classifications):
+        return CommandClassification(argv, "destructive", True, "destructive pipeline")
+    if all(item.risk == "read-only inspection" for item in classifications):
+        return CommandClassification(argv, "read-only inspection", True, "read-only pipeline")
+    return unknown
+
+
+def _classify_argv(argv: list[str], command: str) -> CommandClassification:
     name = Path(argv[0]).name
+    if "/" in argv[0] and Path(argv[0]).parent not in {Path("/bin"), Path("/usr/bin")}:
+        return CommandClassification(
+            argv, "shell-composed or unknown", False, "non-system executable"
+        )
     if name in SHELL_EXECUTABLES and "-c" in argv:
         command_index = argv.index("-c") + 1
         if command_index < len(argv):
@@ -195,9 +308,27 @@ def classify_command(command: str) -> CommandClassification:
         ):
             risk, reason = "workspace-writing", "git output file"
     elif name == "find" and any(
-        token in {"-delete", "-exec", "-execdir", "-ok", "-okdir"} for token in argv
+        token
+        in {
+            "-delete",
+            "-exec",
+            "-execdir",
+            "-ok",
+            "-okdir",
+            "-fprint",
+            "-fprint0",
+            "-fprintf",
+            "-fls",
+        }
+        for token in argv
     ):
         risk, reason = "destructive", "find action"
+    elif name == "sort" and any(
+        token.startswith(("-o", "--output", "--compress-program"))
+        or (token.startswith("-") and not token.startswith("--") and "o" in token)
+        for token in argv[1:]
+    ):
+        risk, reason = "workspace-writing", "sort output or subprocess"
     elif name in READ_ONLY_COMMANDS:
         risk, reason = "read-only inspection", name
     elif name in DESTRUCTIVE_COMMANDS:
@@ -243,7 +374,7 @@ class Workspace:
         out = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=GIT_TIMEOUT)
         if out.returncode != 0:
             raise GitCommandError(argv, out.returncode, out.stdout, out.stderr)
-        return (out.stdout + out.stderr).strip()
+        return out.stdout if "-z" in args else (out.stdout + out.stderr).strip()
 
     def _status_paths(self) -> list[str]:
         """Return literal dirty paths without C-style quoting ambiguities."""
@@ -279,8 +410,8 @@ class Workspace:
             if self._git("status", "--porcelain"):
                 self.write_enabled = False
                 return (
-                    "WORKING TREE IS DIRTY — commit or stash your changes first; "
-                    "klaude will not mix its edits with yours"
+                    "WORKING TREE IS DIRTY — existing changes belong to the user; "
+                    "Klaude will stay read-only until the user resolves them"
                 )
             branch = f"klaude/{task_slug}"
             existing = self._git("branch", "--list", branch)
@@ -296,7 +427,9 @@ class Workspace:
     def _require_write_enabled(self) -> None:
         if not self.write_enabled:
             raise PermissionError(
-                "working tree is dirty; commit or stash your changes before AI edits"
+                "working tree is dirty; user-owned changes are protected. Only the user may "
+                "resolve this state. Do not commit, stash, reset, or clean their changes. "
+                "Continue with read-only inspection."
             )
 
     def _require_clean_repo(self) -> None:
@@ -304,8 +437,8 @@ class Workspace:
         if self._is_repo() and self._git("status", "--porcelain"):
             self.write_enabled = False
             raise PermissionError(
-                "working tree changed after Klaude started; commit or stash those changes "
-                "before AI edits"
+                "working tree changed after Klaude started; user-owned changes are protected. "
+                "Only the user may resolve this state; continue with read-only inspection."
             )
 
     @contextmanager
@@ -411,6 +544,10 @@ class Workspace:
                 continue
             candidate = token.split("=", 1)[1] if token.startswith("-") and "=" in token else token
             candidate_path = Path(candidate)
+            if candidate.startswith("~"):
+                raise PermissionError(
+                    "shell home expansion is isolated; use storage_usage for home storage totals"
+                )
             if self._is_sensitive_path(candidate_path):
                 raise PermissionError(f"shell access to secret file denied: {candidate}")
             if candidate.startswith("/"):
@@ -422,8 +559,22 @@ class Workspace:
                 path = (self.root / candidate).resolve()
                 if not path.is_relative_to(self.root):
                     raise PermissionError(f"shell path escapes workspace: {candidate}")
+            if any(char in candidate for char in "*?["):
+                for match in glob.iglob(str(self.root / candidate)):
+                    path = Path(match).resolve()
+                    if (
+                        not path.is_relative_to(self.root)
+                        or self._is_sensitive_path(path)
+                        or Path(match).name.startswith("-")
+                    ):
+                        raise PermissionError("shell glob includes a protected or outside path")
 
     # --- tool implementations ---------------------------------------------
+    def preflight_mutation(self, path: str | None = None) -> None:
+        self._require_clean_repo()
+        if path is not None and self._is_sensitive_path(self._jail(path)):
+            raise PermissionError("file mutation of a secret path is denied")
+
     def read_file(self, path: str) -> str:
         target = self._jail(path)
         if self._is_sensitive_path(target):
@@ -431,16 +582,19 @@ class Workspace:
         text = target.read_text()
         return text[:MAX_READ] + ("\n...[truncated]" if len(text) > MAX_READ else "")
 
-    def write_file(self, path: str, content: str) -> str:
+    def write_file(self, path: str, content: str) -> dict:
         with self._mutation_lock():
             self._require_clean_repo()
             p = self._jail(path)
+            before = p.read_text() if p.exists() else ""
+            if p.exists() and before == content:
+                return _edit_result(path, before, content, f"unchanged {path}")
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content)
             self._commit(f"write {path}", p)
-        return f"wrote {len(content)} chars to {path}"
+        return _edit_result(path, before, content, f"wrote {len(content)} chars to {path}")
 
-    def edit_file(self, path: str, old_str: str, new_str: str) -> str:
+    def edit_file(self, path: str, old_str: str, new_str: str) -> str | dict:
         with self._mutation_lock():
             self._require_clean_repo()
             p = self._jail(path)
@@ -450,9 +604,11 @@ class Workspace:
                 return "error: old_str not found in file"
             if n > 1:
                 return f"error: old_str appears {n} times — make it unique"
+            if old_str == new_str:
+                return _edit_result(path, text, text, f"unchanged {path}")
             p.write_text(text.replace(old_str, new_str, 1))
             self._commit(f"edit {path}", p)
-        return f"edited {path}"
+        return _edit_result(path, text, text.replace(old_str, new_str, 1), f"edited {path}")
 
     def list_dir(self, path: str = ".") -> str:
         p = self._jail(path)
@@ -488,11 +644,33 @@ class Workspace:
         text = self._redact(out.stdout.strip())
         return text[:10_000] if text else "(no matches)"
 
-    def run_shell(self, command: str) -> str:
+    def preflight_shell(self, command: str) -> None:
         classification = classify_command(command)
+        if not classification.argv:
+            raise ValueError("invalid shell command")
         self._require_command_allowed(classification)
         self._validate_command_paths(classification.argv)
-        argv = ["/bin/bash", "-lc", command] if classification.uses_shell else classification.argv
+        if classification.risk != "read-only inspection":
+            self._require_clean_repo()
+        if classification.uses_shell:
+            syntax = subprocess.run(
+                ["/bin/bash", "--noprofile", "--norc", "-n", "-c", command],
+                env={"PATH": "/usr/bin:/bin"},
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if syntax.returncode:
+                raise ValueError("invalid shell syntax; no command executed")
+
+    def run_shell(self, command: str) -> str:
+        self.preflight_shell(command)
+        classification = classify_command(command)
+        argv = (
+            ["/bin/bash", "--noprofile", "--norc", "-o", "pipefail", "-c", command]
+            if classification.uses_shell
+            else classification.argv
+        )
         writable = classification.risk != "read-only inspection"
         lock = self._mutation_lock() if writable else nullcontext()
         with lock:
@@ -503,6 +681,7 @@ class Workspace:
                     name: value
                     for name, value in os.environ.items()
                     if not SENSITIVE_ENV_NAME_RE.search(name)
+                    and name not in {"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "CDPATH"}
                 }
                 env = {
                     **safe_environment,
@@ -511,6 +690,24 @@ class Workspace:
                     "XDG_CACHE_HOME": f"{temporary}/cache",
                     "XDG_CONFIG_HOME": f"{temporary}/config",
                 }
+                env.pop("VIRTUAL_ENV", None)
+                env.pop("PYTHONHOME", None)
+                env.pop("PYTHONPATH", None)
+                env.pop("UV_PROJECT_ENVIRONMENT", None)
+                # Prefer toolchains owned by the active workspace, then a
+                # deterministic system path. User and launcher virtualenv bins
+                # live outside the Landlock policy and must never win resolution.
+                workspace_bins = [
+                    path
+                    for path in (
+                        self.root / ".venv" / "bin",
+                        self.root / "node_modules" / ".bin",
+                    )
+                    if path.is_dir()
+                ]
+                env["PATH"] = ":".join(
+                    [*(str(path) for path in workspace_bins), "/usr/local/bin", "/usr/bin", "/bin"]
+                )
                 sandbox_argv = [
                     sys.executable,
                     "-m",
@@ -552,7 +749,7 @@ class Workspace:
             return f"git error: {exc}"
 
     def git_commit(self, message: str) -> str:
-        self._require_write_enabled()
+        self._require_clean_repo()
         before = ""
         try:
             before = self._git("rev-parse", "HEAD")
@@ -579,12 +776,21 @@ class Workspace:
 
 
 def build_tools(ws: Workspace) -> list[Tool]:
+    from .diagnostics import storage_usage
+
     S = {"type": "string"}
 
     def obj(props: dict, required: list[str]) -> dict:
         return {"type": "object", "properties": props, "required": required}
 
     return [
+        Tool(
+            "storage_usage",
+            "Inspect OS drive capacity and bounded storage totals for fixed "
+            "system directories and this account's home. Metadata only; no file contents.",
+            obj({}, []),
+            storage_usage,
+        ),
         Tool(
             "read_file", "Read a file from the workspace.", obj({"path": S}, ["path"]), ws.read_file
         ),
@@ -607,6 +813,7 @@ def build_tools(ws: Workspace) -> list[Tool]:
             "Create or overwrite a file with content.",
             obj({"path": S, "content": S}, ["path", "content"]),
             ws.write_file,
+            preflight=lambda a: ws.preflight_mutation(a["path"]),
             detail=lambda a: f"write {a.get('path')} ({len(a.get('content', ''))} chars)",
         ),
         Tool(
@@ -614,6 +821,7 @@ def build_tools(ws: Workspace) -> list[Tool]:
             "Edit a file by replacing an exact unique string with a new string.",
             obj({"path": S, "old_str": S, "new_str": S}, ["path", "old_str", "new_str"]),
             ws.edit_file,
+            preflight=lambda a: ws.preflight_mutation(a["path"]),
             detail=lambda a: f"edit {a.get('path')}: '{str(a.get('old_str'))[:60]}...'",
         ),
         Tool(
@@ -621,6 +829,7 @@ def build_tools(ws: Workspace) -> list[Tool]:
             "Run a command in the workspace. Returns exit code and output.",
             obj({"command": S}, ["command"]),
             ws.run_shell,
+            preflight=lambda a: ws.preflight_shell(a["command"]),
             detail=lambda a: (
                 f"$ {a.get('command')}\nrisk={classify_command(str(a.get('command', ''))).risk}"
             ),
@@ -632,6 +841,7 @@ def build_tools(ws: Workspace) -> list[Tool]:
             "Commit all current changes with a message.",
             obj({"message": S}, ["message"]),
             ws.git_commit,
+            preflight=lambda a: ws._require_clean_repo(),
             detail=lambda a: f"git commit -m '{a.get('message')}'",
         ),
     ]

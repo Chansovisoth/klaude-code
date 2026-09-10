@@ -7,6 +7,8 @@ from klaude_core.config import Config
 from klaude_web.facade import Web
 from klaude_web.providers import (
     AmbiguityType,
+    BraveAPIProvider,
+    BraveWebProvider,
     DiscoveryEvaluation,
     EvidenceLevel,
     ExaProvider,
@@ -1537,7 +1539,7 @@ def test_all_searx_fanout_failures_raise_complete_failure(monkeypatch):
         searx_search_detailed("http://searx.test", "FlazeSlayer", 5)
 
 
-def test_quality_search_attempts_google_first_when_configured():
+def test_quality_search_attempts_keyless_provider_before_configured_google():
     cfg = _cfg_with_google()
     calls = []
     google = FakeProvider(
@@ -1562,9 +1564,9 @@ def test_quality_search_attempts_google_first_when_configured():
         registry=_registry(cfg, [google, ddgs]),
     )
 
-    assert response.providers_attempted == ["google"]
+    assert response.providers_attempted == ["ddgs", "google"]
     assert response.providers_succeeded == ["google"]
-    assert calls == ["google"]
+    assert calls == ["ddgs", "google"]
 
 
 def test_exa_status_reflects_configured_key_and_priority():
@@ -1578,6 +1580,184 @@ def test_exa_status_reflects_configured_key_and_priority():
     assert statuses["exa"].enabled is True
     assert statuses["exa"].state == ProviderState.AVAILABLE
     assert statuses["exa"].priority == 1
+
+
+def test_brave_api_status_is_unconfigured_without_key(monkeypatch):
+    monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+    cfg = Config()
+    registry = ProviderRegistry(cfg, state_store=ProviderStateStore(None))
+    status = {item.name: item for item in registry.statuses()}["brave_api"]
+
+    assert status.configured is False
+    assert status.state == ProviderState.UNCONFIGURED
+    assert status.unavailable_reason == "missing BRAVE_SEARCH_API_KEY"
+
+
+def test_keyless_brave_search_uses_ddgs_brave_backend(monkeypatch):
+    cfg = Config()
+    provider = BraveWebProvider(cfg)
+    query = SearchQuery(
+        text="Godot release notes",
+        intent=SearchIntent.RECENT_SOFTWARE,
+        freshness="30d",
+        result_limit=5,
+    )
+    calls: list[dict] = []
+
+    class FakeDDGS:
+        def __init__(self, *, timeout):
+            calls.append({"timeout": timeout})
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def text(self, query, **kwargs):
+            calls.append({"query": query, **kwargs})
+            return [
+                {
+                    "title": "Godot release notes",
+                    "href": "https://godotengine.org/article/",
+                    "body": "Official release information.",
+                }
+            ]
+
+    monkeypatch.setattr(provider, "_ddgs_class", lambda: FakeDDGS)
+
+    response = provider.search(query)
+
+    assert calls[1]["backend"] == "brave"
+    assert calls[1]["timelimit"] == "m"
+    assert response.providers_succeeded == ["brave"]
+    assert response.results[0]["provider"] == "brave"
+    assert response.provider_metadata["brave"] == {
+        "transport": "ddgs",
+        "backend": "brave",
+        "estimated_cost": 0.0,
+    }
+
+
+def test_brave_search_uses_official_api_and_normalizes_results(monkeypatch):
+    cfg = Config()
+    cfg.brave_search_api_key = "secret-brave-key"
+    cfg.web_providers["brave_api"].timeout_seconds = 9
+    now = datetime(2026, 9, 8, tzinfo=UTC)
+    provider = BraveAPIProvider(cfg, now=lambda: now)
+    query = SearchQuery(
+        text="Godot 4.7 release",
+        intent=SearchIntent.RECENT_SOFTWARE,
+        language="en-US",
+        country="KH",
+        freshness="90d",
+        exclude_domains=["spam.example"],
+        result_limit=50,
+    )
+    calls = []
+
+    def fake_get(url, headers, params, timeout):
+        calls.append({"url": url, "headers": headers, "params": params, "timeout": timeout})
+        return httpx.Response(
+            200,
+            json={
+                "query": {
+                    "original": "Godot 4.7 release",
+                    "altered": "Godot 4.7 release date",
+                    "more_results_available": True,
+                },
+                "web": {
+                    "results": [
+                        {
+                            "title": "Godot 4.7 released",
+                            "url": "https://godotengine.org/article/godot-4-7-released/",
+                            "description": "Godot 4.7 is now available.",
+                            "extra_snippets": [
+                                "The release includes editor and rendering improvements."
+                            ],
+                            "page_age": "2026-09-01T00:00:00Z",
+                            "age": "1 week ago",
+                            "language": "en",
+                        }
+                    ]
+                },
+            },
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr("klaude_web.providers.httpx.get", fake_get)
+
+    response = provider.search(query)
+
+    assert calls == [
+        {
+            "url": "https://api.search.brave.com/res/v1/web/search",
+            "headers": {
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip",
+                "X-Subscription-Token": "secret-brave-key",
+            },
+            "params": {
+                "q": "Godot 4.7 release -site:spam.example",
+                "count": 20,
+                "safesearch": "moderate",
+                "spellcheck": True,
+                "text_decorations": False,
+                "extra_snippets": True,
+                "result_filter": "web",
+                "country": "KH",
+                "search_lang": "en",
+                "freshness": "2026-06-10to2026-09-08",
+            },
+            "timeout": 9,
+        }
+    ]
+    assert "secret-brave-key" not in calls[0]["params"].values()
+    assert response.providers_succeeded == ["brave_api"]
+    assert response.results[0]["provider"] == "brave_api"
+    assert response.results[0]["published_at"].startswith("2026-09-01")
+    assert "rendering improvements" in response.results[0]["snippet"]
+    assert response.provider_metadata["brave_api"]["reported_search_count"] == 1
+    assert response.provider_metadata["brave_api"]["altered_query"] == "Godot 4.7 release date"
+
+
+def test_brave_quota_error_uses_rate_limit_reset_and_redacts_key(monkeypatch):
+    cfg = Config()
+    cfg.brave_search_api_key = "secret-brave-key"
+    cfg.web_search.max_attempts_per_provider = 1
+    now = datetime(2026, 9, 8, tzinfo=UTC)
+    provider = BraveAPIProvider(cfg, now=lambda: now)
+    query = build_search_query("current Godot version", cfg, 5)
+
+    def fake_get(url, headers, params, timeout):
+        return httpx.Response(
+            429,
+            headers={"X-RateLimit-Reset": "1, 1000"},
+            json={
+                "error": {
+                    "code": "QUOTA_LIMITED",
+                    "detail": "quota exhausted for secret-brave-key",
+                }
+            },
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr("klaude_web.providers.httpx.get", fake_get)
+
+    with pytest.raises(ProviderSearchError) as exc_info:
+        provider.search(query)
+
+    assert exc_info.value.state == ProviderState.QUOTA_EXHAUSTED
+    assert exc_info.value.retry_at == datetime(2026, 9, 8, 0, 0, 1, tzinfo=UTC)
+    assert "secret-brave-key" not in str(exc_info.value)
+
+
+def test_brave_provider_directive_is_removed_from_search_terms():
+    directive = parse_provider_directive("Search Godot release notes using Brave.")
+
+    assert directive.provider == "brave"
+    assert directive.strict is True
+    assert directive.cleaned_user_query == "Search Godot release notes."
 
 
 def test_exa_status_is_unconfigured_without_key(monkeypatch):
@@ -2481,6 +2661,7 @@ def test_ddgs_is_attempted_before_searxng():
 
 def test_searxng_is_not_called_after_sufficient_google_evidence():
     cfg = _cfg_with_google()
+    cfg.web_search.provider_order = ["google", "searxng"]
     calls = []
     google = FakeProvider(
         "google",
@@ -2972,6 +3153,7 @@ def test_failure_from_replaced_api_key_does_not_count_toward_cooldown():
 
 def test_weak_relevance_falls_back_without_marking_provider_unhealthy():
     cfg = _cfg_with_google()
+    cfg.web_search.provider_order = ["google", "ddgs"]
     store = ProviderStateStore(None)
     calls = []
     google = FakeProvider(

@@ -70,13 +70,15 @@ def _resolve_data_dir() -> Path:
 CONFIG_DIR = _resolve_config_dir()
 DATA_DIR = _resolve_data_dir()
 DEFAULT_WEB_PROVIDER_ORDER = [
+    "brave",
+    "ddgs",
+    "searxng",
+    "brave_api",
     "google",
     "parallel",
     "exa",
-    "ddgs",
     "tavily",
     "firecrawl",
-    "searxng",
 ]
 
 TIER_PRESETS: dict[str, dict[str, str]] = {
@@ -348,6 +350,8 @@ class OllamaConfig:
 
 def _default_web_providers() -> dict[str, WebProviderConfig]:
     return {
+        "brave": WebProviderConfig(),
+        "brave_api": WebProviderConfig(api_key_env="BRAVE_SEARCH_API_KEY"),
         "google": WebProviderConfig(api_key_env="GEMINI_API_KEY"),
         "parallel": WebProviderConfig(api_key_env="PARALLEL_API_KEY"),
         "tavily": WebProviderConfig(api_key_env="TAVILY_API_KEY"),
@@ -366,9 +370,10 @@ class Config:
     crawl4ai_url: str = ""  # empty = tier disabled, fall through to trafilatura
     crawl4ai_api_key: str = ""
     crawler_user_agent: str = "KlaudeBot/0.2 (+local documentation crawler)"
-    web_provider: str = "quality"  # quality | auto | local | exa
+    web_provider: str = "quality"  # quality | auto | local | brave | brave_api | exa
     gemini_api_key: str = ""
     openai_api_key: str = ""
+    brave_search_api_key: str = ""
     parallel_api_key: str = ""
     tavily_api_key: str = ""
     firecrawl_api_key: str = ""
@@ -381,7 +386,7 @@ class Config:
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     # permission policy per tool: ask | allow | deny
     permissions: dict[str, str] = field(default_factory=dict)
-    max_agent_steps: int = 8
+    max_agent_steps: int = 20
     max_code_continuations: int = 2
     max_code_repairs: int = 2
     retrieval_k: int = 6
@@ -543,6 +548,7 @@ class Config:
 
 DEFAULT_PERMISSIONS = {
     "run_shell": "ask",
+    "storage_usage": "ask",
     "write_file": "ask",
     "edit_file": "ask",
     "git_commit": "ask",
@@ -557,8 +563,10 @@ DEFAULT_PERMISSIONS = {
     "weather_lookup": "allow",
     "web_search": "allow",
     "fetch_url": "allow",
+    "http_probe": "allow",
     "code_search": "allow",
     "crawl_site": "ask",
+    "learn_source": "ask",
     "huggingface_search": "allow",
     "huggingface_details": "allow",
     "huggingface_readme": "allow",
@@ -566,6 +574,7 @@ DEFAULT_PERMISSIONS = {
     "search_sessions": "allow",
     "list_recent_sessions": "allow",
     "list_commands": "allow",
+    "request_user_input": "allow",
     "remember_fact": "ask",
 }
 
@@ -635,8 +644,10 @@ def load_config() -> Config:
     web = user.get("web", {})
     cloud = user.get("cloud", {})
     cfg.web_provider = web.get("provider", os.environ.get("KLAUDE_WEB_PROVIDER", cfg.web_provider))
-    if cfg.web_provider not in {"quality", "local", "exa", "auto"}:
-        raise ValueError("web.provider must be one of: quality, local, exa, auto")
+    if cfg.web_provider not in {"quality", "local", "brave", "brave_api", "exa", "auto"}:
+        raise ValueError(
+            "web.provider must be one of: quality, local, brave, brave_api, exa, auto"
+        )
     billing = web.get("billing", {})
     cfg.web_billing.mode = billing.get("mode", cfg.web_billing.mode)
     if cfg.web_billing.mode not in {
@@ -944,6 +955,13 @@ def load_config() -> Config:
     cfg.openai_api_key = str(
         cloud.get("openai_api_key", _env_value("OPENAI_API_KEY", cfg.openai_api_key)) or ""
     ).strip()
+    cfg.brave_search_api_key = str(
+        web.get(
+            "brave_search_api_key",
+            _env_value("BRAVE_SEARCH_API_KEY", cfg.brave_search_api_key),
+        )
+        or ""
+    ).strip()
     cfg.parallel_api_key = web.get(
         "parallel_api_key",
         _env_value("PARALLEL_API_KEY", cfg.parallel_api_key),
@@ -985,7 +1003,7 @@ def load_config() -> Config:
     cfg.permissions = {**DEFAULT_PERMISSIONS, **user.get("permissions", {})}
 
     agent = user.get("agent", {})
-    cfg.max_agent_steps = max(1, min(20, int(agent.get("max_steps", cfg.max_agent_steps))))
+    cfg.max_agent_steps = max(1, min(64, int(agent.get("max_steps", cfg.max_agent_steps))))
     cfg.max_code_continuations = max(
         0, min(3, int(agent.get("max_code_continuations", cfg.max_code_continuations)))
     )

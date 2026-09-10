@@ -18,6 +18,7 @@ from .fetch import (
     canonical_url_key,
     canonicalize_public_url,
     fetch_page_detailed,
+    probe_public_url,
     resolve_public_url,
     validate_public_url,
 )
@@ -167,6 +168,52 @@ class Web:
 
     def fetch(self, url: str) -> str:
         return str(self.fetch_detailed(url).get("content", ""))
+
+    def probe_detailed(self, url: str, method: str = "HEAD") -> dict:
+        """Return bounded HTTP metadata without reading page content."""
+        try:
+            result = probe_public_url(
+                url,
+                method,
+                timeout_seconds=min(self.cfg.web_fetch.timeout_seconds, 10.0),
+                max_redirects=self.cfg.web_fetch.max_redirects,
+            )
+        except UnsafeURL as exc:
+            return {
+                "requested_url": str(url or ""),
+                "final_url": "",
+                "method": str(method or "HEAD").upper(),
+                "status": "failed",
+                "reachable": False,
+                "failure": {"class": "unsafe_url", "reason": str(exc), "transient": False},
+            }
+        except (FetchPageError, ValueError) as exc:
+            return {
+                "requested_url": str(url or ""),
+                "final_url": getattr(exc, "final_url", ""),
+                "method": str(method or "HEAD").upper(),
+                "status": "failed",
+                "reachable": False,
+                "redirect_count": int(getattr(exc, "redirect_count", 0) or 0),
+                "failure": {
+                    "class": getattr(exc, "failure_class", "invalid_request"),
+                    "reason": str(exc),
+                    "transient": bool(getattr(exc, "transient", False)),
+                },
+            }
+        return {
+            "requested_url": result.requested_url,
+            "final_url": result.final_url,
+            "method": result.method,
+            "status": "succeeded",
+            "reachable": result.reachable,
+            "status_code": result.status_code,
+            "ok": 200 <= result.status_code < 400,
+            "content_type": result.content_type,
+            "content_length": result.content_length,
+            "redirect_count": result.redirect_count,
+            "elapsed_ms": result.elapsed_ms,
+        }
 
     def fetch_detailed(self, url: str) -> dict:
         try:

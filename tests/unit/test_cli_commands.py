@@ -3,6 +3,7 @@ import inspect
 import json
 import subprocess
 import threading
+import time
 from datetime import datetime
 from importlib.metadata import version as package_version
 from io import StringIO
@@ -19,12 +20,15 @@ from klaude_cli.main import (
     DEFAULT_TUI_THEME,
     ESCAPE_SEQUENCE_TIMEOUT,
     FETCH_URL_TOOL_DESCRIPTION,
+    HTTP_PROBE_TOOL_DESCRIPTION,
     KITTY_KEYBOARD_PROTOCOL_OFF,
     KITTY_KEYBOARD_PROTOCOL_ON,
+    LARGE_PASTE_CHARACTER_THRESHOLD,
     LIST_COMMANDS_TOOL_DESCRIPTION,
     MAX_INPUT_HEIGHT,
     MIN_INPUT_HEIGHT,
     SHIFT_ENTER_SEQUENCES,
+    TERMINAL_CLEAR_SEQUENCE,
     TEXT_THEME_PREVIEW_BLOCK,
     TUI_THEME_LABELS,
     TUI_THEME_STYLES,
@@ -36,39 +40,63 @@ from klaude_cli.main import (
     ChatUIState,
     CommandSurface,
     InputPlaceholderProcessor,
+    PendingChatCommand,
+    PendingChatTurn,
     PersistentChatTUI,
     TranscriptLexer,
     TUIAppearance,
+    UserInputBroker,
+    _active_tool_status,
+    _activity_updates_enabled,
+    _activity_value,
+    _agent_configuration_context,
+    _agent_context_window,
     _append_tool_capabilities,
     _apply_runtime_context_to_search_config,
     _apply_runtime_preferences,
     _apply_session_effort,
     _apply_tool_availability_preferences,
     _apply_web_provider_preferences,
+    _ask_permission,
     _bounded_result_count,
+    _chat_status,
     _chat_toolbar,
+    _codex_usage_rows,
     _command_reference_context,
     _command_reference_result,
+    _completed_tool_activity,
     _control_ollama_service,
     _control_ollama_service_with_sudo,
     _diff_syntax_lines,
+    _edit_summary,
     _fenced_code_lines,
+    _format_recent_sessions,
     _format_search_response,
     _format_web_results,
     _handle_command_reference_request,
     _handle_unknown_slash_command,
+    _http_probe_display_lines,
+    _http_probe_tool_result,
+    _inferred_knowledge_library,
+    _init_request,
     _is_termux_terminal,
     _iter_online_docs_entries,
     _klaude_logo,
     _knowledge_context_chunk_count,
+    _knowledge_ingestion_intent,
     _knowledge_libraries_count,
+    _learn_source_permission_detail,
+    _learn_source_preflight,
+    _learn_source_tool_result,
     _load_last_chat_model,
     _load_runtime_preferences,
     _load_tui_appearance,
     _message_divider,
     _migrate_runtime_device_preference,
     _mode_from_permission,
+    _normalized_user_input_options,
     _online_docs_file,
+    _pending_input_request_from_turns,
     _plan_command,
     _print_assistant_text,
     _print_trace,
@@ -76,12 +104,16 @@ from klaude_cli.main import (
     _read_chat_input,
     _read_plain_chat_input,
     _render,
+    _resolve_requested_chat_model,
+    _restored_transcript,
     _runtime_status_summary,
     _save_last_chat_model,
     _save_runtime_preferences,
     _save_tui_appearance,
     _search_execution_metadata,
     _select_tool_names,
+    _status_columns,
+    _styled_recent_sessions,
     _system_prompt,
     _tool_availability_preferences,
     _tui_style,
@@ -102,7 +134,15 @@ from klaude_cli.main import (
     sessions_delete,
     system_info,
 )
-from klaude_core import Agent, AgentEvent, PermissionGate, Tool
+from klaude_core import (
+    Agent,
+    AgentEvent,
+    CodexAuthError,
+    ModelCapabilities,
+    ModelInfo,
+    PermissionGate,
+    Tool,
+)
 from klaude_core.config import DEFAULT_PERMISSIONS, Config
 from klaude_core.memory import Memory
 from klaude_core.runtime_context import (
@@ -127,7 +167,10 @@ from rich.text import Text
 
 
 def test_system_prompt_points_to_deterministic_command_reference(tmp_path):
-    prompt = _system_prompt(Memory(tmp_path / "memory.md", tmp_path / "sessions.db"))
+    prompt = _system_prompt(
+        Memory(tmp_path / "memory.md", tmp_path / "sessions.db"),
+        configuration_context="- Tool registry: 3/4 enabled",
+    )
 
     assert "Usage: klaude [OPTIONS] COMMAND [ARGS]..." not in prompt
     assert "deterministic command-reference router" in prompt
@@ -153,6 +196,118 @@ def test_system_prompt_points_to_deterministic_command_reference(tmp_path):
     assert "list_files" not in COMMAND_REFERENCE
     assert "run_shell_command" not in COMMAND_REFERENCE
     assert "Runtime context:" in prompt
+    assert "Active Klaude configuration:" in prompt
+    assert "Tool registry: 3/4 enabled" in prompt
+
+
+def test_agent_configuration_context_is_complete_dynamic_and_secret_free(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    cfg = Config()
+    cfg.gemini_api_key = "super-secret-gemini-key"
+    cfg.web_providers["brave"].enabled = True
+    cfg.web_providers["google"].enabled = False
+    cfg.web_search.result_validation_enabled = False
+    cfg.retrieval_validation_enabled = True
+    preferences_path = tmp_path / "chat-preferences.json"
+    preferences_path.write_text(
+        json.dumps(
+            {
+                "runtime_device_mode": "cpu-only",
+                "composer_mode": "vim",
+                "display": {"activity_updates": False},
+            }
+        )
+    )
+    appearance_path = tmp_path / "appearance.json"
+    appearance_path.write_text(
+        json.dumps(
+            {
+                "theme": {"interface": "crimson-red", "text": "monokai"},
+                "input_field": {"border": False, "min_height": 6, "max_height": 10},
+            }
+        )
+    )
+    (tmp_path / "AGENTS.md").write_text("secret repository instructions")
+    agent = SimpleNamespace(
+        model="qwen3-coder:30b",
+        model_info=SimpleNamespace(backend="ollama", ref="ollama/qwen3-coder:30b"),
+        reasoning_mode="thinking",
+        reasoning_effort="high",
+        ollama_think="high",
+        ollama_code_think="medium",
+        plan_mode=True,
+        ollama_options={"num_ctx": 16_384, "num_thread": 8, "unknown_secret": "do-not-show"},
+        ollama_code_options={"temperature": 0.2},
+        tools={"read_file": object(), "web_search": object(), "write_file": object()},
+        disabled_tool_names={"write_file"},
+        gate=SimpleNamespace(
+            policies={"read_file": "allow", "web_search": "ask", "write_file": "deny"}
+        ),
+        tool_config=cfg,
+        workdir=tmp_path,
+        workspace=SimpleNamespace(repo_root=tmp_path),
+    )
+
+    context = _agent_configuration_context(
+        agent,
+        memory,
+        preferences_path=preferences_path,
+        appearance_path=appearance_path,
+    )
+
+    assert "Model: ollama/qwen3-coder:30b (backend=ollama)" in context
+    assert "mode=thinking; effort=chat high · code medium; plan_mode=on" in context
+    assert "Tool registry: 2/3 enabled; enabled=read_file, web_search" in context
+    assert "allow=1 (read_file); ask=1 (web_search); deny=1 (write_file)" in context
+    assert "Web provider toggles: 8/9 on" in context
+    assert "Web providers off: google" in context
+    assert "web_search=off; knowledge_search=on" in context
+    assert "Repository guidance: detected but not yet injected" in context
+    assert "device=cpu-only; composer=vim; activity_updates=off" in context
+    assert "interface=Crimson Red; syntax=Monokai; input_border=off; input_height=6-10" in context
+    assert "super-secret-gemini-key" not in context
+    assert "do-not-show" not in context
+    assert "secret repository instructions" not in context
+
+    agent.disabled_tool_names.clear()
+    agent.reasoning_mode = "standard"
+    cfg.web_providers["google"].enabled = True
+    refreshed = _agent_configuration_context(agent, memory)
+
+    assert "mode=standard; effort=standard; plan_mode=on" in refreshed
+    assert "Tool registry: 3/3 enabled" in refreshed
+    assert "Web provider toggles: 9/9 on" in refreshed
+    assert "Web providers off:" not in refreshed
+
+
+def test_cloud_context_uses_discovered_limit_and_hides_ollama_tuning(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    agent = SimpleNamespace(
+        model="gpt-5",
+        model_info=ModelInfo(
+            "openai_codex",
+            "gpt-5",
+            "GPT-5",
+            capabilities=ModelCapabilities(context_window=128_000),
+        ),
+        reasoning_mode="standard",
+        plan_mode=False,
+        ollama_options={"num_ctx": 8192, "num_gpu": -1},
+        ollama_code_options={"num_ctx": 4096},
+        tools={},
+        disabled_tool_names=set(),
+        gate=SimpleNamespace(policies={}, process_grants=set()),
+        workdir=tmp_path,
+        tool_config=None,
+    )
+
+    context = _agent_configuration_context(agent, memory)
+
+    assert _agent_context_window(agent) == 128_000
+    assert "Context window: 128,000 tokens" in context
+    assert "General request settings: provider/model defaults" in context
+    assert "num_ctx=8192" not in context
+    assert "num_gpu=-1" not in context
 
 
 def test_chat_input_preserves_a_multiline_prompt_as_one_turn():
@@ -205,6 +360,7 @@ def test_canonical_command_reference_preserves_sections_and_lines():
     assert "\n  /model" in reference
     assert "Select an available Cloud or Local chat model" in reference
     assert "\n  /effort" in reference
+    assert "\n  /start" in reference
     assert "\n  /restart" in reference
     assert "\n  /stop" in reference
     assert "\n  /refresh" in reference
@@ -223,7 +379,9 @@ def test_command_registry_contains_model_commands_separately():
     assert "/model" in usages
     assert "/model NAME" in usages
     assert "/models" not in usages
-    assert {"/vim", "/permissions [TOOL POLICY [save]]", "/settings [CATEGORY]"} <= usages
+    assert {"/init", "/vim", "/permission", "/settings [CATEGORY]"} <= usages
+    assert not any(usage.startswith("/permissions") for usage in usages)
+    assert "/debug_activity" not in usages
     assert "/nano" not in usages
 
 
@@ -463,6 +621,89 @@ def test_transcript_lexer_highlights_fenced_code_with_its_language():
     assert ("class:pygments.operator", "=") in fragments
 
 
+def test_edit_summary_renders_counts_syntax_and_replays():
+    text = _edit_summary(
+        [
+            {
+                "path": "demo.py",
+                "added": 1,
+                "removed": 1,
+                "lines": ["      1 - value = 1", "      1 + value = 2"],
+            },
+            {"path": "other.py", "added": 1, "removed": 0, "lines": []},
+        ],
+        elapsed_seconds=30,
+    )
+    assert "[edited] (30s) 2 files (+2 -1)" in text
+    assert "└ demo.py (+1 -1)" in text
+    fragments = TranscriptLexer().lex_document(Document(text))(3)
+    assert any(style.startswith("class:pygments") for style, _ in fragments)
+    assert fragments[0][0] == "#55d985"
+    restored = _restored_transcript(
+        "test", [{"role": "system", "content": {"event": "edit_summary", "text": text}}], 80
+    )
+    assert text in restored
+
+
+def test_live_activity_uses_original_braille_animation_and_static_style(monkeypatch):
+    tui = _fake_persistent_tui()
+    tui.running = True
+    monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: 0.0)
+    first = tui._status_fragments()[0]
+    monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: 0.1)
+    second = tui._status_fragments()[0]
+    assert first[0] == second[0] == "class:runtime_busy"
+    assert first[1] == " ⠋ WORKING "
+    assert second[1] == " ⠙ WORKING "
+    tui.running = False
+    assert tui._status_fragments()[0][0] == "class:runtime_text"
+
+
+def test_live_activity_uses_progressive_label_and_whole_turn_elapsed(monkeypatch):
+    tui = _fake_persistent_tui()
+    tui.running = True
+    tui.activity = "editing src/app.py"
+    tui._turn_started_at = 100.0
+    monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: 111.0)
+
+    status = "".join(text for _style, text in tui._status_fragments())
+
+    assert "⠋ EDITING" in status
+    assert "11s" in status
+    assert "[EDITING]" not in status
+    assert "src/app.py" not in status
+
+
+def test_quiet_running_command_transitions_to_waiting_after_threshold(monkeypatch):
+    tui = _fake_persistent_tui()
+    tui.running = True
+    tui.activity = "running pytest tests/unit"
+    tui._turn_started_at = 90.0
+    tui._activity_started_at = 100.0
+
+    monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: 104.9)
+    assert "RUNNING" in "".join(text for _style, text in tui._status_fragments())
+
+    monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: 105.0)
+    status = "".join(text for _style, text in tui._status_fragments())
+    assert "WAITING" in status
+    assert "15s" in status
+
+
+def test_permission_wait_uses_braille_footer_and_compact_elapsed(monkeypatch):
+    tui = _fake_persistent_tui()
+    tui.running = True
+    tui._turn_started_at = 40.0
+    tui._permission_request = {"tool": "run_shell"}
+    monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: 111.0)
+
+    status = "".join(text for _style, text in tui._status_fragments())
+
+    assert "⠋ WAITING" in status
+    assert "1m 11s" in status
+    assert "[WAITING]" not in status
+
+
 def test_transcript_lexer_highlights_git_diff_and_marks_the_patch_surface():
     document = Document(
         "Staged changes\n"
@@ -582,6 +823,7 @@ def test_resume_lists_all_sessions_in_columns_and_continues_selected_session(tmp
     for i in range(15):
         tui.memory.log_turn(f"saved-{i:02}", "user", f"Original session title {i}")
         tui.memory.log_turn(f"saved-{i:02}", "assistant", "Saved answer")
+    assert tui.memory.acquire_session_lease("saved-13", "other-client", "active-turn")
     tui.agent.restore_session = lambda turns: Agent.restore_session(tui.agent, turns)
     tui.agent.messages.append({"role": "user", "content": "unrelated current topic"})
     tui._set_input("/resume")
@@ -591,7 +833,16 @@ def test_resume_lists_all_sessions_in_columns_and_continues_selected_session(tmp
     assert len(tui._choice_values) == 16  # Every session plus cancel, no reset.
     first = tui._choice_values[0]
     assert first == "now        saved-14  Original session title 14"
+    assert tui._choice_values[1] == "now        saved-13  [ACTIVE] Original session title 13"
     assert first in tui._choice_fragments()[0][1]
+    fragments = tui._choice_fragments()
+    assert ("class:choice.active.edge", "[") in fragments
+    assert ("class:choice.active.word", "ACTIVE") in fragments
+    assert ("class:choice.active.edge", "]") in fragments
+    assert tui.memory.release_session_lease("saved-13", "other-client", "active-turn")
+    tui._refresh_resume_choices()
+    assert tui._choice_values[1] == "now        saved-13  Original session title 13"
+    assert tui._choice_index == 0
     tui._accept_choice()
 
     assert tui.session_id == "saved-14"
@@ -605,13 +856,47 @@ def test_resume_lists_all_sessions_in_columns_and_continues_selected_session(tmp
     assert len(tui.memory.load_session("saved-14")) == 2
     tui.agent.run = lambda _message: iter([AgentEvent("text", {"content": "Next answer"})])
     tui._run_turn("Follow-up", threading.Event())
-    assert tui.memory.load_session("saved-14")[-2:] == [
+    dialogue = [
+        turn
+        for turn in tui.memory.load_session("saved-14")
+        if turn["role"] in {"user", "assistant"}
+    ]
+    assert dialogue[-2:] == [
         {"role": "user", "content": "Follow-up"},
         {"role": "assistant", "content": "Next answer"},
     ]
 
 
-def test_resume_cancel_empty_missing_and_busy_preserve_session(tmp_path):
+def test_active_session_badge_uses_green_edges_and_dark_text():
+    style = _tui_style("autumn", "vscode-dark")
+    edge = style.get_attrs_for_style_str("class:choice.active.edge")
+    word = style.get_attrs_for_style_str("class:choice.active.word")
+
+    assert edge.color == edge.bgcolor == "55d985"
+    assert word.bgcolor == "55d985"
+    assert word.color != "55d985"
+
+
+def test_recent_session_formats_put_active_badge_before_name():
+    sessions = [
+        {
+            "date": "2026-09-09 12:00",
+            "session_id": "abc123",
+            "turns": 2,
+            "preview": "latest reply",
+            "title": "Parser investigation",
+            "active": True,
+        }
+    ]
+
+    expected = "2026-09-09 12:00  abc123  2 turns  [ACTIVE] Parser investigation"
+    assert _format_recent_sessions(sessions) == expected
+    styled = _styled_recent_sessions(sessions)
+    assert styled.plain == expected
+    assert any("55d985" in str(span.style) for span in styled.spans)
+
+
+def test_resume_cancel_empty_and_missing_preserve_session(tmp_path):
     tui = _fake_persistent_tui(tmp_path / "appearance.json")
     tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
     tui._open_resume()
@@ -622,14 +907,23 @@ def test_resume_cancel_empty_missing_and_busy_preserve_session(tmp_path):
     assert tui.session_id == "session-1"
     tui._resume_session("missing")
     assert "No saved session: missing" in tui.output.text
-    tui.running = True
-    tui._resume_session("saved")
-    tui.running = False
-    tui.pending.append("Queued instruction")
-    tui._resume_session("saved")
     assert tui.session_id == "session-1"
-    assert list(tui.pending) == ["Queued instruction"]
     assert tui.agent.messages == [{"role": "system", "content": "system prompt"}]
+
+
+def test_invalid_resume_target_does_not_interrupt_active_worker(tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui.running = True
+    tui.pending.append("Queued instruction")
+
+    tui._resume_session("missing")
+
+    assert tui.session_id == "session-1"
+    assert tui.running
+    assert not tui.cancel_requested.is_set()
+    assert list(tui.pending) == ["Queued instruction"]
+    assert "No saved session: missing" in tui.output.text
 
 
 def test_second_batch_chat_commands_show_status_memory_skills_and_recap(tmp_path, monkeypatch):
@@ -651,7 +945,7 @@ def test_second_batch_chat_commands_show_status_memory_skills_and_recap(tmp_path
     submit("/recap")
     submit("/compact")
     output = tui.output.text
-    assert "session: session-1" in output
+    assert "Session ID    session-1" in output
     assert "Prefer concise answers" in output
     assert "auto memory: off" in output
     assert "installed skills:" in output
@@ -687,8 +981,41 @@ def test_debug_label_previews_every_label_style_without_waiting_for_idle(tmp_pat
         "[status]",
         "[appearance]",
         "[runtime]",
-        "[permission · example]",
+        "[permission · run_shell]",
+        "[input · klaude]",
+        "[secret · ollama service]",
+        "[debug]",
+        "[composer]",
+        "[context]",
+        "[recap]",
+        "[memory]",
+        "[skills]",
+        "[diff]",
+        "[settings]",
+        "[session]",
+        "[export]",
+        "[hint]",
+        "[workspace]",
+        "[workspace listing]",
+        "[ollama]",
+        "[attached]",
+        "[queued]",
+        "[queued action]",
+        "[pending turns]",
+        "[steer queued]",
+        "[you · steer]",
+        "[worked]",
+        "[explored]",
+        "[edited]",
+        "[ran]",
+        "[unchanged]",
+        "[committed]",
+        "[answered]",
+        "[approved]",
+        "[denied]",
+        "[cancelled]",
         "[warning]",
+        "[interrupted]",
         "[interrupted at a safe boundary]",
         "[failed]",
         "[error]",
@@ -707,6 +1034,33 @@ def test_debug_label_rejects_arguments(tmp_path):
     tui._submit_buffer(steer=False)
 
     assert "[error] /debug_label takes no arguments." in tui.output.text
+
+
+def test_debug_label_includes_cycling_footer_preview_without_starting_ai(tmp_path, monkeypatch):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    clock = {"now": 100.0}
+    monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: clock["now"])
+    tui._set_input("/debug_label")
+
+    tui._submit_buffer(steer=False)
+
+    assert not tui.running
+    assert tui._debug_label_started_at == 100.0
+    assert "[status] Neutral session information" in tui.output.text
+    assert "worked for 1m 11s" in tui.output.text
+    status = "".join(text for _style, text in tui._status_fragments())
+    assert "⠋ WORKING" in status
+    assert "1m 11s" in status
+
+    clock["now"] = 102.1
+    status = "".join(text for _style, text in tui._status_fragments())
+    assert "⠙ EXPLORING" in status
+    assert "1m 13s" in status
+
+    tui._set_input("/debug_label")
+    tui._submit_buffer(steer=False)
+    assert tui._debug_label_started_at is None
+    assert "★ READY" in "".join(text for _style, text in tui._status_fragments())
 
 
 def test_clear_erases_only_terminal_view_and_keeps_live_session_state(tmp_path):
@@ -755,27 +1109,111 @@ def test_plan_mode_toggles():
     assert not tui.agent.plan_mode
 
 
-@pytest.mark.parametrize("target", ["", "saved"])
-def test_resume_during_cancellation_waits_for_worker_then_proceeds(tmp_path, target):
+def test_bare_resume_opens_picker_without_interrupting_active_worker(tmp_path):
     tui = _fake_persistent_tui(tmp_path / "appearance.json")
     tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
     tui.memory.log_turn("saved", "user", "Saved conversation")
     tui.agent.restore_session = lambda turns: Agent.restore_session(tui.agent, turns)
     tui.running = True
-    tui.cancel_requested.set()
-    tui._set_input("/resume " + target)
+    tui.pending.append("queued follow-up")
+    tui._set_input("/resume")
     tui._submit_buffer(steer=False)
-    assert tui._pending_resume == target
+
+    assert tui._choice_kind == "session"
+    assert tui.running
+    assert not tui.cancel_requested.is_set()
+    assert list(tui.pending) == ["queued follow-up"]
+
+
+def test_resume_command_bypasses_permission_prompt_while_worker_is_active(tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui.memory.log_turn("saved", "user", "Saved conversation")
+    tui.running = True
+    tui._permission_request = {
+        "tool": "run_shell",
+        "answer": "n",
+        "done": threading.Event(),
+    }
+    tui._set_input("/resume")
+    enter = next(
+        binding.handler
+        for binding in tui.key_bindings.bindings
+        if tuple(binding.keys) == (Keys.Enter,)
+    )
+
+    enter(None)
+
+    assert tui._choice_kind == "session"
+    assert tui._permission_request is not None
+    assert not tui.cancel_requested.is_set()
+
+
+def test_switching_from_remote_input_prompt_detaches_without_answering(tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui.memory.log_turn("saved", "user", "Saved conversation")
+    tui.agent.restore_session = lambda turns: Agent.restore_session(tui.agent, turns)
+    tui._watching_remote = True
+    tui._user_input_request = {
+        "request_id": "remote-request",
+        "question": "Choose one",
+        "options": [],
+        "remote": True,
+        "turn_id": "remote-turn",
+    }
+
+    tui._resume_session("saved")
+
+    assert tui.session_id == "saved"
+    assert tui._user_input_request is None
+    assert not any(
+        turn["role"] == "system"
+        and isinstance(turn["content"], dict)
+        and turn["content"].get("event") == "input_answer"
+        for turn in tui.memory.load_session("session-1")
+    )
+
+
+def test_cancelling_resume_picker_restarts_queue_if_worker_finished(tmp_path, monkeypatch):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui.memory.log_turn("saved", "user", "Saved conversation")
+    started = []
+    tui.running = True
+    tui.pending.append("queued follow-up")
+    tui._open_resume()
+    tui.running = False
+    monkeypatch.setattr(tui, "_start_next", lambda: started.append("next"))
+
+    tui._cancel_choice()
+
+    assert tui._choice_kind is None
+    assert list(tui.pending) == ["queued follow-up"]
+    assert started == ["next"]
+
+
+def test_resume_target_interrupts_then_switches_at_safe_boundary(tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui.memory.log_turn("saved", "user", "Saved conversation")
+    tui.agent.restore_session = lambda turns: Agent.restore_session(tui.agent, turns)
+    tui.running = True
+    tui.pending.append("queued follow-up")
+    tui._set_input("/resume saved")
+    tui._submit_buffer(steer=False)
+
+    assert tui._pending_resume == "saved"
     assert tui.session_id == "session-1"
     assert tui.running
+    assert tui.cancel_requested.is_set()
+    assert not tui.pending
+    assert "Discarded 1 queued item(s)" in tui.output.text
     tui._events.put(("turn_done", {"cancelled": True}))
     tui._before_render(tui.application)
     assert not tui.running
     assert tui._pending_resume is None
-    if target:
-        assert tui.session_id == "saved"
-    else:
-        assert tui._choice_kind == "session"
+    assert tui.session_id == "saved"
 
 
 def test_cancel_releases_permission_wait():
@@ -852,6 +1290,70 @@ def test_review_dispatches_read_only_turn(tmp_path, monkeypatch):
     assert "staged diff" in tui.pending[0]
 
 
+def test_init_dispatches_scoped_repository_guidance_turn(tmp_path, monkeypatch):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui.agent.workdir = tmp_path
+    started = []
+    monkeypatch.setattr(tui, "_start_next", lambda: started.append(True))
+    tui._set_input("/init")
+
+    tui._submit_buffer(steer=False)
+
+    assert started == [True]
+    assert str(tui.pending[0]) == "/init"
+    request = tui.pending[0].model_message
+    assert request == _init_request(tui.agent)
+    assert request is not None
+    assert str(tmp_path / "AGENTS.md") in request
+    tools = {
+        name: object()
+        for name in (
+            "read_file",
+            "list_dir",
+            "grep",
+            "workspace_info",
+            "write_file",
+            "edit_file",
+            "git_commit",
+            "run_shell",
+            "web_search",
+        )
+    }
+    selected = _select_tool_names(request, tools)
+    assert selected == [
+        "read_file",
+        "list_dir",
+        "grep",
+        "workspace_info",
+        "write_file",
+        "edit_file",
+    ]
+
+
+def test_init_line_mode_keeps_generated_task_out_of_public_user_message(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui.agent.workdir = tmp_path
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    cfg = Config()
+    rendered = []
+    monkeypatch.setattr(Config, "data_dir", property(lambda _self: tmp_path))
+    monkeypatch.setattr("klaude_cli.main.load_config", lambda: cfg)
+    monkeypatch.setattr("klaude_cli.main._build_agent", lambda *_args: (tui.agent, memory))
+    monkeypatch.setattr(
+        "klaude_cli.main._render",
+        lambda _agent, _memory, _session_id, user_message, _ui_state, **kwargs: rendered.append(
+            (user_message, kwargs.get("model_message"))
+        ),
+    )
+
+    result = CliRunner().invoke(app, ["chat", "--no-tui"], input="/init\n/quit\n")
+
+    assert result.exit_code == 0, result.output
+    assert rendered == [("/init", _init_request(tui.agent))]
+
+
 def test_resume_line_mode_lists_and_restores_without_sending_command_to_model(
     tmp_path,
     monkeypatch,
@@ -882,9 +1384,11 @@ def test_resume_line_mode_lists_and_restores_without_sending_command_to_model(
     assert len(memory.load_session("saved")) == 2
 
 
-def test_completed_assistant_message_has_blank_line_before_closing_divider():
+def test_completed_assistant_message_has_unit_duration_in_closing_divider(monkeypatch):
     tui = _fake_persistent_tui()
     emitted = []
+    tui._turn_started_at = 100.0
+    monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: 171.0)
     tui.agent.run = lambda _message: iter([AgentEvent("text_delta", {"content": "Hi!"})])
     tui.memory.log_turn = lambda *_args: None
     tui.memory.auto_remember_turn = lambda _message: []
@@ -894,7 +1398,100 @@ def test_completed_assistant_message_has_blank_line_before_closing_divider():
 
     closing = [payload for kind, payload in emitted if kind == "append"][-1]
     assert closing.startswith("\n\n━━ klaude · ")
+    assert "worked for 1m 11s" in closing
     assert closing.endswith("\n")
+
+
+def test_edit_group_is_flushed_saved_and_mirrored_at_end_of_turn(tmp_path):
+    tui = _fake_persistent_tui()
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui._turn_elapsed_seconds = lambda: 30
+    events = []
+    for path in ("first.py", "second.py"):
+        payload = {"tool": "write_file", "args": {"path": path}}
+        events.append(AgentEvent("tool_start", payload))
+        events.append(
+            AgentEvent(
+                "tool_result",
+                {
+                    **payload,
+                    "result": "wrote file",
+                    "metadata": {
+                        "edit": {
+                            "path": path,
+                            "added": 1,
+                            "removed": 0,
+                            "lines": ["      1 + answer = 42"],
+                            "changed": True,
+                        }
+                    },
+                },
+            )
+        )
+    tui.agent.run = lambda _message: iter(events)
+    tui._run_turn("Make two files", threading.Event(), turn_id="edit-turn")
+    saved = tui.memory.load_session(tui.session_id)
+    summaries = [
+        turn["content"]
+        for turn in saved
+        if isinstance(turn["content"], dict) and turn["content"].get("event") == "edit_summary"
+    ]
+    assert len(summaries) == 1
+    assert "[edited] (30s) 2 files (+2 -0)" in summaries[0]["text"]
+    shared = tui.memory.session_events_since(tui.session_id, 0)
+    assert any(event["kind"] == "edit_summary" for event in shared)
+
+
+def test_run_turn_persists_real_tool_activity_milestones(tmp_path, monkeypatch):
+    tui = _fake_persistent_tui()
+    tui._turn_started_at = 100.0
+    monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: 130.0)
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui.agent.run = lambda _message: iter(
+        [
+            AgentEvent("tool_start", {"tool": "read_file", "args": {"path": "src/app.py"}}),
+            AgentEvent(
+                "tool_result",
+                {
+                    "tool": "read_file",
+                    "args": {"path": "src/app.py"},
+                    "result": "file contents",
+                    "metadata": {},
+                },
+            ),
+            AgentEvent("text", {"content": "Reviewed."}),
+        ]
+    )
+    emitted = []
+    original_emit = tui._emit
+
+    def capture(kind, payload=None):
+        emitted.append((kind, payload))
+        original_emit(kind, payload)
+
+    tui._emit = capture
+
+    tui._run_turn("Review the file", threading.Event(), turn_id="turn-1")
+
+    updates = [
+        turn["content"]
+        for turn in tui.memory.load_session(tui.session_id)
+        if turn["role"] == "system"
+        and isinstance(turn["content"], dict)
+        and turn["content"].get("event") == "activity_update"
+    ]
+    assert updates == [
+        {
+            "event": "activity_update",
+            "label": "explored",
+            "detail": "Read src/app.py",
+            "elapsed_seconds": 30,
+        },
+    ]
+    appended = "".join(str(payload) for kind, payload in emitted if kind == "append")
+    assert "[working]" not in appended
+    assert "[explored] (30s) Read src/app.py" in appended
+    assert "-> read_file" not in appended
 
 
 def test_transcript_dividers_refresh_after_resize():
@@ -1038,6 +1635,9 @@ def test_transcript_lexer_styles_semantic_and_informational_notice_labels():
         "[runtime] edited config.toml\n"
         "[status] session details\n"
         "[interrupted at a safe boundary] user cancelled\n"
+        "[approved] run shell\n"
+        "[denied] write file\n"
+        "[cancelled] permission request\n"
         "[permission · Ollama service] Restart the service?"
     )
     get_line = TranscriptLexer().lex_document(document)
@@ -1059,7 +1659,10 @@ def test_transcript_lexer_styles_semantic_and_informational_notice_labels():
     assert get_line(6) == badge("info", "RUNTIME", " edited config.toml")
     assert get_line(7) == badge("info", "STATUS", " session details")
     assert get_line(8) == badge("warning", "INTERRUPTED AT A SAFE BOUNDARY", " user cancelled")
-    assert get_line(9) == badge("info", "PERMISSION · OLLAMA SERVICE", " Restart the service?")
+    assert get_line(9) == badge("success", "APPROVED", " run shell")
+    assert get_line(10) == badge("warning", "DENIED", " write file")
+    assert get_line(11) == badge("warning", "CANCELLED", " permission request")
+    assert get_line(12) == badge("info", "PERMISSION · OLLAMA SERVICE", " Restart the service?")
 
 
 def test_notice_label_theme_uses_footer_brand_foreground_and_semantic_backgrounds():
@@ -1325,6 +1928,71 @@ def test_persistent_tui_registers_modified_enter_and_interrupt_bindings():
     assert (Keys.ControlC,) in handlers
 
 
+def test_large_bracketed_paste_is_compact_but_submits_full_text(monkeypatch):
+    tui = _fake_persistent_tui()
+    pasted = "first line\n" + "x" * LARGE_PASTE_CHARACTER_THRESHOLD
+    submitted = []
+    monkeypatch.setattr(tui, "_enqueue", lambda text, **_kwargs: submitted.append(text))
+    paste = next(
+        binding.handler
+        for binding in tui.key_bindings.bindings
+        if tuple(binding.keys) == (Keys.BracketedPaste,)
+    )
+
+    async def insert_paste():
+        paste(SimpleNamespace(data=pasted))
+        await asyncio.sleep(0)
+
+    asyncio.run(insert_paste())
+
+    assert tui.input.text == f"[Pasted {len(pasted):,} chars]"
+    assert tui._expanded_composer_text() == pasted
+    tui._submit_buffer(steer=False)
+    assert submitted == [pasted]
+    assert tui._history == [pasted]
+    assert tui.input.text == ""
+    assert tui._composer_pastes == []
+
+
+def test_small_bracketed_paste_remains_editable_and_normalizes_newlines():
+    tui = _fake_persistent_tui()
+    paste = next(
+        binding.handler
+        for binding in tui.key_bindings.bindings
+        if tuple(binding.keys) == (Keys.BracketedPaste,)
+    )
+
+    async def insert_paste():
+        paste(SimpleNamespace(data="one\r\ntwo\rthree"))
+        await asyncio.sleep(0)
+
+    asyncio.run(insert_paste())
+
+    assert tui.input.text == "one\ntwo\nthree"
+    assert tui._composer_pastes == []
+
+
+def test_terminal_bracketed_paste_uses_compact_composer_marker():
+    async def exercise():
+        tui = _fake_persistent_tui()
+        pasted = "z" * LARGE_PASTE_CHARACTER_THRESHOLD
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = DummyOutput()
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+                pipe.send_text(f"\x1b[200~{pasted}\x1b[201~")
+                await asyncio.sleep(0.1)
+                assert tui.input.text == "[Pasted 1,000 chars]"
+                assert tui._expanded_composer_text() == pasted
+            finally:
+                tui.application.exit()
+                await task
+
+    asyncio.run(exercise())
+
+
 def test_persistent_tui_restores_enhanced_keyboard_mode_on_failure(monkeypatch):
     tui = _fake_persistent_tui()
     writes = []
@@ -1346,12 +2014,37 @@ def test_persistent_tui_restores_enhanced_keyboard_mode_on_failure(monkeypatch):
         tui.run()
 
     assert writes == [
+        TERMINAL_CLEAR_SEQUENCE,
         "\r\n" * 3,
         KITTY_KEYBOARD_PROTOCOL_ON,
         XTERM_MODIFY_OTHER_KEYS_ON,
         XTERM_MODIFY_OTHER_KEYS_OFF,
         KITTY_KEYBOARD_PROTOCOL_OFF,
     ]
+
+
+def test_interactive_chat_clears_terminal_before_loading_configuration(monkeypatch):
+    import klaude_cli.main as cli_main
+
+    events = []
+    monkeypatch.setattr(cli_main.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(cli_main.sys, "stdout", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(
+        cli_main,
+        "_clear_plain_session_view",
+        lambda **_kwargs: events.append("clear"),
+    )
+
+    def stop_after_clear():
+        events.append("load config")
+        raise RuntimeError("stop after startup-order check")
+
+    monkeypatch.setattr(cli_main, "load_config", stop_after_clear)
+
+    with pytest.raises(RuntimeError, match="startup-order check"):
+        cli_main.chat(model="", legacy=False, no_tui=False)
+
+    assert events == ["clear", "load config"]
 
 
 def test_session_effort_supports_explicit_levels():
@@ -1401,6 +2094,9 @@ def _fake_persistent_tui(appearance_path=None, chat_preferences_path=None):
         tool_config = Config()
 
     class FakeMemory:
+        def log_turn(self, *_args, **_kwargs):
+            return None
+
         def remember(self, fact, source="manual"):
             return True
 
@@ -1483,6 +2179,54 @@ def test_resumed_tuis_share_live_composers_without_overwriting_each_other(tmp_pa
     assert second.input.text == "draft from second"
 
 
+def test_resumed_observer_status_tracks_remote_worker_lease(tmp_path, monkeypatch):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    memory.log_turn("shared", "user", "Long-running request")
+    assert memory.acquire_session_lease("shared", "remote-owner", "remote-turn")
+    started_at = time.time() - 36
+    memory.update_session_live("shared", activity="web_search", turn_started_at=started_at)
+    monkeypatch.setattr("klaude_cli.main.time.time", lambda: started_at + 36)
+    observer = _fake_persistent_tui(tmp_path / "appearance.json")
+    observer.memory = memory
+    observer.agent.restore_session = lambda turns: Agent.restore_session(observer.agent, turns)
+
+    observer._resume_session("shared")
+
+    assert not observer.running
+    assert observer._watching_remote
+    status = "".join(text for _style, text in observer._status_fragments())
+    assert "EXPLORING" in status
+    assert "36s" in status
+    assert "READY" not in status
+
+    assert memory.release_session_lease("shared", "remote-owner", "remote-turn")
+    observer._sync_shared_session()
+
+    assert not observer._watching_remote
+    status = "".join(text for _style, text in observer._status_fragments())
+    assert "READY" in status
+    assert "WORKING" not in status
+
+
+def test_resumed_observer_receives_structured_activity_updates(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    observer = _fake_persistent_tui(tmp_path / "appearance.json")
+    observer.memory = memory
+    observer.session_id = "shared"
+    observer._session_event_cursor = 0
+    memory.publish_session_event(
+        "shared",
+        "remote-owner",
+        "activity_update",
+        {"label": "explored", "detail": "Read src/app.py", "elapsed_seconds": 8},
+        turn_id="remote-turn",
+    )
+
+    observer._sync_shared_session()
+
+    assert "[explored] (8s) Read src/app.py" in observer.output.text
+
+
 def test_tools_settings_persist_independent_validation_toggles(tmp_path):
     path = tmp_path / "chat-preferences.json"
     tui = _fake_persistent_tui(chat_preferences_path=path)
@@ -1498,6 +2242,192 @@ def test_tools_settings_persist_independent_validation_toggles(tmp_path):
     assert tui.agent.tool_config.web_search.result_validation_enabled is False
     assert tui.agent.tool_config.retrieval_validation_enabled is True
     assert tui._choice_values[tui._choice_index] == "web search validation: off (toggle)"
+
+
+def test_permission_command_opens_grouped_settings_and_replaces_plural_command(tmp_path):
+    tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "chat-preferences.json")
+    tui._set_input("/permission")
+
+    tui._submit_buffer(steer=False)
+
+    assert tui._choice_kind == "permission settings"
+    assert "Current configuration: BALANCED" in tui._choice_values
+    assert "Write file: ASK" in tui._choice_values
+    assert "Web search: ALLOW" in tui._choice_values
+    assert "Remember fact: ASK" in tui._choice_values
+    assert tui._choice_values.index("reset to default") < tui._choice_values.index("back")
+
+    tui._cancel_choice()
+    tui._cancel_choice()
+    tui._set_input("/permissions")
+    tui._submit_buffer(steer=False)
+    assert tui._choice_kind is None
+    assert "Unknown chat command: /permissions" in tui.output.text
+
+
+def test_permission_rows_cycle_persist_and_detect_custom_configuration(tmp_path):
+    path = tmp_path / "chat-preferences.json"
+    tui = _fake_persistent_tui(chat_preferences_path=path)
+    tui._open_settings_category("permissions")
+    tui._choice_index = tui._choice_values.index("Write file: ASK")
+
+    tui._accept_choice()
+
+    saved = json.loads(path.read_text())
+    assert saved["permissions"]["write_file"] == "allow"
+    assert tui.agent.gate.policies["write_file"] == "allow"
+    assert "Current configuration: CUSTOM" in tui._choice_values
+    assert tui._choice_values[tui._choice_index] == "Write file: ALLOW"
+
+
+def test_permission_preset_picker_previews_grouped_policies_and_applies_preset(tmp_path):
+    path = tmp_path / "chat-preferences.json"
+    tui = _fake_persistent_tui(chat_preferences_path=path)
+    tui._open_settings_category("permissions")
+    tui._choice_index = tui._choice_values.index("Current configuration: BALANCED")
+    tui._accept_choice()
+
+    assert tui._choice_kind == "permission preset"
+    assert tui._choice_values[0] == "Custom"
+    assert tui._choice_values[tui._choice_index] == "Balanced"
+    assert tui._permission_preview_visible
+    preview = tui.text_theme_preview.text
+    assert "Workspace\n" in preview
+    assert "\n\nGit\n" in preview
+    assert "\n\nWeb & Research\n" in preview
+    assert "Write file" in preview and "ASK" in preview
+    assert "Web search" in preview and "ALLOW" in preview
+    assert tui._choice_values.index("reset to default") < tui._choice_values.index("back")
+
+    tui._choice_index = tui._choice_values.index("reset to default")
+    tui._apply_choice_preview()
+    reset_preview = tui.text_theme_preview.text
+    assert "RESET TO DEFAULT" in reset_preview
+    assert "configured default policy" in reset_preview
+    reset_write_line = next(
+        line for line in reset_preview.splitlines() if line.startswith("Write file")
+    )
+    assert reset_write_line.endswith("ASK")
+
+    tui._choice_index = tui._choice_values.index("Full Access")
+    tui._apply_choice_preview()
+    assert "FULL ACCESS" in tui.text_theme_preview.text
+    tui._accept_choice()
+
+    assert not tui._permission_preview_visible
+    assert "Current configuration: FULL ACCESS" in tui._choice_values
+    assert set(json.loads(path.read_text())["permissions"].values()) == {"allow"}
+
+
+def test_permission_preset_picker_selects_custom_and_previews_current_map(tmp_path):
+    path = tmp_path / "chat-preferences.json"
+    tui = _fake_persistent_tui(chat_preferences_path=path)
+    tui._open_settings_category("permissions")
+    tui._choice_index = tui._choice_values.index("Write file: ASK")
+    tui._accept_choice()
+    tui._choice_index = tui._choice_values.index("Current configuration: CUSTOM")
+    tui._accept_choice()
+
+    assert tui._choice_values[tui._choice_index] == "Custom"
+    assert "CUSTOM" in tui.text_theme_preview.text
+    write_line = next(
+        line for line in tui.text_theme_preview.text.splitlines() if line.startswith("Write file")
+    )
+    assert write_line.endswith("ALLOW")
+
+
+def test_permission_reset_removes_saved_overrides_and_restores_configured_defaults(tmp_path):
+    path = tmp_path / "chat-preferences.json"
+    tui = _fake_persistent_tui(chat_preferences_path=path)
+    tui._open_settings_category("permissions")
+    tui._choice_index = tui._choice_values.index("Write file: ASK")
+    tui._accept_choice()
+    tui._choice_index = tui._choice_values.index("reset to default")
+
+    tui._accept_choice()
+
+    assert "permissions" not in json.loads(path.read_text())
+    assert tui.agent.gate.policies["write_file"] == "ask"
+    assert "Current configuration: BALANCED" in tui._choice_values
+    assert tui._choice_values[tui._choice_index] == "reset to default"
+
+
+def test_rebuilding_any_settings_page_preserves_its_selected_logical_row(tmp_path):
+    tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "chat-preferences.json")
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+
+    for category, selected in (
+        ("theme", "text/code theme:"),
+        ("input field", "border:"),
+        ("memory", "automatic memory:"),
+        ("tools", "web search validation:"),
+        ("permissions", "Write file:"),
+        ("runtime", "CPU threads:"),
+    ):
+        tui._open_settings_category(category)
+        row = next(value for value in tui._choice_values if value.startswith(selected))
+        tui._choice_index = tui._choice_values.index(row)
+
+        tui._open_settings_category(category)
+
+        assert tui._choice_values[tui._choice_index].startswith(selected)
+
+
+def test_settings_include_memory_and_skills_categories():
+    tui = _fake_persistent_tui()
+
+    categories = tui._settings_categories()
+
+    assert "memory" in categories
+    assert "skills" in categories
+
+
+def test_memory_settings_toggle_show_facts_and_reset_to_enabled(tmp_path):
+    tui = _fake_persistent_tui()
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui.memory.remember("Prefer concise answers", source="manual")
+
+    tui._open_settings_category("memory")
+
+    assert tui._choice_kind == "memory settings"
+    assert "automatic memory: on (toggle)" in tui._choice_values
+    assert "\0info:Durable facts: 1" in tui._choice_values
+    assert any("Prefer concise answers" in value for value in tui._choice_values)
+    tui._choice_index = tui._choice_values.index("automatic memory: on (toggle)")
+    tui._accept_choice()
+    assert not tui.memory.auto_memory_enabled()
+    assert "automatic memory: off (toggle)" in tui._choice_values
+
+    tui._choice_index = tui._choice_values.index("reset to default")
+    tui._accept_choice()
+    assert tui.memory.auto_memory_enabled()
+
+
+def test_skills_settings_show_read_only_installed_inventory(monkeypatch):
+    tui = _fake_persistent_tui()
+    monkeypatch.setattr(
+        "klaude_knowledge.list_installed_skills",
+        lambda _cfg: [
+            {
+                "name": "crawl4ai",
+                "library": "web-tools",
+                "indexed_files": ["SKILL.md", "reference.md"],
+            }
+        ],
+    )
+
+    tui._open_settings_category("skills")
+
+    assert tui._choice_kind == "skills settings"
+    assert "\0info:Installed: 1" in tui._choice_values
+    assert (
+        "\0info:crawl4ai · library web-tools · 2 indexed files" in tui._choice_values
+    )
+    assert "reset to default" not in tui._choice_values
+    assert tui._choice_values[-1] == "back"
+    rendered = "".join(text for _style, text in tui._choice_fragments())
+    assert "\0info:" not in rendered
+    assert "crawl4ai · library web-tools · 2 indexed files" in rendered
 
 
 def test_tools_settings_persist_and_apply_individual_research_tool_toggles(tmp_path):
@@ -1551,17 +2481,204 @@ def test_settings_choice_sections_are_visible_and_not_selectable():
     assert not tui._choice_values[tui._choice_index].startswith("\0section:")
 
 
-def test_tools_settings_can_show_high_level_reasoning_activity(tmp_path):
+def test_tools_settings_can_toggle_high_level_activity_updates(tmp_path):
     path = tmp_path / "chat-preferences.json"
     tui = _fake_persistent_tui(chat_preferences_path=path)
 
     tui._open_settings_category("tools")
-    tui._choice_index = tui._choice_values.index("reasoning activity: off (toggle)")
+    tui._choice_index = tui._choice_values.index("activity updates: on (toggle)")
     tui._accept_choice()
 
-    assert tui.show_reasoning_activity is True
-    assert json.loads(path.read_text())["display"]["reasoning_activity"] is True
-    assert tui._choice_values[tui._choice_index] == "reasoning activity: on (toggle)"
+    assert tui.show_activity_updates is False
+    assert json.loads(path.read_text())["display"]["activity_updates"] is False
+    assert tui._choice_values[tui._choice_index] == "activity updates: off (toggle)"
+
+
+def test_activity_updates_default_on_and_migrate_reasoning_activity_preference(tmp_path):
+    path = tmp_path / "chat-preferences.json"
+
+    assert _activity_updates_enabled(path) is True
+    path.write_text(json.dumps({"display": {"reasoning_activity": False}}))
+    assert _activity_updates_enabled(path) is False
+    path.write_text(json.dumps({"display": {"activity_updates": True}}))
+    assert _activity_updates_enabled(path) is True
+
+
+def test_restored_transcript_replays_persisted_activity_updates():
+    transcript = _restored_transcript(
+        "session-1",
+        [
+            {"role": "user", "content": "Inspect it", "ts": 1_700_000_000},
+            {
+                "role": "system",
+                "content": {
+                    "event": "activity_update",
+                    "label": "explored",
+                    "detail": "Read src/app.py",
+                },
+                "ts": 1_700_000_001,
+            },
+            {"role": "assistant", "content": "Done.", "ts": 1_700_000_002},
+        ],
+        80,
+    )
+
+    assert "[explored] Read src/app.py" in transcript
+    assert (
+        transcript.index("Inspect it") < transcript.index("[explored]") < transcript.index("Done.")
+    )
+
+
+def test_restored_transcript_replays_model_session_updates():
+    transcript = _restored_transcript(
+        "session-1",
+        [
+            {
+                "role": "system",
+                "content": {
+                    "event": "session_update",
+                    "detail": "model openai_codex/gpt-5 · thinking · conversation retained",
+                },
+                "ts": 1_700_000_000,
+            }
+        ],
+        80,
+    )
+
+    assert (
+        "[session] model openai_codex/gpt-5 · thinking · conversation retained"
+        in transcript
+    )
+
+
+@pytest.mark.parametrize(
+    "tool,args,active,completed,detail",
+    [
+        (
+            "read_file",
+            {"path": "src/app.py"},
+            "exploring src/app.py",
+            "explored",
+            "Read src/app.py",
+        ),
+        ("edit_file", {"path": "src/app.py"}, "editing src/app.py", "edited", "Edited src/app.py"),
+        ("run_shell", {"command": "pytest -q"}, "running pytest -q", "ran", "pytest -q"),
+        (
+            "learn_source",
+            {"url": "https://example.com/docs", "library": "example"},
+            "learning https://example.com/docs into example",
+            "learned",
+            "https://example.com/docs into example",
+        ),
+    ],
+)
+def test_activity_updates_derive_from_real_tool_events(tool, args, active, completed, detail):
+    assert _active_tool_status(tool, args) == active
+    assert _completed_tool_activity(tool, args, "ok", {}) == (completed, detail)
+
+
+def test_failed_activity_keeps_a_concise_failure_reason():
+    assert _completed_tool_activity(
+        "edit_file",
+        {"path": "src/app.py"},
+        "error: old_str not found in file",
+        {},
+    ) == ("failed", "Edited src/app.py — error: old_str not found in file")
+
+
+def test_activity_updates_redact_secret_shaped_values():
+    value = _activity_value(
+        "curl -H 'Authorization: Bearer abc.123' --api-key topsecret "
+        "https://user:password@example.com/?token=querysecret"
+    )
+
+    assert "abc.123" not in value
+    assert "topsecret" not in value
+    assert "password" not in value
+    assert "querysecret" not in value
+    assert value.count("[redacted]") >= 4
+
+
+def test_settings_toggles_render_as_theme_colored_two_cell_switches(tmp_path):
+    tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "chat-preferences.json")
+
+    tui._open_settings_category("tools")
+    tui._choice_index = tui._choice_values.index("activity updates: on (toggle)")
+    fragments = tui._choice_fragments()
+
+    assert ("class:toggle.on", "■") in fragments
+    rendered = "".join(text for _style, text in fragments)
+    activity_row = next(line for line in rendered.splitlines() if "activity updates" in line)
+    assert activity_row.endswith("[  ■]")
+    assert "activity updates: on (toggle)" not in rendered
+    toggle_index = next(
+        index for index, fragment in enumerate(fragments) if fragment == ("class:toggle.on", "■")
+    )
+    assert fragments[toggle_index - 1] == ("class:toggle.track", "[  ")
+    assert fragments[toggle_index + 1] == ("class:toggle.track", "]")
+
+    tui._accept_choice()
+    fragments = tui._choice_fragments()
+
+    assert ("class:toggle.off", "■") in fragments
+    toggle_index = next(
+        index for index, fragment in enumerate(fragments) if fragment == ("class:toggle.off", "■")
+    )
+    assert fragments[toggle_index - 1] == ("class:toggle.track", "[")
+    assert fragments[toggle_index + 1] == ("class:toggle.track", "  ]")
+    rendered = "".join(text for _style, text in fragments)
+    activity_row = next(line for line in rendered.splitlines() if "activity updates" in line)
+    assert activity_row.endswith("[■  ]")
+    assert "activity updates: off (toggle)" not in rendered
+
+
+def test_off_toggle_square_matches_brackets_and_on_square_uses_primary_color():
+    style = _tui_style("autumn", "vscode-dark")
+
+    track = style.get_attrs_for_style_str("class:toggle.track")
+    off = style.get_attrs_for_style_str("class:toggle.off")
+    on = style.get_attrs_for_style_str("class:toggle.on")
+
+    assert off.color == track.color
+    assert on.color != track.color
+
+
+def test_settings_category_rows_render_as_aligned_columns(tmp_path):
+    preferences = tmp_path / "chat-preferences.json"
+    preferences.write_text(json.dumps({"runtime_device_mode": "gpu-preferred"}))
+    tui = _fake_persistent_tui(chat_preferences_path=preferences)
+
+    tui._open_settings_category("runtime")
+    rendered = "".join(text for _style, text in tui._choice_fragments())
+    rows = [
+        line
+        for line in rendered.splitlines()
+        if any(name in line for name in ("device", "CPU threads", "context size"))
+    ]
+
+    value_columns = {
+        next(line.index(value) for line in rows if value in line)
+        for value in ("GPU preferred", "auto (Klaude decides)", "8,192")
+    }
+    assert len(value_columns) == 1
+    assert all(": " not in line for line in rows)
+
+    tui._open_settings_category("tools")
+    rendered = "".join(text for _style, text in tui._choice_fragments())
+    toggle_rows = [
+        line
+        for line in rendered.splitlines()
+        if any(
+            name in line
+            for name in (
+                "activity updates",
+                "web search validation",
+                "knowledge search validation",
+            )
+        )
+    ]
+    assert len(toggle_rows) == 3
+    assert len({line.index("[") for line in toggle_rows}) == 1
 
 
 def test_input_setting_toggle_keeps_its_selector_row(tmp_path):
@@ -1587,24 +2704,214 @@ def test_persistent_tui_keeps_input_live_and_queues_while_running():
     assert not tui.input.window.dont_extend_width()
 
 
-def test_session_actions_queue_in_input_order_while_a_turn_is_running(monkeypatch):
+def test_chat_status_reports_session_runtime_permissions_and_agents_file(tmp_path):
+    repo = tmp_path / "repo"
+    workdir = repo / "src"
+    workdir.mkdir(parents=True)
+    root_instructions = repo / "AGENTS.md"
+    nested_instructions = workdir / "AGENTS.md"
+    root_instructions.write_text("root guidance")
+    nested_instructions.write_text("nested guidance")
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    memory.rename_session("session-1", "Parser investigation")
+    agent = SimpleNamespace(
+        model="qwen3-coder:30b",
+        reasoning_mode="thinking",
+        ollama_think="high",
+        ollama_code_think="high",
+        ollama_options={"num_ctx": 16_384},
+        messages=[{"role": "system", "content": "system prompt"}],
+        plan_mode=False,
+        workdir=workdir,
+        workspace=SimpleNamespace(repo_root=repo),
+        gate=SimpleNamespace(
+            policies={"read_file": "allow", "run_shell": "ask", "write_file": "deny"}
+        ),
+    )
+
+    result = _chat_status(agent, memory, "session-1")
+
+    assert "Session ID    session-1" in result
+    assert "Session name  Parser investigation" in result
+    assert "Mode          thinking" in result
+    assert "Effort        high" in result
+    assert "Context left  ~16,381 tokens" in result
+    assert f"Workspace     {workdir}" in result
+    assert "AGENTS.md     detected (not yet injected)" in result
+    assert f"              {root_instructions}" in result
+    assert f"              {nested_instructions}" in result
+    assert "Permissions   allow 1 · ask 1 · deny 1" in result
+    assert "Memory        on" in result
+    assert "Tools         3" in result
+
+
+def test_status_columns_align_values():
+    rendered = _status_columns([("ID", "abc"), ("Session name", "Parser work"), ("", "/path")])
+    lines = rendered.splitlines()
+
+    assert {
+        line.index(value)
+        for line, value in zip(lines, ("abc", "Parser work", "/path"), strict=True)
+    } == {len("Session name") + 2}
+
+
+def test_codex_status_rows_show_five_hour_weekly_and_luna_reserve_limits():
+    usage = SimpleNamespace(
+        buckets=(
+            SimpleNamespace(
+                limit_id="codex",
+                limit_name="Codex",
+                model="",
+                primary=SimpleNamespace(
+                    used_percent=5,
+                    window_duration_minutes=300,
+                    resets_at=2_000_000_000,
+                ),
+                secondary=SimpleNamespace(
+                    used_percent=31,
+                    window_duration_minutes=10_080,
+                    resets_at=2_000_100_000,
+                ),
+            ),
+            SimpleNamespace(
+                limit_id="base_model_inference",
+                limit_name="Reserve",
+                model="gpt-5.6-luna",
+                primary=SimpleNamespace(
+                    used_percent=0,
+                    window_duration_minutes=10_080,
+                    resets_at=2_000_200_000,
+                ),
+                secondary=None,
+            ),
+        )
+    )
+    agent = SimpleNamespace(
+        model_info=SimpleNamespace(backend="openai_codex"),
+        ollama=SimpleNamespace(auth=SimpleNamespace(rate_limits=lambda: usage)),
+    )
+
+    rows = _codex_usage_rows(agent)
+    rendered = dict(rows)
+
+    assert "95% left" in rendered["5h limit"]
+    assert "69% left" in rendered["Weekly limit"]
+    assert "100% left" in rendered["Luna Reserve Weekly limit"]
+    assert rendered["Usage details"] == "https://chatgpt.com/codex/settings/usage"
+
+
+def test_chat_status_uses_first_input_hint_before_worker_persists_turn(tmp_path):
     tui = _fake_persistent_tui()
-    monkeypatch.setattr("klaude_cli.main._chat_status", lambda *_args: "ready")
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui._run_turn = lambda *_args, **_kwargs: None
+
+    tui._enqueue("Investigate why the parser drops nested fields")
+
+    assert tui.running
+    assert tui.memory.session_title("session-1") == "Untitled session"
+    tui._set_input("/status")
+    tui._submit_buffer(steer=False)
+    assert "Session name  Investigate why the parser drops nested fields" in tui.output.text
+
+
+def test_status_runs_immediately_while_a_turn_is_running(monkeypatch):
+    tui = _fake_persistent_tui()
+    monkeypatch.setattr("klaude_cli.main._chat_status", lambda *_args, **_kwargs: "ready")
     tui.running = True
     tui._set_input("/status")
 
     tui._submit_buffer(steer=False)
 
     assert tui.input.text == ""
-    assert list(tui.pending) == ["/status"]
-    assert type(tui.pending[0]).__name__ == "PendingChatCommand"
-    assert "[queued action 1] /status" in tui.output.text
-
-    tui.running = False
-    tui._start_next()
-
     assert not tui.pending
-    assert "[status]" in tui.output.text
+    assert "[queued action" not in tui.output.text
+    assert "[status]\nready" in tui.output.text
+    assert tui.running
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["/recap", "/status", "/memory", "/skills", "/diff"],
+)
+def test_live_snapshot_commands_do_not_require_idle(command):
+    assert not PersistentChatTUI._command_requires_idle(*command.partition(" ")[::2])
+
+
+@pytest.mark.parametrize(
+    "command,label",
+    [
+        ("/recap", "[recap]"),
+        ("/status", "[status]"),
+        ("/memory", "[memory]"),
+        ("/skills", "[skills]"),
+        ("/diff", "[diff]"),
+    ],
+)
+def test_live_snapshot_commands_execute_during_work(monkeypatch, command, label):
+    tui = _fake_persistent_tui()
+    tui.running = True
+    monkeypatch.setattr("klaude_cli.main._chat_status", lambda *_args, **_kwargs: "status snapshot")
+    monkeypatch.setattr("klaude_cli.main._chat_memory", lambda *_args: "memory snapshot")
+    monkeypatch.setattr("klaude_cli.main._chat_skills", lambda *_args: "skills snapshot")
+    monkeypatch.setattr("klaude_cli.main._workspace_diff", lambda *_args: "diff snapshot")
+    tui._set_input(command)
+
+    tui._submit_buffer(steer=False)
+
+    assert tui.input.text == ""
+    assert not tui.pending
+    assert "[queued action" not in tui.output.text
+    assert label in tui.output.text
+    assert tui.running
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/compact",
+        "/memory off",
+        "/plan on",
+        "/init",
+        "/new",
+        "/rename Parser work",
+        "/fork",
+        "/export",
+        "/review",
+    ],
+)
+def test_state_changing_commands_still_require_idle(command):
+    assert PersistentChatTUI._command_requires_idle(*command.partition(" ")[::2])
+
+
+def test_resume_does_not_require_idle():
+    assert not PersistentChatTUI._command_requires_idle("/resume", "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/compact",
+        "/memory off",
+        "/plan on",
+        "/init",
+        "/new",
+        "/rename Parser work",
+        "/fork",
+        "/export",
+        "/review",
+    ],
+)
+def test_state_changing_commands_queue_during_work(command):
+    tui = _fake_persistent_tui()
+    tui.running = True
+    tui._set_input(command)
+
+    tui._submit_buffer(steer=False)
+
+    assert tui.input.text == ""
+    assert list(tui.pending) == [command]
+    assert type(tui.pending[0]).__name__ == "PendingChatCommand"
+    assert f"[queued action 1] {command}" in tui.output.text
 
 
 def test_persistent_tui_input_has_empty_state_placeholder():
@@ -1621,7 +2928,10 @@ def test_persistent_tui_permission_uses_a_contextual_composer_placeholder():
 
     tui._permission_request = {"tool": "run_shell"}
 
-    assert tui._composer_placeholder_text() == "Type y/yes, n/no, or a/always · Enter confirms."
+    assert (
+        tui._composer_placeholder_text()
+        == "Type y/yes, n/no, or a/always · Enter allows once."
+    )
 
 
 def test_persistent_tui_composer_uses_a_themed_side_rail_instead_of_a_frame():
@@ -1770,6 +3080,59 @@ def test_empty_queue_edit_and_enter_deletes_that_follow_up():
     assert tui.activity == "queued follow-up deleted"
 
 
+def test_alt_backslash_promotes_the_selected_queue_edit_to_steering():
+    tui = _fake_persistent_tui()
+    tui.running = True
+    attachment = Path("brief.md")
+    tui.pending.extend(
+        [
+            PendingChatTurn("earlier"),
+            PendingChatTurn("steer this", (attachment,)),
+        ]
+    )
+    alt_up = next(
+        binding.handler
+        for binding in tui.key_bindings.bindings
+        if tuple(binding.keys) == (Keys.Escape, Keys.Up)
+    )
+    alt_steer = next(
+        binding.handler
+        for binding in tui.key_bindings.bindings
+        if tuple(binding.keys) == (Keys.Escape, "\\")
+    )
+
+    alt_up(None)
+    assert "alt + \\ steer selected" in "".join(
+        text for _style, text in tui._queue_fragments()
+    )
+    tui._set_input("steer this edited")
+    alt_steer(None)
+
+    assert [str(turn) for turn in tui.pending] == ["steer this edited", "earlier"]
+    assert tui.pending[0].attachments == (attachment,)
+    assert tui._queue_edit_index is None
+    assert tui.input.text == ""
+    assert tui.cancel_requested.is_set()
+    assert tui.activity == "steering at safe boundary"
+    assert tui.output.text.count("[steer queued] steer this edited") == 1
+
+
+def test_alt_backslash_does_not_turn_a_queued_session_action_into_model_input():
+    tui = _fake_persistent_tui()
+    tui.running = True
+    tui.pending.append(PendingChatCommand("/resume saved"))
+    tui._edit_previous_queued()
+    tui._set_input("/resume other")
+
+    tui._submit_buffer(steer=True)
+
+    assert isinstance(tui.pending[0], PendingChatCommand)
+    assert str(tui.pending[0]) == "/resume saved"
+    assert tui._queue_edit_index == 0
+    assert not tui.cancel_requested.is_set()
+    assert "cannot be used as steering messages" in tui.status_error
+
+
 def test_persistent_tui_steer_prioritizes_and_interrupts_active_turn():
     tui = _fake_persistent_tui()
     tui.running = True
@@ -1827,6 +3190,42 @@ def test_arrow_keys_prioritize_completion_over_history(key, expected):
     assert buffer.complete_state.complete_index == expected
     assert buffer.text == ("/help", "/model")[expected]
     assert tui._history == ["previous input"]
+
+
+@pytest.mark.parametrize(
+    "key,start,expected",
+    [
+        (Keys.Left, len("first\n"), len("first")),
+        (Keys.Right, len("first"), len("first\n")),
+    ],
+)
+def test_horizontal_arrow_keys_cross_logical_line_boundaries(key, start, expected):
+    tui = _fake_persistent_tui()
+    tui.input.buffer.set_document(Document("first\nsecond", start), bypass_readonly=True)
+    handler = next(
+        binding.handler
+        for binding in tui.key_bindings.bindings
+        if tuple(binding.keys) == (key,)
+    )
+
+    handler(SimpleNamespace(arg=1))
+
+    assert tui.input.buffer.cursor_position == expected
+
+
+@pytest.mark.parametrize("key,start", [(Keys.Left, 0), (Keys.Right, len("first\nsecond"))])
+def test_horizontal_arrow_keys_stop_at_composer_boundaries(key, start):
+    tui = _fake_persistent_tui()
+    tui.input.buffer.set_document(Document("first\nsecond", start), bypass_readonly=True)
+    handler = next(
+        binding.handler
+        for binding in tui.key_bindings.bindings
+        if tuple(binding.keys) == (key,)
+    )
+
+    handler(SimpleNamespace(arg=1))
+
+    assert tui.input.buffer.cursor_position == start
 
 
 def test_escape_closes_completion_without_clearing_input():
@@ -1934,11 +3333,56 @@ def test_settings_submenus_end_with_back_instead_of_cancel(category):
     assert tui._choice_kind == "settings"
 
 
+def test_models_settings_uses_model_picker_flow_and_returns_to_settings():
+    tui = _fake_persistent_tui()
+    tui._begin_choice("settings", tui._settings_categories(), "models")
+
+    tui._accept_choice()
+
+    assert tui._choice_kind == "model source"
+    assert tui._choice_values == ["Local", "Cloud", "back"]
+    tui._choice_index = tui._choice_values.index("Local")
+    tui._accept_choice()
+    assert tui._choice_kind == "model"
+
+    tui._choice_index = tui._choice_values.index("back")
+    tui._accept_choice()
+    assert tui._choice_kind == "model source"
+    assert tui._choice_values[-1] == "back"
+
+    tui._choice_index = tui._choice_values.index("back")
+    tui._accept_choice()
+    assert tui._choice_kind == "settings"
+    assert tui._choice_values[tui._choice_index] == "models"
+
+
+def test_settings_models_command_opens_same_source_picker():
+    tui = _fake_persistent_tui()
+    tui._set_input("/settings models")
+
+    tui._submit_buffer(steer=False)
+
+    assert tui._choice_kind == "model source"
+    assert tui._choice_values == ["Local", "Cloud", "back"]
+
+
 def test_bottom_status_omits_obsolete_scroll_hint():
     tui = _fake_persistent_tui()
     text = "".join(fragment[1] for fragment in tui._keybind_fragments())
     assert "Scroll" not in text
     assert "/ commands" not in text
+
+
+def test_footer_omits_standard_composer_but_keeps_vim_indicator():
+    tui = _fake_persistent_tui()
+
+    standard = "".join(fragment[1] for fragment in tui._keybind_fragments())
+    tui.composer_mode = "vim"
+    vim = "".join(fragment[1] for fragment in tui._keybind_fragments())
+
+    assert "Standard" not in standard
+    assert "composer" not in standard
+    assert "Vim composer" in vim
 
 
 def test_vim_command_toggles_and_persists_composer_mode(tmp_path):
@@ -2233,23 +3677,72 @@ def test_cancel_during_effort_picker_restores_original_model():
     assert tui.agent.model == "qwen3.5:4b"
 
 
-def test_persistent_tui_renders_unavailable_picker_options_in_gray():
+def test_persistent_tui_renders_unavailable_picker_options_in_gray(monkeypatch):
+    monkeypatch.setattr("klaude_cli.main.load_model_cache", lambda _path: [])
     tui = _fake_persistent_tui()
     tui._open_cloud_provider()
 
     fragments = tui._choice_fragments()
 
-    assert ("class:choice.disabled", "    OpenAI — API key not configured\n") in fragments
+    assert tui._choice_values[tui._choice_index] == "OpenAI Codex — not signed in"
+    assert (
+        "class:choice.disabled.selected",
+        "  › OpenAI Codex — not signed in\n",
+    ) in fragments
     assert tui._choice_values[-3:] == [
         "back",
         "",
-        "Tip: add OPENAI_API_KEY and/or GEMINI_API_KEY to config/.env",
+        "Tip: use `klaude auth login openai-codex`, or add API keys to config/.env",
     ]
     assert ("class:choice.disabled", "\n") in fragments
     assert (
         "class:choice.disabled",
-        "    Tip: add OPENAI_API_KEY and/or GEMINI_API_KEY to config/.env",
+        "    Tip: use `klaude auth login openai-codex`, or add API keys to config/.env",
     ) in fragments
+
+
+def test_unavailable_picker_options_can_be_highlighted_but_not_accepted(monkeypatch):
+    monkeypatch.setattr("klaude_cli.main.load_model_cache", lambda _path: [])
+    tui = _fake_persistent_tui()
+    tui._open_cloud_provider()
+
+    codex = tui._choice_index
+    tui._move_choice(1)
+    openai = tui._choice_index
+    assert tui._choice_values[openai] == "OpenAI — API key not configured"
+    tui._move_choice(1)
+    google = tui._choice_index
+    assert tui._choice_values[google] == "Google — API key not configured"
+
+    tui._accept_choice()
+    assert tui._choice_kind == "model cloud provider"
+    assert tui._choice_index == google
+
+    tui._move_choice(1)
+    assert tui._choice_values[tui._choice_index] == "back"
+    tui._click_choice(codex)
+    assert tui._choice_index == codex
+    tui._click_choice(codex)
+    assert tui._choice_kind == "model cloud provider"
+    assert tui._choice_index == codex
+
+
+def test_expired_codex_auth_keeps_model_picker_open(monkeypatch):
+    tui = _fake_persistent_tui()
+    tui._model_choices = {
+        "gpt-5.6-sol": ModelInfo("openai_codex", "gpt-5.6-sol", "GPT-5.6 Sol")
+    }
+    tui._begin_choice("model", ["gpt-5.6-sol", "back"], "gpt-5.6-sol")
+    monkeypatch.setattr(
+        "klaude_cli.main._set_agent_model",
+        lambda *_args: (_ for _ in ()).throw(CodexAuthError("sign in again")),
+    )
+
+    tui._accept_choice()
+
+    assert tui._choice_kind == "model"
+    assert tui.agent.model == "qwen3.5:4b"
+    assert tui.status_error == "sign in again"
 
 
 @pytest.mark.parametrize(
@@ -2594,6 +4087,159 @@ def test_persistent_tui_permission_answer_unblocks_worker_request():
     assert tui._permission_request is None
 
 
+def test_user_input_broker_normalizes_options_and_returns_structured_answer():
+    broker = UserInputBroker()
+    captured = []
+    broker.handler = lambda question, options, header: (
+        captured.append((question, options, header)) or ("Banana", "option")
+    )
+
+    result = json.loads(
+        broker.request(
+            " Pick one ",
+            [
+                {"label": " Apple ", "description": " Red fruit "},
+                {"label": "apple", "description": "duplicate"},
+                " Banana ",
+            ],
+            " Fruit ",
+        )
+    )
+
+    assert captured == [
+        (
+            "Pick one",
+            [
+                {"label": "Apple", "description": "Red fruit"},
+                {"label": "Banana", "description": ""},
+            ],
+            "Fruit",
+        )
+    ]
+    assert result == {"status": "answered", "answer": "Banana", "source": "option"}
+
+
+def test_user_input_composer_submits_custom_text_without_overwriting_selection():
+    tui = _fake_persistent_tui()
+    done = __import__("threading").Event()
+    request = {
+        "request_id": "request-1",
+        "question": "Which fruit?",
+        "options": _normalized_user_input_options(["Apple", "Banana", "Orange"]),
+        "answer": None,
+        "source": "cancelled",
+        "done": done,
+        "remote": False,
+        "turn_id": "turn-1",
+    }
+    tui._user_input_request = request
+    tui._set_input("Dragon fruit")
+
+    tui._move_user_input_choice(1)
+    tui._submit_user_input_response()
+
+    assert request["answer"] == "Dragon fruit"
+    assert request["source"] == "custom"
+    assert done.is_set()
+    assert tui._user_input_request is None
+
+
+def test_user_input_composer_uses_highlighted_option_only_when_draft_is_empty():
+    tui = _fake_persistent_tui()
+    done = __import__("threading").Event()
+    request = {
+        "request_id": "request-2",
+        "question": "Which fruit?",
+        "options": _normalized_user_input_options(["Apple", "Banana", "Orange"]),
+        "answer": None,
+        "source": "cancelled",
+        "done": done,
+        "remote": False,
+        "turn_id": "turn-2",
+    }
+    tui._user_input_request = request
+    tui._user_input_index = 2
+
+    tui._submit_user_input_response()
+
+    assert request["answer"] == "Orange"
+    assert request["source"] == "option"
+
+
+def test_remote_user_input_stays_open_when_answer_cannot_be_published(monkeypatch):
+    tui = _fake_persistent_tui()
+    request = {
+        "request_id": "request-remote",
+        "question": "Which fruit?",
+        "options": _normalized_user_input_options(["Apple"]),
+        "remote": True,
+        "turn_id": "turn-remote",
+    }
+    tui._user_input_request = request
+    monkeypatch.setattr(tui, "_publish_shared_event", lambda *_args, **_kwargs: False)
+
+    tui._submit_user_input_response()
+
+    assert tui._user_input_request is request
+    assert "not submitted" in tui.status_error
+
+
+def test_pending_user_input_is_recovered_only_until_its_answer():
+    request = {
+        "role": "system",
+        "content": {
+            "event": "input_request",
+            "request_id": "request-1",
+            "question": "Which fruit?",
+            "options": [{"label": "Apple", "description": ""}],
+        },
+    }
+    assert _pending_input_request_from_turns([request])["question"] == "Which fruit?"
+    answer = {
+        "role": "system",
+        "content": {
+            "event": "input_answer",
+            "request_id": "request-1",
+            "answer": "Apple",
+        },
+    }
+    assert _pending_input_request_from_turns([request, answer]) is None
+
+
+def test_permission_prompt_emits_waiting_activity_state(monkeypatch):
+    tui = _fake_persistent_tui()
+    emitted = []
+    updates = []
+    published = []
+
+    def emit(kind, payload=None):
+        emitted.append((kind, payload))
+        if kind == "permission":
+            payload["done"].set()
+
+    monkeypatch.setattr(tui, "_emit", emit)
+    monkeypatch.setattr(
+        tui,
+        "_record_activity_update",
+        lambda label, detail, *, turn_id: updates.append((label, detail, turn_id)),
+    )
+    monkeypatch.setattr(
+        tui,
+        "_publish_shared_event",
+        lambda kind, payload, *, turn_id: published.append((kind, payload, turn_id)),
+    )
+    tui._turn_id = "turn-1"
+
+    assert tui._ask_permission("run_shell", "run tests") == "n"
+    assert emitted[0] == ("activity", "waiting for run shell approval")
+    assert updates == [("denied", "Permission for run shell", "turn-1")]
+    assert published[0] == (
+        "activity",
+        {"text": "waiting for run shell approval"},
+        "turn-1",
+    )
+
+
 def test_active_ollama_service_control_confirms_before_cancelling(monkeypatch):
     tui = _fake_persistent_tui()
     tui.running = True
@@ -2619,6 +4265,50 @@ def test_active_ollama_service_control_confirms_before_cancelling(monkeypatch):
     assert cancel_calls == ["cancel"]
 
 
+def test_starting_ollama_does_not_cancel_an_active_response(monkeypatch):
+    tui = _fake_persistent_tui()
+    tui.running = True
+    cancel_calls = []
+    prompts = []
+    control_finished = threading.Event()
+    tui.agent.ollama.cancel_active = lambda: cancel_calls.append("cancel") or True
+    monkeypatch.setattr(
+        tui,
+        "_ask_permission",
+        lambda _tool, detail: prompts.append(detail) or "y",
+    )
+
+    def control(action):
+        assert action == "start"
+        control_finished.set()
+        return True, "Ollama service started"
+
+    monkeypatch.setattr("klaude_cli.main._control_ollama_service", control)
+
+    tui._request_ollama_service_control("start")
+
+    assert control_finished.wait(2)
+    assert cancel_calls == []
+    assert prompts == ["Start the local Ollama service?"]
+
+
+def test_ollama_service_control_supports_start(monkeypatch):
+    calls = []
+    monkeypatch.setattr("klaude_cli.main.shutil.which", lambda command: "/usr/bin/systemctl")
+
+    def run(arguments, **kwargs):
+        calls.append((arguments, kwargs))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("klaude_cli.main.subprocess.run", run)
+
+    ok, message = _control_ollama_service("start")
+
+    assert ok
+    assert message == "Ollama service started"
+    assert calls[0][0] == ["systemctl", "--no-ask-password", "start", "ollama"]
+
+
 def test_cancelled_transport_error_is_not_saved_as_runtime_failure(tmp_path):
     tui = _fake_persistent_tui()
     tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
@@ -2631,7 +4321,9 @@ def test_cancelled_transport_error_is_not_saved_as_runtime_failure(tmp_path):
     tui._run_turn("hello", cancelled, turn_id="turn-1")
 
     turns = tui.memory.load_session(tui.session_id)
-    assert [(turn["role"], turn["content"]) for turn in turns] == [("user", "hello")]
+    assert turns[0] == {"role": "user", "content": "hello"}
+    assert turns[1]["content"]["event"] == "interruption"
+    assert "Bad file descriptor" not in str(turns)
     events = tui.memory.session_events_since(tui.session_id, 0)
     assert "error" not in {event["kind"] for event in events}
 
@@ -2791,6 +4483,21 @@ def test_persistent_tui_refresh_erases_and_invalidates_current_frame(monkeypatch
     assert calls == [("erase", False), ("invalidate",)]
 
 
+def test_picker_redraws_throttle_shared_session_polling(monkeypatch):
+    tui = _fake_persistent_tui()
+    calls = []
+    monkeypatch.setattr(tui, "_sync_shared_session", lambda: calls.append("sync"))
+    tui._begin_choice("settings", tui._settings_categories(), "models")
+    tui._last_picker_session_sync = time.monotonic()
+
+    tui._before_render(None)
+
+    assert calls == []
+    tui._last_picker_session_sync = 0.0
+    tui._before_render(None)
+    assert calls == ["sync"]
+
+
 def test_persistent_tui_permission_response_accepts_composer_input():
     tui = _fake_persistent_tui()
     done = __import__("threading").Event()
@@ -2803,6 +4510,26 @@ def test_persistent_tui_permission_response_accepts_composer_input():
     assert request["answer"] == "y"
     assert done.is_set()
     assert tui.input.text == ""
+
+
+def test_persistent_tui_empty_permission_response_allows_once():
+    tui = _fake_persistent_tui()
+    done = threading.Event()
+    request = {"tool": "run_shell", "detail": "run tests", "answer": "n", "done": done}
+    tui._permission_request = request
+
+    tui._submit_permission_response()
+
+    assert request["answer"] == "y"
+    assert done.is_set()
+    assert tui.input.text == ""
+
+
+def test_line_permission_empty_enter_allows_once(monkeypatch):
+    monkeypatch.setattr("klaude_cli.main.console.print", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("klaude_cli.main.console.input", lambda *_args, **_kwargs: "")
+
+    assert _ask_permission("learn_source", "Learn this page?") == "y"
 
 
 def test_persistent_tui_permission_response_keeps_invalid_composer_input():
@@ -2902,6 +4629,26 @@ def test_last_chat_model_store_defaults_and_round_trips(tmp_path):
     _save_last_chat_model(path, "qwen3.5:9b")
 
     assert _load_last_chat_model(path) == "qwen3.5:9b"
+
+
+def test_requested_codex_model_refreshes_catalog_when_cache_is_empty(monkeypatch):
+    expected = ModelInfo("openai_codex", "gpt-5.5", "gpt-5.5")
+    monkeypatch.setattr("klaude_cli.main._available_chat_models", lambda *_args: [])
+    monkeypatch.setattr(
+        "klaude_cli.main.CodexAuthManager",
+        lambda: SimpleNamespace(
+            status=lambda: SimpleNamespace(authenticated=True),
+        ),
+    )
+    monkeypatch.setattr("klaude_cli.main.discover_codex_models", lambda: [expected])
+
+    selected = _resolve_requested_chat_model(
+        SimpleNamespace(openai_api_key="", gemini_api_key=""),
+        SimpleNamespace(),
+        "openai_codex/gpt-5.5",
+    )
+
+    assert selected == expected
 
 
 def test_runtime_preferences_persist_alongside_the_last_chat_model(tmp_path):
@@ -3462,6 +5209,8 @@ def test_tool_selector_direct_response_requests_do_not_call_tools():
     for message in (
         "hi",
         "hello",
+        "hellooo",
+        "whaaa",
         "who are you",
         "hi, who might you be",
         "introduce yourself",
@@ -3470,11 +5219,42 @@ def test_tool_selector_direct_response_requests_do_not_call_tools():
         assert _select_tool_names(message, tools) == []
 
 
+def test_tool_selector_uses_command_registry_for_named_slash_command_help():
+    tool = Tool(
+        "list_commands",
+        "Show commands.",
+        {"type": "object", "properties": {}, "required": []},
+        lambda: "",
+    )
+
+    assert _select_tool_names("what does /init do in Klaude?", {"list_commands": tool}) == [
+        "list_commands"
+    ]
+
+
+def test_tool_selector_does_not_treat_text_reader_as_image_vision():
+    tools = {
+        name: Tool(
+            name,
+            f"{name}.",
+            {"type": "object", "properties": {}, "required": []},
+            lambda: "",
+        )
+        for name in ("list_dir", "read_file", "workspace_info")
+    }
+
+    assert _select_tool_names(
+        "look at the image I placed in the current directory", tools
+    ) == ["list_dir", "workspace_info"]
+
+
 def test_list_commands_is_allowed_by_default():
     assert DEFAULT_PERMISSIONS["list_commands"] == "allow"
     assert DEFAULT_PERMISSIONS["current_time"] == "allow"
     assert DEFAULT_PERMISSIONS["weather_lookup"] == "allow"
     assert DEFAULT_PERMISSIONS["workspace_info"] == "allow"
+    assert DEFAULT_PERMISSIONS["http_probe"] == "allow"
+    assert DEFAULT_PERMISSIONS["learn_source"] == "ask"
 
 
 def test_list_commands_description_excludes_casual_identity_questions():
@@ -3484,6 +5264,216 @@ def test_list_commands_description_excludes_casual_identity_questions():
     assert "available commands" in description
     assert "Never invent commands" in description
     assert "focused command help" in description
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Learn this source: https://obsidian.md/help/",
+        "Learn and save this documentation https://obsidian.md/help/",
+        "Save https://obsidian.md/help/ into my Obsidian knowledge library",
+        "Index this documentation site in the obsidian library",
+        "Please ingest the page into knowledge",
+    ],
+)
+def test_knowledge_ingestion_intent_requires_explicit_persistence_language(message):
+    assert _knowledge_ingestion_intent(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "I want to learn about retrieval augmented generation",
+        "Read https://obsidian.md/help/ for this answer",
+        "What does the Obsidian documentation say?",
+        "Remember that I use Obsidian",
+    ],
+)
+def test_knowledge_ingestion_intent_rejects_temporary_or_personal_memory_requests(message):
+    assert not _knowledge_ingestion_intent(message)
+
+
+def test_tool_selector_routes_explicit_learning_only_to_persistent_ingestion():
+    tools = {
+        name: Tool(
+            name,
+            f"{name}.",
+            {"type": "object", "properties": {}, "required": []},
+            lambda: "",
+        )
+        for name in (
+            "learn_source",
+            "query_knowledge",
+            "web_search",
+            "fetch_url",
+            "crawl_site",
+            "write_file",
+            "run_shell",
+        )
+    }
+
+    assert _select_tool_names(
+        "Learn and keep this documentation: https://obsidian.md/help/", tools
+    ) == ["learn_source"]
+
+
+def test_inferred_knowledge_library_prefers_explicit_name_then_domain():
+    assert _inferred_knowledge_library("https://docs.python.org/3/", "Python 3") == "Python 3"
+    assert _inferred_knowledge_library("https://docs.python.org/3/") == "python"
+    assert _inferred_knowledge_library("https://obsidian.md/help/") == "obsidian"
+
+
+def test_learn_source_preflight_rejects_invalid_scope_credentials_and_bounds():
+    with pytest.raises(ValueError, match="HTTP"):
+        _learn_source_preflight({"url": "file:///tmp/private", "scope": "page"})
+    with pytest.raises(ValueError, match="credentials"):
+        _learn_source_preflight({"url": "https://user:secret@example.com", "scope": "page"})
+    with pytest.raises(ValueError, match="scope"):
+        _learn_source_preflight({"url": "https://example.com", "scope": "domain"})
+    with pytest.raises(ValueError, match="max_pages"):
+        _learn_source_preflight(
+            {"url": "https://example.com", "scope": "site", "max_pages": 501}
+        )
+
+
+def test_learn_source_permission_detail_shows_persistent_scope_and_inferred_library():
+    detail = _learn_source_permission_detail(
+        {"url": "https://obsidian.md/help/", "scope": "site"}
+    )
+
+    assert detail == (
+        "Learn documentation site https://obsidian.md/help/ into the local knowledge "
+        "library 'obsidian'?"
+    )
+
+
+def test_learn_source_page_fetches_and_indexes_canonical_content():
+    class FakeWeb:
+        def fetch_detailed(self, url):
+            assert url == "https://example.com/docs/start"
+            return {
+                "status": "succeeded",
+                "content": "# Start\n" + ("Useful documentation. " * 20),
+                "final_url": "https://example.com/docs/start/",
+                "title": "Start",
+                "provider_label": "direct",
+            }
+
+    class FakeKnowledge:
+        def __init__(self):
+            self.learned = []
+
+        def source_is_current(self, library, text, source):
+            return False
+
+        def learn_text(self, library, text, source, title=""):
+            self.learned.append((library, text, source, title))
+            return 3
+
+    knowledge = FakeKnowledge()
+
+    result = _learn_source_tool_result(
+        object(),
+        FakeWeb(),
+        knowledge,
+        "https://example.com/docs/start",
+    )
+
+    assert result["metadata"] == {
+        "canonical_tool": "learn_source",
+        "status": "learned",
+        "scope": "page",
+        "library": "example",
+        "url": "https://example.com/docs/start/",
+        "title": "Start",
+        "pages": 1,
+        "chunks": 3,
+        "provider": "direct",
+    }
+    assert knowledge.learned[0][0::2] == (
+        "example",
+        "https://example.com/docs/start/",
+    )
+
+
+def test_learn_source_page_reports_unchanged_without_reindexing():
+    class FakeWeb:
+        def fetch_detailed(self, _url):
+            return {
+                "status": "succeeded",
+                "content": "existing content",
+                "canonical_url": "https://example.com/docs",
+            }
+
+    class FakeKnowledge:
+        def source_is_current(self, _library, _text, _source):
+            return True
+
+        def learn_text(self, *_args, **_kwargs):
+            raise AssertionError("unchanged source must not be reindexed")
+
+    result = _learn_source_tool_result(
+        object(), FakeWeb(), FakeKnowledge(), "https://example.com/docs"
+    )
+
+    assert result["metadata"]["status"] == "unchanged"
+    assert result["metadata"]["chunks"] == 0
+    assert result["content"].startswith("source unchanged")
+
+
+def test_learn_source_page_reports_fetch_failure_without_indexing():
+    class FakeWeb:
+        def fetch_detailed(self, _url):
+            return {
+                "status": "failed",
+                "content": "",
+                "failure": {"reason": "robots policy denied the request"},
+            }
+
+    class FakeKnowledge:
+        def source_is_current(self, *_args, **_kwargs):
+            raise AssertionError("failed fetch must not inspect the index")
+
+        def learn_text(self, *_args, **_kwargs):
+            raise AssertionError("failed fetch must not be indexed")
+
+    result = _learn_source_tool_result(
+        object(), FakeWeb(), FakeKnowledge(), "https://example.com/private"
+    )
+
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["pages"] == 0
+    assert result["metadata"]["chunks"] == 0
+    assert "robots policy denied" in result["content"]
+
+
+def test_learn_source_site_defaults_to_the_supplied_documentation_subtree(monkeypatch):
+    captured = {}
+
+    def fake_crawl(cfg, url, library, **kwargs):
+        captured.update(cfg=cfg, url=url, library=library, **kwargs)
+        return (
+            SimpleNamespace(library=library, manifest_path=Path("/data/manifest.json")),
+            12,
+            {"pages": [{"url": url}], "errors": [], "skipped": [], "seeded": []},
+        )
+
+    monkeypatch.setattr("klaude_cli.main._crawl_and_install", fake_crawl)
+
+    result = _learn_source_tool_result(
+        "cfg",
+        object(),
+        object(),
+        "https://obsidian.md/help/",
+        scope="site",
+    )
+
+    assert captured["library"] == "obsidian"
+    assert captured["include_patterns"] == ["/help", "/help/*"]
+    assert captured["use_sitemap"] is True
+    assert result["metadata"]["status"] == "learned"
+    assert result["metadata"]["pages"] == 1
+    assert result["metadata"]["chunks"] == 12
 
 
 def test_tool_selector_exposes_knowledge_for_local_knowledge_questions():
@@ -3783,6 +5773,49 @@ def test_tool_selector_exposes_web_for_requested_result_list():
     selected = _select_tool_names("show me 20 results about FlazeSlayer", tools)
 
     assert selected == ["web_search", "fetch_url"]
+
+
+def test_tool_selector_exposes_restricted_probe_for_endpoint_diagnostics():
+    tools = {
+        name: Tool(
+            name,
+            f"{name}.",
+            {"type": "object", "properties": {}, "required": []},
+            lambda: "",
+        )
+        for name in ("web_search", "fetch_url", "http_probe", "run_shell")
+    }
+
+    selected = _select_tool_names("Is this endpoint reachable?", tools)
+
+    assert "http_probe" in selected
+    assert "run_shell" not in selected
+
+
+def test_http_probe_tool_result_and_display_use_structured_metadata():
+    class FakeWeb:
+        def probe_detailed(self, url, method):
+            return {
+                "requested_url": url,
+                "final_url": "https://example.com/health",
+                "method": method,
+                "status": "succeeded",
+                "reachable": True,
+                "status_code": 204,
+                "ok": True,
+                "content_type": "text/plain",
+                "content_length": 0,
+                "redirect_count": 1,
+                "elapsed_ms": 12,
+            }
+
+    result = _http_probe_tool_result(FakeWeb(), "http://example.com/health", "GET")
+    lines = _http_probe_display_lines(result["metadata"], result["content"])
+
+    assert HTTP_PROBE_TOOL_DESCRIPTION
+    assert "Status: 204" in result["content"]
+    assert result["metadata"]["canonical_tool"] == "http_probe"
+    assert lines[0] == "-> http_probe [204]"
 
 
 def test_tool_selector_exposes_web_for_activity_evidence_question():

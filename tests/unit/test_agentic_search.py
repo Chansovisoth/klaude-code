@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
 from klaude_core import Agent, PermissionGate, Tool, WebResearchBudget
 from klaude_core.agent import ConversationEntity
 
@@ -85,6 +86,54 @@ def test_plan_mode_blocks_writes_but_keeps_read_and_retrieval_tools():
     assert names == {"read_file", "web_search"}
 
 
+def test_user_input_tool_is_omitted_for_a_direct_greeting():
+    ollama = ScriptedOllama([{"role": "assistant", "content": "Need a choice."}])
+    agent = Agent(
+        ollama,
+        "fake-model",
+        [
+            Tool(
+                "request_user_input",
+                "Ask the user.",
+                {"type": "object", "properties": {"question": {"type": "string"}}},
+                lambda **_kwargs: "unused",
+            )
+        ],
+        PermissionGate({"request_user_input": "allow"}, lambda *_: "y"),
+        "system",
+        tool_selector=lambda _message, _available: [],
+    )
+
+    list(agent.run("hello"))
+
+    assert ollama.calls[0]["tools"] == []
+
+
+def test_user_input_tool_remains_available_for_a_decision_request():
+    ollama = ScriptedOllama([{"role": "assistant", "content": "Need a choice."}])
+    agent = Agent(
+        ollama,
+        "fake-model",
+        [
+            Tool(
+                "request_user_input",
+                "Ask the user.",
+                {"type": "object", "properties": {"question": {"type": "string"}}},
+                lambda **_kwargs: "unused",
+            )
+        ],
+        PermissionGate({"request_user_input": "allow"}, lambda *_: "y"),
+        "large product system prompt",
+        tool_selector=lambda _message, _available: [],
+    )
+
+    list(agent.run("Help me choose which database to use"))
+
+    assert [schema["function"]["name"] for schema in ollama.calls[0]["tools"]] == [
+        "request_user_input"
+    ]
+
+
 def test_disabled_research_tool_is_neither_exposed_nor_reinstated_for_explicit_search():
     called = []
     ollama = ScriptedOllama([{"role": "assistant", "content": "No web tool available."}])
@@ -102,6 +151,108 @@ def test_disabled_research_tool_is_neither_exposed_nor_reinstated_for_explicit_s
 
     assert ollama.calls[0]["tools"] == []
     assert called == []
+
+
+def test_agent_blocks_unrequested_curl_as_web_fallback():
+    executed = []
+    ollama = ScriptedOllama(
+        [
+            tool_call("run_shell", command="/usr/bin/curl https://example.com/"),
+            {"role": "assistant", "content": "The bounded web path was unavailable."},
+        ]
+    )
+    agent = Agent(
+        ollama,
+        "fake-model",
+        [
+            Tool(
+                "run_shell",
+                "Run a shell command",
+                {"type": "object"},
+                lambda **kwargs: executed.append(kwargs),
+            )
+        ],
+        PermissionGate({"run_shell": "allow"}, lambda *_: "y"),
+        "system",
+        tool_selector=lambda _message, available: list(available),
+    )
+
+    events = list(agent.run("Check whether the website is online."))
+
+    assert executed == []
+    tool_results = [event.payload for event in events if event.kind == "tool_result"]
+    assert tool_results[0]["metadata"]["shell_network_fallback_blocked"] is True
+    assert "requires an explicit user request" in tool_results[0]["result"]
+
+
+def test_agent_allows_curl_when_user_explicitly_requests_it():
+    executed = []
+    ollama = ScriptedOllama(
+        [
+            tool_call("run_shell", command="curl https://example.com/"),
+            {"role": "assistant", "content": "Done."},
+        ]
+    )
+    agent = Agent(
+        ollama,
+        "fake-model",
+        [
+            Tool(
+                "run_shell",
+                "Run a shell command",
+                {"type": "object"},
+                lambda **kwargs: executed.append(kwargs) or "exit=0",
+            )
+        ],
+        PermissionGate({"run_shell": "allow"}, lambda *_: "y"),
+        "system",
+        tool_selector=lambda _message, available: list(available),
+    )
+
+    list(agent.run("Use curl to check https://example.com/."))
+
+    assert executed == [{"command": "curl https://example.com/"}]
+
+
+def test_http_probe_allows_get_retry_after_head_for_same_url():
+    executed = []
+    ollama = ScriptedOllama(
+        [
+            tool_call("http_probe", url="https://example.com/", method="HEAD"),
+            tool_call("http_probe", url="https://example.com/", method="GET"),
+            {"role": "assistant", "content": "The endpoint responds to GET."},
+        ]
+    )
+
+    def probe(**kwargs):
+        executed.append(kwargs)
+        status_code = 405 if kwargs["method"] == "HEAD" else 200
+        return {
+            "content": f"HTTP probe status: {status_code}",
+            "metadata": {
+                "status": "succeeded",
+                "status_code": status_code,
+                "final_url": kwargs["url"],
+            },
+        }
+
+    agent = Agent(
+        ollama,
+        "fake-model",
+        [Tool("http_probe", "Probe", {"type": "object"}, probe)],
+        PermissionGate({"http_probe": "allow"}, lambda *_: "y"),
+        "system",
+        tool_selector=lambda _message, available: list(available),
+    )
+
+    list(agent.run("Check whether this endpoint is reachable: https://example.com/"))
+
+    assert executed == [
+        {"url": "https://example.com/", "method": "HEAD"},
+        {"url": "https://example.com/", "method": "GET"},
+    ]
+    assert agent.last_web_research_state is not None
+    assert agent.last_web_research_state.fetch_calls_used == 2
 
 
 def search_result(query: str, *items: tuple[str, str, str], providers=("mock",)):
@@ -571,6 +722,23 @@ def test_cuda_unspecified_launch_failure_gets_an_actionable_runtime_error():
     assert "CPU-only" in message
 
 
+def test_codex_usage_limit_gets_actionable_non_raw_error():
+    from klaude_core.agent import _runtime_error_message
+
+    error = RuntimeError(
+        "Error code: 429 - {'error': {'type': 'usage_limit_reached', "
+        "'message': 'The usage limit has been reached', 'plan_type': 'plus', "
+        "'resets_at': 2000000000, 'resets_in_seconds': 14252}}"
+    )
+
+    message = _runtime_error_message(error)
+
+    assert "OpenAI Codex usage limit reached (Plus plan)" in message
+    assert "chatgpt.com/codex/settings/usage" in message
+    assert "usage_limit_reached" not in message
+    assert "{'error'" not in message
+
+
 def test_cuda_runner_fault_retries_once_on_cpu_when_placement_is_automatic():
     class GpuFailingOllama:
         def __init__(self):
@@ -945,8 +1113,137 @@ def test_new_turn_compacts_stale_history_before_ollama_silently_truncates_it():
 
     sent = "\n".join(str(message["content"]) for message in ollama.messages)
     assert "current request" in sent
-    assert "old request" not in sent
-    assert "old answer" not in sent
+    assert "Earlier conversation recap retained during context compaction" in sent
+    assert "old request" in sent
+    assert ("x" * 2_000) not in sent
+    assert ("y" * 2_000) not in sent
+
+
+def test_context_compaction_keeps_tool_call_and_output_in_the_same_turn():
+    agent = Agent(
+        object(),
+        "fake-model",
+        [],
+        PermissionGate({}, lambda _tool, _detail: "y"),
+        "system",
+        ollama_options={"num_ctx": 4096, "num_predict": 2048},
+    )
+    agent.messages.extend(
+        [
+            {"role": "user", "content": "old " + ("x" * 10_000)},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "inspect it"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_name": "read_file",
+                "tool_call_id": "call-1",
+                "content": "contents",
+            },
+            {"role": "assistant", "content": "inspection complete"},
+            {"role": "user", "content": "continue"},
+        ]
+    )
+
+    agent._compact_history([])
+
+    roles = [message["role"] for message in agent.messages]
+    assert roles[-5:] == ["user", "assistant", "tool", "assistant", "user"]
+    assert agent.messages[-3]["tool_call_id"] == "call-1"
+
+
+def test_short_followup_inherits_safe_retrieval_route_from_recent_context():
+    seen_tools = []
+
+    class Runtime:
+        def chat(self, _model, _messages, tools=None, **_kwargs):
+            seen_tools.append([item["function"]["name"] for item in tools or []])
+            return {"role": "assistant", "content": "I searched broader terms."}
+
+    knowledge = Tool(
+        "query_knowledge",
+        "Search knowledge.",
+        {"type": "object", "properties": {}, "required": []},
+        lambda: "unused",
+    )
+    agent = Agent(
+        Runtime(),
+        "fake-model",
+        [knowledge],
+        PermissionGate({"query_knowledge": "allow"}, lambda _tool, _detail: "y"),
+        "system",
+        tool_selector=lambda message, _tools: (
+            ["query_knowledge"] if "knowledge" in message.casefold() else []
+        ),
+    )
+    agent.messages.append(
+        {"role": "assistant", "content": "I can search the knowledge library more broadly."}
+    )
+
+    list(agent.run("try"))
+
+    assert seen_tools == [["query_knowledge"]]
+
+
+def test_short_followup_does_not_inherit_mutation_from_assistant_prose():
+    seen_tools = []
+
+    class Runtime:
+        def chat(self, _model, _messages, tools=None, **_kwargs):
+            seen_tools.append([item["function"]["name"] for item in tools or []])
+            return {"role": "assistant", "content": "I need an explicit action route."}
+
+    edit = Tool(
+        "edit_file",
+        "Edit a file.",
+        {"type": "object", "properties": {}, "required": []},
+        lambda: "unused",
+    )
+    agent = Agent(
+        Runtime(),
+        "fake-model",
+        [edit],
+        PermissionGate({"edit_file": "ask"}, lambda _tool, _detail: "n"),
+        "system",
+        tool_selector=lambda message, _tools: (
+            ["edit_file"] if "edit" in message.casefold() else []
+        ),
+    )
+    agent.messages.append(
+        {"role": "assistant", "content": "I could edit the configuration."}
+    )
+
+    list(agent.run("do that"))
+
+    assert seen_tools == [[]]
+
+
+@pytest.mark.parametrize("message", ["hellooo", "whaaa"])
+def test_stretched_interjection_does_not_replace_active_retrieval_entity(message):
+    ollama = ScriptedOllama([{"role": "assistant", "content": "Hello."}])
+    agent = Agent(
+        ollama,
+        "fake-model",
+        [],
+        PermissionGate({}, lambda *_: "y"),
+        "system",
+    )
+    agent.retrieval_state.active_entities = [
+        ConversationEntity(mention="Paragon", active=True, introduced_turn=1)
+    ]
+
+    list(agent.run(message))
+
+    assert agent.retrieval_state.active_entities[0].mention == "Paragon"
 
 
 def test_search_only_can_finish_from_snippets():

@@ -12,11 +12,11 @@ def test_agent_step_budget_defaults_low_and_clamps_overrides(tmp_path, monkeypat
     monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
 
     cfg = load_config()
-    assert cfg.max_agent_steps == 8
+    assert cfg.max_agent_steps == 20
     assert cfg.max_code_repairs == 2
 
     (config_dir / "config.toml").write_text("[agent]\nmax_steps = 200\n")
-    assert load_config().max_agent_steps == 20
+    assert load_config().max_agent_steps == 64
 
     (config_dir / "config.toml").write_text("[agent]\nmax_steps = 0\n")
     assert load_config().max_agent_steps == 1
@@ -441,3 +441,18 @@ def test_load_config_reads_web_search_provider_sections(tmp_path, monkeypatch):
     assert cfg.web_providers["google"].enabled is False
     assert cfg.web_providers["searxng"].last_resort_only is True
     assert cfg.web_providers["searxng"].automatic_merge is False
+
+
+def test_load_config_reads_brave_search_key_and_default_priority(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    data_dir = tmp_path / "data"
+    config_dir.mkdir()
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "  brave-test-key  ")
+
+    cfg = load_config()
+
+    assert cfg.brave_search_api_key == "brave-test-key"
+    assert cfg.web_providers["brave_api"].api_key_env == "BRAVE_SEARCH_API_KEY"
+    assert cfg.web_search.provider_order[0] == "brave"

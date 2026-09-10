@@ -1,3 +1,4 @@
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -79,6 +80,16 @@ def test_session_search_and_recent_sessions(tmp_path):
     assert recent[1]["session_id"] == "s1"
 
 
+def test_session_search_ignores_question_scaffolding_and_tolerates_word_suffix_typo(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    memory.log_turn("past", "user", "Please remembermy favorite fruit is mangosteen")
+
+    hits = memory.search_sessions("what is something I remembered in my other sessions?")
+
+    assert hits
+    assert hits[0]["session_id"] == "past"
+
+
 def test_session_keeps_private_model_context_separate_from_visible_turn(tmp_path):
     memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
     memory.log_turn(
@@ -127,6 +138,40 @@ def test_session_worker_lease_is_exclusive_renewable_and_releasable(tmp_path):
     assert memory.renew_session_lease("s1", "client-a", "turn-a")
     assert memory.release_session_lease("s1", "client-a", "turn-a")
     assert memory.acquire_session_lease("s1", "client-b", "turn-b")
+
+
+def test_session_live_schema_migrates_and_tracks_the_shared_turn_start(tmp_path):
+    database = tmp_path / "sessions.db"
+    legacy = sqlite3.connect(database)
+    legacy.execute(
+        """CREATE TABLE session_live (
+            session_id TEXT PRIMARY KEY,
+            revision INTEGER NOT NULL DEFAULT 0,
+            owner_client_id TEXT NOT NULL DEFAULT '',
+            owner_lease_until REAL NOT NULL DEFAULT 0,
+            turn_id TEXT NOT NULL DEFAULT '',
+            state TEXT NOT NULL DEFAULT 'idle',
+            draft_client_id TEXT NOT NULL DEFAULT '',
+            draft TEXT NOT NULL DEFAULT '',
+            activity TEXT NOT NULL DEFAULT 'ready',
+            partial TEXT NOT NULL DEFAULT '',
+            queue_json TEXT NOT NULL DEFAULT '[]',
+            updated_at REAL NOT NULL
+        )"""
+    )
+    legacy.commit()
+    legacy.close()
+
+    memory = Memory(tmp_path / "memory.md", database)
+    assert "turn_started_at" in {
+        row[1] for row in memory.db.execute("PRAGMA table_info(session_live)").fetchall()
+    }
+    assert memory.acquire_session_lease("s1", "client-a", "turn-a")
+    live = memory.session_live_state("s1")
+
+    assert live["turn_started_at"] > 0
+    assert memory.release_session_lease("s1", "client-a", "turn-a")
+    assert memory.session_live_state("s1")["turn_started_at"] == 0
 
 
 def test_session_live_state_has_monotonic_revisions_and_shared_draft(tmp_path):
@@ -194,12 +239,16 @@ def test_two_memory_clients_share_atomic_turn_snapshot_and_stream(tmp_path):
     assert "private" in snapshot["turns"][0]["model_content"]
     assert snapshot["live"]["partial"] == "Working"
     assert snapshot["live"]["owner_client_id"] == "owner"
+    assert watcher.resumable_sessions()[0]["active"] is True
+    assert watcher.recent_sessions()[0]["active"] is True
 
     owner.log_turn("shared", "assistant", "Working")
     owner.publish_session_event(
         "shared", "owner", "turn_done", {"suffix": "worked"}, turn_id="turn-1"
     )
     assert owner.release_session_lease("shared", "owner", "turn-1")
+    assert watcher.resumable_sessions()[0]["active"] is False
+    assert watcher.recent_sessions()[0]["active"] is False
     assert watcher.acquire_session_lease("shared", "watcher", "turn-2")
 
 
@@ -230,6 +279,28 @@ def test_clear_sessions_removes_all_session_turns(tmp_path):
     assert memory.clear_sessions() == {"sessions": 0, "turns": 0}
 
 
+def test_activity_records_replay_without_polluting_dialogue_counts_or_search(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    memory.log_turn("s1", "user", "Inspect the parser")
+    memory.log_turn(
+        "s1",
+        "system",
+        {"event": "activity_update", "label": "explored", "detail": "Read secret-parser.py"},
+    )
+    memory.log_turn("s1", "assistant", "The parser is sound.")
+
+    assert memory.session_counts() == {"sessions": 1, "turns": 2}
+    assert memory.recent_sessions()[0]["turns"] == 2
+    assert memory.recent_sessions()[0]["preview"] == "The parser is sound."
+    assert memory.search_sessions("secret-parser") == []
+    assert memory.session_tail("s1") == [
+        {"role": "user", "content": "Inspect the parser"},
+        {"role": "assistant", "content": "The parser is sound."},
+    ]
+    assert memory.delete_session("s1") == 2
+    assert memory.load_session("s1") == []
+
+
 def test_session_names_persist_and_forks_remain_independent(tmp_path):
     memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
     memory.log_turn("original", "user", "A question")
@@ -240,6 +311,13 @@ def test_session_names_persist_and_forks_remain_independent(tmp_path):
     reopened = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
     titles = {s["session_id"]: s["title"] for s in reopened.resumable_sessions()}
     assert titles == {"original": "Named conversation", "fork": "Named conversation (fork)"}
+    recent_titles = {s["session_id"]: s["title"] for s in reopened.recent_sessions()}
+    assert recent_titles == titles
+    assert reopened.session_title("original") == "Named conversation"
+    assert reopened.session_title("fork") == "Named conversation (fork)"
+    assert reopened.session_title("missing") == "Untitled session"
+    reopened.log_turn("derived", "user", "  First user message\nwith extra spacing  ")
+    assert reopened.session_title("derived") == "First user message with extra spacing"
     assert len(reopened.load_session("original")) == 1
     assert len(reopened.load_session("fork")) == 2
     reopened.delete_session("original")

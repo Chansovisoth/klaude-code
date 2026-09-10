@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -104,6 +105,21 @@ class FetchPageResult:
     content_truncated: bool = False
     attempted_providers: tuple[str, ...] = ()
     successful_provider: str | None = None
+
+
+@dataclass(frozen=True)
+class HTTPProbeResult:
+    """Bounded metadata from one public HTTP endpoint check."""
+
+    requested_url: str
+    final_url: str
+    method: str
+    status_code: int
+    content_type: str
+    content_length: int | None
+    redirect_count: int
+    elapsed_ms: int
+    reachable: bool = True
 
 
 class _MetadataParser(HTMLParser):
@@ -376,6 +392,107 @@ def resolve_public_url(
         transport=transport,
     )
     return page.final_url, page.redirect_count
+
+
+def probe_public_url(
+    url: str,
+    method: str = "HEAD",
+    *,
+    timeout_seconds: float = 10.0,
+    max_redirects: int = 5,
+    resolver: Callable[..., list[tuple]] = socket.getaddrinfo,
+    transport: httpx.BaseTransport | None = None,
+) -> HTTPProbeResult:
+    """Check a public HTTP endpoint without accepting caller-controlled request data.
+
+    The probe returns response metadata only. It deliberately provides no knobs for
+    headers, credentials, bodies, cookies, proxies, or TLS verification, keeping it
+    substantially narrower than a shell command such as ``curl``.
+    """
+    normalized_method = str(method or "HEAD").strip().upper()
+    if normalized_method not in {"HEAD", "GET"}:
+        raise ValueError("HTTP probe method must be HEAD or GET")
+    requested_url = canonicalize_public_url(url)
+    parsed = urlparse(requested_url)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if port not in {80, 443}:
+        raise UnsafeURL("HTTP probe allows only standard web ports 80 and 443")
+
+    current_url = requested_url
+    redirect_count = 0
+    started = time.monotonic()
+    headers = {
+        "User-Agent": UA,
+        "Accept": "*/*",
+    }
+    try:
+        with httpx.Client(
+            headers=headers,
+            timeout=max(0.1, min(float(timeout_seconds), 30.0)),
+            follow_redirects=False,
+            transport=transport,
+            trust_env=False,
+        ) as client:
+            while True:
+                current_url = validate_public_url(current_url, resolver)
+                current_parsed = urlparse(current_url)
+                current_port = current_parsed.port or (
+                    443 if current_parsed.scheme == "https" else 80
+                )
+                if current_port not in {80, 443}:
+                    raise UnsafeURL("HTTP probe allows only standard web ports 80 and 443")
+                with client.stream(normalized_method, current_url) as response:
+                    if response.status_code in REDIRECT_STATUSES:
+                        location = response.headers.get("location", "").strip()
+                        if not location:
+                            raise FetchPageError(
+                                "redirect response did not include a location",
+                                failure_class="invalid_redirect",
+                                final_url=current_url,
+                                redirect_count=redirect_count,
+                            )
+                        if redirect_count >= max_redirects:
+                            raise FetchPageError(
+                                f"redirect limit ({max_redirects}) exceeded",
+                                failure_class="redirect_limit",
+                                final_url=current_url,
+                                redirect_count=redirect_count,
+                            )
+                        current_url = canonicalize_public_url(urljoin(current_url, location))
+                        redirect_count += 1
+                        continue
+                    raw_length = response.headers.get("content-length", "").strip()
+                    try:
+                        parsed_length = int(raw_length) if raw_length else None
+                        content_length = (
+                            parsed_length
+                            if parsed_length is not None and parsed_length >= 0
+                            else None
+                        )
+                    except ValueError:
+                        content_length = None
+                    return HTTPProbeResult(
+                        requested_url=requested_url,
+                        final_url=current_url,
+                        method=normalized_method,
+                        status_code=response.status_code,
+                        content_type=_content_type(response.headers),
+                        content_length=content_length,
+                        redirect_count=redirect_count,
+                        elapsed_ms=max(0, round((time.monotonic() - started) * 1000)),
+                    )
+    except UnsafeURL:
+        raise
+    except FetchPageError:
+        raise
+    except httpx.TimeoutException as exc:
+        raise FetchPageError(
+            "HTTP probe timed out", failure_class="timeout", transient=True
+        ) from exc
+    except (httpx.HTTPError, ValueError) as exc:
+        raise FetchPageError(
+            f"HTTP probe failed: {exc}", failure_class="network_failure", transient=True
+        ) from exc
 
 
 def _html_metadata(html: str) -> tuple[str, str | None, str | None, str]:

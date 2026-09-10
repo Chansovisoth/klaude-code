@@ -1,8 +1,10 @@
 import pytest
 from klaude_core.model_runtime import (
+    CodexRuntime,
     GeminiRuntime,
     ModelInfo,
     OpenAIRuntime,
+    discover_codex_models,
     grouped_local_models,
     load_model_cache,
     local_model_weight_first_key,
@@ -260,13 +262,276 @@ def test_cloud_model_cache_round_trips_public_catalog_data_only(tmp_path):
         cache,
         [
             ModelInfo("openai_api", "gpt-5", "GPT-5", released_at=123),
+            ModelInfo("openai_codex", "gpt-5.6-sol", "GPT-5.6 Sol"),
             ModelInfo("ollama", "qwen3", "qwen3"),
         ],
     )
 
     assert load_model_cache(cache) == [
         ModelInfo("openai_api", "gpt-5", "GPT-5", released_at=123),
+        ModelInfo("openai_codex", "gpt-5.6-sol", "GPT-5.6 Sol"),
     ]
+
+
+def test_cloud_model_cache_excludes_endpoint_specific_openai_models(tmp_path):
+    cache = tmp_path / "model-cache.json"
+    save_model_cache(
+        cache,
+        [
+            ModelInfo("openai_api", "gpt-5", "gpt-5"),
+            ModelInfo("openai_api", "gpt-5-search-api", "gpt-5-search-api"),
+            ModelInfo("openai_api", "sora-2", "sora-2"),
+            ModelInfo("openai_api", "whisper-1", "whisper-1"),
+        ],
+    )
+
+    assert [item.model_id for item in load_model_cache(cache)] == ["gpt-5"]
+
+
+def test_codex_model_discovery_uses_account_catalog_and_efforts():
+    class Auth:
+        def list_models(self):
+            return [
+                {
+                    "model": "gpt-5.6-sol",
+                    "displayName": "GPT-5.6 Sol",
+                    "hidden": False,
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "low"},
+                        {"reasoningEffort": "high"},
+                    ],
+                },
+                {"model": "hidden", "hidden": True},
+            ]
+
+    models = discover_codex_models(Auth())
+
+    assert [item.ref for item in models] == ["openai_codex/gpt-5.6-sol"]
+    assert models[0].capabilities.effort_levels == ("low", "high")
+
+
+def test_codex_runtime_retries_one_unauthorized_request_with_refresh(monkeypatch):
+    calls = []
+    request_options = []
+    response = type("Response", (), {"output": [], "output_text": "ok", "usage": None})()
+    delta = type("Event", (), {"type": "response.output_text.delta", "delta": "ok"})()
+    completed = type("Event", (), {"type": "response.completed", "response": response})()
+
+    class Unauthorized(Exception):
+        status_code = 401
+
+    class Responses:
+        def __init__(self, refresh):
+            self.refresh = refresh
+
+        def create(self, **kwargs):
+            calls.append(self.refresh)
+            request_options.append(kwargs)
+            if not self.refresh:
+                raise Unauthorized()
+            return iter([delta, completed])
+
+    runtime = CodexRuntime(auth=object())
+    monkeypatch.setattr(
+        runtime,
+        "_client",
+        lambda *, refresh=False: type("Client", (), {"responses": Responses(refresh)})(),
+    )
+
+    assert runtime.chat("gpt-test", [{"role": "user", "content": "hello"}])["content"] == "ok"
+    assert calls == [False, True]
+    assert request_options[0]["stream"] is True
+    assert request_options[1]["stream"] is True
+
+
+def test_codex_transport_forces_streaming_for_every_internal_caller(monkeypatch):
+    captured = {}
+
+    class Responses:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return iter(())
+
+    runtime = CodexRuntime(auth=object())
+    monkeypatch.setattr(
+        runtime,
+        "_client",
+        lambda *, refresh=False: type("Client", (), {"responses": Responses()})(),
+    )
+
+    runtime._response_create(model="gpt-test", input=[], stream=False)
+
+    assert captured["stream"] is True
+
+
+def test_codex_runtime_surfaces_revoked_auth_after_one_refresh(monkeypatch):
+    class Unauthorized(Exception):
+        status_code = 401
+
+    class Responses:
+        def create(self, **_kwargs):
+            raise Unauthorized()
+
+    runtime = CodexRuntime(auth=object())
+    monkeypatch.setattr(
+        runtime,
+        "_client",
+        lambda *, refresh=False: type("Client", (), {"responses": Responses()})(),
+    )
+
+    with pytest.raises(RuntimeError, match="expired or was revoked"):
+        runtime.chat("gpt-test", [{"role": "user", "content": "hello"}])
+
+
+def test_codex_runtime_streaming_preserves_deltas(monkeypatch):
+    reasoning = type(
+        "Reasoning",
+        (),
+        {
+            "id": "rs_123",
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "opaque-state",
+            "content": [],
+        },
+    )()
+    response = type(
+        "Response", (), {"output": [reasoning], "output_text": "hello", "usage": None}
+    )()
+    events = [
+        type("Event", (), {"type": "response.output_text.delta", "delta": "hel"})(),
+        type("Event", (), {"type": "response.output_text.delta", "delta": "lo"})(),
+        type("Event", (), {"type": "response.output_item.done", "item": reasoning})(),
+        type("Event", (), {"type": "response.completed", "response": response})(),
+    ]
+    runtime = CodexRuntime(auth=object())
+    monkeypatch.setattr(runtime, "_response_create", lambda **_kwargs: iter(events))
+
+    chunks = list(runtime.chat_stream("gpt-test", []))
+
+    assert [item["content"] for item in chunks] == ["hel", "lo", ""]
+    assert chunks[-1]["codex_reasoning_items"] == [
+        {
+            "id": "rs_123",
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "opaque-state",
+        }
+    ]
+
+
+def test_codex_runtime_replays_only_opaque_reasoning_state():
+    message = {
+        "role": "assistant",
+        "content": "done",
+        "codex_reasoning_items": [
+            {
+                "id": "rs_123",
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": "opaque-state",
+            }
+        ],
+    }
+
+    assert CodexRuntime._input([message]) == [
+        {
+            "id": "rs_123",
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "opaque-state",
+        },
+        {"role": "assistant", "content": "done"},
+    ]
+
+
+def test_codex_runtime_drops_incomplete_reasoning_continuation_items():
+    incomplete = type(
+        "Reasoning",
+        (),
+        {"type": "reasoning", "encrypted_content": "opaque-state", "summary": []},
+    )()
+
+    assert CodexRuntime._reasoning_item(incomplete) is None
+
+
+def test_openai_input_drops_orphaned_function_call_outputs():
+    messages = [
+        {"role": "system", "content": "system"},
+        {
+            "role": "tool",
+            "tool_call_id": "orphan",
+            "tool_name": "read_file",
+            "content": "stale result",
+        },
+        {"role": "user", "content": "continue"},
+    ]
+
+    assert OpenAIRuntime._input(messages) == [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "continue"},
+    ]
+
+
+def test_openai_input_keeps_complete_function_call_pairs():
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "tool_name": "read_file",
+            "content": "contents",
+        },
+    ]
+
+    assert [item["type"] for item in OpenAIRuntime._input(messages)] == [
+        "function_call",
+        "function_call_output",
+    ]
+
+
+def test_codex_runtime_preserves_structured_tool_calls(monkeypatch):
+    call = type(
+        "Call",
+        (),
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "read_file",
+            "arguments": "{}",
+            "content": [],
+        },
+    )()
+    response = type("Response", (), {"output": [call], "output_text": "", "usage": None})()
+    runtime = CodexRuntime(auth=object())
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return iter(
+            [
+                type("Event", (), {"type": "response.output_item.done", "item": call})(),
+                type("Event", (), {"type": "response.completed", "response": response})(),
+            ]
+        )
+
+    monkeypatch.setattr(runtime, "_response_create", create)
+
+    message = runtime.chat("gpt-test", [], tools=[])
+
+    assert message["tool_calls"] == [
+        {"id": "call-1", "function": {"name": "read_file", "arguments": "{}"}}
+    ]
+    assert captured["stream"] is True
 
 
 def test_local_model_sort_prefers_larger_parameter_tags():

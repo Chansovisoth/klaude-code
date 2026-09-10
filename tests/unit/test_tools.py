@@ -26,10 +26,40 @@ def test_run_shell_respects_dirty_worktree_write_lock(tmp_path):
         ws.run_shell("touch generated.txt")
 
 
+def test_run_shell_does_not_inherit_launcher_python_environment(tmp_path, monkeypatch):
+    ws = Workspace(tmp_path)
+    monkeypatch.setenv("VIRTUAL_ENV", "/outside/repository/.venv")
+    monkeypatch.setenv("PYTHONPATH", "/outside/repository/packages")
+
+    result = ws.run_shell(
+        "python3 -c 'import os; print(os.environ.get(\"VIRTUAL_ENV\")); "
+        "print(os.environ.get(\"PYTHONPATH\"))'"
+    )
+
+    assert "exit=0" in result
+    assert "/outside/repository" not in result
+
+
 def test_git_diff_tool_description_matches_worktree_diff(tmp_path):
     tools = {tool.name: tool for tool in build_tools(Workspace(tmp_path))}
 
     assert tools["git_diff"].description == "Show the current working-tree diff."
+
+
+def test_edits_capture_patch_before_auto_commit(tmp_path):
+    _init_repo(tmp_path)
+    ws = Workspace(tmp_path)
+    result = ws.edit_file("README.md", "hello", "hello\nworld")
+    edit = result["metadata"]["edit"]
+    assert (edit["added"], edit["removed"]) == (1, 0)
+    assert any("2 + world" in line for line in edit["lines"])
+    assert not _run(["git", "diff"], tmp_path).stdout
+    unchanged = ws.write_file("README.md", "hello\nworld\n")
+    assert unchanged["metadata"]["edit"]["changed"] is False
+    newline_only = ws.write_file("README.md", "hello\nworld")
+    patch = newline_only["metadata"]["edit"]
+    assert (patch["added"], patch["removed"]) == (1, 1)
+    assert any("No newline" in line for line in patch["lines"])
 
 
 def test_workspace_info_reports_working_directory_and_repo_root(tmp_path):
@@ -220,13 +250,17 @@ def test_shell_syntax_uses_explicit_shell_path(tmp_path, monkeypatch):
 
     ws.run_shell("rg needle . | head")
 
-    sandbox_argv = calls[0][0]
+    sandbox_argv = calls[-1][0]
     assert sandbox_argv[sandbox_argv.index("--") + 1 :] == [
         "/bin/bash",
-        "-lc",
+        "--noprofile",
+        "--norc",
+        "-o",
+        "pipefail",
+        "-c",
         "rg needle . | head",
     ]
-    assert calls[0][1]["shell"] is False
+    assert calls[-1][1]["shell"] is False
 
 
 def test_destructive_git_commands_receive_highest_risk():

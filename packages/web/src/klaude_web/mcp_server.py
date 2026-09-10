@@ -114,6 +114,11 @@ def main() -> None:
         return json.dumps(web.fetch_detailed(url), ensure_ascii=False, indent=1)
 
     @mcp.tool()
+    def http_probe(url: str, method: str = "HEAD") -> str:
+        """Check a public endpoint with bounded HEAD or GET response metadata."""
+        return json.dumps(web.probe_detailed(url, method), ensure_ascii=False, indent=1)
+
+    @mcp.tool()
     def crawl_site(
         url: str,
         max_depth: int = 2,

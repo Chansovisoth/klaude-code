@@ -21,6 +21,7 @@ class PermissionDenied(Exception):
 class PermissionGate:
     def __init__(self, policies: dict[str, str], ask: AskCallback):
         self.policies = dict(policies)
+        self.process_grants: set[str] = set()
         self._ask = ask
 
     def set_ask_callback(self, ask: AskCallback) -> None:
@@ -33,9 +34,11 @@ class PermissionGate:
             return
         if policy == "deny":
             raise PermissionDenied(f"tool '{tool}' is denied by policy")
+        if tool in self.process_grants:
+            return
         answer = self._ask(tool, detail)
-        if answer == "a":  # always allow for this session
-            self.policies[tool] = "allow"
+        if answer == "a":  # allow until this process exits; never save as a preference
+            self.process_grants.add(tool)
             return
         if answer != "y":
             raise PermissionDenied(f"user declined '{tool}'")

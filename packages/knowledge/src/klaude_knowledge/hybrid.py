@@ -39,6 +39,35 @@ def _token_overlap(query: str, text: str) -> float:
     return len(query_terms & _terms(text)) / len(query_terms)
 
 
+def _exact_lexical_fallback(
+    question: str,
+    route: LibraryRoute,
+    hits: list[dict],
+    k: int,
+) -> list[dict]:
+    """Accept only near-exact BM25 evidence after semantic validation rejects it."""
+    accepted = []
+    for hit in hits:
+        overlap = _token_overlap(question, f"{hit.get('source', '')} {hit.get('text', '')}")
+        if hit.get("keyword_rank") is None or overlap < 0.8:
+            continue
+        fallback = dict(hit)
+        fallback["relevance_score"] = round(max(overlap, float(route.confidence)), 3)
+        fallback["lexical_overlap"] = round(overlap, 3)
+        fallback["vector_similarity"] = round(
+            vector_distance_to_similarity(hit.get("vector_distance")), 3
+        )
+        fallback["route_reason"] = f"{route.reason}; exact lexical fallback"
+        accepted.append(fallback)
+    accepted.sort(
+        key=lambda item: (
+            -float(item.get("lexical_overlap", 0)),
+            int(item.get("keyword_rank") or 10**9),
+        )
+    )
+    return accepted[:k]
+
+
 def vector_distance_to_similarity(distance: float | None, metric: str = "l2") -> float:
     """Convert LanceDB's lower-is-better default distance into 0..1 similarity."""
     if distance is None:
@@ -295,7 +324,16 @@ class Knowledge:
                 reranked.append(hit)
             merged = reranked
 
-        return self._accepted_hits(question, route, merged, k)
+        accepted = self._accepted_hits(question, route, merged, k)
+        if accepted:
+            return accepted
+
+        # Exact lexical evidence is a safe validation path of its own. Dense
+        # embeddings and optional rerankers can undershoot short versioned
+        # queries such as "Godot 4.7" even when BM25 found the exact official
+        # documentation. Do not turn a strong keyword match into a false
+        # "no local knowledge" result.
+        return _exact_lexical_fallback(question, route, merged, k)
 
     def query_as_context(self, question: str, collection: str = "", k: int = 6) -> str:
         hits = self.query(question, collection, k)

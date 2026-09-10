@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from klaude_cli.main import _fetch_url_tool_result
 from klaude_core import Agent, Config, PermissionGate, Tool
 from klaude_web.facade import Web
@@ -12,6 +14,50 @@ def make_web(tmp_path, monkeypatch):
     cfg = Config()
     cfg.web_search.cache_enabled = False
     return Web(cfg)
+
+
+def test_web_probe_detailed_returns_bounded_transport_metadata(tmp_path, monkeypatch):
+    web = make_web(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "klaude_web.facade.probe_public_url",
+        lambda url, method, **_kwargs: SimpleNamespace(
+            requested_url="https://example.com/health",
+            final_url="https://www.example.com/health",
+            method=method,
+            status_code=204,
+            content_type="text/plain",
+            content_length=0,
+            redirect_count=1,
+            elapsed_ms=8,
+            reachable=True,
+        ),
+    )
+
+    result = web.probe_detailed("https://example.com/health", "HEAD")
+
+    assert result == {
+        "requested_url": "https://example.com/health",
+        "final_url": "https://www.example.com/health",
+        "method": "HEAD",
+        "status": "succeeded",
+        "reachable": True,
+        "status_code": 204,
+        "ok": True,
+        "content_type": "text/plain",
+        "content_length": 0,
+        "redirect_count": 1,
+        "elapsed_ms": 8,
+    }
+
+
+def test_web_probe_detailed_returns_structured_unsafe_url_failure(tmp_path, monkeypatch):
+    web = make_web(tmp_path, monkeypatch)
+
+    result = web.probe_detailed("http://127.0.0.1/admin")
+
+    assert result["status"] == "failed"
+    assert result["reachable"] is False
+    assert result["failure"]["class"] == "unsafe_url"
 
 
 def fetched_document(requested_url, *, final_url=None, content="Full page evidence"):
@@ -300,7 +346,10 @@ def test_agent_keeps_fetched_injection_in_lower_authority_tool_message():
                         }
                     ],
                 }
-            assert messages[0] == {"role": "system", "content": "system authority"}
+            assert messages[0]["role"] == "system"
+            assert messages[0]["content"].startswith("system authority")
+            assert injection not in messages[0]["content"]
+            assert "Callable this request: fetch_url" in messages[0]["content"]
             assert messages[-1]["role"] == "tool"
             assert messages[-1]["tool_name"] == "fetch_url"
             assert injection in messages[-1]["content"]

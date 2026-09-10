@@ -44,7 +44,7 @@
 [agent]
 # Maximum model/tool-loop iterations for one user turn. Keep this bounded on
 # slower hardware; raise it only for workflows that genuinely need more tools.
-# max_steps = 8
+# max_steps = 20                 # bounded model/tool iterations per turn (1-64)
 # retrieval_k = 6
 # Continue a response only when Ollama reports an output-length stop inside an
 # unfinished fenced code block.  Limited to avoid loops with weak local models.
@@ -143,6 +143,15 @@
 # enabled = true
 # api_key_env = "GEMINI_API_KEY"
 
+[web.providers.brave]
+# enabled = true
+# Keyless Brave website search through Klaude's local DDGS adapter.
+
+[web.providers.brave_api]
+# enabled = true
+# api_key_env = "BRAVE_SEARCH_API_KEY"
+# Optional official Brave Web Search API. This provider may incur charges.
+
 # Optional cloud chat providers.  Keys are normally supplied through the
 # environment rather than committed configuration.
 # [cloud]
@@ -232,3 +241,4 @@ max_results = 5
 # run_shell = "ask"    # ask | allow | deny
 # edit_file = "ask"
 # crawl_site = "ask"
+# learn_source = "ask"

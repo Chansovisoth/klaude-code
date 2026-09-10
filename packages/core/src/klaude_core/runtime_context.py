@@ -321,10 +321,25 @@ def parse_fastfetch_json(raw: str) -> tuple[SystemContext, list[str]]:
             release = sanitize_text(_first(result_dict, "release", "version") or result)
             system.kernel = " ".join(part for part in (name, release) if part)
         elif module == "uptime":
-            system.uptime_seconds = parse_uptime_seconds(result)
+            # Fastfetch's structured `uptime` value is milliseconds. Parsing
+            # it as seconds can report multi-year uptime on a two-day boot.
+            raw_uptime = result_dict.get("uptime")
+            if isinstance(raw_uptime, int | float) and not isinstance(raw_uptime, bool):
+                system.uptime_seconds = max(0, int(raw_uptime / 1000))
+            else:
+                system.uptime_seconds = parse_uptime_seconds(result)
         elif module == "shell":
             system.shell = sanitize_text(
-                _first(result_dict, "processName", "name", "path") or result
+                _first(
+                    result_dict,
+                    "exeName",
+                    "prettyName",
+                    "exe",
+                    "processName",
+                    "name",
+                    "path",
+                )
+                or result
             )
         elif module == "terminal":
             system.terminal = sanitize_text(_first(result_dict, "processName", "name") or result)
