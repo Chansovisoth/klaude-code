@@ -434,6 +434,7 @@ class OpenAIRuntime:
         if think not in {None, False, "off", "auto"}:
             kwargs["reasoning"] = {"effort": str(think)}
         self._active_response = self._response_create(**kwargs)
+        completed = False
         try:
             for event in self._active_response:
                 kind = getattr(event, "type", "")
@@ -443,8 +444,13 @@ class OpenAIRuntime:
                     yield {"role": "assistant", "content": getattr(event, "delta", "")}
                 elif kind == "response.completed":
                     response = getattr(event, "response", None)
+                    if response is None:
+                        raise RuntimeError(
+                            "OpenAI stream completed without a terminal response."
+                        )
                     self._record(response)
                     self._raise_for_terminal_response(response)
+                    completed = True
                     terminal = self._message(response)
                     metadata = {
                         key: value
@@ -467,11 +473,23 @@ class OpenAIRuntime:
                     raise RuntimeError(str(message or "OpenAI response failed."))
         finally:
             self._active_response = None
+        if not completed:
+            raise RuntimeError("OpenAI stream ended without a completed response.")
 
     def _record(self, response: Any) -> None:
         usage = getattr(response, "usage", None)
         self.last_chat_metadata = {
             "provider": self.backend,
+            **(
+                {"response_id": str(response_id)}
+                if (response_id := getattr(response, "id", None))
+                else {}
+            ),
+            **(
+                {"status": str(status)}
+                if (status := getattr(response, "status", None))
+                else {}
+            ),
             "usage": usage.model_dump()
             if usage is not None and hasattr(usage, "model_dump")
             else usage,
@@ -645,7 +663,17 @@ class CodexRuntime(OpenAIRuntime):
             raise RuntimeError("OpenAI Codex stream ended without a completed response.")
         self._record(completed)
         self._raise_for_terminal_response(completed)
-        content = "".join(text_parts) or "".join(refusals)
+        terminal = self._message(completed)
+        for item in getattr(completed, "output", []) or []:
+            call = self._tool_call_item(item)
+            if call and all(existing["id"] != call["id"] for existing in calls):
+                calls.append(call)
+            reasoning = self._reasoning_item(item)
+            if reasoning and all(
+                existing["id"] != reasoning["id"] for existing in reasoning_items
+            ):
+                reasoning_items.append(reasoning)
+        content = "".join(text_parts) or "".join(refusals) or str(terminal["content"])
         return {
             "role": "assistant",
             "content": content,
@@ -685,6 +713,10 @@ class CodexRuntime(OpenAIRuntime):
                         }
                 elif kind == "response.completed":
                     response = getattr(event, "response", None)
+                    if response is None:
+                        raise RuntimeError(
+                            "OpenAI Codex stream completed without a terminal response."
+                        )
                     self._record(response)
                     self._raise_for_terminal_response(response)
                     completed = True
@@ -709,11 +741,24 @@ class CodexRuntime(OpenAIRuntime):
     def _tool_call_item(item: Any) -> dict[str, Any] | None:
         if getattr(item, "type", "") != "function_call":
             return None
+        call_id = str(getattr(item, "call_id", "") or "").strip()
+        name = str(getattr(item, "name", "") or "").strip()
+        arguments = getattr(item, "arguments", "{}")
+        if not call_id or not name:
+            raise RuntimeError("OpenAI Codex returned a malformed function call.")
+        if not isinstance(arguments, str):
+            raise RuntimeError("OpenAI Codex returned non-text function arguments.")
+        try:
+            decoded = json.loads(arguments)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("OpenAI Codex returned malformed function arguments.") from exc
+        if not isinstance(decoded, dict):
+            raise RuntimeError("OpenAI Codex returned non-object function arguments.")
         return {
-            "id": getattr(item, "call_id", ""),
+            "id": call_id,
             "function": {
-                "name": getattr(item, "name", ""),
-                "arguments": getattr(item, "arguments", "{}"),
+                "name": name,
+                "arguments": arguments,
             },
         }
 

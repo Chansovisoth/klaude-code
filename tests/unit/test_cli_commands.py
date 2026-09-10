@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from klaude_cli.main import (
+    AGENTS_INSTRUCTION_MAX_CHARS,
     COMMAND_REFERENCE,
     CTRL_ENTER_SEQUENCES,
     DEFAULT_INPUT_BORDER,
@@ -104,6 +105,7 @@ from klaude_cli.main import (
     _read_chat_input,
     _read_plain_chat_input,
     _render,
+    _repository_instruction_context,
     _resolve_requested_chat_model,
     _restored_transcript,
     _runtime_status_summary,
@@ -227,7 +229,7 @@ def test_agent_configuration_context_is_complete_dynamic_and_secret_free(tmp_pat
             }
         )
     )
-    (tmp_path / "AGENTS.md").write_text("secret repository instructions")
+    (tmp_path / "AGENTS.md").write_text("repository-specific instructions")
     agent = SimpleNamespace(
         model="qwen3-coder:30b",
         model_info=SimpleNamespace(backend="ollama", ref="ollama/qwen3-coder:30b"),
@@ -257,17 +259,18 @@ def test_agent_configuration_context_is_complete_dynamic_and_secret_free(tmp_pat
 
     assert "Model: ollama/qwen3-coder:30b (backend=ollama)" in context
     assert "mode=thinking; effort=chat high · code medium; plan_mode=on" in context
+    assert "Turn execution limit: 20 model/tool steps" in context
     assert "Tool registry: 2/3 enabled; enabled=read_file, web_search" in context
     assert "allow=1 (read_file); ask=1 (web_search); deny=1 (write_file)" in context
     assert "Web provider toggles: 8/9 on" in context
     assert "Web providers off: google" in context
     assert "web_search=off; knowledge_search=on" in context
-    assert "Repository guidance: detected but not yet injected" in context
+    assert "Repository guidance: injected" in context
     assert "device=cpu-only; composer=vim; activity_updates=off" in context
     assert "interface=Crimson Red; syntax=Monokai; input_border=off; input_height=6-10" in context
     assert "super-secret-gemini-key" not in context
     assert "do-not-show" not in context
-    assert "secret repository instructions" not in context
+    assert "repository-specific instructions" in context
 
     agent.disabled_tool_names.clear()
     agent.reasoning_mode = "standard"
@@ -278,6 +281,30 @@ def test_agent_configuration_context_is_complete_dynamic_and_secret_free(tmp_pat
     assert "Tool registry: 3/3 enabled" in refreshed
     assert "Web provider toggles: 9/9 on" in refreshed
     assert "Web providers off:" not in refreshed
+
+
+def test_repository_instructions_are_bounded_ordered_and_preserve_nested_guidance(tmp_path):
+    repo = tmp_path / "repo"
+    workdir = repo / "src" / "feature"
+    workdir.mkdir(parents=True)
+    root = repo / "AGENTS.md"
+    nested = workdir / "AGENTS.md"
+    root.write_text("ROOT-GUIDANCE\n" + ("r" * AGENTS_INSTRUCTION_MAX_CHARS))
+    nested.write_text("NESTED-GUIDANCE\nOnly edit feature files.")
+    agent = SimpleNamespace(
+        workdir=workdir,
+        workspace=SimpleNamespace(repo_root=repo),
+    )
+
+    context, paths, truncated = _repository_instruction_context(agent)
+
+    assert paths == [root, nested]
+    assert truncated
+    assert "ROOT-GUIDANCE" in context
+    assert "NESTED-GUIDANCE" in context
+    assert context.index(str(root)) < context.index(str(nested))
+    assert len(context) < AGENTS_INSTRUCTION_MAX_CHARS + 1_000
+    assert 'permission_escalation="false"' in context
 
 
 def test_cloud_context_uses_discovered_limit_and_hides_ollama_tuning(tmp_path):
@@ -292,6 +319,7 @@ def test_cloud_context_uses_discovered_limit_and_hides_ollama_tuning(tmp_path):
         ),
         reasoning_mode="standard",
         plan_mode=False,
+        max_steps=40,
         ollama_options={"num_ctx": 8192, "num_gpu": -1},
         ollama_code_options={"num_ctx": 4096},
         tools={},
@@ -1449,14 +1477,21 @@ def test_run_turn_persists_real_tool_activity_milestones(tmp_path, monkeypatch):
     tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
     tui.agent.run = lambda _message: iter(
         [
-            AgentEvent("tool_start", {"tool": "read_file", "args": {"path": "src/app.py"}}),
+            AgentEvent(
+                "tool_start",
+                {
+                    "tool": "read_file",
+                    "args": {"path": "src/app.py"},
+                    "execution_id": "execution-1",
+                },
+            ),
             AgentEvent(
                 "tool_result",
                 {
                     "tool": "read_file",
                     "args": {"path": "src/app.py"},
                     "result": "file contents",
-                    "metadata": {},
+                    "metadata": {"execution_id": "execution-1", "executed": True},
                 },
             ),
             AgentEvent("text", {"content": "Reviewed."}),
@@ -1492,6 +1527,42 @@ def test_run_turn_persists_real_tool_activity_milestones(tmp_path, monkeypatch):
     assert "[working]" not in appended
     assert "[explored] (30s) Read src/app.py" in appended
     assert "-> read_file" not in appended
+    shared = tui.memory.session_events_since(tui.session_id, 0)
+    audits = [event["payload"] for event in shared if event["kind"] == "tool_audit"]
+    assert [(audit["phase"], audit["execution_id"]) for audit in audits] == [
+        ("start", "execution-1"),
+        ("result", "execution-1"),
+    ]
+    kinds = [event["kind"] for event in shared]
+    assert kinds.index("tool_audit", kinds.index("tool_audit") + 1) < kinds.index(
+        "activity_update"
+    ) < kinds.index("turn_done")
+
+
+def test_run_turn_mirrors_live_capability_snapshots(tmp_path):
+    tui = _fake_persistent_tui()
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    snapshot = {
+        "globally_enabled_tools": ["read_file"],
+        "callable_tools": ["read_file"],
+        "effective_permissions": {"read_file": "allow"},
+        "budget": {"model_steps_used": 1, "max_model_steps": 20},
+    }
+    def run(_message):
+        tui.agent.capability_observer(snapshot)
+        return iter([AgentEvent("text", {"content": "Done."})])
+
+    tui.agent.run = run
+
+    tui._run_turn("Inspect", threading.Event(), turn_id="turn-1")
+
+    events = tui.memory.session_events_since(tui.session_id, 0)
+    capability_events = [event for event in events if event["kind"] == "capabilities"]
+    assert len(capability_events) == 1
+    assert capability_events[0]["payload"]["snapshot"] == snapshot
+    assert [event["kind"] for event in events].index("capabilities") < [
+        event["kind"] for event in events
+    ].index("turn_done")
 
 
 def test_transcript_dividers_refresh_after_resize():
@@ -2089,6 +2160,7 @@ def _fake_persistent_tui(appearance_path=None, chat_preferences_path=None):
         gate = FakeGate()
         messages = [{"role": "system", "content": "system prompt"}]
         ollama_options = {"num_ctx": 8192}
+        max_steps = 20
         ollama_think = None
         ollama_code_think = "low"
         tool_config = Config()
@@ -2185,6 +2257,26 @@ def test_resumed_observer_status_tracks_remote_worker_lease(tmp_path, monkeypatc
     assert memory.acquire_session_lease("shared", "remote-owner", "remote-turn")
     started_at = time.time() - 36
     memory.update_session_live("shared", activity="web_search", turn_started_at=started_at)
+    memory.publish_session_event(
+        "shared",
+        "remote-owner",
+        "capabilities",
+        {
+            "snapshot": {
+                "globally_enabled_tools": ["read_file", "web_search"],
+                "callable_tools": ["web_search"],
+                "effective_permissions": {"read_file": "allow", "web_search": "allow"},
+                "budget": {
+                    "model_steps_used": 2,
+                    "max_model_steps": 20,
+                    "tool_calls_used": 1,
+                    "max_tool_calls": 40,
+                    "elapsed_seconds": 36,
+                },
+            }
+        },
+        turn_id="remote-turn",
+    )
     monkeypatch.setattr("klaude_cli.main.time.time", lambda: started_at + 36)
     observer = _fake_persistent_tui(tmp_path / "appearance.json")
     observer.memory = memory
@@ -2198,6 +2290,8 @@ def test_resumed_observer_status_tracks_remote_worker_lease(tmp_path, monkeypatc
     assert "EXPLORING" in status
     assert "36s" in status
     assert "READY" not in status
+    assert observer.agent.last_turn_capabilities["callable_tools"] == ["web_search"]
+    assert observer.agent.last_turn_budget["model_steps_used"] == 2
 
     assert memory.release_session_lease("shared", "remote-owner", "remote-turn")
     observer._sync_shared_session()
@@ -2206,6 +2300,41 @@ def test_resumed_observer_status_tracks_remote_worker_lease(tmp_path, monkeypatc
     status = "".join(text for _style, text in observer._status_fragments())
     assert "READY" in status
     assert "WORKING" not in status
+
+
+def test_resumed_observer_durably_recovers_an_expired_remote_turn(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    assert memory.acquire_session_lease("shared", "remote-owner", "remote-turn")
+    memory.start_session_turn(
+        "shared", "remote-owner", "remote-turn", "Long-running request"
+    )
+    memory.publish_session_event(
+        "shared",
+        "remote-owner",
+        "assistant_delta",
+        {"text": "Partial remote answer"},
+        turn_id="remote-turn",
+    )
+    observer = _fake_persistent_tui(tmp_path / "appearance.json")
+    observer.memory = memory
+    observer.agent.restore_session = lambda turns: Agent.restore_session(observer.agent, turns)
+    observer._resume_session("shared")
+    assert observer._watching_remote
+
+    memory.update_session_live("shared", owner_lease_until=time.time() - 1)
+    observer._sync_shared_session()
+
+    assert not observer._watching_remote
+    assert memory.session_live_state("shared")["state"] == "interrupted"
+    done = [
+        event
+        for event in memory.session_events_since("shared", 0)
+        if event["kind"] == "turn_done"
+    ]
+    assert len(done) == 1
+    assert done[0]["payload"]["recovered"] is True
+    assert "[interrupted] worker lease expired before completion" in observer.output.text
+    assert "saved output is preserved" in observer.output.text
 
 
 def test_resumed_observer_receives_structured_activity_updates(tmp_path):
@@ -2722,6 +2851,25 @@ def test_chat_status_reports_session_runtime_permissions_and_agents_file(tmp_pat
         ollama_options={"num_ctx": 16_384},
         messages=[{"role": "system", "content": "system prompt"}],
         plan_mode=False,
+        max_steps=40,
+        last_turn_budget={
+            "model_steps_used": 3,
+            "max_model_steps": 40,
+            "tool_calls_used": 5,
+            "max_tool_calls": 80,
+            "elapsed_seconds": 7.25,
+        },
+        last_turn_capabilities={
+            "globally_enabled_tools": ["read_file", "run_shell", "write_file"],
+            "callable_tools": ["read_file", "run_shell"],
+            "budget": {
+                "model_steps_used": 3,
+                "max_model_steps": 40,
+                "tool_calls_used": 5,
+                "max_tool_calls": 80,
+                "elapsed_seconds": 7.25,
+            },
+        },
         workdir=workdir,
         workspace=SimpleNamespace(repo_root=repo),
         gate=SimpleNamespace(
@@ -2735,9 +2883,12 @@ def test_chat_status_reports_session_runtime_permissions_and_agents_file(tmp_pat
     assert "Session name  Parser investigation" in result
     assert "Mode          thinking" in result
     assert "Effort        high" in result
+    assert "Turn limit    40 steps + finalization" in result
+    assert "Callable now  2/3 enabled tools" in result
+    assert "Turn budget   models 3/40 · tools 5/80 · 7.2s" in result
     assert "Context left  ~16,381 tokens" in result
     assert f"Workspace     {workdir}" in result
-    assert "AGENTS.md     detected (not yet injected)" in result
+    assert "AGENTS.md     injected" in result
     assert f"              {root_instructions}" in result
     assert f"              {nested_instructions}" in result
     assert "Permissions   allow 1 · ask 1 · deny 1" in result
@@ -3456,6 +3607,8 @@ def test_runtime_settings_control_device_threads_and_context_persist(tmp_path):
     assert tui._choice_kind == "runtime settings"
     assert any(value.startswith("device: auto") for value in tui._choice_values)
 
+    device_row = next(value for value in tui._choice_values if value.startswith("device:"))
+    tui._choice_index = tui._choice_values.index(device_row)
     tui._accept_choice()
     assert tui._choice_kind == "runtime device"
 
@@ -3476,6 +3629,59 @@ def test_runtime_settings_control_device_threads_and_context_persist(tmp_path):
         "num_thread": 4,
         "num_ctx": 16_384,
     }
+
+
+def test_runtime_turn_limit_presets_custom_value_and_reset_persist(tmp_path):
+    preferences_path = tmp_path / "chat-preferences.json"
+    tui = _fake_persistent_tui(chat_preferences_path=preferences_path)
+
+    tui._open_settings_category("runtime")
+    turn_row = next(value for value in tui._choice_values if value.startswith("turn limit:"))
+    tui._choice_index = tui._choice_values.index(turn_row)
+    tui._accept_choice()
+
+    assert tui._choice_kind == "turn limit"
+    tui._choice_index = tui._choice_values.index("Extended · 40 steps")
+    tui._accept_choice()
+    assert tui.agent.max_steps == 40
+    assert _load_runtime_preferences(preferences_path)["max_steps"] == 40
+
+    tui._choice_index = tui._choice_values.index("turn limit: 40 steps")
+    tui._accept_choice()
+    tui._choice_index = tui._choice_values.index("custom input")
+    tui._accept_choice()
+    tui._set_input("31")
+    tui._submit_buffer(steer=False)
+    assert tui.agent.max_steps == 31
+    assert _load_runtime_preferences(preferences_path)["max_steps"] == 31
+
+    tui._choice_index = tui._choice_values.index("turn limit: 31 steps")
+    tui._accept_choice()
+    tui._choice_index = tui._choice_values.index("reset to default")
+    tui._accept_choice()
+    assert tui.agent.max_steps == tui.cfg.max_agent_steps
+    assert "max_steps" not in _load_runtime_preferences(preferences_path)
+
+
+def test_runtime_turn_limit_preference_applies_to_agent(tmp_path):
+    path = tmp_path / "chat-preferences.json"
+    _save_runtime_preferences(path, {"max_steps": 40})
+    agent = _fake_persistent_tui().agent
+
+    _apply_runtime_preferences(agent, _load_runtime_preferences(path))
+
+    assert agent.max_steps == 40
+
+
+def test_runtime_turn_limit_rejects_out_of_range_custom_value():
+    tui = _fake_persistent_tui()
+    tui._runtime_edit = "max_steps"
+    tui._set_input("65")
+
+    tui._submit_buffer(steer=False)
+
+    assert tui.agent.max_steps != 65
+    assert "1 to 64" in tui.status_error
 
 
 def test_runtime_settings_offer_scoped_nano_editors(monkeypatch):
@@ -4570,6 +4776,8 @@ def test_runtime_gpu_only_mode_requests_full_offload_and_persists(tmp_path):
     path = tmp_path / "chat-preferences.json"
     tui = _fake_persistent_tui(chat_preferences_path=path)
     tui._open_settings_category("runtime")
+    device_row = next(value for value in tui._choice_values if value.startswith("device:"))
+    tui._choice_index = tui._choice_values.index(device_row)
     tui._accept_choice()
 
     assert "GPU only" in tui._choice_values

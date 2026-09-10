@@ -1,0 +1,55 @@
+from klaude_core.execution import TurnGovernor
+
+
+def test_turn_governor_tracks_steps_calls_and_remaining_budget():
+    now = [100.0]
+    governor = TurnGovernor(
+        4,
+        max_tool_calls=3,
+        max_elapsed_seconds=60,
+        clock=lambda: now[0],
+    )
+
+    assert governor.begin_model_step() == ""
+    assert governor.observe_tool_result("inspect", "first evidence") == ""
+    now[0] += 2.5
+    snapshot = governor.snapshot()
+
+    assert snapshot.model_steps_used == 1
+    assert snapshot.model_steps_left == 3
+    assert snapshot.tool_calls_used == 1
+    assert snapshot.tool_calls_left == 2
+    assert snapshot.elapsed_seconds == 2.5
+
+
+def test_turn_governor_stops_after_cross_tool_no_progress_streak():
+    governor = TurnGovernor(20, max_tool_calls=20, max_no_progress=3)
+
+    assert governor.observe_tool_result("read_file", "tool error: missing") == ""
+    assert governor.observe_tool_result("grep", "permission denied: blocked") == ""
+    assert (
+        governor.observe_tool_result("run_shell", "skipped unsafe command")
+        == "tool activity stopped making progress"
+    )
+    assert governor.snapshot().stop_reason == "tool activity stopped making progress"
+
+
+def test_turn_governor_resets_no_progress_after_new_evidence():
+    governor = TurnGovernor(20, max_tool_calls=20, max_no_progress=3)
+
+    governor.observe_tool_result("read_file", "tool error: missing")
+    governor.observe_tool_result("grep", "permission denied: blocked")
+    assert governor.observe_tool_result("workspace_info", "new workspace evidence") == ""
+
+    assert governor.snapshot().no_progress_streak == 0
+
+
+def test_turn_governor_stops_at_safe_boundary_after_wall_time():
+    now = [10.0]
+    governor = TurnGovernor(20, max_elapsed_seconds=5, clock=lambda: now[0])
+    assert governor.begin_model_step() == ""
+
+    now[0] = 15.0
+
+    assert governor.begin_model_step() == "turn wall-time budget reached"
+    assert governor.snapshot().model_steps_used == 1

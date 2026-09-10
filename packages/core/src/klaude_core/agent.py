@@ -21,7 +21,9 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from uuid import uuid4
 
+from .capabilities import TurnCapabilities
 from .entities import structured_domains_for_text
+from .execution import TurnGovernor
 from .model_runtime import ModelInfo, ModelRuntime
 from .ollama import Ollama
 from .permissions import PermissionDenied, PermissionGate
@@ -906,6 +908,19 @@ def _clean_tool_arg(value: Any, *, collapse_whitespace: bool = False) -> Any:
             for key, item in value.items()
         }
     return value
+
+
+def _interrupted_stream_content(content: str, *, holding_markup: bool) -> str:
+    """Keep only content that was safe to expose before an aborted stream.
+
+    Once streaming is held because a ``<`` may begin a text-form tool call,
+    the suffix has not been shown publicly and must not become model history.
+    Retaining it would teach the next request from malformed, half-written
+    protocol markup. A completed stream still follows the normal parser path.
+    """
+    if not holding_markup:
+        return content
+    return content.partition("<")[0]
 
 
 def parse_provider_directive(text: str) -> ProviderDirective:
@@ -3692,6 +3707,10 @@ class Agent:
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         self.retrieval_state = RetrievalConversationState()
         self.last_web_research_state: AgenticSearchState | None = None
+        self.last_turn_budget: dict[str, Any] = {}
+        self.last_turn_capabilities: dict[str, Any] = {}
+        self.injected_instruction_paths: tuple[str, ...] = ()
+        self.injected_instructions_truncated = False
         self.plan_mode = False
         # Host integrations may attach workspace-aware services. Defining the
         # extension seam here keeps those capabilities explicit and typed.
@@ -3704,6 +3723,7 @@ class Agent:
         # deterministic unavailable result instead of blocking on stdin.
         self.user_input_broker: Any = None
         self.system_prompt_builder: Callable[[], str] | None = None
+        self.capability_observer: Callable[[dict[str, Any]], None] | None = None
 
     def set_system_prompt(self, system_prompt: str) -> None:
         if self.messages and self.messages[0].get("role") == "system":
@@ -3716,6 +3736,8 @@ class Agent:
         self.messages = [m for m in self.messages if m.get("role") == "system"][:1]
         self.retrieval_state = RetrievalConversationState()
         self.last_web_research_state = None
+        self.last_turn_budget = {}
+        self.last_turn_capabilities = {}
         for turn in turns:
             if turn.get("role") not in {"user", "assistant"}:
                 continue
@@ -3890,6 +3912,7 @@ class Agent:
             name: tool for name, tool in self.tools.items() if name not in self.disabled_tool_names
         }
         registered_tools = registered_tools if registered_tools is not None else set(self.tools)
+        globally_enabled_tools = registered_tools - self.disabled_tool_names
         unavailable_reasons = {
             name: "plan/review mode" for name in registered_tools - set(self.tools)
         }
@@ -4034,7 +4057,11 @@ class Agent:
         code_validation_repairs = 0
         tool_parser_retried = False
         tool_recovery_attempted = False
-        failed_actions: set[str] = set()
+        failed_action_signatures: set[str] = set()
+        failed_action_counts: dict[str, int] = {}
+        retired_tools: set[str] = set()
+        governor = TurnGovernor(self.max_steps)
+        self.last_turn_budget = governor.snapshot().to_dict()
         gpu_fallback_retried = False
         retrieval_requirement_retries: set[str] = set()
         source_reference_retried = False
@@ -4073,6 +4100,10 @@ class Agent:
                 return []
             schemas: list[dict[str, Any]] = []
             for name, tool in selected_tools.items():
+                if self.gate.policies.get(name, "ask") == "deny":
+                    continue
+                if name in retired_tools:
+                    continue
                 if name in resolved_control_tools:
                     continue
                 if name in WEB_RESEARCH_TOOLS and research.web_activity_stopped:
@@ -4088,19 +4119,99 @@ class Agent:
                 schemas.append(tool.schema())
             return schemas
 
+        def capability_snapshot() -> TurnCapabilities:
+            callable_names = {item["function"]["name"] for item in active_schemas()}
+            process_grants: set[str] = set(getattr(self.gate, "process_grants", set()))
+            effective_permissions = {
+                name: (
+                    "allow"
+                    if name in process_grants
+                    and self.gate.policies.get(name, "ask") == "ask"
+                    else self.gate.policies.get(name, "ask")
+                )
+                for name in registered_tools
+            }
+
+            unavailable: dict[str, str] = {}
+            for name in registered_tools - callable_names:
+                reason = unavailable_reasons.get(name)
+                if reason is None and effective_permissions.get(name) == "deny":
+                    reason = "permission policy deny"
+                if reason is None and name in retired_tools:
+                    reason = "retired after repeated unsuccessful calls"
+                if reason is None and name in resolved_control_tools:
+                    reason = "control tool already resolved this turn"
+                if reason is None and tools_disabled_for_turn:
+                    reason = governor.stop_reason or "tool activity stopped"
+                if reason is None and name == "web_search" and (
+                    research.search_calls_used >= research.budget.max_search_calls
+                ):
+                    reason = "web-search budget exhausted"
+                if reason is None and name in WEB_FETCH_ACTION_TOOLS and (
+                    research.fetch_calls_used >= research.budget.max_fetch_calls
+                ):
+                    reason = "web-fetch budget exhausted"
+                if reason is None and name in WEB_RESEARCH_TOOLS and research.web_activity_stopped:
+                    reason = "web activity stopped"
+                unavailable[name] = reason or "turn routing"
+
+            hard_constraints = [
+                "Use only supplied schemas; never invent tool-call markup",
+                "Permissions never override workspace, transport, command-safety, or "
+                "destructive-action boundaries",
+                "Never stage, commit, stash, reset, clean, or revert user-owned changes "
+                "to bypass a blocked action",
+            ]
+            if workspace is not None and not workspace.write_enabled:
+                hard_constraints.append(
+                    "Pre-existing dirty workspace changes belong to the user; continue only "
+                    "with safe read-only investigation"
+                )
+            if self.plan_mode:
+                hard_constraints.append("Plan mode permits investigation, not implementation")
+            elif any(reason == "plan/review mode" for reason in unavailable_reasons.values()):
+                hard_constraints.append(
+                    "This scoped review turn permits read-only investigation, not mutation"
+                )
+
+            snapshot = TurnCapabilities.create(
+                globally_enabled_tools=globally_enabled_tools,
+                callable_tools=callable_names,
+                unavailable_tools=unavailable,
+                effective_permissions=effective_permissions,
+                hard_constraints=hard_constraints,
+                provider_backend=self.model_info.backend,
+                provider_model=self.model_info.model_id,
+                provider_supports_tools=self.model_info.capabilities.supports_tools,
+                provider_context_window=self.model_info.capabilities.context_window,
+                provider_effort_levels=self.model_info.capabilities.effort_levels,
+                injected_instructions=self.injected_instruction_paths,
+                instructions_truncated=self.injected_instructions_truncated,
+                plan_mode=self.plan_mode,
+                workspace_write_enabled=(
+                    bool(workspace.write_enabled) if workspace is not None else None
+                ),
+                budget=governor.snapshot(),
+            )
+            self.last_turn_budget = snapshot.budget.to_dict()
+            self.last_turn_capabilities = snapshot.to_dict()
+            return snapshot
+
         def model_messages() -> list[dict[str, Any]]:
+            snapshot = capability_snapshot()
             if code_answer_expected and (not selected_tools or tools_disabled_for_turn):
                 return [
-                    {"role": "system", "content": direct_code_system_prompt},
+                    {
+                        "role": "system",
+                        "content": direct_code_system_prompt
+                        + "\n\n"
+                        + snapshot.render_compact_for_model(),
+                    },
                     *self.messages[1:],
                 ]
             if not selected_tools and not _needs_full_product_context(user_message):
                 compact_prompt = DIRECT_RESPONSE_SYSTEM_PROMPT
-                compact_prompt += (
-                    "\nUnavailable this request: "
-                    + (", ".join(sorted(registered_tools)) or "(none)")
-                    + "."
-                )
+                compact_prompt += "\n\n" + snapshot.render_compact_for_model()
                 if self.code_context:
                     compact_prompt += (
                         "\n\nRelevant durable user and project preferences:\n"
@@ -4110,44 +4221,7 @@ class Agent:
                     {"role": "system", "content": compact_prompt},
                     *self.messages[1:],
                 ]
-            callable_names = {item["function"]["name"] for item in active_schemas()}
-            process_grants: set[str] = set(getattr(self.gate, "process_grants", set()))
-            policy_groups = {
-                policy: sorted(
-                    name
-                    for name in callable_names
-                    if (
-                        "allow"
-                        if name in process_grants
-                        else self.gate.policies.get(name, "ask")
-                    )
-                    == policy
-                )
-                for policy in ("allow", "ask", "deny")
-            }
-            unavailable = {
-                name: unavailable_reasons.get(name, "turn routing or action budget")
-                for name in registered_tools - callable_names
-            }
-            context = (
-                "\n\n<turn_capabilities>\n"
-                f"Callable this request: {', '.join(sorted(callable_names)) or '(none)'}.\n"
-                "Unavailable this request: "
-                f"{', '.join(sorted(unavailable))}.\n"
-                f"Reasons: {json.dumps(unavailable, sort_keys=True)}\n"
-                "The global registry is an inventory, not permission to call omitted tools. "
-                "Omissions may reflect routing, settings, plan mode, or exhausted budgets. "
-                "Effective permission policy for callable tools: "
-                + "; ".join(
-                    f"{policy.upper()}={', '.join(names) or '(none)'}"
-                    for policy, names in policy_groups.items()
-                )
-                + ". ALLOW executes without a prompt; ASK invokes the host permission UI; "
-                "DENY cannot execute. These are the current live settings for this turn. "
-                "Use only the supplied schemas; do not invent tool markup. "
-                "A blocked command must not be repaired by staging, committing, stashing, "
-                "resetting or cleaning user-owned changes.\n</turn_capabilities>"
-            )
+            context = "\n\n" + snapshot.render_for_model()
             recent = next(
                 (
                     str(m.get("content", ""))
@@ -4182,9 +4256,12 @@ class Agent:
             return f"{result}\n\n{research.model_summary()}"
 
         def finish_payload() -> dict[str, Any]:
-            if not research.actions and not research.web_actions_used:
-                return {}
-            return {"web_research": research.to_dict()}
+            payload: dict[str, Any] = {
+                "turn_capabilities": capability_snapshot().to_dict()
+            }
+            if research.actions or research.web_actions_used:
+                payload["web_research"] = research.to_dict()
+            return payload
 
         def record_finish(content: str, *, best_effort: bool = False) -> None:
             if not research.actions and not research.web_actions_used:
@@ -4204,14 +4281,15 @@ class Agent:
                 detail=research.exhausted_reason,
             )
 
+        initial_model_messages = model_messages()
         direct_code_prompt = (
-            direct_code_system_prompt
+            initial_model_messages[0]["content"]
             if code_answer_expected and not selected_tools
             else None
         )
         self._compact_history(
             active_schemas(),
-            system_prompt_for_budget=direct_code_prompt or model_messages()[0]["content"],
+            system_prompt_for_budget=direct_code_prompt or initial_model_messages[0]["content"],
         )
 
         def execute_tool_call(call: dict[str, Any]):
@@ -4240,6 +4318,32 @@ class Agent:
                     research.add_gap(missing_information)
 
             tool = selected_tools.get(name)
+            if governor.stop_reason:
+                return (
+                    name,
+                    args,
+                    tool,
+                    f"skipped execution governor: {governor.stop_reason}",
+                    {"execution_governor_stopped": True, "executed": False},
+                )
+            current_callable_names = {
+                item["function"]["name"] for item in active_schemas()
+            }
+            if tool is not None and name not in current_callable_names:
+                reason = dict(capability_snapshot().unavailable_tools).get(
+                    name, "not callable in this request"
+                )
+                return (
+                    name,
+                    args,
+                    None,
+                    f"error: tool '{original_name}' is unavailable: {reason}",
+                    {
+                        "executed": False,
+                        "unavailable_tool": True,
+                        "unavailable_reason": reason,
+                    },
+                )
             if (
                 tool is None
                 and name not in self.disabled_tool_names
@@ -4681,9 +4785,30 @@ class Agent:
 
         # Retrieval is model-led. The host enforces tool safety and budgets but
         # never synthesizes a search or knowledge query from the user's words.
+        governor_stop_instruction_sent = False
         for _step in range(self.max_steps):
+            governor_reason = governor.begin_model_step()
+            self.last_turn_budget = governor.snapshot().to_dict()
+            if governor_reason and not governor_stop_instruction_sent:
+                governor_stop_instruction_sent = True
+                tools_disabled_for_turn = True
+                self.messages.append(
+                    _controller_message(
+                        f"Execution governor stopped tool activity: {governor_reason}. Do not "
+                        "call another tool. Give the user a concise factual final report from "
+                        "completed results and state unfinished work honestly."
+                    )
+                )
             try:
                 schemas = active_schemas()
+                request_messages = model_messages()
+                if self.capability_observer is not None:
+                    try:
+                        self.capability_observer(dict(self.last_turn_capabilities))
+                    except Exception:
+                        # Cross-process status mirroring is best-effort and must
+                        # never prevent the provider request from running.
+                        pass
                 stream_chat = getattr(self.ollama, "chat_stream", None)
                 # With no tool schema, Ollama can yield response fragments as
                 # they are generated. Tool-enabled requests stay assembled so
@@ -4702,7 +4827,7 @@ class Agent:
                     try:
                         for fragment in stream_chat(
                             self.model,
-                            model_messages(),
+                            request_messages,
                             options=request_options,
                             think=request_think,
                         ):
@@ -4737,13 +4862,18 @@ class Agent:
                         stream_completed = True
                     finally:
                         if not stream_completed and streamed_parts:
-                            self.messages.append(
-                                {
-                                    "role": "assistant",
-                                    "content": "".join(streamed_parts),
-                                    "interrupted": True,
-                                }
+                            interrupted_content = _interrupted_stream_content(
+                                "".join(streamed_parts),
+                                holding_markup=holding_markup,
                             )
+                            if interrupted_content:
+                                self.messages.append(
+                                    {
+                                        "role": "assistant",
+                                        "content": interrupted_content,
+                                        "interrupted": True,
+                                    }
+                                )
                     msg = {
                         "role": "assistant",
                         "content": "".join(streamed_parts),
@@ -4766,11 +4896,11 @@ class Agent:
                     # accept `options` but have not added this parameter.
                     if request_think is not None:
                         chat_kwargs["think"] = request_think
-                    msg = self.ollama.chat(self.model, model_messages(), **chat_kwargs)
+                    msg = self.ollama.chat(self.model, request_messages, **chat_kwargs)
                 else:
                     msg = self.ollama.chat(
                         self.model,
-                        model_messages(),
+                        request_messages,
                         tools=schemas,
                     )
             except Exception as e:  # surface, don't crash the session
@@ -5070,6 +5200,12 @@ class Agent:
 
             for call in tool_calls:
                 name, args, tool, result, metadata = yield from execute_tool_call(call)
+                governor_reason = governor.observe_tool_result(name, result, metadata)
+                self.last_turn_budget = governor.snapshot().to_dict()
+                if governor_reason:
+                    tools_disabled_for_turn = True
+                recovery_instruction = ""
+                retired_reason = ""
                 if name not in WEB_RESEARCH_TOOLS and result.startswith(
                     ("tool error:", "permission denied:", "error:", "blocked ", "skipped ")
                 ):
@@ -5077,34 +5213,36 @@ class Agent:
                         **metadata,
                         "status": "failed" if not result.startswith("skipped ") else "skipped",
                     }
-                    if name in failed_actions:
-                        yield AgentEvent(
-                            "tool_result",
-                            {"tool": name, "args": args, "result": result, "metadata": metadata},
+                    failure_signature = (
+                        f"{_tool_call_key(name, args)}:"
+                        + " ".join(result.casefold().split())[:500]
+                    )
+                    failed_action_counts[name] = failed_action_counts.get(name, 0) + 1
+                    repeated_failure = failure_signature in failed_action_signatures
+                    failed_action_signatures.add(failure_signature)
+                    if repeated_failure or failed_action_counts[name] >= 2:
+                        retired_tools.add(name)
+                        metadata["bounded_recovery"] = True
+                        recovery_instruction = (
+                            f"{name} has failed or been blocked repeatedly and is unavailable "
+                            "for the rest of this turn. Do not retry it or bypass the safety "
+                            "condition. Use a different available tool, or give the user a "
+                            "concise factual final report from completed results."
                         )
-                        yield AgentEvent(
-                            "error",
-                            {
-                                "message": f"Repeated blocked or unsuccessful {name}; "
-                                "stopped this approach."
-                            },
-                        )
-                        return
-                    failed_actions.add(name)
-                    self.messages.append(
-                        _controller_message(
+                        retired_reason = f"retired repeatedly unsuccessful tool {name}"
+                    else:
+                        recovery_instruction = (
                             f"{name} did not execute successfully. Do not repeat equivalent calls "
                             "or modify user-owned Git changes to bypass a restriction. Choose a "
                             "permitted alternative or explain the specific limitation."
                         )
-                    )
                 if tool is not None and tool.return_direct:
                     self.messages.append({"role": "assistant", "content": result})
                     direct_payload: dict[str, Any] = {"content": result}
                     if metadata:
                         direct_payload["metadata"] = metadata
                     yield AgentEvent("text", direct_payload)
-                    yield AgentEvent("done", {})
+                    yield AgentEvent("done", finish_payload())
                     return
                 yield AgentEvent(
                     "tool_result",
@@ -5124,6 +5262,20 @@ class Agent:
                         key: value for key, value in metadata.items() if key != "edit"
                     }
                 self.messages.append(tool_message)
+                if recovery_instruction:
+                    self.messages.append(_controller_message(recovery_instruction))
+                if governor_reason and not governor_stop_instruction_sent:
+                    self.messages.append(
+                        _controller_message(
+                            f"Execution governor stopped further tool activity: {governor_reason}. "
+                            "Do not call another tool. Give the user a concise factual final "
+                            "report from completed results and state unfinished work honestly."
+                        )
+                    )
+                    governor_stop_instruction_sent = True
+                if retired_reason:
+                    yield AgentEvent("retry", {"reason": retired_reason})
+                capability_snapshot()
 
         if research.web_actions_used:
             research.exhausted_reason = research.exhausted_reason or "max_agent_steps"

@@ -1,4 +1,4 @@
-.PHONY: setup dev up down test lint typecheck check doctor
+.PHONY: setup dev up down test lint typecheck package-smoke check doctor
 
 setup:
 	bash scripts/install.sh
@@ -16,12 +16,15 @@ test:
 	uv run pytest -q
 
 lint:
-	RUFF_NO_CACHE=true .venv/bin/ruff check .
+	uv run ruff check .
 
 typecheck:
-	uv run mypy packages apps
+	uv run mypy packages/core/src packages/knowledge/src packages/tools_local/src packages/web/src apps/cli/src
 
-check: test lint
+package-smoke:
+	uv run python scripts/package_smoke.py
+
+check: test lint typecheck
 
 doctor:
 	uv run klaude doctor

@@ -1318,12 +1318,14 @@ def _load_runtime_preferences(path: Path) -> dict[str, int | None]:
     if not isinstance(raw, dict):
         return {}
     preferences: dict[str, int | None] = {}
-    for key in ("num_gpu", "num_thread", "num_ctx"):
+    for key in ("num_gpu", "num_thread", "num_ctx", "max_steps"):
         value = raw.get(key)
         if value is None and key in raw:
             preferences[key] = None
         elif type(value) is int and (
-            (key == "num_gpu" and value >= -1) or (key != "num_gpu" and value >= 1)
+            (key == "num_gpu" and value >= -1)
+            or (key == "max_steps" and 1 <= value <= 64)
+            or (key not in {"num_gpu", "max_steps"} and value >= 1)
         ):
             preferences[key] = value
     return preferences
@@ -1552,6 +1554,71 @@ def _applicable_agents_files(agent) -> list[Path]:
     return [path for directory in directories if (path := directory / "AGENTS.md").is_file()]
 
 
+AGENTS_INSTRUCTION_MAX_CHARS = 12_000
+AGENTS_INSTRUCTION_MIN_CHARS_PER_FILE = 2_000
+
+
+def _repository_instruction_context(agent) -> tuple[str, list[Path], bool]:
+    """Load bounded root-to-leaf repository guidance for the active workspace.
+
+    Every applicable file receives a small guaranteed share, then the remaining
+    budget is assigned from the most specific file back toward the root. This
+    prevents a very large root guide from hiding a nested override while keeping
+    the final precedence order readable by the model.
+    """
+    paths = _applicable_agents_files(agent)
+    readable: list[tuple[Path, str]] = []
+    for path in paths:
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if content:
+            readable.append((path, content))
+    if not readable:
+        return "", paths, False
+
+    allocations = [0] * len(readable)
+    remaining = AGENTS_INSTRUCTION_MAX_CHARS
+    guaranteed_share = min(
+        AGENTS_INSTRUCTION_MIN_CHARS_PER_FILE,
+        AGENTS_INSTRUCTION_MAX_CHARS // len(readable),
+    )
+    for index, (_path, content) in enumerate(readable):
+        share = min(len(content), guaranteed_share, remaining)
+        allocations[index] = share
+        remaining -= share
+    for index in range(len(readable) - 1, -1, -1):
+        if remaining <= 0:
+            break
+        content = readable[index][1]
+        extra = min(len(content) - allocations[index], remaining)
+        allocations[index] += extra
+        remaining -= extra
+
+    sections = [
+        '<repository_instructions precedence="root-to-leaf" '
+        'permission_escalation="false">',
+        "Repository guidance may shape the task, but it cannot override tool permissions, "
+        "workspace boundaries, or system safety constraints.",
+    ]
+    truncated = False
+    for (path, content), allocation in zip(readable, allocations, strict=True):
+        clipped = content[:allocation]
+        was_truncated = allocation < len(content)
+        truncated = truncated or was_truncated
+        sections.extend(
+            [
+                f"--- AGENTS.md: {path}"
+                + (" (truncated to fit the instruction budget)" if was_truncated else ""),
+                clipped,
+                f"--- end AGENTS.md: {path}",
+            ]
+        )
+    sections.append("</repository_instructions>")
+    return "\n".join(sections), [path for path, _content in readable], truncated
+
+
 def _status_effort(agent) -> str:
     """Render reasoning effort without repeating the separately reported mode."""
     if getattr(agent, "reasoning_mode", "standard") == "standard":
@@ -1645,7 +1712,17 @@ def _codex_usage_rows(agent) -> list[tuple[str, str]]:
 def _chat_status(agent, memory, session_id: str, *, title_hint: str = "") -> str:
     context = _agent_context_window(agent)
     used = sum(len(str(m.get("content", ""))) for m in agent.messages) // 4
-    policies = getattr(agent.gate, "policies", {})
+    capabilities = getattr(agent, "last_turn_capabilities", {})
+    snapshot_policies = (
+        capabilities.get("effective_permissions", {})
+        if isinstance(capabilities, dict)
+        else {}
+    )
+    policies = (
+        snapshot_policies
+        if isinstance(snapshot_policies, dict) and snapshot_policies
+        else getattr(agent.gate, "policies", {})
+    )
     permission_counts = {
         policy: sum(value == policy for value in policies.values())
         for policy in ("allow", "ask", "deny")
@@ -1654,21 +1731,68 @@ def _chat_status(agent, memory, session_id: str, *, title_hint: str = "") -> str
     title = title_getter(session_id) if callable(title_getter) else "Untitled session"
     if title == "Untitled session" and title_hint:
         title = title_hint
-    instruction_files = _applicable_agents_files(agent)
+    instruction_context, instruction_files, instructions_truncated = (
+        _repository_instruction_context(agent)
+    )
+    agent.injected_instruction_paths = (
+        tuple(str(path) for path in instruction_files) if instruction_context else ()
+    )
+    agent.injected_instructions_truncated = bool(
+        instruction_context and instructions_truncated
+    )
     rows = [
         ("Session ID", session_id),
         ("Session name", title),
         ("Model", str(agent.model)),
         ("Mode", str(getattr(agent, "reasoning_mode", "standard"))),
         ("Effort", _status_effort(agent)),
+        ("Turn limit", f"{getattr(agent, 'max_steps', 20)} steps + finalization"),
         ("Plan mode", "on" if getattr(agent, "plan_mode", False) else "off"),
         ("Context", f"~{used:,}/{context:,} tokens"),
         ("Context left", f"~{max(0, context - used):,} tokens"),
         ("Workspace", str(getattr(agent, "workdir", Path.cwd()))),
     ]
-    if instruction_files:
-        rows.append(("AGENTS.md", "detected (not yet injected)"))
+    if isinstance(capabilities, dict) and capabilities:
+        callable_tools = capabilities.get("callable_tools")
+        enabled_tools = capabilities.get("globally_enabled_tools")
+        if isinstance(callable_tools, list) and isinstance(enabled_tools, list):
+            rows.append(
+                ("Callable now", f"{len(callable_tools)}/{len(enabled_tools)} enabled tools")
+            )
+    budget = (
+        capabilities.get("budget", {})
+        if isinstance(capabilities, dict) and capabilities
+        else getattr(agent, "last_turn_budget", {})
+    )
+    if isinstance(budget, dict) and budget:
+        model_steps_used = budget.get("model_steps_used")
+        max_model_steps = budget.get("max_model_steps")
+        tool_calls_used = budget.get("tool_calls_used")
+        max_tool_calls = budget.get("max_tool_calls")
+        elapsed_seconds = budget.get("elapsed_seconds")
+        effective_max_steps = (
+            max_model_steps
+            if type(max_model_steps) is int
+            else getattr(agent, "max_steps", 20)
+        )
+        rows.append(
+            (
+                "Turn budget",
+                f"models {model_steps_used if type(model_steps_used) is int else 0}/"
+                f"{effective_max_steps} · "
+                f"tools {tool_calls_used if type(tool_calls_used) is int else 0}/"
+                f"{max_tool_calls if type(max_tool_calls) is int else 0} · "
+                f"{elapsed_seconds if isinstance(elapsed_seconds, (int, float)) else 0:.1f}s",
+            )
+        )
+        if budget.get("stop_reason"):
+            rows.append(("Turn stopped", str(budget["stop_reason"])))
+    if instruction_context:
+        state = "injected (bounded)" if instructions_truncated else "injected"
+        rows.append(("AGENTS.md", state))
         rows.extend(("", str(path)) for path in instruction_files)
+    elif instruction_files:
+        rows.append(("AGENTS.md", "detected but unreadable"))
     else:
         rows.append(("AGENTS.md", "not found"))
     rows.extend(
@@ -1786,6 +1910,10 @@ def _save_runtime_preferences(path: Path, preferences: dict[str, int | None]) ->
 
 def _apply_runtime_preferences(agent: Agent, preferences: dict[str, int | None]) -> None:
     for key, value in preferences.items():
+        if key == "max_steps":
+            if value is not None:
+                agent.max_steps = value
+            continue
         if value is None:
             agent.ollama_options.pop(key, None)
         else:
@@ -3077,6 +3205,8 @@ def _agent_configuration_context(
         f"plan_mode={'on' if getattr(agent, 'plan_mode', False) else 'off'}",
         f"- General request settings: {option_text}",
         f"- Code request overrides: {code_option_text}",
+        f"- Turn execution limit: {getattr(agent, 'max_steps', 20)} model/tool steps; "
+        "one additional tool-free finalization request is reserved",
         f"- Tool registry: {len(enabled_tools)}/{len(all_tools)} enabled; "
         f"enabled={_configuration_value(', '.join(enabled_tools), limit=1_200)}",
         "- Permissions: "
@@ -3138,12 +3268,24 @@ def _agent_configuration_context(
     lines.append(f"- Automatic memory: {'on' if memory.auto_memory_enabled() else 'off'}")
     workdir = Path(getattr(agent, "workdir", Path.cwd())).resolve()
     lines.append(f"- Workspace: {_configuration_value(workdir)}")
-    instruction_files = _applicable_agents_files(agent)
-    if instruction_files:
+    instruction_context, instruction_files, instructions_truncated = (
+        _repository_instruction_context(agent)
+    )
+    agent.injected_instruction_paths = (
+        tuple(str(path) for path in instruction_files) if instruction_context else ()
+    )
+    agent.injected_instructions_truncated = bool(
+        instruction_context and instructions_truncated
+    )
+    if instruction_context:
         lines.append(
-            "- Repository guidance: detected but not yet injected: "
+            "- Repository guidance: injected"
+            + (" with bounded truncation" if instructions_truncated else "")
+            + ": "
             + _configuration_value(", ".join(str(path) for path in instruction_files), limit=900)
         )
+    elif instruction_files:
+        lines.append("- Repository guidance: detected but no readable content was available")
     else:
         lines.append("- Repository guidance: no applicable AGENTS.md detected")
 
@@ -3171,6 +3313,7 @@ def _agent_configuration_context(
             "to see image pixels unless a future active capability explicitly says so.",
             "- Provider toggles describe configuration, not current network health.",
             "- Only call tools whose schemas are present in the current model request.",
+            instruction_context,
             "</klaude_configuration>",
         ]
     )
@@ -6190,6 +6333,10 @@ def _render(
             model_content=(effective_message if effective_message != user_msg else None),
         )
     _print_trace(f"-> model [{getattr(agent, 'model', 'local')}] thinking...")
+    prior_capability_observer = getattr(agent, "capability_observer", None)
+    agent.capability_observer = lambda snapshot: publish(
+        "capabilities", {"snapshot": snapshot}
+    )
     assistant_text: list[str] = []
     streamed_fragments: list[str] = []
     streamed_logged = False
@@ -6297,6 +6444,7 @@ def _render(
         )
         raise
     finally:
+        agent.capability_observer = prior_capability_observer
         if streamed_fragments and not streamed_logged:
             partial = "".join(streamed_fragments)
             memory.log_turn(session_id, "assistant", partial)
@@ -6318,7 +6466,14 @@ def _render(
             )
         if live_lifecycle:
             state = "interrupted" if interrupted else "failed" if turn_failed else "idle"
-            publish("turn_done", {"cancelled": interrupted, "failed": turn_failed})
+            publish(
+                "turn_done",
+                {
+                    "cancelled": interrupted,
+                    "failed": turn_failed,
+                    "turn_capabilities": getattr(agent, "last_turn_capabilities", {}),
+                },
+            )
             try:
                 memory.release_session_lease(
                     session_id, client_id, turn_id, state=state
@@ -7811,6 +7966,13 @@ class PersistentChatTUI:
             current = int(self.agent.ollama_options.get("num_ctx", 8192))
             formatted = f"{current:,}"
             return value == (formatted if formatted in self._choice_values else "custom input")
+        if kind == "turn limit":
+            preset = {
+                12: "Safe · 12 steps",
+                20: "Balanced · 20 steps",
+                40: "Extended · 40 steps",
+            }.get(self.agent.max_steps, "custom input")
+            return value == preset
         if kind == "model":
             choice = getattr(self, "_model_choices", {}).get(value)
             return (
@@ -7828,7 +7990,11 @@ class PersistentChatTUI:
 
     def _persist_runtime_preferences(self, *keys: str) -> None:
         for key in keys:
-            self._runtime_preferences[key] = self.agent.ollama_options.get(key)
+            self._runtime_preferences[key] = (
+                self.agent.max_steps
+                if key == "max_steps"
+                else self.agent.ollama_options.get(key)
+            )
         try:
             _save_runtime_preferences(
                 self.chat_preferences_path,
@@ -7972,9 +8138,13 @@ class PersistentChatTUI:
         was_watching = self._watching_remote
         self._watching_remote = bool(remote_owner)
         if was_watching and not remote_owner and live.get("state") == "running":
-            self._append(
-                "\n[interrupted] Remote worker lease expired; saved output is preserved.\n"
-            )
+            recovered = self.memory.session_snapshot(self.session_id)
+            live = recovered["live"]
+            self._session_live_revision = int(live["revision"])
+            if not recovered.get("recovered_turn_ids"):
+                self._append(
+                    "\n[interrupted] Remote worker lease expired; saved output is preserved.\n"
+                )
         self._remote_turn_started_at = (
             float(live.get("turn_started_at") or 0.0) if remote_owner else 0.0
         )
@@ -8011,6 +8181,13 @@ class PersistentChatTUI:
                     self._append(text)
             elif event["kind"] == "activity":
                 self.activity = str(payload.get("text", "working"))
+            elif event["kind"] == "capabilities":
+                snapshot = payload.get("snapshot")
+                if isinstance(snapshot, dict):
+                    self.agent.last_turn_capabilities = snapshot
+                    budget = snapshot.get("budget")
+                    if isinstance(budget, dict):
+                        self.agent.last_turn_budget = budget
             elif event["kind"] == "activity_update":
                 activity = _completed_activity_text(
                     payload.get("label"),
@@ -8055,6 +8232,9 @@ class PersistentChatTUI:
                 if detail:
                     self._append(f"\n[session] {detail}\n")
             elif event["kind"] == "turn_done":
+                if payload.get("recovered"):
+                    reason = str(payload.get("reason", "remote worker ended unexpectedly"))
+                    self._append(f"\n[interrupted] {reason}; saved output is preserved.\n")
                 suffix = str(payload.get("suffix", ""))
                 timestamp = datetime.fromtimestamp(event["ts"]).astimezone()
                 self._append(
@@ -9117,6 +9297,31 @@ class PersistentChatTUI:
             self._persist_runtime_preferences("num_ctx")
             self._open_settings_category("runtime", "context size:")
             return
+        if self._choice_kind == "turn limit":
+            if selected == "back":
+                self._open_settings_category("runtime")
+                return
+            if selected == "custom input":
+                self._choice_kind = None
+                self._choice_values = []
+                self._runtime_edit = "max_steps"
+                self._set_input(str(self.agent.max_steps))
+                return
+            if selected == RESET_THEME_CHOICE:
+                self.agent.max_steps = self.cfg.max_agent_steps
+                self._runtime_preferences.pop("max_steps", None)
+                try:
+                    _save_runtime_preferences(
+                        self.chat_preferences_path,
+                        self._runtime_preferences,
+                    )
+                except OSError as exc:
+                    self.status_error = f"runtime settings were not saved: {exc}"
+            else:
+                self.agent.max_steps = int(selected.rsplit("·", 1)[1].split()[0])
+                self._persist_runtime_preferences("max_steps")
+            self._open_settings_category("runtime", "turn limit:")
+            return
         if self._choice_kind == "permission preset":
             if selected == "back":
                 self._hide_permission_preview()
@@ -9361,6 +9566,8 @@ class PersistentChatTUI:
             thread_label = str(threads) if threads else "auto (Klaude decides)"
             context = int(self.agent.ollama_options.get("num_ctx", 8192))
             choices = [
+                _choice_section("EXECUTION"),
+                f"turn limit: {self.agent.max_steps} steps",
                 _choice_section("DEVICE"),
                 f"device: {device}",
                 _choice_section("PERFORMANCE"),
@@ -9563,8 +9770,29 @@ class PersistentChatTUI:
                     f"{int(current):,}",
                 )
                 return
+            if selected.startswith("turn limit:"):
+                preset = {
+                    12: "Safe · 12 steps",
+                    20: "Balanced · 20 steps",
+                    40: "Extended · 40 steps",
+                }.get(self.agent.max_steps, "custom input")
+                self._begin_choice(
+                    "turn limit",
+                    [
+                        "Safe · 12 steps",
+                        "Balanced · 20 steps",
+                        "Extended · 40 steps",
+                        "custom input",
+                        "back",
+                        RESET_THEME_CHOICE,
+                    ],
+                    preset,
+                )
+                return
             self.agent.ollama_options.pop("num_gpu", None)
             self.agent.ollama_options.pop("num_thread", None)
+            self.agent.max_steps = self.cfg.max_agent_steps
+            self._runtime_preferences.pop("max_steps", None)
             self._runtime_device_mode = "auto"
             self._persist_runtime_preferences("num_gpu", "num_thread")
             _save_runtime_device_mode(self.chat_preferences_path, self._runtime_device_mode)
@@ -9989,6 +10217,12 @@ class PersistentChatTUI:
             "",
         )
         self._remote_queue = [str(value) for state in active_clients for value in state["queue"]]
+        live_capabilities = snapshot.get("live_capabilities")
+        if isinstance(live_capabilities, dict) and live_capabilities:
+            self.agent.last_turn_capabilities = live_capabilities
+            budget = live_capabilities.get("budget")
+            if isinstance(budget, dict):
+                self.agent.last_turn_budget = budget
         remote_active = (
             live["state"] == "running"
             and live["owner_client_id"] != self.client_id
@@ -10051,11 +10285,15 @@ class PersistentChatTUI:
                 self._runtime_edit = None
                 self._open_settings_category("runtime")
                 return
-            if not value.isdecimal() or not 1 <= int(value) <= 262144:
-                self.status_error = "Enter a whole number from 1 to 262144, or cancel"
+            maximum = 64 if self._runtime_edit == "max_steps" else 262144
+            if not value.isdecimal() or not 1 <= int(value) <= maximum:
+                self.status_error = f"Enter a whole number from 1 to {maximum}, or cancel"
                 return
             edited_setting = self._runtime_edit
-            self.agent.ollama_options[edited_setting] = int(value)
+            if edited_setting == "max_steps":
+                self.agent.max_steps = int(value)
+            else:
+                self.agent.ollama_options[edited_setting] = int(value)
             if edited_setting == "num_ctx":
                 self.ui_state.context_window = int(value)
             self._persist_runtime_preferences(edited_setting)
@@ -10063,7 +10301,12 @@ class PersistentChatTUI:
             self.status_error = ""
             self._set_input("")
             self._open_settings_category(
-                "runtime", "context size:" if edited_setting == "num_ctx" else "CPU threads:"
+                "runtime",
+                {
+                    "num_ctx": "context size:",
+                    "num_thread": "CPU threads:",
+                    "max_steps": "turn limit:",
+                }[edited_setting],
             )
             return
         if self._height_edit:
@@ -10761,6 +11004,7 @@ class PersistentChatTUI:
         assistant_saved = False
         turn_failed = False
         pending_edits: list[dict] = []
+        prior_capability_observer = getattr(self.agent, "capability_observer", None)
 
         def flush_edits() -> None:
             if not pending_edits:
@@ -10778,6 +11022,11 @@ class PersistentChatTUI:
             self._publish_shared_event("edit_summary", {"text": text}, turn_id=turn_id)
             self.memory.log_turn(self.session_id, "system", {"event": "edit_summary", "text": text})
 
+        def publish_capabilities(snapshot: dict[str, Any]) -> None:
+            self._publish_shared_event(
+                "capabilities", {"snapshot": snapshot}, turn_id=turn_id
+            )
+
         try:
             builder = getattr(self.agent, "system_prompt_builder", None)
             if builder:
@@ -10793,6 +11042,7 @@ class PersistentChatTUI:
             if not cancel_event.is_set():
                 self._emit("activity", "working")
                 self._publish_shared_event("activity", {"text": "working"}, turn_id=turn_id)
+            self.agent.capability_observer = publish_capabilities
             events = (
                 self.agent.run(effective_message, read_only=True)
                 if read_only
@@ -11010,6 +11260,7 @@ class PersistentChatTUI:
                     {"event": "runtime_error", "message": str(exc)},
                 )
         finally:
+            self.agent.capability_observer = prior_capability_observer
             partial = "".join(assistant_parts).strip()
             if partial and not assistant_saved:
                 self.memory.log_turn(self.session_id, "assistant", partial)
@@ -11048,7 +11299,14 @@ class PersistentChatTUI:
             suffix = f"worked for {elapsed_label}"
             self._publish_shared_event(
                 "turn_done",
-                {"suffix": suffix, "cancelled": cancelled, "failed": turn_failed},
+                {
+                    "suffix": suffix,
+                    "cancelled": cancelled,
+                    "failed": turn_failed,
+                    "turn_capabilities": getattr(
+                        self.agent, "last_turn_capabilities", {}
+                    ),
+                },
                 turn_id=turn_id,
             )
             try:
@@ -11060,7 +11318,18 @@ class PersistentChatTUI:
                 )
             except sqlite3.Error as exc:
                 self._emit("error", f"session lease cleanup failed: {exc}")
-            self._emit("turn_done", {"metadata": metadata, "cancelled": cancelled})
+            self._emit(
+                "turn_done",
+                {
+                    "metadata": {
+                        **metadata,
+                        "turn_capabilities": getattr(
+                            self.agent, "last_turn_capabilities", {}
+                        ),
+                    },
+                    "cancelled": cancelled,
+                },
+            )
 
     def _ask_permission(self, tool: str, detail: str) -> str:
         if self.shutting_down or self.cancel_requested.is_set():

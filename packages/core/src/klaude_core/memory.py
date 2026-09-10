@@ -608,16 +608,41 @@ class Memory:
         return max(0, old) + max(0, capped)
 
     def session_snapshot(self, session_id: str) -> dict:
-        """Read saved turns, live state, and event cursor from one snapshot."""
+        """Read one session snapshot and durably finalize expired worker turns.
+
+        Recovery is serialized with ``BEGIN IMMEDIATE`` so multiple resumed
+        clients cannot each record the same interruption. Public partial output
+        is promoted to the durable transcript before the expired lease is
+        cleared; tool results are never fabricated during recovery.
+        """
         with self._db_lock:
-            self.db.execute("BEGIN")
+            now = time.time()
+            preflight_live = self.session_live_state(session_id)
+            preflight_active = (
+                str(preflight_live.get("turn_id") or "")
+                if preflight_live.get("state") == "running"
+                and float(preflight_live.get("owner_lease_until") or 0) > now
+                else ""
+            )
+            unfinished = self.db.execute(
+                "SELECT 1 FROM session_events AS started "
+                "WHERE started.session_id=? AND started.kind='user_started' "
+                "AND started.turn_id<>? AND NOT EXISTS ("
+                "SELECT 1 FROM session_events AS finished "
+                "WHERE finished.session_id=started.session_id "
+                "AND finished.turn_id=started.turn_id AND finished.kind='turn_done'"
+                ") LIMIT 1",
+                (session_id, preflight_active),
+            ).fetchone()
+            expired_live = (
+                preflight_live.get("state") == "running"
+                and float(preflight_live.get("owner_lease_until") or 0) <= now
+            )
+            self.db.execute("BEGIN IMMEDIATE" if unfinished or expired_live else "BEGIN")
             try:
                 turns = self.load_session(session_id, timestamps=True)
                 live = self.session_live_state(session_id)
                 clients = self.session_client_states(session_id)
-                cursor = self.latest_session_event_id(session_id)
-                # Recover a truthful view without rewriting historical records. A process
-                # kill cannot run finally; user_started minus turn_done is the durable clue.
                 events = []
                 after = 0
                 while True:
@@ -637,39 +662,118 @@ class Memory:
                     and live.get("owner_lease_until", 0) > time.time()
                     else None
                 )
-                for turn_id in started:
+                live_capabilities: dict = {}
+                if active:
+                    for event in reversed(by_turn.get(str(active), [])):
+                        if event["kind"] != "capabilities":
+                            continue
+                        payload = event.get("payload")
+                        snapshot = payload.get("snapshot") if isinstance(payload, dict) else None
+                        if isinstance(snapshot, dict):
+                            live_capabilities = snapshot
+                        break
+                recovered_turn_ids: list[str] = []
+                for turn_id, start_event in started.items():
                     if turn_id in finished or turn_id == active:
                         continue
                     related = by_turn[turn_id]
                     stamp = max(e["ts"] for e in related) + 0.000001
+                    next_turn_started_at = min(
+                        (
+                            float(event["ts"])
+                            for other_id, event in started.items()
+                            if other_id != turn_id
+                            and float(event["ts"]) > float(start_event["ts"])
+                        ),
+                        default=float("inf"),
+                    )
                     partial = "".join(
                         str(e["payload"].get("text", ""))
                         for e in related
                         if e["kind"] == "assistant_delta"
                     )
-                    if partial and not any(t.get("content") == partial for t in turns):
-                        turns.append({"role": "assistant", "content": partial, "ts": stamp})
-                    turns.append(
-                        {
-                            "role": "system",
-                            "ts": stamp,
-                            "content": {
-                                "event": "runtime_error",
-                                "message": "Interrupted: this turn has no completion record. "
-                                "Its worker ended "
-                                "or lost its lease; saved output above is preserved.",
-                            },
-                        }
+                    durable_assistant_exists = any(
+                        turn.get("role") == "assistant"
+                        and float(turn.get("ts", 0)) >= float(start_event["ts"])
+                        and float(turn.get("ts", 0)) < next_turn_started_at
+                        for turn in turns
                     )
-                turns.sort(key=lambda item: item["ts"])
+                    if partial and not durable_assistant_exists:
+                        self.db.execute(
+                            "INSERT INTO turns "
+                            "(session_id, ts, role, content, model_content) VALUES (?,?,?,?,NULL)",
+                            (
+                                session_id,
+                                stamp,
+                                "assistant",
+                                json.dumps(partial, ensure_ascii=False),
+                            ),
+                        )
+                        turns.append({"role": "assistant", "content": partial, "ts": stamp})
+                        stamp += 0.000001
+                    message = (
+                        "Interrupted: this turn has no completion record. Its worker ended "
+                        "or lost its lease; saved output above is preserved."
+                    )
+                    system_content = {"event": "runtime_error", "message": message}
+                    interruption_exists = any(
+                        turn.get("role") == "system"
+                        and float(turn.get("ts", 0)) >= float(start_event["ts"])
+                        and float(turn.get("ts", 0)) < next_turn_started_at
+                        and turn.get("content") == system_content
+                        for turn in turns
+                    )
+                    if not interruption_exists:
+                        self.db.execute(
+                            "INSERT INTO turns "
+                            "(session_id, ts, role, content, model_content) "
+                            "VALUES (?,?,?,?,NULL)",
+                            (
+                                session_id,
+                                stamp,
+                                "system",
+                                json.dumps(system_content, ensure_ascii=False),
+                            ),
+                        )
+                        turns.append(
+                            {"role": "system", "ts": stamp, "content": system_content}
+                        )
+                    self.db.execute(
+                        "INSERT INTO session_events "
+                        "(session_id, turn_id, client_id, ts, kind, payload) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (
+                            session_id,
+                            turn_id,
+                            str(start_event.get("client_id", "")),
+                            stamp + 0.000001,
+                            "turn_done",
+                            json.dumps(
+                                {
+                                    "suffix": "interrupted",
+                                    "cancelled": True,
+                                    "failed": True,
+                                    "recovered": True,
+                                    "reason": "worker lease expired before completion",
+                                },
+                                ensure_ascii=False,
+                            ),
+                        ),
+                    )
+                    recovered_turn_ids.append(turn_id)
+
                 if live.get("state") == "running" and not active:
-                    live = {
-                        **live,
-                        "state": "interrupted",
-                        "activity": "ready",
-                        "owner_client_id": "",
-                        "owner_lease_until": 0,
-                    }
+                    recovery_now = time.time()
+                    self.db.execute(
+                        "UPDATE session_live SET revision=revision+1, owner_client_id='', "
+                        "owner_lease_until=0, turn_id='', state='interrupted', "
+                        "turn_started_at=0, activity='ready', partial='', updated_at=? "
+                        "WHERE session_id=? AND state='running' AND owner_lease_until<=?",
+                        (recovery_now, session_id, recovery_now),
+                    )
+                    live = self.session_live_state(session_id)
+                turns.sort(key=lambda item: item["ts"])
+                cursor = self.latest_session_event_id(session_id)
                 self.db.commit()
             except Exception:
                 self.db.rollback()
@@ -679,6 +783,8 @@ class Memory:
             "live": live,
             "clients": clients,
             "event_cursor": cursor,
+            "recovered_turn_ids": recovered_turn_ids,
+            "live_capabilities": live_capabilities,
         }
 
     def update_session_client(

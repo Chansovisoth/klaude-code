@@ -1,4 +1,5 @@
 import sqlite3
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -231,6 +232,13 @@ def test_two_memory_clients_share_atomic_turn_snapshot_and_stream(tmp_path):
     owner.publish_session_event(
         "shared", "owner", "assistant_delta", {"text": "Working"}, turn_id="turn-1"
     )
+    owner.publish_session_event(
+        "shared",
+        "owner",
+        "capabilities",
+        {"snapshot": {"callable_tools": ["read_file"], "budget": {"model_steps_used": 1}}},
+        turn_id="turn-1",
+    )
 
     snapshot = watcher.session_snapshot("shared")
 
@@ -238,6 +246,7 @@ def test_two_memory_clients_share_atomic_turn_snapshot_and_stream(tmp_path):
     assert snapshot["turns"][0]["content"] == "Review this"
     assert "private" in snapshot["turns"][0]["model_content"]
     assert snapshot["live"]["partial"] == "Working"
+    assert snapshot["live_capabilities"]["callable_tools"] == ["read_file"]
     assert snapshot["live"]["owner_client_id"] == "owner"
     assert watcher.resumable_sessions()[0]["active"] is True
     assert watcher.recent_sessions()[0]["active"] is True
@@ -250,6 +259,110 @@ def test_two_memory_clients_share_atomic_turn_snapshot_and_stream(tmp_path):
     assert watcher.resumable_sessions()[0]["active"] is False
     assert watcher.recent_sessions()[0]["active"] is False
     assert watcher.acquire_session_lease("shared", "watcher", "turn-2")
+
+
+def test_expired_worker_turn_is_recovered_durably_and_idempotently(tmp_path):
+    database = tmp_path / "sessions.db"
+    owner = Memory(tmp_path / "memory.md", database)
+    watcher = Memory(tmp_path / "memory.md", database)
+
+    assert owner.acquire_session_lease("shared", "owner", "turn-1")
+    owner.start_session_turn("shared", "owner", "turn-1", "Build it")
+    owner.publish_session_event(
+        "shared", "owner", "assistant_delta", {"text": "Partial answer"}, turn_id="turn-1"
+    )
+    owner.update_session_live("shared", owner_lease_until=time.time() - 1)
+
+    first = watcher.session_snapshot("shared")
+    second = watcher.session_snapshot("shared")
+
+    assert first["recovered_turn_ids"] == ["turn-1"]
+    assert second["recovered_turn_ids"] == []
+    assert [turn["content"] for turn in first["turns"] if turn["role"] == "assistant"] == [
+        "Partial answer"
+    ]
+    errors = [
+        turn
+        for turn in first["turns"]
+        if turn["role"] == "system"
+        and isinstance(turn["content"], dict)
+        and turn["content"].get("event") == "runtime_error"
+    ]
+    assert len(errors) == 1
+    done = [
+        event
+        for event in watcher.session_events_since("shared", 0)
+        if event["kind"] == "turn_done"
+    ]
+    assert len(done) == 1
+    assert done[0]["payload"]["recovered"] is True
+    assert watcher.session_live_state("shared") == first["live"]
+    assert first["live"]["state"] == "interrupted"
+    assert first["live"]["owner_client_id"] == ""
+    assert first["live"]["partial"] == ""
+
+
+def test_expired_turn_does_not_duplicate_an_already_saved_assistant_answer(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    assert memory.acquire_session_lease("shared", "owner", "turn-1")
+    memory.start_session_turn("shared", "owner", "turn-1", "Build it")
+    memory.publish_session_event(
+        "shared", "owner", "assistant_delta", {"text": "Saved answer"}, turn_id="turn-1"
+    )
+    memory.log_turn("shared", "assistant", "Saved answer")
+    memory.update_session_live("shared", owner_lease_until=time.time() - 1)
+
+    snapshot = memory.session_snapshot("shared")
+
+    assert [turn["content"] for turn in snapshot["turns"] if turn["role"] == "assistant"] == [
+        "Saved answer"
+    ]
+
+
+def test_concurrent_observers_record_only_one_stale_turn_completion(tmp_path):
+    database = tmp_path / "sessions.db"
+    owner = Memory(tmp_path / "memory.md", database)
+    observers = [
+        Memory(tmp_path / "memory.md", database),
+        Memory(tmp_path / "memory.md", database),
+    ]
+    assert owner.acquire_session_lease("shared", "owner", "turn-1")
+    owner.start_session_turn("shared", "owner", "turn-1", "Build it")
+    owner.update_session_live("shared", owner_lease_until=time.time() - 1)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        snapshots = list(executor.map(lambda memory: memory.session_snapshot("shared"), observers))
+
+    assert sorted(len(snapshot["recovered_turn_ids"]) for snapshot in snapshots) == [0, 1]
+    done = [
+        event
+        for event in owner.session_events_since("shared", 0)
+        if event["kind"] == "turn_done"
+    ]
+    assert len(done) == 1
+
+
+def test_stale_partial_is_not_hidden_by_a_later_completed_assistant_turn(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    assert memory.acquire_session_lease("shared", "owner-a", "turn-1")
+    memory.start_session_turn("shared", "owner-a", "turn-1", "First request")
+    memory.publish_session_event(
+        "shared", "owner-a", "assistant_delta", {"text": "First partial"}, turn_id="turn-1"
+    )
+    memory.update_session_live("shared", owner_lease_until=time.time() - 1)
+    assert memory.acquire_session_lease("shared", "owner-b", "turn-2")
+    memory.start_session_turn("shared", "owner-b", "turn-2", "Second request")
+    memory.log_turn("shared", "assistant", "Second answer")
+    memory.publish_session_event(
+        "shared", "owner-b", "turn_done", {"suffix": "worked"}, turn_id="turn-2"
+    )
+    assert memory.release_session_lease("shared", "owner-b", "turn-2")
+
+    snapshot = memory.session_snapshot("shared")
+
+    assistants = [turn["content"] for turn in snapshot["turns"] if turn["role"] == "assistant"]
+    assert assistants == ["First partial", "Second answer"]
+    assert snapshot["recovered_turn_ids"] == ["turn-1"]
 
 
 def test_delete_one_session_removes_only_that_session(tmp_path):

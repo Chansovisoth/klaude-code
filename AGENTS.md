@@ -42,6 +42,14 @@ Workspace layout:
 - `tests/unit`: unit coverage for config, tools, memory, runtime context, docs,
   skills, knowledge, search, providers, fetch, CLI commands, and dates.
 
+GitHub Actions runs the locked unit suite on Python 3.11, 3.12, and 3.13, then
+runs Ruff and production-source mypy in a separate least-privilege quality job.
+A packaging job also builds all five workspace wheels, installs them together
+in an isolated temporary virtual environment, imports each public package, and
+runs the installed `klaude --help`. Jobs use bounded timeouts and cancel
+superseded runs. `make check` mirrors the local unit, lint, and production-type
+validation surface; `make package-smoke` runs the separate distribution check.
+
 ## User-Facing Terms
 
 Use `library` in CLI help, README examples, prompts, and user-facing text for a
@@ -168,8 +176,14 @@ Chat slash commands currently include:
   back from that request. CPU threads/context size offer presets and custom
   numeric input. Auto Calibrate
   derives bounded thread and context targets from local CPU, RAM, and VRAM,
-  while keeping device placement automatic. Input border defaults on. Every
-  category includes its own reset action. Runtime also offers scoped external
+  while keeping device placement automatic. Runtime also exposes the per-turn
+  model/tool ceiling through Safe (12), Balanced (20), Extended (40), and
+  custom 1-64 step choices. The selected value applies immediately, persists
+  for later chats, and appears in the model-facing live configuration. Reset
+  restores `[agent].max_steps` from `config.toml`; the ceiling remains an
+  emergency safety boundary with one additional tool-free finalization request.
+  Input border defaults on. Every category includes its own reset action.
+  Runtime also offers scoped external
   Nano editors for Klaude's `config.toml` and saved runtime preferences; they
   return to the chat after exit and changes apply to the next chat.
 - `/vim`: toggle Vim editing controls in the TUI composer; invoke it again to
@@ -184,12 +198,14 @@ Chat slash commands currently include:
 - `/recap`: show a concise local recap of the current session's recent turns.
 - `/status`: available immediately even while a local or remote model turn is
   working. Show session ID and effective name, model, reasoning mode and effort,
-  workspace, context estimate and approximate remaining context tokens, plan mode,
+  workspace, context estimate and approximate remaining context tokens, the
+  effective turn limit and reserved finalization, plan mode,
   effective permission-policy counts,
-  memory mode, tool count, and applicable repository `AGENTS.md` paths. Until
-  native repository-instruction loading is implemented, detected `AGENTS.md`
-  files must be labeled `not yet injected` rather than implying that the model
-  received them. The effective session name is a saved assigned/generated name
+  memory mode, tool count, and applicable repository `AGENTS.md` paths.
+  Successfully loaded files are labeled `injected` or `injected (bounded)`;
+  detected files with no readable content are labeled honestly rather than
+  implying that the model received them. The effective session name is a saved
+  assigned/generated name
   when one exists, otherwise the normalized first user input (up to 160
   characters). Capture that fallback synchronously when the first turn starts
   so live `/status` never races the worker's database write. Render status as
@@ -276,7 +292,11 @@ Chat slash commands currently include:
   `EXPLORING`, `EDITING`, `RUNNING`, `LEARNING`, or `WAITING`) while that remote worker lease
   is active with the same animated Braille indicator even though its own local
   worker flag is false, and return to `★ READY` after the remote lease is
-  released or expires.
+  released or expires. Before every provider request the worker publishes the
+  same sanitized `TurnCapabilities` snapshot supplied to that model. An observer
+  joining mid-turn receives the latest snapshot atomically with its session
+  snapshot; later updates refresh its live `/status` without changing the
+  observer's own saved model selection.
 - `/model`: open an arrow-key model picker, then an effort picker.
 - `/model NAME`: switch the active chat model, then choose effort while keeping
   chat history. A successful selection is reused at the next chat launch and
@@ -410,7 +430,18 @@ must not simulate streaming character by character. Tool-enabled responses may
 still need to assemble before their structured calls are resolved. Non-interactive stdin retains line-oriented compatibility and plain
 output. Line-oriented and one-shot turns use the same renewable session lease,
 durable start/result/completion events, partial-output preservation, and
-failed/interrupted finalization as TUI turns. In the TUI, `/help` category names are underlined, and each user or
+failed/interrupted finalization as TUI turns. If a process disappears before
+finalization, the first client observing its expired lease performs one
+transactional recovery under `BEGIN IMMEDIATE`: public partial output is
+promoted to the durable transcript when no assistant turn was already saved,
+one interruption system turn and recovered `turn_done` event are recorded, and
+only the expired owner lease is cleared. Concurrent observers cannot duplicate
+recovery. Recovery never invents tool results or completed activity labels; a
+start-only tool audit remains start-only. If cancellation or a provider failure
+interrupts a text stream while its unpublished suffix might be text-form tool
+markup, keep only the already-safe prose prefix in model history. Never feed a
+half-written tool tag into the next request as assistant prose. In the TUI,
+`/help` category names are underlined, and each user or
 assistant message begins with a full-width gray divider containing the speaker
 name and local date/time. Each session starts with a `Session: <id>` divider
 after the logo and intro; the composer is labeled `you`, and each turn closes
@@ -529,17 +560,22 @@ configuration block in its system prompt. It identifies the selected model and
 backend, reasoning mode and effort, plan mode, allowlisted runtime options,
 configured chat providers, enabled and disabled tools, effective permission
 counts, web-provider toggle count and routing order, retrieval validation, memory mode, workspace and
-detected-but-not-yet-injected `AGENTS.md` paths, plus current appearance,
+  applicable injected `AGENTS.md` paths and bounded-truncation state, plus current appearance,
 composer, and activity-update settings. Refresh it from effective in-memory
 state before each turn so changes made through `/settings`, `/permission`,
 `/model`, `/mode`, and `/plan` are visible to the next model request. Provider
 toggles describe configuration, not live reachability. Never include API keys,
 secret values, environment contents, or repository-instruction file contents
-in this block; the schemas attached to the current request remain the authority
-for which tools the model may call. The per-turn capability block lists the
-effective `ALLOW`, `ASK`, and `DENY` policy for those callable schemas so a
-permission change is visible on the next request; the gate still remains the
-execution authority.
+  in this block; the schemas attached to the current request remain the authority
+  for which tools the model may call. A frozen `TurnCapabilities` snapshot is
+  rebuilt before every provider request from the global enabled registry, actual
+  schemas, effective process-local permission overrides, hard constraints,
+  workspace write state, provider/model capabilities, injected instruction paths,
+  and the live execution budget. Policy-denied tools are omitted from schemas and
+  listed as unavailable instead of being invited to fail. The model prompt,
+  `/status`, agent completion event, and shared `turn_done` event serialize this
+  same snapshot; permission changes are therefore visible on the next request.
+  The permission gate and immutable tool preflight remain the execution authority.
 
 When the user explicitly asks for the complete command list, use the
 deterministic command-reference handler and preserve its formatting. When the
@@ -637,7 +673,16 @@ Docker service, or whatever launcher the user chose.
 
 Cloud runtime requests are stateless: OpenAI Responses calls set `store=false`
 and surface refusal and failed-stream events instead of silently producing an
-empty reply. Cloud context accounting uses discovered provider model metadata
+empty reply. Streaming OpenAI and Codex requests require an explicit completed
+terminal event; malformed terminal events and native function-call items fail
+closed instead of being treated as successful output. Codex reconciles streamed
+tool/reasoning items against the authoritative completed response, deduplicates
+items by provider ID, and falls back to completed response text when a transport
+omits text deltas. Non-secret response IDs and terminal status are retained as
+runtime metadata for diagnostics, but are not used as server-side continuation
+while `store=false`; conversation continuity remains local replay plus Codex's
+encrypted reasoning items. Cloud context accounting uses discovered provider
+model metadata
 and never inherits saved Ollama `num_ctx` or GPU/thread tuning; when the Codex
 catalog omits a limit, discovery records a conservative 128K fallback. Responses
 history emits function calls and outputs only as complete call-ID pairs so a
@@ -667,6 +712,12 @@ The agent loop in `packages/core/src/klaude_core/agent.py` handles:
   `prefer ddgs`;
 - deterministic tool exposure for casual turns, command-help requests,
   workspace requests, local knowledge, web lookup, and follow-ups;
+- bounded hierarchical repository guidance. Applicable `AGENTS.md` files load
+  root-to-leaf into the refreshed system prompt with a combined
+  12,000-character budget. Every readable file receives a share and the closest
+  file receives remaining capacity first, so a large root guide cannot hide a
+  nested override. Repository guidance cannot elevate tool permissions or
+  bypass system safety boundaries;
 - conversation entity state for resolved/unresolved entities, corrections,
   rejected interpretations, active official domains, claim intent, evidence
   gaps, and topic switches;
@@ -682,6 +733,13 @@ The agent loop in `packages/core/src/klaude_core/agent.py` handles:
   tool-free synthesis request. If it cannot produce an answer, report that the
   safety limit was reached, preserve completed work, and tell the user how to
   continue instead of exposing an internal `step budget exhausted` error.
+- a provider-independent turn governor in `klaude_core.execution`. It tracks
+  model steps, tool calls, safe-boundary wall time, repeated outcomes, and
+  consecutive non-progress results. Three failed, skipped, unexecuted, or
+  duplicate outcomes across tools stop further tool activity and reserve the
+  next model request for a factual tool-free finalization. A successful new
+  result resets the non-progress streak. The live snapshot is included in the
+  per-request capability block and `/status`; switching sessions clears it.
 - normalized Codex usage-limit failures that show the account plan and reset
   time when supplied, link to the official usage page, and suggest waiting or
   selecting another configured provider without printing the raw API payload.
@@ -733,8 +791,12 @@ Incomplete totals are labeled lower bounds; other users' homes are excluded.
 The tool defaults to ask and appears in Permissions as OS storage usage.
 Ordinary shell paths, including glob expansions, remain workspace-scoped.
 
-Each model request receives a capability block derived from its actual schemas,
-with reasons for unavailable tools. Short repair follow-ups retain the previous
+Each model request receives an immutable capability block derived from its actual
+schemas, with reasons for unavailable tools and a separate global-enabled inventory.
+It records effective ask/allow/deny policies, provider tool/context/effort support,
+injected guidance paths, workspace state, hard safety constraints, and remaining
+turn budgets. `DENY` tools are not exposed as callable schemas. `/status` and
+durable completion events use the same sanitized snapshot. Short repair follow-ups retain the previous
 request's selected capabilities when they contain no new tool intent. Short
 execution follow-ups use preceding fenced commands as disambiguating context.
 Alternate bare tool XML is detected, never evaluated; one structured-call repair

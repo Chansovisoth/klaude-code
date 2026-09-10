@@ -1,0 +1,32 @@
+[
+  {
+    "name": "os-disk-diagnosis",
+    "prior_messages": [],
+    "user": "What's taking up so much space on the OS drive?",
+    "expected_tools": ["storage_usage"],
+    "forbidden_tools": ["write_file", "edit_file", "git_commit"]
+  },
+  {
+    "name": "contextual-run-typo",
+    "prior_messages": [
+      {
+        "role": "user",
+        "content": "How can I inspect disk usage?"
+      },
+      {
+        "role": "assistant",
+        "content": "Run these diagnostics:\n```bash\ndf -h /\ndu -sh /home/*\n```"
+      }
+    ],
+    "user": "run theme",
+    "expected_tools": ["storage_usage"],
+    "forbidden_tools": ["write_file", "edit_file", "git_commit"]
+  },
+  {
+    "name": "web-lookup",
+    "prior_messages": [],
+    "user": "Look up Chanreach Try online",
+    "expected_tools": ["web_search"],
+    "forbidden_tools": ["write_file", "edit_file", "git_commit", "run_shell"]
+  }
+]

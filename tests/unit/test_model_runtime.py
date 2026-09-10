@@ -106,6 +106,25 @@ def test_openai_nonstream_refusal_is_visible():
     assert OpenAIRuntime._message(response)["content"] == "Request declined"
 
 
+def test_openai_records_sanitized_response_identity_and_status():
+    usage = type("Usage", (), {"model_dump": lambda self: {"input_tokens": 3}})()
+    response = type(
+        "Response",
+        (),
+        {"id": "resp_123", "status": "completed", "usage": usage},
+    )()
+    runtime = OpenAIRuntime("secret")
+
+    runtime._record(response)
+
+    assert runtime.last_chat_metadata == {
+        "provider": "openai_api",
+        "response_id": "resp_123",
+        "status": "completed",
+        "usage": {"input_tokens": 3},
+    }
+
+
 @pytest.mark.parametrize(
     ("model", "effort", "expected"),
     [
@@ -420,6 +439,63 @@ def test_codex_runtime_streaming_preserves_deltas(monkeypatch):
     ]
 
 
+def test_openai_stream_requires_terminal_completion_event(monkeypatch):
+    runtime = OpenAIRuntime("secret")
+    events = [type("Event", (), {"type": "response.output_text.delta", "delta": "partial"})()]
+    monkeypatch.setattr(runtime, "_response_create", lambda **_kwargs: iter(events))
+
+    stream = runtime.chat_stream("gpt-test", [])
+    assert next(stream)["content"] == "partial"
+    with pytest.raises(RuntimeError, match="without a completed response"):
+        next(stream)
+
+
+def test_openai_stream_rejects_completion_without_response(monkeypatch):
+    runtime = OpenAIRuntime("secret")
+    event = type("Event", (), {"type": "response.completed", "response": None})()
+    monkeypatch.setattr(runtime, "_response_create", lambda **_kwargs: iter([event]))
+
+    with pytest.raises(RuntimeError, match="without a terminal response"):
+        list(runtime.chat_stream("gpt-test", []))
+
+
+def test_codex_stream_rejects_completion_without_response(monkeypatch):
+    runtime = CodexRuntime(auth=object())
+    event = type("Event", (), {"type": "response.completed", "response": None})()
+    monkeypatch.setattr(runtime, "_response_create", lambda **_kwargs: iter([event]))
+
+    with pytest.raises(RuntimeError, match="without a terminal response"):
+        list(runtime.chat_stream("gpt-test", []))
+
+
+@pytest.mark.parametrize(
+    ("call_id", "name", "arguments", "message"),
+    [
+        ("", "read_file", "{}", "malformed function call"),
+        ("call-1", "", "{}", "malformed function call"),
+        ("call-1", "read_file", "{", "malformed function arguments"),
+        ("call-1", "read_file", "[]", "non-object function arguments"),
+        ("call-1", "read_file", {}, "non-text function arguments"),
+    ],
+)
+def test_codex_runtime_rejects_malformed_native_tool_items(
+    call_id, name, arguments, message
+):
+    item = type(
+        "Call",
+        (),
+        {
+            "type": "function_call",
+            "call_id": call_id,
+            "name": name,
+            "arguments": arguments,
+        },
+    )()
+
+    with pytest.raises(RuntimeError, match=message):
+        CodexRuntime._tool_call_item(item)
+
+
 def test_codex_runtime_replays_only_opaque_reasoning_state():
     message = {
         "role": "assistant",
@@ -532,6 +608,100 @@ def test_codex_runtime_preserves_structured_tool_calls(monkeypatch):
         {"id": "call-1", "function": {"name": "read_file", "arguments": "{}"}}
     ]
     assert captured["stream"] is True
+
+
+def test_codex_runtime_recovers_terminal_items_when_done_events_are_missing(monkeypatch):
+    call = type(
+        "Call",
+        (),
+        {
+            "type": "function_call",
+            "call_id": "call-terminal",
+            "name": "read_file",
+            "arguments": '{"path":"README.md"}',
+            "content": [],
+        },
+    )()
+    reasoning = type(
+        "Reasoning",
+        (),
+        {
+            "id": "rs_terminal",
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "opaque-terminal-state",
+        },
+    )()
+    response = type(
+        "Response",
+        (),
+        {
+            "id": "resp_terminal",
+            "status": "completed",
+            "output": [reasoning, call],
+            "output_text": "terminal fallback",
+            "usage": None,
+        },
+    )()
+    runtime = CodexRuntime(auth=object())
+    monkeypatch.setattr(
+        runtime,
+        "_response_create",
+        lambda **_kwargs: iter(
+            [type("Event", (), {"type": "response.completed", "response": response})()]
+        ),
+    )
+
+    message = runtime.chat("gpt-test", [], tools=[])
+
+    assert message["content"] == "terminal fallback"
+    assert message["tool_calls"] == [
+        {
+            "id": "call-terminal",
+            "function": {
+                "name": "read_file",
+                "arguments": '{"path":"README.md"}',
+            },
+        }
+    ]
+    assert message["codex_reasoning_items"] == [
+        {
+            "id": "rs_terminal",
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "opaque-terminal-state",
+        }
+    ]
+    assert runtime.last_chat_metadata["response_id"] == "resp_terminal"
+
+
+def test_codex_runtime_deduplicates_streamed_and_terminal_items(monkeypatch):
+    call = type(
+        "Call",
+        (),
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "read_file",
+            "arguments": "{}",
+            "content": [],
+        },
+    )()
+    response = type(
+        "Response",
+        (),
+        {"output": [call], "output_text": "", "usage": None},
+    )()
+    events = [
+        type("Event", (), {"type": "response.output_item.done", "item": call})(),
+        type("Event", (), {"type": "response.completed", "response": response})(),
+    ]
+    runtime = CodexRuntime(auth=object())
+    monkeypatch.setattr(runtime, "_response_create", lambda **_kwargs: iter(events))
+
+    message = runtime.chat("gpt-test", [], tools=[])
+
+    assert len(message["tool_calls"]) == 1
 
 
 def test_local_model_sort_prefers_larger_parameter_tags():

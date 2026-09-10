@@ -1,4 +1,5 @@
 from .agent import Agent, AgentEvent, AgenticSearchState, Tool, WebResearchBudget
+from .capabilities import TurnCapabilities
 from .codex_auth import (
     CodexAuthError,
     CodexAuthManager,
@@ -20,6 +21,7 @@ from .entities import (
     structured_domains_for_text,
     structured_entity_profile,
 )
+from .execution import TurnBudgetSnapshot, TurnGovernor
 from .memory import Memory
 from .model_runtime import (
     CodexRuntime,
@@ -41,6 +43,7 @@ __all__ = [
     "WebResearchBudget",
     "Config",
     "load_config",
+    "TurnCapabilities",
     "CodexAuthError",
     "CodexAuthManager",
     "CodexAuthStatus",
@@ -57,6 +60,8 @@ __all__ = [
     "normalize_name",
     "structured_domains_for_text",
     "structured_entity_profile",
+    "TurnBudgetSnapshot",
+    "TurnGovernor",
     "Memory",
     "Ollama",
     "OllamaError",

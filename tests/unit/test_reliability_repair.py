@@ -173,6 +173,67 @@ def test_unavailable_tool_recovery_bounded():
     assert "Unavailable this request: run_shell" in runtime.requests[0][0][0]["content"]
 
 
+def test_repeated_tool_failure_retires_tool_and_finalizes_without_looping():
+    runtime = Runtime(
+        [
+            call("inspect", path="/tmp/missing"),
+            call("inspect", path="/tmp/missing"),
+            {"role": "assistant", "content": "The inspection could not be completed."},
+        ]
+    )
+    tool = Tool(
+        "inspect",
+        "inspect a path",
+        {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+        lambda **_: (_ for _ in ()).throw(RuntimeError("diagnostic unavailable")),
+    )
+
+    events = list(make_agent(runtime, [tool]).run("inspect the path"))
+
+    assert len(runtime.requests) == 3
+    assert any(
+        event.kind == "retry"
+        and "retired repeatedly unsuccessful tool inspect" in event.payload["reason"]
+        for event in events
+    )
+    assert events[-1].kind == "done"
+    assert "could not be completed" in events[-2].payload["content"]
+    assert runtime.requests[2][1] == []
+
+
+def test_cross_tool_no_progress_forces_tool_free_finalization():
+    runtime = Runtime(
+        [
+            call("one"),
+            call("two"),
+            call("three"),
+            {"role": "assistant", "content": "All available approaches were blocked."},
+        ]
+    )
+
+    def fail(name):
+        def run():
+            raise RuntimeError(f"{name} unavailable")
+
+        return run
+
+    tools = [
+        Tool(name, name, {"type": "object", "properties": {}}, fail(name))
+        for name in ("one", "two", "three")
+    ]
+
+    events = list(make_agent(runtime, tools).run("try the available diagnostics"))
+
+    assert len(runtime.requests) == 4
+    assert runtime.requests[3][1] == []
+    assert events[-1].kind == "done"
+    assert "blocked" in events[-2].payload["content"]
+
+
 def test_request_user_input_is_removed_after_one_answer():
     responses = [
         call("request_user_input", question="Which fruit?"),
@@ -242,7 +303,7 @@ def test_skipped_duplicate_is_not_ran():
     )
 
 
-def test_snapshot_recovers_abandoned_turn_without_writes(tmp_path):
+def test_snapshot_durably_recovers_abandoned_turn_once(tmp_path):
     memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
     memory.acquire_session_lease("s", "client", "t")
     memory.start_session_turn("s", "client", "t", "inspect storage")
@@ -250,13 +311,18 @@ def test_snapshot_recovers_abandoned_turn_without_writes(tmp_path):
         "s", "client", "assistant_delta", {"text": "Partial answer"}, turn_id="t"
     )
     memory.update_session_live("s", owner_lease_until=0)
-    before = memory.db.total_changes
     snapshot = memory.session_snapshot("s")
     assert snapshot["live"]["state"] == "interrupted"
     assert any(t["content"] == "Partial answer" for t in snapshot["turns"])
     assert "Interrupted:" in snapshot["turns"][-1]["content"]["message"]
-    assert memory.db.total_changes == before
-    assert memory.session_snapshot("s") == snapshot
+    assert snapshot["recovered_turn_ids"] == ["t"]
+    before_second_snapshot = memory.db.total_changes
+    second = memory.session_snapshot("s")
+    assert memory.db.total_changes == before_second_snapshot
+    assert second["turns"] == snapshot["turns"]
+    assert second["live"] == snapshot["live"]
+    assert second["event_cursor"] == snapshot["event_cursor"]
+    assert second["recovered_turn_ids"] == []
 
 
 def test_snapshot_does_not_interrupt_active_turn(tmp_path):
@@ -384,6 +450,119 @@ def test_live_permission_policy_is_explicit_in_turn_capabilities():
     assert "ALLOW=write_file" in prompt
     assert "DENY=edit_file" in prompt
     assert "current live settings for this turn" in prompt
+    assert {item["function"]["name"] for item in runtime.requests[0][1]} == {"write_file"}
+    assert agent.last_turn_capabilities["callable_tools"] == ["write_file"]
+    assert agent.last_turn_capabilities["unavailable_tools"]["edit_file"] == (
+        "permission policy deny"
+    )
+
+
+def test_done_event_contains_same_sanitized_capability_snapshot():
+    runtime = Runtime([{"role": "assistant", "content": "Done."}])
+    observed_capabilities = []
+    agent = Agent(
+        runtime,
+        "fake",
+        [Tool("inspect", "inspect", {}, lambda: "ok")],
+        PermissionGate({"inspect": "allow"}, lambda *_: "n"),
+        "system",
+    )
+    agent.capability_observer = observed_capabilities.append
+
+    events = list(agent.run("inspect this"))
+
+    snapshot = events[-1].payload["turn_capabilities"]
+    assert snapshot == agent.last_turn_capabilities
+    assert snapshot["callable_tools"] == ["inspect"]
+    assert "budget" in snapshot
+    assert observed_capabilities[0]["callable_tools"] == ["inspect"]
+    assert [event.kind for event in events] == ["text", "done"]
+
+
+def test_permission_setting_change_rebuilds_next_request_capabilities():
+    runtime = Runtime(
+        [
+            {"role": "assistant", "content": "Writing is currently unavailable."},
+            {"role": "assistant", "content": "Writing is now available."},
+        ]
+    )
+    gate = PermissionGate({"write_file": "deny"}, lambda *_: "n")
+    agent = Agent(
+        runtime,
+        "fake",
+        [Tool("write_file", "write", {}, lambda: "ok")],
+        gate,
+        "system",
+        tool_selector=lambda *_: ["write_file"],
+    )
+
+    list(agent.run("edit the file"))
+    gate.policies["write_file"] = "allow"
+    list(agent.run("continue editing"))
+
+    assert runtime.requests[0][1] == []
+    assert {item["function"]["name"] for item in runtime.requests[1][1]} == {
+        "write_file"
+    }
+    assert "DENY=write_file" in runtime.requests[0][0][0]["content"]
+    assert "ALLOW=write_file" in runtime.requests[1][0][0]["content"]
+    assert agent.last_turn_capabilities["effective_permissions"] == {
+        "write_file": "allow"
+    }
+
+
+def test_session_restore_clears_live_capability_snapshot():
+    runtime = Runtime([{"role": "assistant", "content": "Done."}])
+    agent = Agent(
+        runtime,
+        "fake",
+        [Tool("inspect", "inspect", {}, lambda: "ok")],
+        PermissionGate({"inspect": "allow"}, lambda *_: "n"),
+        "system",
+    )
+    list(agent.run("inspect this"))
+    assert agent.last_turn_capabilities
+
+    agent.restore_session([{"role": "user", "content": "new session"}])
+
+    assert agent.last_turn_capabilities == {}
+    assert agent.last_turn_budget == {}
+
+
+def test_text_or_native_call_cannot_bypass_denied_schema_filter():
+    executed = False
+
+    def forbidden_tool():
+        nonlocal executed
+        executed = True
+        return "should not run"
+
+    runtime = Runtime(
+        [
+            call("write_file"),
+            {"role": "assistant", "content": "Writing is denied."},
+        ]
+    )
+    agent = Agent(
+        runtime,
+        "fake",
+        [Tool("write_file", "write", {}, forbidden_tool)],
+        PermissionGate({"write_file": "deny"}, lambda *_: pytest.fail("must not prompt")),
+        "system",
+        tool_selector=lambda *_: ["write_file"],
+    )
+
+    events = list(agent.run("edit the file"))
+
+    assert executed is False
+    assert any(
+        event.kind == "retry" and "unavailable tool call" in event.payload["reason"]
+        for event in events
+    )
+    assert not any(event.kind in {"tool_start", "tool_result"} for event in events)
+    assert agent.last_turn_capabilities["unavailable_tools"]["write_file"] == (
+        "permission policy deny"
+    )
 
 
 def test_step_limit_gets_one_tool_free_final_synthesis():

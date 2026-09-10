@@ -891,6 +891,64 @@ def test_closing_stream_preserves_partial_assistant_in_agent_history():
     }
 
 
+def test_aborted_stream_drops_unpublished_partial_tool_markup_from_history():
+    class BrokenStreamingOllama:
+        last_chat_metadata = {}
+
+        def chat_stream(self, model, messages, options=None, think=None):
+            yield {"role": "assistant", "content": "Safe public prefix. "}
+            yield {"role": "assistant", "content": "<function=web_search>"}
+            yield {"role": "assistant", "content": "<parameter=query>unfinished"}
+            raise ConnectionError("stream disconnected")
+
+    agent = Agent(
+        BrokenStreamingOllama(),
+        "fake-model",
+        [],
+        PermissionGate({}, lambda _tool, _detail: "y"),
+        "system",
+    )
+
+    events = list(agent.run("hello"))
+
+    public = "".join(
+        str(event.payload.get("content", ""))
+        for event in events
+        if event.kind in {"text", "text_delta"}
+    )
+    assert public == "Safe public prefix. "
+    assert not any("<function" in str(event.payload) for event in events)
+    assert events[-1].kind == "error"
+    assert agent.messages[-1] == {
+        "role": "assistant",
+        "content": "Safe public prefix. ",
+        "interrupted": True,
+    }
+
+
+def test_aborted_stream_with_only_tool_markup_adds_no_assistant_history():
+    class BrokenMarkupStream:
+        last_chat_metadata = {}
+
+        def chat_stream(self, model, messages, options=None, think=None):
+            yield {"role": "assistant", "content": "<web_search query=\"unfinished\""}
+            raise ConnectionError("stream disconnected")
+
+    agent = Agent(
+        BrokenMarkupStream(),
+        "fake-model",
+        [],
+        PermissionGate({}, lambda _tool, _detail: "y"),
+        "system",
+    )
+
+    events = list(agent.run("hello"))
+
+    assert [message["role"] for message in agent.messages] == ["system", "user"]
+    assert not any(event.kind in {"text", "text_delta"} for event in events)
+    assert events[-1].kind == "error"
+
+
 def test_restore_session_uses_model_context_without_exposing_it_as_visible_content():
     agent = Agent(
         ScriptedOllama([]),
