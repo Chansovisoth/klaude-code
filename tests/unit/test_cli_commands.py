@@ -3596,7 +3596,16 @@ def test_footer_separates_runtime_model_spacer_and_keybind_rows():
     assert "qwen3.5:4b" in status_model
     assert tui.ui_state.effort in status_model
     assert "klaude v" in "".join(text for _style, text in tui._footer_brand_fragments())
-    assert "~/klaude-code" in "".join(text for _style, text in tui._footer_path_fragments())
+    workdir = Path(getattr(tui.agent, "workdir", Path.cwd())).resolve()
+    try:
+        relative = workdir.relative_to(Path.home())
+    except ValueError:
+        expected_path = str(workdir)
+    else:
+        expected_path = "~" if not relative.parts else f"~/{relative}"
+    assert f" {expected_path} ┃" == "".join(
+        text for _style, text in tui._footer_path_fragments()
+    )
     assert "Enter to send/queue" in "".join(text for _style, text in tui._keybind_fragments())
 
 

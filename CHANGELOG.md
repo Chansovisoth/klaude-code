@@ -18,7 +18,8 @@
   tool-item validation.
 - Add Python 3.11-3.13 CI, production mypy, Ruff, and a five-wheel isolated
   installation/CLI smoke gate. Track the workspace `uv.lock` so frozen CI and
-  clean-checkout builds use the exact dependency graph validated for release.
+  clean-checkout builds use the exact dependency graph validated for release;
+  keep path-rendering tests independent of a developer-specific home layout.
 - Fix picker scrolling by tracking the selected row in the renderer; add
   PageUp/PageDown navigation and Escape cancellation. Standardize reset and
   cancel rows across selection menus, preview theme changes, and support
