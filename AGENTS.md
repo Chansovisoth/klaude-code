@@ -51,6 +51,13 @@ superseded runs. `make check` mirrors the local unit, lint, and production-type
 validation surface; `make package-smoke` runs the separate distribution check.
 The root `uv.lock` is tracked release input; update it deliberately whenever
 workspace metadata or dependencies change, and keep CI installation frozen.
+`.github/workflows/release-candidate.yml` is a manual, non-publishing release
+gate. It builds all five wheels twice with one source timestamp, validates their
+metadata and archive structure, requires byte-identical output, writes
+`SHA256SUMS`, creates GitHub/Sigstore build-provenance attestations with the
+official `actions/attest` action, and uploads the verified candidate for 14 days.
+Keep release actions pinned to immutable commit SHAs. Publishing to PyPI remains
+a separate explicitly authorized operation.
 
 ## User-Facing Terms
 
@@ -1217,6 +1224,10 @@ Before committing or pushing, inspect:
 
 - `git status --short --branch`
 - `git branch -vv`
+
+Before a prerelease, run the manual Release candidate workflow for the exact
+commit and verify its checksums and provenance. `scripts/verify_release_artifacts.py`
+is the dependency-free artifact validator used by that workflow.
 
 The worktree may already be dirty with user or generated changes. Never revert
 changes you did not make unless the user explicitly requests it.

@@ -1,0 +1,52 @@
+name: Release candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-verify-attest:
+    name: Build, verify, and attest wheels
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.28"
+          enable-cache: true
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install locked development environment
+        run: uv sync --frozen --dev
+      - name: Set reproducible build timestamp
+        run: echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)" >> "$GITHUB_ENV"
+      - name: Build wheels twice
+        run: |
+          uv build --all-packages --wheel --out-dir dist --no-build-logs
+          uv build --all-packages --wheel --out-dir dist-compare --no-build-logs
+      - name: Verify contents, versions, and reproducibility
+        run: uv run --frozen python scripts/verify_release_artifacts.py dist --compare dist-compare
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: "dist/*"
+      - name: Upload verified candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: klaude-wheels-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14

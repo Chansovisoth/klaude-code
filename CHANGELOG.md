@@ -20,6 +20,11 @@
   installation/CLI smoke gate. Track the workspace `uv.lock` so frozen CI and
   clean-checkout builds use the exact dependency graph validated for release;
   keep path-rendering tests independent of a developer-specific home layout.
+- Add a manual, non-publishing release-candidate gate that builds all five
+  wheels twice with a fixed source timestamp, validates wheel metadata and
+  archive structure, requires byte-identical artifacts, emits SHA-256 sums,
+  creates Sigstore-backed GitHub provenance attestations, and retains the
+  verified candidate for review.
 - Fix picker scrolling by tracking the selected row in the renderer; add
   PageUp/PageDown navigation and Escape cancellation. Standardize reset and
   cancel rows across selection menus, preview theme changes, and support
