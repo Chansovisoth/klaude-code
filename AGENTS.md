@@ -1329,21 +1329,23 @@ Development state at handoff:
   cancellation, and offline transcript capability matrices.
 - The opt-in live behavioral harness records comparable sanitized metrics across
   configured local and cloud models without adding paid/network calls to CI.
-- Core exports the initial controlled-subagent contracts and sequential
-  supervisor. Child roles are host-defined and read-only, intersect the parent
+- Core exports the initial controlled-subagent contracts and bounded supervisor.
+  Child roles are host-defined and read-only, intersect the parent
   callable set with effective user permissions, cannot turn a denied policy into
   a process grant, have independent and aggregate budgets, return bounded
   structured results, and emit public lifecycle events without reasoning text.
-  Its isolated sequential child adapter receives only the bounded task handoff,
+  Its isolated child adapter receives only the bounded task handoff,
   not the parent transcript, runs under a dedicated non-interactive scope, and
   uses an independent built-in provider transport. Host cancellation reaches the
   primary and child transports. Completed usage—including failed child usage—is
   charged to the parent governor.
-  Narrow explicit-intent routing now exposes one permission-controlled delegation;
-  host cancellation and durable, resumable public child outcomes are connected.
+  Narrow explicit-intent routing now exposes one permission-controlled
+  delegation, with up to three independent tasks and conservative cloud
+  concurrency; host cancellation and durable, resumable public child outcomes
+  are connected. Runtime settings expose Auto or explicit 1-4 worker limits.
 - Full validation can hang in the optional LanceDB roundtrip under some
   restricted sandboxes. Report the focused and non-LanceDB results separately;
   never describe the knowledge suite as green unless it completed.
-- Continue controlled subagent orchestration with adaptive concurrency and live behavioral
-  evaluation before considering an implementation-worker role. Do not add
+- Continue controlled subagent orchestration with live behavioral evaluation
+  before considering an implementation-worker role. Do not add
   background/cloud workers or broad write concurrency as part of that work.
