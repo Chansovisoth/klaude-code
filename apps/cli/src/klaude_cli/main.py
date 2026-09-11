@@ -3316,6 +3316,8 @@ def _agent_configuration_context(
         f"- General request settings: {option_text}",
         f"- Code request overrides: {code_option_text}",
         f"- Turn execution limit: {getattr(agent, 'max_steps', 20)} model/tool steps; "
+        f"tool-call ceiling "
+        f"{getattr(agent, 'max_tool_calls', None) or max(4, getattr(agent, 'max_steps', 20) * 2)}; "
         "one additional tool-free finalization request is reserved",
         f"- Subagent concurrency: {_subagent_parallelism_label(agent)}; "
         "parallelism is limited to audited stateless read-only tools",
@@ -6355,6 +6357,7 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
         gate,
         _system_prompt(memory, runtime_text),
         max_steps=cfg.max_agent_steps,
+        max_tool_calls=(cfg.max_agent_tool_calls or None),
         max_code_continuations=cfg.max_code_continuations,
         max_code_repairs=cfg.max_code_repairs,
         tool_selector=_select_tool_names,

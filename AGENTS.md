@@ -194,6 +194,9 @@ Chat slash commands currently include:
   for later chats, and appears in the model-facing live configuration. Reset
   restores `[agent].max_steps` from `config.toml`; the ceiling remains an
   emergency safety boundary with one additional tool-free finalization request.
+  `[agent].max_tool_calls` independently caps tool invocations (0 derives two
+  calls per step, bounded to 256), and the effective ceiling appears in the
+  status budget and model-facing configuration.
   Runtime also exposes Subagent Workers: Auto uses one worker for Ollama and two
   for cloud providers, while explicit 1-4 choices support stronger hardware or
   stricter quota control. The choice applies immediately, persists in

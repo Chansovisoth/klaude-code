@@ -45,6 +45,7 @@
 # Maximum model/tool-loop iterations for one user turn. Keep this bounded on
 # slower hardware; raise it only for workflows that genuinely need more tools.
 # max_steps = 20                 # bounded model/tool iterations per turn (1-64)
+# max_tool_calls = 0             # 0 = derive as two calls per step (0-256)
 # Concurrent child workers: 0 = provider-aware auto (1 Ollama, 2 cloud).
 # Explicit 1-4 overrides auto; only audited stateless read-only tools overlap.
 # max_subagent_concurrency = 0

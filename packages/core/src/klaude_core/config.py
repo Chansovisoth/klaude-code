@@ -387,6 +387,8 @@ class Config:
     # permission policy per tool: ask | allow | deny
     permissions: dict[str, str] = field(default_factory=dict)
     max_agent_steps: int = 20
+    # 0 derives a conservative ceiling from max_steps (two calls per step).
+    max_agent_tool_calls: int = 0
     # 0 selects the provider-aware policy (one local worker, two cloud workers).
     max_subagent_concurrency: int = 0
     max_code_continuations: int = 2
@@ -1007,6 +1009,10 @@ def load_config() -> Config:
 
     agent = user.get("agent", {})
     cfg.max_agent_steps = max(1, min(64, int(agent.get("max_steps", cfg.max_agent_steps))))
+    cfg.max_agent_tool_calls = max(
+        0,
+        min(256, int(agent.get("max_tool_calls", cfg.max_agent_tool_calls))),
+    )
     cfg.max_subagent_concurrency = max(
         0,
         min(
