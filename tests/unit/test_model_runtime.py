@@ -3,6 +3,7 @@ from klaude_core.model_runtime import (
     CodexRuntime,
     GeminiRuntime,
     ModelInfo,
+    OllamaRuntime,
     OpenAIRuntime,
     discover_codex_models,
     grouped_local_models,
@@ -11,6 +12,7 @@ from klaude_core.model_runtime import (
     newest_model_first_key,
     save_model_cache,
 )
+from klaude_core.ollama import Ollama
 
 
 def test_model_info_has_stable_canonical_ref_and_derived_metadata():
@@ -58,6 +60,41 @@ def test_cloud_runtimes_reject_missing_credentials():
         OpenAIRuntime("")
     with pytest.raises(ValueError, match="Gemini API key"):
         GeminiRuntime("  ")
+
+
+def test_builtin_runtimes_fork_independent_child_transport_state():
+    auth = object()
+    runtimes = [
+        OpenAIRuntime("secret"),
+        CodexRuntime(auth=auth),
+        GeminiRuntime("secret"),
+    ]
+
+    children = [runtime.fork_for_child() for runtime in runtimes]
+
+    pairs = list(zip(runtimes, children, strict=True))
+    assert all(child is not parent for parent, child in pairs)
+    assert all(
+        child._active_response_lock is not parent._active_response_lock
+        for parent, child in pairs
+    )
+    assert children[0].api_key == "secret"
+    assert children[1].auth is auth
+    assert children[1]._session_id != runtimes[1]._session_id
+    assert children[2].api_key == "secret"
+
+
+def test_ollama_runtime_forks_and_closes_an_independent_client():
+    parent = OllamaRuntime(Ollama("http://ollama.test", timeout=12))
+    child = parent.fork_for_child()
+
+    assert child is not parent
+    assert child.ollama is not parent.ollama
+    assert child.ollama.base_url == parent.ollama.base_url
+    assert child.ollama.timeout == 12
+
+    child.close()
+    parent.close()
 
 
 @pytest.mark.parametrize(

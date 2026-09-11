@@ -35,6 +35,55 @@ class ScriptedOllama:
         return response() if callable(response) else deepcopy(response)
 
 
+def test_parallel_tool_response_stops_at_the_nonexpandable_call_budget():
+    executed = []
+    ollama = ScriptedOllama(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {"name": "inspect", "arguments": {"value": "first"}},
+                    },
+                    {
+                        "id": "call-2",
+                        "function": {"name": "inspect", "arguments": {"value": "second"}},
+                    },
+                ],
+            },
+            {"role": "assistant", "content": "Stopped after the allowed inspection."},
+        ]
+    )
+    agent = Agent(
+        ollama,
+        "fake-model",
+        [
+            Tool(
+                "inspect",
+                "Inspect one value.",
+                {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                },
+                lambda value: executed.append(value) or f"inspected {value}",
+            )
+        ],
+        PermissionGate({"inspect": "allow"}, lambda *_args: "n"),
+        "system",
+        max_tool_calls=1,
+    )
+
+    events = list(agent.run("Inspect both values"))
+
+    assert executed == ["first"]
+    assert len([event for event in events if event.kind == "tool_result"]) == 1
+    assert agent.last_turn_budget["tool_calls_used"] == 1
+    assert agent.last_turn_budget["stop_reason"] == "tool-call budget reached"
+
+
 def test_read_only_review_blocks_model_requested_writes_and_restores_tools():
     executed = []
     ollama = ScriptedOllama(

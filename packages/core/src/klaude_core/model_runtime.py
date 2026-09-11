@@ -274,6 +274,7 @@ class ModelRuntime(Protocol):
         think: bool | str | None = None,
     ): ...
     def cancel_active(self) -> bool: ...
+    def fork_for_child(self) -> ModelRuntime: ...
 
 
 class OllamaRuntime:
@@ -294,6 +295,13 @@ class OllamaRuntime:
 
     def cancel_active(self) -> bool:
         return self.ollama.cancel_active()
+
+    def fork_for_child(self) -> OllamaRuntime:
+        """Create an independent transport tracker for child model requests."""
+        return OllamaRuntime(Ollama(self.ollama.base_url, timeout=self.ollama.timeout))
+
+    def close(self) -> None:
+        self.ollama.close()
 
     def list_models(self) -> list[str]:
         return self.ollama.list_models()
@@ -359,6 +367,10 @@ class OpenAIRuntime(_CancelableResponseRuntime):
         except ImportError as exc:  # pragma: no cover - depends on optional extra
             raise RuntimeError("OpenAI API support requires `klaude-core[cloud]`.") from exc
         return OpenAI(api_key=self.api_key)
+
+    def fork_for_child(self) -> OpenAIRuntime:
+        """Keep credentials while isolating mutable stream and usage state."""
+        return OpenAIRuntime(self.api_key)
 
     def _response_create(self, **kwargs: Any):
         return self._client().responses.create(**kwargs)
@@ -609,6 +621,10 @@ class CodexRuntime(OpenAIRuntime):
             default_headers=headers,
             max_retries=0,
         )
+
+    def fork_for_child(self) -> CodexRuntime:
+        """Use a fresh Codex session/stream tracker with the same auth broker."""
+        return CodexRuntime(self.auth)
 
     def _response_create(self, **kwargs: Any):
         # The ChatGPT-authenticated Codex Responses backend rejects buffered
@@ -899,6 +915,10 @@ class GeminiRuntime(_CancelableResponseRuntime):
         except ImportError as exc:  # pragma: no cover - depends on optional extra
             raise RuntimeError("Gemini API support requires `klaude-core[cloud].") from exc
         return genai, types
+
+    def fork_for_child(self) -> GeminiRuntime:
+        """Keep the API credential while isolating mutable response state."""
+        return GeminiRuntime(self.api_key)
 
     def _request(
         self,

@@ -79,6 +79,15 @@ class Ollama:
                 pass
         return True
 
+    def close(self) -> None:
+        """Release idle and active HTTP transports owned by this client."""
+        self.cancel_active()
+        try:
+            self._client.close()
+        except Exception:
+            # Cleanup is best effort during child teardown and process exit.
+            pass
+
     def chat(
         self,
         model: str,

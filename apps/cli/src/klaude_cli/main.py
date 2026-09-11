@@ -12025,6 +12025,9 @@ class PersistentChatTUI:
     def _cancel_active_transport(self) -> bool:
         """Wake the active provider without allowing teardown errors into the TUI."""
         try:
+            cancel_all = getattr(self.agent, "cancel_active_transports", None)
+            if callable(cancel_all):
+                return bool(cancel_all())
             return bool(self.agent.ollama.cancel_active())
         except Exception:
             # Provider adapters promise best-effort cancellation, but retain a

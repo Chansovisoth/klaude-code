@@ -7,8 +7,12 @@
   envelopes, conservative permission inheritance, independent and aggregate
   budgets, bounded structured results, cancellation checks, and public
   lifecycle events. Add an isolated sequential child-agent adapter that receives
-  only bounded task context, runs under a dedicated non-interactive scope, and
-  charges successful or failed child usage to the parent governor. Explicit
+  only bounded task context, runs under a dedicated non-interactive scope and
+  independently forked provider transport, and charges successful or failed
+  child usage to the parent governor. Host cancellation fans out to the primary
+  and active child transports. Child tool calls now have independent and
+  aggregate caps, reserve the enclosing parent tool-result slot, and stop
+  provider-emitted parallel call batches at the first exhausted safe boundary. Explicit
   delegation and second-opinion requests now narrowly expose one permission-
   controlled `delegate_task`; completed public child summaries and sanitized
   lifecycle metadata persist for local and resumed clients.

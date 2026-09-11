@@ -13,6 +13,7 @@ import ast
 import json
 import os
 import re
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -3726,6 +3727,7 @@ class Agent:
         ollama_code_think: bool | str | None = None,
         code_context: str = "",
         model_info: ModelInfo | None = None,
+        max_tool_calls: int | None = None,
     ):
         self.runtime = ollama
         # Compatibility alias for integrations which still inspect `ollama`.
@@ -3739,6 +3741,7 @@ class Agent:
         self.disabled_tool_names: set[str] = set()
         self.gate = gate
         self.max_steps = max_steps
+        self.max_tool_calls = max_tool_calls
         self.max_code_continuations = max(0, min(3, max_code_continuations))
         self.max_code_repairs = max(0, min(3, max_code_repairs))
         self.tool_selector = tool_selector
@@ -3774,6 +3777,37 @@ class Agent:
         self.capability_observer: Callable[[dict[str, Any]], None] | None = None
         self.cancellation_check: Callable[[], bool] = lambda: False
         self.subagent_event_observer: Callable[[Any], None] | None = None
+        self._child_runtime_lock = threading.Lock()
+        self._active_child_runtimes: set[Any] = set()
+
+    def register_child_runtime(self, runtime: Any) -> None:
+        """Make an isolated child transport visible to host cancellation."""
+        with self._child_runtime_lock:
+            self._active_child_runtimes.add(runtime)
+
+    def unregister_child_runtime(self, runtime: Any) -> None:
+        with self._child_runtime_lock:
+            self._active_child_runtimes.discard(runtime)
+
+    def cancel_active_transports(self) -> bool:
+        """Best-effort cancellation for the primary and any active child calls."""
+        with self._child_runtime_lock:
+            runtimes = (self.runtime, *self._active_child_runtimes)
+        cancelled = False
+        seen: set[int] = set()
+        for runtime in runtimes:
+            if id(runtime) in seen:
+                continue
+            seen.add(id(runtime))
+            cancel = getattr(runtime, "cancel_active", None)
+            if not callable(cancel):
+                continue
+            try:
+                cancelled = bool(cancel()) or cancelled
+            except Exception:
+                # Transport teardown must never escape into a terminal handler.
+                pass
+        return cancelled
 
     def set_system_prompt(self, system_prompt: str) -> None:
         if self.messages and self.messages[0].get("role") == "system":
@@ -4121,7 +4155,7 @@ class Agent:
         failed_action_signatures: set[str] = set()
         failed_action_counts: dict[str, int] = {}
         retired_tools: set[str] = set()
-        governor = TurnGovernor(self.max_steps)
+        governor = TurnGovernor(self.max_steps, max_tool_calls=self.max_tool_calls)
         self.active_turn_governor = governor
         self.last_turn_budget = governor.snapshot().to_dict()
         gpu_fallback_retried = False
@@ -5364,6 +5398,11 @@ class Agent:
                 if retired_reason:
                     yield AgentEvent("retry", {"reason": retired_reason})
                 capability_snapshot()
+                if governor_reason:
+                    # A single provider response may contain parallel tool
+                    # calls. Stop at this safe result boundary instead of
+                    # executing calls beyond the non-expandable turn budget.
+                    break
 
         if research.web_actions_used:
             research.exhausted_reason = research.exhausted_reason or "max_agent_steps"

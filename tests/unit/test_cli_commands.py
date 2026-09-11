@@ -5762,6 +5762,12 @@ def test_parent_agent_executes_one_isolated_delegation_and_accounts_for_it():
             self.calls.append({"messages": messages, "tools": tools})
             return self.responses.pop(0)
 
+        def fork_for_child(self):
+            child = object.__new__(type(self))
+            child.responses = self.responses
+            child.calls = self.calls
+            return child
+
     runtime = NestedRuntime()
     agent_ref = {}
     tools = [

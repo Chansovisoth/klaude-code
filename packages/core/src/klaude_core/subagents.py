@@ -97,16 +97,22 @@ class SubagentBudget:
     max_children: int = 1
     max_steps_per_child: int = 6
     max_total_steps: int = 8
+    max_tool_calls_per_child: int = 8
+    max_total_tool_calls: int = 12
     max_result_characters: int = 8_000
 
     def bounded(self) -> SubagentBudget:
         children = max(1, min(8, int(self.max_children)))
         per_child = max(1, min(20, int(self.max_steps_per_child)))
         total = max(1, min(64, int(self.max_total_steps)))
+        calls_per_child = max(1, min(64, int(self.max_tool_calls_per_child)))
+        total_calls = max(1, min(128, int(self.max_total_tool_calls)))
         return SubagentBudget(
             max_children=children,
             max_steps_per_child=min(per_child, total),
             max_total_steps=total,
+            max_tool_calls_per_child=min(calls_per_child, total_calls),
+            max_total_tool_calls=total_calls,
             max_result_characters=max(512, min(32_000, int(self.max_result_characters))),
         )
 
@@ -119,6 +125,7 @@ class SubagentAssignment:
     callable_tools: tuple[str, ...]
     unavailable_tools: tuple[tuple[str, str], ...]
     max_steps: int
+    max_tool_calls: int
 
 
 @dataclass(frozen=True)
@@ -199,7 +206,7 @@ class SubagentExecutionError(RuntimeError):
 
 
 def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> SubagentWorkerOutput:
-    """Run one isolated child conversation on the parent's idle provider runtime.
+    """Run one isolated child conversation on an independent provider runtime.
 
     The adapter deliberately receives no parent transcript. The bounded task
     objective and context are the only conversational handoff. Tool closures
@@ -208,6 +215,13 @@ def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> Subagen
     """
     from .agent import Agent
     from .permissions import PermissionGate
+
+    runtime_factory = getattr(parent.runtime, "fork_for_child", None)
+    if not callable(runtime_factory):
+        raise RuntimeError("the active provider cannot create an isolated child runtime")
+    child_runtime = runtime_factory()
+    if child_runtime is parent.runtime:
+        raise RuntimeError("the active provider returned a shared child runtime")
 
     child_tools = [
         parent.tools[name]
@@ -228,6 +242,7 @@ def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> Subagen
         + "permission, or ask the user questions. Return concise findings with concrete public "
         + "evidence such as file paths, symbols, or source URLs. Do not expose private reasoning.\n"
         + f"Maximum model steps: {assignment.max_steps}.\n"
+        + f"Maximum tool calls: {assignment.max_tool_calls}.\n"
         + "</subagent_contract>"
     )
     parent_selector = parent.tool_selector
@@ -236,21 +251,31 @@ def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> Subagen
         if parent_selector is None
         else lambda _message, tools: parent_selector(assignment.task.objective, tools)
     )
-    child = Agent(
-        parent.runtime,
-        parent.model,
-        child_tools,
-        child_gate,
-        child_prompt,
-        max_steps=assignment.max_steps,
-        max_code_continuations=0,
-        max_code_repairs=0,
-        tool_selector=child_selector,
-        ollama_options=parent.ollama_options,
-        ollama_think=parent.ollama_think,
-        web_research_budget=parent.web_research_budget,
-        model_info=parent.model_info,
-    )
+    try:
+        child = Agent(
+            child_runtime,
+            parent.model,
+            child_tools,
+            child_gate,
+            child_prompt,
+            max_steps=assignment.max_steps,
+            max_tool_calls=assignment.max_tool_calls,
+            max_code_continuations=0,
+            max_code_repairs=0,
+            tool_selector=child_selector,
+            ollama_options=parent.ollama_options,
+            ollama_think=parent.ollama_think,
+            web_research_budget=parent.web_research_budget,
+            model_info=parent.model_info,
+        )
+    except Exception:
+        close = getattr(child_runtime, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+        raise
     child.workspace = getattr(parent, "workspace", None)
     child.workdir = getattr(parent, "workdir", None)
     child.tool_config = getattr(parent, "tool_config", None)
@@ -260,6 +285,7 @@ def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> Subagen
     child.injected_instructions_truncated = bool(
         getattr(parent, "injected_instructions_truncated", False)
     )
+    parent.register_child_runtime(child_runtime)
 
     user_message = (
         "<subagent_task>\n"
@@ -278,39 +304,49 @@ def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> Subagen
     tool_calls = 0
     completed = False
     errors: list[str] = []
-    for event in child.run(user_message, scope=TurnScope.SUBAGENT):
-        if event.kind == "text":
-            text_events.append(str(event.payload.get("content", "")))
-        elif event.kind == "text_delta":
-            text_deltas.append(str(event.payload.get("content", "")))
-        elif event.kind == "tool_start":
-            tools_used.append(str(event.payload.get("tool", "")))
-        elif event.kind == "tool_result":
-            tool_calls += 1
-        elif event.kind == "error":
-            errors.append(str(event.payload.get("message", "")))
-        elif event.kind == "done":
-            completed = True
-    if not completed or errors:
-        raise SubagentExecutionError(
+    try:
+        for event in child.run(user_message, scope=TurnScope.SUBAGENT):
+            if event.kind == "text":
+                text_events.append(str(event.payload.get("content", "")))
+            elif event.kind == "text_delta":
+                text_deltas.append(str(event.payload.get("content", "")))
+            elif event.kind == "tool_start":
+                tools_used.append(str(event.payload.get("tool", "")))
+            elif event.kind == "tool_result":
+                tool_calls += 1
+            elif event.kind == "error":
+                errors.append(str(event.payload.get("message", "")))
+            elif event.kind == "done":
+                completed = True
+        if not completed or errors:
+            raise SubagentExecutionError(
+                model_steps=int(child.last_turn_budget.get("model_steps_used", 0)),
+                tool_calls=tool_calls,
+            )
+        summary = "\n\n".join(text_events).strip() or "".join(text_deltas).strip()
+        return SubagentWorkerOutput(
+            summary=summary,
             model_steps=int(child.last_turn_budget.get("model_steps_used", 0)),
             tool_calls=tool_calls,
+            tools_used=tuple(dict.fromkeys(tools_used)),
         )
-    summary = "\n\n".join(text_events).strip() or "".join(text_deltas).strip()
-    return SubagentWorkerOutput(
-        summary=summary,
-        model_steps=int(child.last_turn_budget.get("model_steps_used", 0)),
-        tool_calls=tool_calls,
-        tools_used=tuple(dict.fromkeys(tools_used)),
-    )
+    finally:
+        parent.unregister_child_runtime(child_runtime)
+        close = getattr(child_runtime, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                # Cleanup cannot replace an already-determined child outcome.
+                pass
 
 
 class SubagentSupervisor:
     """Prepare and run bounded read-only child tasks sequentially.
 
-    Sequential execution is intentional initially: sharing a provider stream
-    concurrently would make cancellation and accounting ambiguous. A future
-    runtime factory may safely enable adaptive concurrency.
+    Sequential execution remains intentional until aggregate budgets and event
+    ordering are concurrency-safe. Each child already owns an independent
+    provider stream and cancellation tracker.
     """
 
     def __init__(
@@ -332,7 +368,13 @@ class SubagentSupervisor:
         self.cancelled = cancelled or (lambda: False)
         self.event_sink = event_sink
 
-    def prepare(self, task: SubagentTask, *, steps_left: int | None = None) -> SubagentAssignment:
+    def prepare(
+        self,
+        task: SubagentTask,
+        *,
+        steps_left: int | None = None,
+        tool_calls_left: int | None = None,
+    ) -> SubagentAssignment:
         role_tools = _ROLE_TOOLS[task.role]
         requested = frozenset(task.requested_tools) if task.requested_tools else role_tools
         candidates = role_tools & requested & self.parent_callable_tools
@@ -360,11 +402,17 @@ class SubagentSupervisor:
                     else "requires an interactive permission decision"
                 )
         remaining = self.budget.max_total_steps if steps_left is None else max(0, steps_left)
+        remaining_calls = (
+            self.budget.max_total_tool_calls
+            if tool_calls_left is None
+            else max(0, tool_calls_left)
+        )
         return SubagentAssignment(
             task=task,
             callable_tools=callable_tools,
             unavailable_tools=tuple(unavailable.items()),
             max_steps=min(self.budget.max_steps_per_child, remaining),
+            max_tool_calls=min(self.budget.max_tool_calls_per_child, remaining_calls),
         )
 
     def run(self, tasks: Iterable[SubagentTask]) -> list[SubagentResult]:
@@ -379,9 +427,14 @@ class SubagentSupervisor:
 
         results: list[SubagentResult] = []
         steps_used = 0
+        tool_calls_used = 0
         for task in queued:
             was_cancelled = self.cancelled()
-            if was_cancelled or steps_used >= self.budget.max_total_steps:
+            budget_exhausted = (
+                steps_used >= self.budget.max_total_steps
+                or tool_calls_used >= self.budget.max_total_tool_calls
+            )
+            if was_cancelled or budget_exhausted:
                 result = self._terminal_result(
                     task,
                     SubagentStatus.CANCELLED if was_cancelled else SubagentStatus.FAILED,
@@ -390,7 +443,11 @@ class SubagentSupervisor:
                 results.append(result)
                 self._emit(self._finished_event(result))
                 continue
-            assignment = self.prepare(task, steps_left=self.budget.max_total_steps - steps_used)
+            assignment = self.prepare(
+                task,
+                steps_left=self.budget.max_total_steps - steps_used,
+                tool_calls_left=self.budget.max_total_tool_calls - tool_calls_used,
+            )
             self._emit(SubagentEvent("subagent_started", task.task_id, task.role))
             try:
                 output = self.worker(assignment)
@@ -398,7 +455,11 @@ class SubagentSupervisor:
                 tool_calls = max(0, int(output.tool_calls))
                 tools_used = tuple(dict.fromkeys(output.tools_used))
                 invalid_tools = set(tools_used) - set(assignment.callable_tools)
-                if model_steps > assignment.max_steps or invalid_tools:
+                if (
+                    model_steps > assignment.max_steps
+                    or tool_calls > assignment.max_tool_calls
+                    or invalid_tools
+                ):
                     result = self._terminal_result(
                         task,
                         SubagentStatus.FAILED,
@@ -407,7 +468,9 @@ class SubagentSupervisor:
                         tool_calls=tool_calls,
                         tools_used=tools_used,
                         error_category=(
-                            "budget_violation" if model_steps > assignment.max_steps
+                            "budget_violation"
+                            if model_steps > assignment.max_steps
+                            or tool_calls > assignment.max_tool_calls
                             else "capability_violation"
                         ),
                     )
@@ -432,10 +495,12 @@ class SubagentSupervisor:
                         tool_calls=tool_calls,
                     )
                 steps_used += min(model_steps, assignment.max_steps)
+                tool_calls_used += min(tool_calls, assignment.max_tool_calls)
             except Exception as exc:
                 model_steps = max(0, int(getattr(exc, "model_steps", 0)))
                 tool_calls = max(0, int(getattr(exc, "tool_calls", 0)))
                 steps_used += min(model_steps, assignment.max_steps)
+                tool_calls_used += min(tool_calls, assignment.max_tool_calls)
                 was_cancelled = self.cancelled()
                 result = self._terminal_result(
                     task,
@@ -516,7 +581,14 @@ def supervise_agent_tasks(
     governor = getattr(parent, "active_turn_governor", None)
     if governor is not None:
         parent_steps_left = max(0, governor.max_model_steps - governor.model_steps_used)
-        if parent_steps_left == 0:
+        parent_tool_calls_left = max(
+            0,
+            governor.max_tool_calls - governor.tool_calls_used,
+        )
+        # The parent loop charges the delegate_task invocation after this
+        # helper returns. Preserve one slot for that enclosing tool result.
+        child_tool_calls_left = max(0, parent_tool_calls_left - 1)
+        if parent_steps_left == 0 or child_tool_calls_left == 0:
             results = [
                 SubagentResult(
                     task_id=task.task_id,
@@ -546,6 +618,14 @@ def supervise_agent_tasks(
                 parent_steps_left,
             ),
             max_total_steps=min(configured_budget.max_total_steps, parent_steps_left),
+            max_tool_calls_per_child=min(
+                configured_budget.max_tool_calls_per_child,
+                child_tool_calls_left,
+            ),
+            max_total_tool_calls=min(
+                configured_budget.max_total_tool_calls,
+                child_tool_calls_left,
+            ),
         )
     snapshot = getattr(parent, "last_turn_capabilities", {})
     snapshot = snapshot if isinstance(snapshot, dict) else {}

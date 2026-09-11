@@ -843,11 +843,18 @@ with effective user policies: allow and active process grants may pass through,
 deny always wins, and unresolved ask policies are omitted rather than prompting
 inside a child. Children cannot write, run shell, mutate Git, ask the user, remember,
 learn, crawl, or delegate. Their successful and failed usage is charged to the
-parent governor. Ctrl+C and steering use the same host cancellation flag and
-provider transport close. Sanitized start/finish events and a bounded public final
+parent governor. Model steps and tool calls have both per-child and aggregate
+caps; delegation preserves a parent tool-result slot, and a provider response
+containing multiple calls stops at the first exhausted tool boundary. Ctrl+C
+and steering use the same host cancellation flag and
+fan out transport cancellation to the primary and active child runtimes. Each
+built-in provider forks independent mutable stream, usage, and session state for
+the child while retaining only the provider configuration or authentication
+broker needed to connect. Custom providers that cannot fork fail closed instead
+of silently sharing a transport. Sanitized start/finish events and a bounded public final
 summary are persisted and mirrored to `/resume`; private reasoning and raw tool
 output are never stored as subagent activity. Execution remains sequential until
-independent provider-runtime isolation makes concurrency safe.
+aggregate budgets and lifecycle ordering are concurrency-safe.
 
 Tool preflight checks paths and write locks before asking permission, and execution
 rechecks mutable conditions. Read-only pipelines are classified component by
@@ -1296,13 +1303,15 @@ Development state at handoff:
   structured results, and emit public lifecycle events without reasoning text.
   Its isolated sequential child adapter receives only the bounded task handoff,
   not the parent transcript, runs under a dedicated non-interactive scope, and
-  charges completed usage—including failed child usage—to the parent governor.
+  uses an independent built-in provider transport. Host cancellation reaches the
+  primary and child transports. Completed usage—including failed child usage—is
+  charged to the parent governor.
   Narrow explicit-intent routing now exposes one permission-controlled delegation;
   host cancellation and durable, resumable public child outcomes are connected.
 - Full validation can hang in the optional LanceDB roundtrip under some
   restricted sandboxes. Report the focused and non-LanceDB results separately;
   never describe the knowledge suite as green unless it completed.
-- Continue controlled subagent orchestration with provider-runtime isolation,
-  adaptive concurrency, stronger aggregate token/tool budgets, and live behavioral
+- Continue controlled subagent orchestration with exact aggregate token budgets,
+  concurrency-safe lifecycle ordering, adaptive concurrency, and live behavioral
   evaluation before considering an implementation-worker role. Do not add
   background/cloud workers or broad write concurrency as part of that work.

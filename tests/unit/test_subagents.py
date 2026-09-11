@@ -90,6 +90,7 @@ def test_supervisor_returns_bounded_structured_result_and_public_events():
 
     def worker(assignment):
         assert assignment.max_steps == 4
+        assert assignment.max_tool_calls == 8
         assert assignment.callable_tools == ("read_file",)
         return SubagentWorkerOutput(
             summary="evidence" * 200,
@@ -169,6 +170,7 @@ def test_supervisor_stops_children_at_shared_budget_and_honors_cancellation():
     ("output", "category"),
     [
         (SubagentWorkerOutput("", model_steps=7), "budget_violation"),
+        (SubagentWorkerOutput("", model_steps=1, tool_calls=9), "budget_violation"),
         (
             SubagentWorkerOutput("", model_steps=1, tools_used=("write_file",)),
             "capability_violation",
@@ -218,6 +220,35 @@ def test_failed_child_usage_is_still_accounted():
     assert result.status is SubagentStatus.FAILED
     assert result.model_steps == 2
     assert result.tool_calls == 3
+
+
+def test_supervisor_enforces_aggregate_child_tool_call_budget():
+    calls = []
+
+    def worker(assignment):
+        calls.append((assignment.task.task_id, assignment.max_tool_calls))
+        return SubagentWorkerOutput("done", model_steps=1, tool_calls=2)
+
+    results = SubagentSupervisor(
+        parent_callable_tools=(),
+        effective_permissions={},
+        worker=worker,
+        budget=SubagentBudget(
+            max_children=2,
+            max_total_steps=4,
+            max_tool_calls_per_child=2,
+            max_total_tool_calls=2,
+        ),
+    ).run(
+        [
+            SubagentTask("first", task_id="one"),
+            SubagentTask("second", task_id="two"),
+        ]
+    )
+
+    assert calls == [("one", 2)]
+    assert results[0].status is SubagentStatus.COMPLETED
+    assert results[1].error_category == "budget_exhausted"
 
 
 def test_worker_failure_after_host_cancellation_is_reported_as_cancelled():
@@ -285,10 +316,23 @@ class _ChildRuntime:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
+        self.children = []
 
     def chat(self, model, messages, tools=None, options=None, think=None):
         self.calls.append({"model": model, "messages": messages, "tools": tools})
         return self.responses.pop(0)
+
+    def fork_for_child(self):
+        child = object.__new__(type(self))
+        child.responses = self.responses
+        child.calls = self.calls
+        child.children = self.children
+        child.closed = False
+        self.children.append(child)
+        return child
+
+    def close(self):
+        self.closed = True
 
 
 def test_agent_adapter_uses_isolated_context_and_subagent_scope():
@@ -319,6 +363,52 @@ def test_agent_adapter_uses_isolated_context_and_subagent_scope():
     assert "Bounded context:\nFocus on selection." in rendered
     assert "private prior conversation" not in rendered
     assert request["tools"] == []
+    assert len(runtime.children) == 1
+    assert runtime.children[0] is not runtime
+    assert runtime.children[0].closed is True
+
+
+def test_agent_adapter_fails_closed_without_an_isolated_runtime_factory():
+    runtime = object()
+    parent = Agent(
+        runtime,
+        "test-model",
+        [],
+        PermissionGate({}, lambda *_args: "n"),
+        "system",
+    )
+    assignment = SubagentSupervisor(
+        parent_callable_tools=(),
+        effective_permissions={},
+        worker=lambda _assignment: SubagentWorkerOutput("", 0),
+    ).prepare(SubagentTask("inspect"))
+
+    with pytest.raises(RuntimeError, match="cannot create an isolated child runtime"):
+        run_agent_assignment(parent, assignment)
+
+
+def test_agent_cancellation_reaches_primary_and_isolated_child_transports():
+    class Runtime:
+        def __init__(self):
+            self.cancelled = 0
+
+        def cancel_active(self):
+            self.cancelled += 1
+            return True
+
+    primary = Runtime()
+    child = Runtime()
+    agent = Agent(primary, "test-model", [], PermissionGate({}, lambda *_args: "n"), "system")
+    agent.register_child_runtime(child)
+
+    assert agent.cancel_active_transports() is True
+    assert primary.cancelled == 1
+    assert child.cancelled == 1
+
+    agent.unregister_child_runtime(child)
+    agent.cancel_active_transports()
+    assert primary.cancelled == 2
+    assert child.cancelled == 1
 
 
 def test_agent_supervision_charges_successful_child_usage_to_parent(monkeypatch):
@@ -386,3 +476,21 @@ def test_parent_budget_rejection_emits_a_terminal_child_event():
             "status": "failed",
         }
     ]
+
+
+def test_parent_tool_budget_preserves_slot_for_delegate_result():
+    parent = Agent(
+        _ChildRuntime([]),
+        "test-model",
+        [],
+        PermissionGate({}, lambda *_args: "n"),
+        "system",
+        max_steps=5,
+        max_tool_calls=1,
+    )
+    parent.active_turn_governor = TurnGovernor(5, max_tool_calls=1)
+
+    result = supervise_agent_tasks(parent, [SubagentTask("inspect")])[0]
+
+    assert result.status is SubagentStatus.FAILED
+    assert result.error_category == "parent_budget_exhausted"
