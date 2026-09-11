@@ -349,7 +349,7 @@ def test_line_renderer_uses_durable_turn_lifecycle(tmp_path, monkeypatch):
     class LineAgent:
         model = "fake"
 
-        def run(self, _message):
+        def run(self, _message, *, scope=None):
             yield AgentEvent("text", {"content": "Completed answer."})
             yield AgentEvent("done", {})
 
@@ -372,7 +372,7 @@ def test_line_renderer_marks_silent_turn_failed(tmp_path, monkeypatch):
     class SilentAgent:
         model = "fake"
 
-        def run(self, _message):
+        def run(self, _message, *, scope=None):
             if False:
                 yield
 

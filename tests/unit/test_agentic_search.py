@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 import pytest
-from klaude_core import Agent, PermissionGate, Tool, WebResearchBudget
+from klaude_core import Agent, PermissionGate, Tool, TurnScope, WebResearchBudget
 from klaude_core.agent import ConversationEntity
 
 
@@ -84,6 +84,121 @@ def test_plan_mode_blocks_writes_but_keeps_read_and_retrieval_tools():
     list(agent.run("make a plan"))
     names = {item["function"]["name"] for item in ollama.calls[0]["tools"]}
     assert names == {"read_file", "web_search"}
+
+
+def test_init_scope_blocks_non_root_agents_write_before_permission(tmp_path):
+    executed = []
+    approvals = []
+    ollama = ScriptedOllama(
+        [
+            tool_call("write_file", path="src/AGENTS.md", content="bad"),
+            {"role": "assistant", "content": "The scoped write was blocked."},
+        ]
+    )
+    agent = Agent(
+        ollama,
+        "fake-model",
+        [
+            Tool(
+                "write_file",
+                "write",
+                {"type": "object"},
+                lambda **kwargs: executed.append(kwargs) or "written",
+            )
+        ],
+        PermissionGate({"write_file": "ask"}, lambda *args: approvals.append(args) or "y"),
+        "system",
+    )
+    agent.workdir = tmp_path
+
+    events = list(agent.run("Initialize guidance", scope=TurnScope.INIT))
+
+    assert executed == []
+    assert approvals == []
+    result = next(event.payload for event in events if event.kind == "tool_result")
+    assert "init scope permits writes only" in result["result"]
+    assert result["metadata"]["executed"] is False
+    assert agent.last_turn_capabilities["scope"] == "init"
+
+
+def test_init_scope_allows_exact_workspace_root_agents_file(tmp_path):
+    executed = []
+    ollama = ScriptedOllama(
+        [
+            tool_call("write_file", path="./AGENTS.md", content="guidance"),
+            {"role": "assistant", "content": "Initialized guidance."},
+        ]
+    )
+    agent = Agent(
+        ollama,
+        "fake-model",
+        [
+            Tool(
+                "write_file",
+                "write",
+                {"type": "object"},
+                lambda **kwargs: executed.append(kwargs) or "written",
+            )
+        ],
+        PermissionGate({"write_file": "allow"}, lambda *_: "n"),
+        "system",
+    )
+    agent.workdir = tmp_path
+
+    list(agent.run("Initialize guidance", scope="init"))
+
+    assert executed == [{"path": "./AGENTS.md", "content": "guidance"}]
+    assert agent.last_turn_capabilities["scope"] == "init"
+
+
+def test_plan_mode_overrides_init_scope_and_removes_write_schema(tmp_path):
+    ollama = ScriptedOllama([{"role": "assistant", "content": "Plan only."}])
+    tools = [
+        Tool(name, name, {"type": "object"}, lambda **_kwargs: "ok")
+        for name in ("read_file", "write_file")
+    ]
+    agent = Agent(
+        ollama,
+        "fake-model",
+        tools,
+        PermissionGate({name.name: "allow" for name in tools}, lambda *_: "n"),
+        "system",
+    )
+    agent.workdir = tmp_path
+    agent.plan_mode = True
+
+    list(agent.run("Initialize guidance", scope=TurnScope.INIT))
+
+    schemas = {item["function"]["name"] for item in ollama.calls[0]["tools"]}
+    assert schemas == {"read_file"}
+    assert agent.last_turn_capabilities["scope"] == "plan"
+    assert agent.last_turn_capabilities["unavailable_tools"]["write_file"] == "plan scope"
+
+
+def test_evaluation_scope_omits_mutation_and_interactive_input_tools():
+    ollama = ScriptedOllama([{"role": "assistant", "content": "Evaluated."}])
+    tools = [
+        Tool(name, name, {"type": "object"}, lambda **_kwargs: "ok")
+        for name in ("read_file", "web_search", "request_user_input", "write_file")
+    ]
+    agent = Agent(
+        ollama,
+        "fake-model",
+        tools,
+        PermissionGate({name.name: "allow" for name in tools}, lambda *_: "n"),
+        "system",
+        tool_selector=lambda _message, available: list(available),
+    )
+
+    list(agent.run("Evaluate behavior", scope=TurnScope.EVALUATION))
+
+    schemas = {item["function"]["name"] for item in ollama.calls[0]["tools"]}
+    assert schemas == {"read_file", "web_search"}
+    assert agent.last_turn_capabilities["scope"] == "evaluation"
+    assert agent.last_turn_capabilities["unavailable_tools"] == {
+        "request_user_input": "evaluation scope",
+        "write_file": "evaluation scope",
+    }
 
 
 def test_user_input_tool_is_omitted_for_a_direct_greeting():

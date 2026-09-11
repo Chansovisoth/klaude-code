@@ -1,7 +1,7 @@
 from dataclasses import FrozenInstanceError
 
 import pytest
-from klaude_core.capabilities import TurnCapabilities
+from klaude_core.capabilities import TurnCapabilities, TurnScope
 from klaude_core.execution import TurnBudgetSnapshot
 
 
@@ -44,6 +44,7 @@ def test_capability_snapshot_is_sorted_immutable_and_serializable():
     }
     assert snapshot.hard_constraints == ("Use only supplied schemas.",)
     assert snapshot.to_dict()["provider"]["context_window"] == 8_192
+    assert snapshot.to_dict()["scope"] == "standard"
     assert snapshot.injected_instructions == ("/repo/AGENTS.md",)
     with pytest.raises(FrozenInstanceError):
         snapshot.plan_mode = True  # type: ignore[misc]
@@ -77,3 +78,29 @@ def test_capability_prompt_distinguishes_registry_callable_and_denied_tools():
     assert "ASK=read_file" in rendered
     assert "DENY=write_file" in rendered
     assert "2/20 model steps and 3/40 tool calls used" in rendered
+
+
+def test_capability_prompt_and_payload_include_typed_turn_scope():
+    snapshot = TurnCapabilities.create(
+        globally_enabled_tools={"read_file"},
+        callable_tools={"read_file"},
+        unavailable_tools={},
+        effective_permissions={"read_file": "allow"},
+        hard_constraints=["Review only."],
+        provider_backend="ollama",
+        provider_model="qwen",
+        provider_supports_tools=True,
+        provider_context_window=8_192,
+        provider_effort_levels=("low",),
+        injected_instructions=(),
+        instructions_truncated=False,
+        plan_mode=False,
+        workspace_write_enabled=True,
+        budget=budget(),
+        scope=TurnScope.REVIEW,
+    )
+
+    assert snapshot.scope is TurnScope.REVIEW
+    assert snapshot.to_dict()["scope"] == "review"
+    assert "Turn scope: review." in snapshot.render_for_model()
+    assert "Turn scope: review." in snapshot.render_compact_for_model()

@@ -11,17 +11,19 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from uuid import uuid4
 
-from .capabilities import TurnCapabilities
+from .capabilities import TurnCapabilities, TurnScope
 from .entities import structured_domains_for_text
 from .execution import TurnGovernor
 from .model_runtime import ModelInfo, ModelRuntime
@@ -3661,6 +3663,40 @@ def _promises_unprovided_code(content: str) -> bool:
     return bool(PROMISE_TO_CODE_RE.search(content[-700:]))
 
 
+_REVIEW_SCOPE_TOOLS = {
+    "read_file",
+    "list_dir",
+    "grep",
+    "workspace_info",
+    "git_status",
+    "git_diff",
+}
+_PLAN_SCOPE_TOOLS = _REVIEW_SCOPE_TOOLS | {
+    "web_search",
+    "fetch_url",
+    "http_probe",
+    "code_search",
+    "query_knowledge",
+    "huggingface_search",
+    "huggingface_details",
+    "huggingface_readme",
+    "search_sessions",
+    "list_recent_sessions",
+    "list_commands",
+    "request_user_input",
+    "storage_usage",
+}
+_EVALUATION_SCOPE_TOOLS = _PLAN_SCOPE_TOOLS - {"request_user_input"}
+_INIT_SCOPE_TOOLS = {
+    "read_file",
+    "list_dir",
+    "grep",
+    "workspace_info",
+    "write_file",
+    "edit_file",
+}
+
+
 class Agent:
     def __init__(
         self,
@@ -3712,6 +3748,7 @@ class Agent:
         self.injected_instruction_paths: tuple[str, ...] = ()
         self.injected_instructions_truncated = False
         self.plan_mode = False
+        self.active_turn_scope = TurnScope.STANDARD
         # Host integrations may attach workspace-aware services. Defining the
         # extension seam here keeps those capabilities explicit and typed.
         self.workspace: Any = None
@@ -3734,6 +3771,7 @@ class Agent:
     def restore_session(self, turns: list[dict[str, Any]]) -> None:
         """Restore saved dialogue while keeping this runtime's system prompt."""
         self.messages = [m for m in self.messages if m.get("role") == "system"][:1]
+        self.active_turn_scope = TurnScope.STANDARD
         self.retrieval_state = RetrievalConversationState()
         self.last_web_research_state = None
         self.last_turn_budget = {}
@@ -3858,45 +3896,51 @@ class Agent:
             *(message for unit in retained_units for message in unit),
         ]
 
-    def run(self, user_message: str, *, read_only: bool = False):
+    def run(
+        self,
+        user_message: str,
+        *,
+        read_only: bool = False,
+        scope: TurnScope | str | None = None,
+    ):
         original_tools = self.tools
         original_prompt = self.messages[0]["content"]
-        if read_only or self.plan_mode:
-            allowed = {"read_file", "list_dir", "grep", "workspace_info", "git_status", "git_diff"}
-            if self.plan_mode and not read_only:
-                allowed.update(
-                    {
-                        "web_search",
-                        "fetch_url",
-                        "http_probe",
-                        "code_search",
-                        "query_knowledge",
-                        "huggingface_search",
-                        "huggingface_details",
-                        "huggingface_readme",
-                        "search_sessions",
-                        "list_recent_sessions",
-                        "list_commands",
-                        "request_user_input",
-                        "storage_usage",
-                    }
-                )
+        requested_scope = TurnScope(scope) if scope is not None else (
+            TurnScope.REVIEW if read_only else TurnScope.STANDARD
+        )
+        effective_scope = (
+            TurnScope.PLAN
+            if self.plan_mode and requested_scope in {TurnScope.STANDARD, TurnScope.INIT}
+            else requested_scope
+        )
+        allowed_by_scope = {
+            TurnScope.PLAN: _PLAN_SCOPE_TOOLS,
+            TurnScope.REVIEW: _REVIEW_SCOPE_TOOLS,
+            TurnScope.INIT: _INIT_SCOPE_TOOLS,
+            TurnScope.EVALUATION: _EVALUATION_SCOPE_TOOLS,
+        }
+        allowed = allowed_by_scope.get(effective_scope)
+        if allowed is not None:
             self.tools = {name: tool for name, tool in original_tools.items() if name in allowed}
-        if self.plan_mode:
+        if effective_scope == TurnScope.PLAN:
             self.messages[0]["content"] = original_prompt + (
                 "\n\nPlan mode is active. Investigate using read-only tools and propose "
                 "an actionable plan. Do not implement changes, execute shell commands, "
                 "or claim to have done so. The user must leave Plan mode before implementation."
             )
+        prior_scope = self.active_turn_scope
+        self.active_turn_scope = effective_scope
         try:
             yield from self._run(
                 user_message,
                 registered_tools=set(original_tools),
-                validate_code_answer=not read_only and not self.plan_mode,
+                validate_code_answer=effective_scope == TurnScope.STANDARD,
+                turn_scope=effective_scope,
             )
         finally:
             self.tools = original_tools
             self.messages[0]["content"] = original_prompt
+            self.active_turn_scope = prior_scope
 
     def _run(
         self,
@@ -3904,6 +3948,7 @@ class Agent:
         *,
         registered_tools: set[str] | None = None,
         validate_code_answer: bool = True,
+        turn_scope: TurnScope = TurnScope.STANDARD,
     ):
         """Generator of AgentEvent — clients iterate and render."""
         self.messages.append({"role": "user", "content": user_message})
@@ -3914,7 +3959,7 @@ class Agent:
         registered_tools = registered_tools if registered_tools is not None else set(self.tools)
         globally_enabled_tools = registered_tools - self.disabled_tool_names
         unavailable_reasons = {
-            name: "plan/review mode" for name in registered_tools - set(self.tools)
+            name: f"{turn_scope.value} scope" for name in registered_tools - set(self.tools)
         }
         unavailable_reasons.update(
             {name: "disabled in settings" for name in self.disabled_tool_names}
@@ -4169,11 +4214,19 @@ class Agent:
                     "Pre-existing dirty workspace changes belong to the user; continue only "
                     "with safe read-only investigation"
                 )
-            if self.plan_mode:
+            if turn_scope == TurnScope.PLAN:
                 hard_constraints.append("Plan mode permits investigation, not implementation")
-            elif any(reason == "plan/review mode" for reason in unavailable_reasons.values()):
+            elif turn_scope == TurnScope.REVIEW:
                 hard_constraints.append(
                     "This scoped review turn permits read-only investigation, not mutation"
+                )
+            elif turn_scope == TurnScope.INIT:
+                hard_constraints.append(
+                    "Init scope may write only the workspace root AGENTS.md"
+                )
+            elif turn_scope == TurnScope.EVALUATION:
+                hard_constraints.append(
+                    "Evaluation scope is read-only and cannot request interactive input"
                 )
 
             snapshot = TurnCapabilities.create(
@@ -4194,6 +4247,7 @@ class Agent:
                     bool(workspace.write_enabled) if workspace is not None else None
                 ),
                 budget=governor.snapshot(),
+                scope=turn_scope,
             )
             self.last_turn_budget = snapshot.budget.to_dict()
             self.last_turn_capabilities = snapshot.to_dict()
@@ -4659,6 +4713,17 @@ class Agent:
                     if key not in tool.parameters.get("properties", {}):
                         validated_args.pop(key, None)
                 _validate_tool_arguments(validated_args, tool.parameters)
+                if turn_scope == TurnScope.INIT and name in {"write_file", "edit_file"}:
+                    root = Path(getattr(self, "workdir", None) or Path.cwd()).resolve()
+                    raw_path = Path(str(validated_args.get("path", ""))).expanduser()
+                    candidate = Path(
+                        os.path.abspath(raw_path if raw_path.is_absolute() else root / raw_path)
+                    )
+                    allowed_target = Path(os.path.abspath(root / "AGENTS.md"))
+                    if candidate != allowed_target:
+                        raise PermissionError(
+                            "init scope permits writes only to the workspace root AGENTS.md"
+                        )
                 if tool.preflight is not None:
                     tool.preflight(args)
                 self.gate.check(name, tool.detail(args))

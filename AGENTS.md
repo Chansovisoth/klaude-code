@@ -817,8 +817,13 @@ Each model request receives an immutable capability block derived from its actua
 schemas, with reasons for unavailable tools and a separate global-enabled inventory.
 It records effective ask/allow/deny policies, provider tool/context/effort support,
 injected guidance paths, workspace state, hard safety constraints, and remaining
-turn budgets. `DENY` tools are not exposed as callable schemas. `/status` and
-durable completion events use the same sanitized snapshot. Short repair follow-ups retain the previous
+turn budgets. Every turn has one typed scope: `standard`, `plan`, `review`, `init`,
+or `evaluation`. Scope allowlists are enforced before provider schemas are built;
+plan and review are read-only, evaluation also omits interactive input, and init
+may write only the workspace-root `AGENTS.md` even if a model supplies another
+path. Plan mode overrides standard and init turns with the stricter plan scope.
+`DENY` tools are not exposed as callable schemas. `/status` and durable completion
+events use the same sanitized snapshot. Short repair follow-ups retain the previous
 request's selected capabilities when they contain no new tool intent. Short
 execution follow-ups use preceding fenced commands as disambiguating context.
 Alternate bare tool XML is detected, never evaluated; one structured-call repair

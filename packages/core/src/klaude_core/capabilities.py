@@ -5,9 +5,20 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from .execution import TurnBudgetSnapshot
+
+
+class TurnScope(StrEnum):
+    """Host-selected purpose and safety envelope for one agent turn."""
+
+    STANDARD = "standard"
+    PLAN = "plan"
+    REVIEW = "review"
+    INIT = "init"
+    EVALUATION = "evaluation"
 
 
 @dataclass(frozen=True)
@@ -34,6 +45,7 @@ class TurnCapabilities:
     plan_mode: bool
     workspace_write_enabled: bool | None
     budget: TurnBudgetSnapshot
+    scope: TurnScope = TurnScope.STANDARD
 
     @classmethod
     def create(
@@ -54,6 +66,7 @@ class TurnCapabilities:
         plan_mode: bool,
         workspace_write_enabled: bool | None,
         budget: TurnBudgetSnapshot,
+        scope: TurnScope | str = TurnScope.STANDARD,
     ) -> TurnCapabilities:
         return cls(
             globally_enabled_tools=tuple(sorted(set(globally_enabled_tools))),
@@ -71,6 +84,7 @@ class TurnCapabilities:
             plan_mode=plan_mode,
             workspace_write_enabled=workspace_write_enabled,
             budget=budget,
+            scope=TurnScope(scope),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -92,6 +106,7 @@ class TurnCapabilities:
             "plan_mode": self.plan_mode,
             "workspace_write_enabled": self.workspace_write_enabled,
             "budget": self.budget.to_dict(),
+            "scope": self.scope.value,
         }
 
     def render_for_model(self) -> str:
@@ -105,6 +120,7 @@ class TurnCapabilities:
         instructions = ", ".join(self.injected_instructions) or "(none)"
         return (
             "<turn_capabilities>\n"
+            f"Turn scope: {self.scope.value}.\n"
             f"Provider: {self.provider_backend}/{self.provider_model}; "
             f"tools={'yes' if self.provider_supports_tools else 'no'}; "
             f"context={self.provider_context_window or 'unknown'}; "
@@ -140,6 +156,7 @@ class TurnCapabilities:
         unavailable = dict(self.unavailable_tools)
         return (
             "<turn_capabilities>"
+            f"Turn scope: {self.scope.value}. "
             f"Provider: {self.provider_backend}/{self.provider_model}. "
             f"Callable this request: {', '.join(self.callable_tools) or '(none)'}. "
             f"Unavailable this request: {', '.join(unavailable) or '(none)'}. "

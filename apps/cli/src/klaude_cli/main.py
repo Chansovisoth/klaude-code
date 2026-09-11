@@ -68,6 +68,7 @@ from klaude_core import (
     OpenAIRuntime,
     PermissionGate,
     Tool,
+    TurnScope,
     WebResearchBudget,
     load_config,
 )
@@ -1747,6 +1748,15 @@ def _chat_status(agent, memory, session_id: str, *, title_hint: str = "") -> str
         ("Mode", str(getattr(agent, "reasoning_mode", "standard"))),
         ("Effort", _status_effort(agent)),
         ("Turn limit", f"{getattr(agent, 'max_steps', 20)} steps + finalization"),
+        (
+            "Turn scope",
+            str(
+                capabilities.get(
+                    "scope",
+                    getattr(agent, "active_turn_scope", TurnScope.STANDARD),
+                )
+            ),
+        ),
         ("Plan mode", "on" if getattr(agent, "plan_mode", False) else "off"),
         ("Context", f"~{used:,}/{context:,} tokens"),
         ("Context left", f"~{max(0, context - used):,} tokens"),
@@ -6353,6 +6363,7 @@ def _render(
     ui_state: ChatUIState | None = None,
     plain: bool = False,
     read_only: bool = False,
+    scope: TurnScope | str | None = None,
     model_message: str | None = None,
 ) -> str:
     builder = getattr(agent, "system_prompt_builder", None)
@@ -6422,9 +6433,10 @@ def _render(
     pending_tool_start_metadata: dict[str, dict] = {}
     turn_failed = False
     interrupted = False
-    events = (
-        agent.run(effective_message, read_only=True) if read_only else agent.run(effective_message)
+    effective_scope = scope if scope is not None else (
+        TurnScope.REVIEW if read_only else None
     )
+    events = agent.run(effective_message, scope=effective_scope)
     try:
         for event in events:
             if event.kind == "text_delta" and event.payload.get("content"):
@@ -7262,16 +7274,19 @@ class PendingChatTurn(str):
 
     attachments: tuple[Path, ...]
     model_message: str | None
+    scope: TurnScope
 
     def __new__(
         cls,
         text: str,
         attachments: tuple[Path, ...] = (),
         model_message: str | None = None,
+        scope: TurnScope | str = TurnScope.STANDARD,
     ):
         instance = super().__new__(cls, text)
         instance.attachments = attachments
         instance.model_message = model_message
+        instance.scope = TurnScope(scope)
         return instance
 
 
@@ -10550,9 +10565,13 @@ class PersistentChatTUI:
                     # generated review turn at the front when this command
                     # itself was waiting in that queue.
                     turn = (
-                        PendingChatTurn("/init", model_message=request)
+                        PendingChatTurn(
+                            "/init",
+                            model_message=request,
+                            scope=TurnScope.INIT,
+                        )
                         if command == "/init"
-                        else PendingChatTurn(request)
+                        else PendingChatTurn(request, scope=TurnScope.REVIEW)
                     )
                     if self._executing_queued_command:
                         self.pending.appendleft(turn)
@@ -10995,7 +11014,7 @@ class PersistentChatTUI:
             args=(user_msg, self.cancel_requested),
             kwargs={
                 "model_message": agent_message,
-                "read_only": self._review_next,
+                "scope": getattr(turn, "scope", TurnScope.STANDARD),
                 "turn_id": turn_id,
             },
             daemon=True,
@@ -11076,6 +11095,7 @@ class PersistentChatTUI:
         *,
         model_message: str | None = None,
         read_only: bool = False,
+        scope: TurnScope | str | None = None,
         turn_id: str = "",
     ) -> None:
         assistant_parts: list[str] = []
@@ -11126,11 +11146,10 @@ class PersistentChatTUI:
                 self._emit("activity", "working")
                 self._publish_shared_event("activity", {"text": "working"}, turn_id=turn_id)
             self.agent.capability_observer = publish_capabilities
-            events = (
-                self.agent.run(effective_message, read_only=True)
-                if read_only
-                else self.agent.run(effective_message)
+            effective_scope = scope if scope is not None else (
+                TurnScope.REVIEW if read_only else None
             )
+            events = self.agent.run(effective_message, scope=effective_scope)
             for event in events:
                 payload = event.payload
                 if event.kind not in {"tool_start", "tool_result"} or (
@@ -12035,7 +12054,7 @@ def chat(
                         _review_request(agent),
                         ui_state,
                         plain=no_tui,
-                        read_only=True,
+                        scope=TurnScope.REVIEW,
                     )
                 elif command == "/init":
                     _render(
@@ -12045,6 +12064,7 @@ def chat(
                         "/init",
                         ui_state,
                         plain=no_tui,
+                        scope=TurnScope.INIT,
                         model_message=_init_request(agent),
                     )
                 else:

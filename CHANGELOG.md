@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add typed standard, plan, review, init, and evaluation turn scopes to the
+  immutable capability contract. Enforce each scope's tool allowlist before
+  provider requests, hard-limit `/init` writes to the workspace-root
+  `AGENTS.md`, and expose the effective scope through `/status` and durable
+  capability snapshots.
 - Add a privacy-bounded live behavioral evaluation harness with isolated
   read-only model/scenario workers, hard timeouts, explicit network opt-in,
   non-overwriting report paths, sanitized provider failure categories, and

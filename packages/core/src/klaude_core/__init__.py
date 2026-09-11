@@ -1,5 +1,5 @@
 from .agent import Agent, AgentEvent, AgenticSearchState, Tool, WebResearchBudget
-from .capabilities import TurnCapabilities
+from .capabilities import TurnCapabilities, TurnScope
 from .codex_auth import (
     CodexAuthError,
     CodexAuthManager,
@@ -45,6 +45,7 @@ __all__ = [
     "Config",
     "load_config",
     "TurnCapabilities",
+    "TurnScope",
     "CodexAuthError",
     "CodexAuthManager",
     "CodexAuthStatus",

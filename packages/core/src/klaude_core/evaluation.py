@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .agent import Agent
+from .capabilities import TurnScope
 
 _FAILURE_PREFIXES = (
     "error:",
@@ -177,7 +178,7 @@ def evaluate_agent_turn(
     agent.gate.set_decision_observer(observe_permission)
     started_at = clock()
     try:
-        for event in agent.run(scenario.prompt, read_only=True):
+        for event in agent.run(scenario.prompt, scope=TurnScope.EVALUATION):
             event_counts[event.kind] += 1
             if event.kind == "text":
                 text_events.append(str(event.payload.get("content", "")))

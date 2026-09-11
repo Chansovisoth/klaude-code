@@ -145,6 +145,7 @@ from klaude_core import (
     ModelInfo,
     PermissionGate,
     Tool,
+    TurnScope,
 )
 from klaude_core.config import DEFAULT_PERMISSIONS, Config
 from klaude_core.memory import Memory
@@ -883,7 +884,9 @@ def test_resume_lists_all_sessions_in_columns_and_continues_selected_session(tmp
     assert "Saved answer" in tui.output.text
     assert tui._history == ["Original session title 14"]
     assert len(tui.memory.load_session("saved-14")) == 2
-    tui.agent.run = lambda _message: iter([AgentEvent("text", {"content": "Next answer"})])
+    tui.agent.run = lambda _message, *, scope=None: iter(
+        [AgentEvent("text", {"content": "Next answer"})]
+    )
     tui._run_turn("Follow-up", threading.Event())
     dialogue = [
         turn
@@ -1317,6 +1320,7 @@ def test_review_dispatches_read_only_turn(tmp_path, monkeypatch):
     tui._submit_buffer(steer=False)
     assert started == [True]
     assert "staged diff" in tui.pending[0]
+    assert tui.pending[0].scope is TurnScope.REVIEW
 
 
 def test_init_dispatches_scoped_repository_guidance_turn(tmp_path, monkeypatch):
@@ -1330,6 +1334,7 @@ def test_init_dispatches_scoped_repository_guidance_turn(tmp_path, monkeypatch):
 
     assert started == [True]
     assert str(tui.pending[0]) == "/init"
+    assert tui.pending[0].scope is TurnScope.INIT
     request = tui.pending[0].model_message
     assert request == _init_request(tui.agent)
     assert request is not None
@@ -1373,14 +1378,14 @@ def test_init_line_mode_keeps_generated_task_out_of_public_user_message(tmp_path
     monkeypatch.setattr(
         "klaude_cli.main._render",
         lambda _agent, _memory, _session_id, user_message, _ui_state, **kwargs: rendered.append(
-            (user_message, kwargs.get("model_message"))
+            (user_message, kwargs.get("model_message"), kwargs.get("scope"))
         ),
     )
 
     result = CliRunner().invoke(app, ["chat", "--no-tui"], input="/init\n/quit\n")
 
     assert result.exit_code == 0, result.output
-    assert rendered == [("/init", _init_request(tui.agent))]
+    assert rendered == [("/init", _init_request(tui.agent), TurnScope.INIT)]
 
 
 def test_resume_line_mode_lists_and_restores_without_sending_command_to_model(
@@ -1418,7 +1423,9 @@ def test_completed_assistant_message_has_unit_duration_in_closing_divider(monkey
     emitted = []
     tui._turn_started_at = 100.0
     monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: 171.0)
-    tui.agent.run = lambda _message: iter([AgentEvent("text_delta", {"content": "Hi!"})])
+    tui.agent.run = lambda _message, *, scope=None: iter(
+        [AgentEvent("text_delta", {"content": "Hi!"})]
+    )
     tui.memory.log_turn = lambda *_args: None
     tui.memory.auto_remember_turn = lambda _message: []
     tui._emit = lambda kind, payload=None: emitted.append((kind, payload))
@@ -1457,7 +1464,7 @@ def test_edit_group_is_flushed_saved_and_mirrored_at_end_of_turn(tmp_path):
                 },
             )
         )
-    tui.agent.run = lambda _message: iter(events)
+    tui.agent.run = lambda _message, *, scope=None: iter(events)
     tui._run_turn("Make two files", threading.Event(), turn_id="edit-turn")
     saved = tui.memory.load_session(tui.session_id)
     summaries = [
@@ -1476,7 +1483,7 @@ def test_run_turn_persists_real_tool_activity_milestones(tmp_path, monkeypatch):
     tui._turn_started_at = 100.0
     monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: 130.0)
     tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
-    tui.agent.run = lambda _message: iter(
+    tui.agent.run = lambda _message, *, scope=None: iter(
         [
             AgentEvent(
                 "tool_start",
@@ -1549,7 +1556,7 @@ def test_run_turn_mirrors_live_capability_snapshots(tmp_path):
         "effective_permissions": {"read_file": "allow"},
         "budget": {"model_steps_used": 1, "max_model_steps": 20},
     }
-    def run(_message):
+    def run(_message, *, scope=None):
         tui.agent.capability_observer(snapshot)
         return iter([AgentEvent("text", {"content": "Done."})])
 
@@ -1931,11 +1938,19 @@ def test_inline_attachment_mention_is_delivered_with_its_message(tmp_path, monke
     source.write_text("Use this brief.")
     tui = _fake_persistent_tui()
     tui.agent.workdir = tmp_path
-    delivered: list[tuple[str, str | None]] = []
+    delivered: list[tuple[str, str | None, TurnScope | str | None]] = []
     delivered_event = threading.Event()
 
-    def capture(message, _cancel_event, *, model_message=None, read_only=False, turn_id=""):
-        delivered.append((message, model_message))
+    def capture(
+        message,
+        _cancel_event,
+        *,
+        model_message=None,
+        read_only=False,
+        scope=None,
+        turn_id="",
+    ):
+        delivered.append((message, model_message, scope))
         delivered_event.set()
 
     monkeypatch.setattr(tui, "_run_turn", capture)
@@ -1946,6 +1961,7 @@ def test_inline_attachment_mention_is_delivered_with_its_message(tmp_path, monke
         (
             "Please review @brief.md.",
             f"Please review @brief.md.\n\n[Attached file: {source.resolve()}]\nUse this brief.",
+            TurnScope.STANDARD,
         )
     ]
 
@@ -2872,6 +2888,7 @@ def test_chat_status_reports_session_runtime_permissions_and_agents_file(tmp_pat
             "elapsed_seconds": 7.25,
         },
         last_turn_capabilities={
+            "scope": "review",
             "globally_enabled_tools": ["read_file", "run_shell", "write_file"],
             "callable_tools": ["read_file", "run_shell"],
             "budget": {
@@ -2896,6 +2913,7 @@ def test_chat_status_reports_session_runtime_permissions_and_agents_file(tmp_pat
     assert "Mode          thinking" in result
     assert "Effort        high" in result
     assert "Turn limit    40 steps + finalization" in result
+    assert "Turn scope    review" in result
     assert "Callable now  2/3 enabled tools" in result
     assert "Turn budget   models 3/40 · tools 5/80 · 7.2s" in result
     assert "Context left  ~16,381 tokens" in result
@@ -4619,7 +4637,7 @@ def test_ollama_service_control_supports_start(monkeypatch):
 def test_cancelled_transport_error_is_not_saved_as_runtime_failure(tmp_path):
     tui = _fake_persistent_tui()
     tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
-    tui.agent.run = lambda _message: iter(
+    tui.agent.run = lambda _message, *, scope=None: iter(
         [AgentEvent("error", {"message": "[Errno 9] Bad file descriptor"})]
     )
     cancelled = threading.Event()
@@ -5110,7 +5128,7 @@ def test_render_suppresses_internal_tool_policy_correction(monkeypatch):
     turns = []
 
     class FakeAgent:
-        def run(self, user_msg):
+        def run(self, user_msg, *, scope=None):
             yield AgentEvent(
                 "tool_result",
                 {
@@ -5149,7 +5167,7 @@ def test_render_streams_code_and_logs_only_the_completed_assistant_turn(monkeypa
     class FakeAgent:
         model = "small-coder"
 
-        def run(self, user_msg):
+        def run(self, user_msg, *, scope=None):
             yield AgentEvent("text_delta", {"content": "```python\n"})
             yield AgentEvent("text_delta", {"content": "print('ok')\n```"})
             yield AgentEvent(
@@ -5181,7 +5199,7 @@ def test_render_shows_web_search_provider_from_structured_metadata(monkeypatch):
     turns = []
 
     class FakeAgent:
-        def run(self, user_msg):
+        def run(self, user_msg, *, scope=None):
             yield AgentEvent(
                 "tool_start",
                 {
@@ -5229,7 +5247,7 @@ def test_render_shows_fetch_url_provider_from_structured_metadata(monkeypatch):
     turns = []
 
     class FakeAgent:
-        def run(self, user_msg):
+        def run(self, user_msg, *, scope=None):
             yield AgentEvent(
                 "tool_start",
                 {
