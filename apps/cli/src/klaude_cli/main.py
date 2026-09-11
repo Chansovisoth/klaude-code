@@ -8207,7 +8207,7 @@ class PersistentChatTUI:
             if not renewed:
                 self.status_error = "session worker lease was lost; interrupting safely"
                 self.cancel_requested.set()
-                self.agent.ollama.cancel_active()
+                self._cancel_active_transport()
             self._last_lease_renewal = now
         self._publish_live_composer()
         live = self.memory.session_live_state(self.session_id)
@@ -8684,7 +8684,7 @@ class PersistentChatTUI:
                 self.activity = "ready"
             elif self.running:
                 self.cancel_requested.set()
-                self.agent.ollama.cancel_active()
+                self._cancel_active_transport()
                 self.activity = "interrupt requested"
             else:
                 self.input.buffer.reset()
@@ -10240,7 +10240,7 @@ class PersistentChatTUI:
             self.pending.clear()
             self._pending_resume = session_id
             self.cancel_requested.set()
-            self.agent.ollama.cancel_active()
+            self._cancel_active_transport()
             suffix = f" Discarded {queued} queued item(s)." if queued else ""
             self._append(
                 "\n[session] Interrupting the current turn; the selected session "
@@ -10614,7 +10614,7 @@ class PersistentChatTUI:
         if text == "/cancel":
             if self.running:
                 self.cancel_requested.set()
-                self.agent.ollama.cancel_active()
+                self._cancel_active_transport()
                 self.activity = "interrupt requested"
             else:
                 self._append("\n[session] Nothing is running.\n")
@@ -10820,7 +10820,7 @@ class PersistentChatTUI:
                 # Ask first. Setting the shared cancellation flag before the
                 # prompt causes _ask_permission() to auto-deny its own request.
                 self.cancel_requested.set()
-                self.agent.ollama.cancel_active()
+                self._cancel_active_transport()
             activity = {
                 "start": "starting",
                 "restart": "restarting",
@@ -10924,7 +10924,7 @@ class PersistentChatTUI:
         self.pending.appendleft(turn)
         if self.running:
             self.cancel_requested.set()
-            self.agent.ollama.cancel_active()
+            self._cancel_active_transport()
             self.activity = "steering at safe boundary"
             self._append(f"\n[steer queued] {turn}\n")
         else:
@@ -11754,8 +11754,17 @@ class PersistentChatTUI:
         if self._user_input_request:
             self._answer_user_input(None, "cancelled")
         self.cancel_requested.set()
-        self.agent.ollama.cancel_active()
+        self._cancel_active_transport()
         self.application.exit(result=None)
+
+    def _cancel_active_transport(self) -> bool:
+        """Wake the active provider without allowing teardown errors into the TUI."""
+        try:
+            return bool(self.agent.ollama.cancel_active())
+        except Exception:
+            # Provider adapters promise best-effort cancellation, but retain a
+            # final UI boundary for custom runtimes and test doubles.
+            return False
 
     def run(self) -> None:
         output = self.application.output

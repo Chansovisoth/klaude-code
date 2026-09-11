@@ -48,6 +48,10 @@ class Ollama:
         with self._active_response_lock:
             client = self._active_client
             response = self._active_response
+            # Detach first so repeated cancellation is idempotent and a close
+            # callback cannot race a later request into being cleared.
+            self._active_client = None
+            self._active_response = None
         if client is None and response is None:
             return False
         if response is not None:
@@ -60,9 +64,19 @@ class Ollama:
                         connection.shutdown(socket.SHUT_RDWR)
                 except (AttributeError, OSError):
                     pass
-            response.close()
+            try:
+                response.close()
+            except Exception:
+                # Closing is only a best-effort wake-up mechanism. The owning
+                # worker still observes its cancellation flag at a safe event
+                # boundary, and terminal input must remain usable if an HTTP
+                # transport raises while being torn down.
+                pass
         if client is not None:
-            client.close()
+            try:
+                client.close()
+            except Exception:
+                pass
         return True
 
     def chat(

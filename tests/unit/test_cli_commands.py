@@ -2229,6 +2229,17 @@ def _fake_persistent_tui(appearance_path=None, chat_preferences_path=None):
     )
 
 
+def test_tui_transport_cancellation_never_leaks_provider_close_errors():
+    tui = _fake_persistent_tui()
+
+    def raising_cancel():
+        raise OSError("provider close failed")
+
+    tui.agent.ollama.cancel_active = raising_cancel
+
+    assert tui._cancel_active_transport() is False
+
+
 def test_resumed_tuis_share_live_composers_without_overwriting_each_other(tmp_path):
     database = tmp_path / "sessions.db"
     first = _fake_persistent_tui()

@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -305,7 +306,42 @@ def _content(message: dict[str, Any]) -> str:
     return str(message.get("content", ""))
 
 
-class OpenAIRuntime:
+class _CancelableResponseRuntime:
+    """Track one provider stream and make cancellation safe from UI threads."""
+
+    def _init_active_response(self) -> None:
+        self._active_response: Any = None
+        self._active_response_lock = threading.Lock()
+
+    def _track_active_response(self, response: Any) -> Any:
+        with self._active_response_lock:
+            self._active_response = response
+        return response
+
+    def _clear_active_response(self, response: Any) -> None:
+        with self._active_response_lock:
+            if self._active_response is response:
+                self._active_response = None
+
+    def cancel_active(self) -> bool:
+        """Detach and close the active stream without leaking close failures."""
+        with self._active_response_lock:
+            response = self._active_response
+            self._active_response = None
+        closer = getattr(response, "close", None)
+        if not callable(closer):
+            return False
+        try:
+            closer()
+        except Exception:
+            # Cancellation is a best-effort wake-up path. The worker still
+            # observes its cancellation flag at the next safe boundary, and a
+            # broken SDK close must never escape into the terminal key handler.
+            pass
+        return True
+
+
+class OpenAIRuntime(_CancelableResponseRuntime):
     """Official OpenAI Responses API adapter, imported only when selected."""
 
     backend = "openai_api"
@@ -315,7 +351,7 @@ class OpenAIRuntime:
             raise ValueError("OpenAI API key is not configured.")
         self.api_key = api_key
         self.last_chat_metadata: dict[str, Any] = {}
-        self._active_response: Any = None
+        self._init_active_response()
 
     def _client(self):
         try:
@@ -433,10 +469,10 @@ class OpenAIRuntime:
         }
         if think not in {None, False, "off", "auto"}:
             kwargs["reasoning"] = {"effort": str(think)}
-        self._active_response = self._response_create(**kwargs)
+        response_stream = self._track_active_response(self._response_create(**kwargs))
         completed = False
         try:
-            for event in self._active_response:
+            for event in response_stream:
                 kind = getattr(event, "type", "")
                 if kind == "response.output_text.delta":
                     yield {"role": "assistant", "content": getattr(event, "delta", "")}
@@ -472,7 +508,7 @@ class OpenAIRuntime:
                     )
                     raise RuntimeError(str(message or "OpenAI response failed."))
         finally:
-            self._active_response = None
+            self._clear_active_response(response_stream)
         if not completed:
             raise RuntimeError("OpenAI stream ended without a completed response.")
 
@@ -542,14 +578,6 @@ class OpenAIRuntime:
             **({"tool_calls": calls} if calls else {}),
         }
 
-    def cancel_active(self) -> bool:
-        closer = getattr(self._active_response, "close", None)
-        if callable(closer):
-            closer()
-            return True
-        return False
-
-
 class CodexRuntime(OpenAIRuntime):
     """Responses adapter authenticated by the official Codex app-server."""
 
@@ -558,7 +586,7 @@ class CodexRuntime(OpenAIRuntime):
     def __init__(self, auth: CodexAuthManager | None = None):
         self.auth = auth or CodexAuthManager()
         self.last_chat_metadata: dict[str, Any] = {}
-        self._active_response: Any = None
+        self._init_active_response()
         self._session_id = str(uuid.uuid4())
 
     def _client(self, *, refresh: bool = False):
@@ -622,14 +650,14 @@ class CodexRuntime(OpenAIRuntime):
         }
         if think not in {None, False, "off", "auto"}:
             kwargs["reasoning"] = {"effort": str(think)}
-        self._active_response = self._response_create(**kwargs)
+        response_stream = self._track_active_response(self._response_create(**kwargs))
         completed = None
         text_parts: list[str] = []
         refusals: list[str] = []
         calls: list[dict[str, Any]] = []
         reasoning_items: list[dict[str, Any]] = []
         try:
-            for event in self._active_response:
+            for event in response_stream:
                 kind = getattr(event, "type", "")
                 if kind == "response.output_text.delta":
                     text_parts.append(str(getattr(event, "delta", "") or ""))
@@ -658,7 +686,7 @@ class CodexRuntime(OpenAIRuntime):
                     )
                     raise RuntimeError(str(detail or "OpenAI Codex response failed."))
         finally:
-            self._active_response = None
+            self._clear_active_response(response_stream)
         if completed is None:
             raise RuntimeError("OpenAI Codex stream ended without a completed response.")
         self._record(completed)
@@ -696,10 +724,10 @@ class CodexRuntime(OpenAIRuntime):
         }
         if think not in {None, False, "off", "auto"}:
             kwargs["reasoning"] = {"effort": str(think)}
-        self._active_response = self._response_create(**kwargs)
+        response_stream = self._track_active_response(self._response_create(**kwargs))
         completed = False
         try:
-            for event in self._active_response:
+            for event in response_stream:
                 kind = getattr(event, "type", "")
                 if kind in {"response.output_text.delta", "response.refusal.delta"}:
                     yield {"role": "assistant", "content": getattr(event, "delta", "") or ""}
@@ -733,7 +761,7 @@ class CodexRuntime(OpenAIRuntime):
                     )
                     raise RuntimeError(str(detail or "OpenAI Codex response failed."))
         finally:
-            self._active_response = None
+            self._clear_active_response(response_stream)
         if not completed:
             raise RuntimeError("OpenAI Codex stream ended without a completed response.")
 
@@ -852,7 +880,7 @@ def discover_codex_models(auth: CodexAuthManager | None = None) -> list[ModelInf
     return sorted(result, key=newest_model_first_key)
 
 
-class GeminiRuntime:
+class GeminiRuntime(_CancelableResponseRuntime):
     """google-genai adapter using manual function calling (no auto execution)."""
 
     backend = "gemini_api"
@@ -862,7 +890,7 @@ class GeminiRuntime:
             raise ValueError("Gemini API key is not configured.")
         self.api_key = api_key
         self.last_chat_metadata: dict[str, Any] = {}
-        self._active_response: Any = None
+        self._init_active_response()
 
     def _sdk(self):
         try:
@@ -994,23 +1022,18 @@ class GeminiRuntime:
         options: dict[str, Any] | None = None,
         think: bool | str | None = None,
     ):
-        self._active_response = self._request(model, messages, None, True, think)
+        response_stream = self._track_active_response(
+            self._request(model, messages, None, True, think)
+        )
         try:
-            for chunk in self._active_response:
+            for chunk in response_stream:
                 yield {"role": "assistant", "content": getattr(chunk, "text", "") or ""}
                 self.last_chat_metadata = {
                     "provider": "gemini_api",
                     "usage": getattr(chunk, "usage_metadata", None),
                 }
         finally:
-            self._active_response = None
-
-    def cancel_active(self) -> bool:
-        closer = getattr(self._active_response, "close", None)
-        if callable(closer):
-            closer()
-            return True
-        return False
+            self._clear_active_response(response_stream)
 
 
 def discover_openai_models(api_key: str) -> list[ModelInfo]:

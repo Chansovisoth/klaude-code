@@ -60,6 +60,30 @@ def test_cloud_runtimes_reject_missing_credentials():
         GeminiRuntime("  ")
 
 
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        OpenAIRuntime("secret"),
+        CodexRuntime(auth=object()),
+        GeminiRuntime("secret"),
+    ],
+)
+def test_cloud_runtime_cancellation_is_best_effort_and_idempotent(runtime):
+    class RaisingStream:
+        close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            raise OSError("transport already closed")
+
+    stream = RaisingStream()
+    runtime._track_active_response(stream)
+
+    assert runtime.cancel_active() is True
+    assert runtime.cancel_active() is False
+    assert stream.close_calls == 1
+
+
 def test_openai_responses_explicitly_disable_provider_storage(monkeypatch):
     captured = {}
 

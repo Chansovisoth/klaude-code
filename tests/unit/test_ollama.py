@@ -57,6 +57,33 @@ def test_cancel_active_closes_request_client():
     assert active.closed is True
 
 
+def test_cancel_active_is_best_effort_and_idempotent_when_closers_fail():
+    class RaisingClient:
+        close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            raise OSError("client already closed")
+
+    class RaisingResponse:
+        extensions = {}
+        close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            raise OSError("response already closed")
+
+    ollama = Ollama("http://ollama.test")
+    client = RaisingClient()
+    response = RaisingResponse()
+    ollama._track_request(client, response)
+
+    assert ollama.cancel_active() is True
+    assert ollama.cancel_active() is False
+    assert response.close_calls == 1
+    assert client.close_calls == 1
+
+
 def test_cancel_active_wakes_a_blocked_socket_reader():
     import socket
     import threading

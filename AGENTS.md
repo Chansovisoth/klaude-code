@@ -702,7 +702,13 @@ model metadata
 and never inherits saved Ollama `num_ctx` or GPU/thread tuning; when the Codex
 catalog omits a limit, discovery records a conservative 128K fallback. Responses
 history emits function calls and outputs only as complete call-ID pairs so a
-cancelled or compacted turn cannot send an orphaned protocol item. OpenAI Codex
+cancelled or compacted turn cannot send an orphaned protocol item. Streaming
+runtimes detach an active transport before closing it;
+cancellation is thread-safe, idempotent, and best-effort, so an SDK/HTTP close
+failure cannot escape into a TUI key handler or session switch. The cooperative
+cancellation flag remains authoritative and is observed at the next safe
+model/tool boundary.
+OpenAI Codex
 account auth is a distinct `openai_codex` backend:
 the official Codex app-server owns device-code login, credential persistence,
 refresh, logout, and account-aware model discovery; Klaude requests an in-memory
