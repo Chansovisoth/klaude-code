@@ -40,14 +40,53 @@ TOOL_NAMES = (
     "request_user_input",
 )
 
+MODEL_PROFILES = (
+    {
+        "name": "constrained-local",
+        "backend": "ollama",
+        "model": "small-local",
+        "context_window": 8_192,
+        "supports_tools": True,
+    },
+    {
+        "name": "default-local-coder",
+        "backend": "ollama",
+        "model": "default-coder",
+        "context_window": 32_768,
+        "supports_tools": True,
+    },
+    {
+        "name": "general-cloud",
+        "backend": "openai_api",
+        "model": "general-cloud",
+        "context_window": 128_000,
+        "supports_tools": True,
+    },
+    {
+        "name": "codex-authenticated",
+        "backend": "openai_codex",
+        "model": "codex-cloud",
+        "context_window": 128_000,
+        "supports_tools": True,
+    },
+    {
+        "name": "tool-less-model",
+        "backend": "ollama",
+        "model": "text-only-local",
+        "context_window": 4_096,
+        "supports_tools": False,
+    },
+)
+
 
 def replay_cases() -> list[dict[str, Any]]:
     path = Path(__file__).with_name("fixtures") / "transcript_replays.json"
     return json.loads(path.read_text())
 
 
+@pytest.mark.parametrize("profile", MODEL_PROFILES, ids=lambda profile: profile["name"])
 @pytest.mark.parametrize("case", replay_cases(), ids=lambda case: case["name"])
-def test_transcript_replay_keeps_schemas_prompt_and_completion_in_sync(case):
+def test_transcript_replay_keeps_schemas_prompt_and_completion_in_sync(case, profile):
     runtime = ReplayRuntime()
     tools = [Tool(name, name.replace("_", " "), {}, lambda: "ok") for name in TOOL_NAMES]
     agent = Agent(
@@ -57,6 +96,15 @@ def test_transcript_replay_keeps_schemas_prompt_and_completion_in_sync(case):
         PermissionGate({name: "allow" for name in TOOL_NAMES}, lambda *_: "n"),
         "system",
         tool_selector=_select_tool_names,
+        model_info=ModelInfo(
+            profile["backend"],
+            profile["model"],
+            profile["name"],
+            capabilities=ModelCapabilities(
+                context_window=profile["context_window"],
+                supports_tools=profile["supports_tools"],
+            ),
+        ),
     )
     agent.workspace = SimpleNamespace(write_enabled=True)
     agent.messages.extend(case["prior_messages"])
@@ -66,9 +114,27 @@ def test_transcript_replay_keeps_schemas_prompt_and_completion_in_sync(case):
     schemas = {item["function"]["name"] for item in runtime.requests[0][1]}
     snapshot = agent.last_turn_capabilities
     assert schemas == set(snapshot["callable_tools"])
-    assert set(case["expected_tools"]) <= schemas
+    if profile["supports_tools"]:
+        assert set(case["expected_tools"]) <= schemas
+    else:
+        assert schemas == set()
+        assert set(case["expected_tools"]) <= set(snapshot["unavailable_tools"])
+        assert all(
+            snapshot["unavailable_tools"][name]
+            == "selected provider/model does not support tool calling"
+            for name in case["expected_tools"]
+        )
     assert set(case["forbidden_tools"]).isdisjoint(schemas)
     assert events[-1].payload["turn_capabilities"] == snapshot
+    assert events[-1].kind == "done"
+    assert len(runtime.requests) == 1
+    assert snapshot["provider"] == {
+        "backend": profile["backend"],
+        "model": profile["model"],
+        "supports_tools": profile["supports_tools"],
+        "context_window": profile["context_window"],
+        "effort_levels": ["off", "low", "medium", "high"],
+    }
     prompt = runtime.requests[0][0][0]["content"]
     assert "Callable this request: " + ", ".join(sorted(schemas)) in prompt
 
