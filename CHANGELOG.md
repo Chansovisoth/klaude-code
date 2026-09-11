@@ -31,6 +31,8 @@
   worker overrides without widening capability or permission boundaries.
   Normal turns also accept an explicit `[agent].max_tool_calls` ceiling, while
   retaining the derived two-calls-per-step default when it is zero.
+  An optional `[agent].max_total_tokens` ceiling now uses the existing exact
+  provider-usage governor without changing the unlimited default.
 - Add typed standard, plan, review, init, and evaluation turn scopes to the
   immutable capability contract. Enforce each scope's tool allowlist before
   provider requests, hard-limit `/init` writes to the workspace-root

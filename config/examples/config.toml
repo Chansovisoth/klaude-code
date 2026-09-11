@@ -46,6 +46,7 @@
 # slower hardware; raise it only for workflows that genuinely need more tools.
 # max_steps = 20                 # bounded model/tool iterations per turn (1-64)
 # max_tool_calls = 0             # 0 = derive as two calls per step (0-256)
+# max_total_tokens = 0            # 0 = unlimited; input + output tokens (1-2,000,000)
 # Concurrent child workers: 0 = provider-aware auto (1 Ollama, 2 cloud).
 # Explicit 1-4 overrides auto; only audited stateless read-only tools overlap.
 # max_subagent_concurrency = 0

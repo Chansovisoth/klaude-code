@@ -389,6 +389,8 @@ class Config:
     max_agent_steps: int = 20
     # 0 derives a conservative ceiling from max_steps (two calls per step).
     max_agent_tool_calls: int = 0
+    # 0 leaves the provider/context-aware token budget unbounded.
+    max_agent_tokens: int = 0
     # 0 selects the provider-aware policy (one local worker, two cloud workers).
     max_subagent_concurrency: int = 0
     max_code_continuations: int = 2
@@ -1012,6 +1014,10 @@ def load_config() -> Config:
     cfg.max_agent_tool_calls = max(
         0,
         min(256, int(agent.get("max_tool_calls", cfg.max_agent_tool_calls))),
+    )
+    cfg.max_agent_tokens = max(
+        0,
+        min(2_000_000, int(agent.get("max_total_tokens", cfg.max_agent_tokens))),
     )
     cfg.max_subagent_concurrency = max(
         0,

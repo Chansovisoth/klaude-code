@@ -197,6 +197,9 @@ Chat slash commands currently include:
   `[agent].max_tool_calls` independently caps tool invocations (0 derives two
   calls per step, bounded to 256), and the effective ceiling appears in the
   status budget and model-facing configuration.
+  `[agent].max_total_tokens` optionally caps exact input plus output tokens
+  (0 keeps the provider/context default, bounded to 2,000,000); missing provider
+  usage remains explicitly unknown rather than estimated.
   Runtime also exposes Subagent Workers: Auto uses one worker for Ollama and two
   for cloud providers, while explicit 1-4 choices support stronger hardware or
   stricter quota control. The choice applies immediately, persists in

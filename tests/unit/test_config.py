@@ -14,6 +14,7 @@ def test_agent_step_budget_defaults_low_and_clamps_overrides(tmp_path, monkeypat
     cfg = load_config()
     assert cfg.max_agent_steps == 20
     assert cfg.max_agent_tool_calls == 0
+    assert cfg.max_agent_tokens == 0
     assert cfg.max_subagent_concurrency == 0
     assert cfg.max_code_repairs == 2
 
@@ -28,6 +29,12 @@ def test_agent_step_budget_defaults_low_and_clamps_overrides(tmp_path, monkeypat
 
     (config_dir / "config.toml").write_text("[agent]\nmax_tool_calls = -1\n")
     assert load_config().max_agent_tool_calls == 0
+
+    (config_dir / "config.toml").write_text("[agent]\nmax_total_tokens = 9_000_000\n")
+    assert load_config().max_agent_tokens == 2_000_000
+
+    (config_dir / "config.toml").write_text("[agent]\nmax_total_tokens = -1\n")
+    assert load_config().max_agent_tokens == 0
 
     (config_dir / "config.toml").write_text(
         "[agent]\nmax_subagent_concurrency = 99\n"
