@@ -269,6 +269,7 @@ def test_agent_configuration_context_is_complete_dynamic_and_secret_free(tmp_pat
     assert "Model: ollama/qwen3-coder:30b (backend=ollama)" in context
     assert "mode=thinking; effort=chat high · code medium; plan_mode=on" in context
     assert "Turn execution limit: 20 model/tool steps" in context
+    assert "Subagent concurrency: auto (1 effective)" in context
     assert "Tool registry: 2/3 enabled; enabled=read_file, web_search" in context
     assert "allow=1 (read_file); ask=1 (web_search); deny=1 (write_file)" in context
     assert "Web provider toggles: 8/9 on" in context
@@ -3077,6 +3078,7 @@ def test_chat_status_reports_session_runtime_permissions_and_agents_file(tmp_pat
     assert "Mode          thinking" in result
     assert "Effort        high" in result
     assert "Turn limit    40 steps + finalization" in result
+    assert "Subagents     auto (1 effective) worker(s)" in result
     assert "Turn scope    review" in result
     assert "Callable now  2/3 enabled tools" in result
     assert "Turn budget   models 3/40 · tools 5/80 · 7.2s" in result
@@ -3874,6 +3876,37 @@ def test_runtime_turn_limit_preference_applies_to_agent(tmp_path):
     _apply_runtime_preferences(agent, _load_runtime_preferences(path))
 
     assert agent.max_steps == 40
+
+
+def test_runtime_subagent_workers_persist_and_reset(tmp_path):
+    preferences_path = tmp_path / "chat-preferences.json"
+    tui = _fake_persistent_tui(chat_preferences_path=preferences_path)
+    tui.agent.max_subagent_concurrency = 0
+
+    tui._open_settings_category("runtime")
+    workers_row = next(
+        value for value in tui._choice_values if value.startswith("subagent workers:")
+    )
+    tui._choice_index = tui._choice_values.index(workers_row)
+    tui._accept_choice()
+    assert tui._choice_kind == "subagent workers"
+
+    tui._choice_index = tui._choice_values.index("3")
+    tui._accept_choice()
+    assert tui.agent.max_subagent_concurrency == 3
+    assert _load_runtime_preferences(preferences_path)["max_subagent_concurrency"] == 3
+
+    workers_row = next(
+        value for value in tui._choice_values if value.startswith("subagent workers:")
+    )
+    tui._choice_index = tui._choice_values.index(workers_row)
+    tui._accept_choice()
+    tui._choice_index = tui._choice_values.index("reset to default")
+    tui._accept_choice()
+    assert tui.agent.max_subagent_concurrency == getattr(
+        tui.cfg, "max_subagent_concurrency", 0
+    )
+    assert "max_subagent_concurrency" not in _load_runtime_preferences(preferences_path)
 
 
 def test_runtime_turn_limit_rejects_out_of_range_custom_value():

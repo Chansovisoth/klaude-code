@@ -373,6 +373,7 @@ def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> Subagen
             ollama_think=parent.ollama_think,
             web_research_budget=parent.web_research_budget,
             model_info=parent.model_info,
+            max_subagent_concurrency=parent.max_subagent_concurrency,
         )
     except Exception:
         close = getattr(child_runtime, "close", None)

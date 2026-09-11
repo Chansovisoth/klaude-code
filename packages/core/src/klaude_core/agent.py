@@ -3729,6 +3729,7 @@ class Agent:
         model_info: ModelInfo | None = None,
         max_tool_calls: int | None = None,
         max_total_tokens: int | None = None,
+        max_subagent_concurrency: int = 0,
     ):
         self.runtime = ollama
         # Compatibility alias for integrations which still inspect `ollama`.
@@ -3744,6 +3745,9 @@ class Agent:
         self.max_steps = max_steps
         self.max_tool_calls = max_tool_calls
         self.max_total_tokens = max_total_tokens
+        self.max_subagent_concurrency = max(
+            0, min(4, int(max_subagent_concurrency))
+        )
         self.max_code_continuations = max(0, min(3, max_code_continuations))
         self.max_code_repairs = max(0, min(3, max_code_repairs))
         self.tool_selector = tool_selector

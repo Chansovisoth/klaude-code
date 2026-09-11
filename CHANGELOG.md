@@ -27,6 +27,8 @@
   once only for an audited stateless workspace-tool subset, with fixed aggregate
   reservations made before launch and input-ordered results. Shared web,
   knowledge, Git, shell, mutation, and unknown capabilities remain sequential.
+  Runtime settings expose the provider-aware Auto policy and explicit 1-4
+  worker overrides without widening capability or permission boundaries.
 - Add typed standard, plan, review, init, and evaluation turn scopes to the
   immutable capability contract. Enforce each scope's tool allowlist before
   provider requests, hard-limit `/init` writes to the workspace-root

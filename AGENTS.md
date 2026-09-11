@@ -194,6 +194,12 @@ Chat slash commands currently include:
   for later chats, and appears in the model-facing live configuration. Reset
   restores `[agent].max_steps` from `config.toml`; the ceiling remains an
   emergency safety boundary with one additional tool-free finalization request.
+  Runtime also exposes Subagent Workers: Auto uses one worker for Ollama and two
+  for cloud providers, while explicit 1-4 choices support stronger hardware or
+  stricter quota control. The choice applies immediately, persists in
+  `chat-preferences.json`, and reset restores
+  `[agent].max_subagent_concurrency` (`0` means Auto). This setting never widens
+  the audited concurrent-tool allowlist or any permission boundary.
   Input border defaults on. Every category includes its own reset action.
   Runtime also offers scoped external
   Nano editors for Klaude's `config.toml` and saved runtime preferences; they

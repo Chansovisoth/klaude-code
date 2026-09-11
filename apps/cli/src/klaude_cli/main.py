@@ -1330,14 +1330,24 @@ def _load_runtime_preferences(path: Path) -> dict[str, int | None]:
     if not isinstance(raw, dict):
         return {}
     preferences: dict[str, int | None] = {}
-    for key in ("num_gpu", "num_thread", "num_ctx", "max_steps"):
+    for key in (
+        "num_gpu",
+        "num_thread",
+        "num_ctx",
+        "max_steps",
+        "max_subagent_concurrency",
+    ):
         value = raw.get(key)
         if value is None and key in raw:
             preferences[key] = None
         elif type(value) is int and (
             (key == "num_gpu" and value >= -1)
             or (key == "max_steps" and 1 <= value <= 64)
-            or (key not in {"num_gpu", "max_steps"} and value >= 1)
+            or (key == "max_subagent_concurrency" and 0 <= value <= 4)
+            or (
+                key not in {"num_gpu", "max_steps", "max_subagent_concurrency"}
+                and value >= 1
+            )
         ):
             preferences[key] = value
     return preferences
@@ -1768,6 +1778,7 @@ def _chat_status(agent, memory, session_id: str, *, title_hint: str = "") -> str
         ("Mode", str(getattr(agent, "reasoning_mode", "standard"))),
         ("Effort", _status_effort(agent)),
         ("Turn limit", f"{getattr(agent, 'max_steps', 20)} steps + finalization"),
+        ("Subagents", f"{_subagent_parallelism_label(agent)} worker(s)"),
         (
             "Turn scope",
             str(
@@ -1943,6 +1954,9 @@ def _apply_runtime_preferences(agent: Agent, preferences: dict[str, int | None])
         if key == "max_steps":
             if value is not None:
                 agent.max_steps = value
+            continue
+        if key == "max_subagent_concurrency":
+            agent.max_subagent_concurrency = 0 if value is None else value
             continue
         if value is None:
             agent.ollama_options.pop(key, None)
@@ -3303,6 +3317,8 @@ def _agent_configuration_context(
         f"- Code request overrides: {code_option_text}",
         f"- Turn execution limit: {getattr(agent, 'max_steps', 20)} model/tool steps; "
         "one additional tool-free finalization request is reserved",
+        f"- Subagent concurrency: {_subagent_parallelism_label(agent)}; "
+        "parallelism is limited to audited stateless read-only tools",
         f"- Tool registry: {len(enabled_tools)}/{len(all_tools)} enabled; "
         f"enabled={_configuration_value(', '.join(enabled_tools), limit=1_200)}",
         "- Permissions: "
@@ -4428,8 +4444,16 @@ def _delegate_task_permission_detail(args: dict) -> str:
 
 def _subagent_parallelism(agent: Agent) -> int:
     """Conservative automatic policy; local inference stays single-worker."""
+    configured = max(0, min(4, int(getattr(agent, "max_subagent_concurrency", 0))))
+    if configured:
+        return configured
     backend = str(getattr(getattr(agent, "model_info", None), "backend", "ollama"))
     return 1 if backend == "ollama" else 2
+
+
+def _subagent_parallelism_label(agent: Agent) -> str:
+    configured = max(0, min(4, int(getattr(agent, "max_subagent_concurrency", 0))))
+    return str(configured) if configured else f"auto ({_subagent_parallelism(agent)} effective)"
 
 
 def _subagent_result_metadata(result) -> dict[str, Any]:
@@ -6340,6 +6364,7 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
         ollama_code_think=cfg.ollama_code_think_for_model(initial_model),
         code_context=memory.facts(),
         model_info=ModelInfo("ollama", initial_model, initial_model),
+        max_subagent_concurrency=cfg.max_subagent_concurrency,
         web_research_budget=WebResearchBudget(
             max_web_actions=cfg.web_search.behavior.max_web_actions,
             max_search_calls=cfg.web_search.behavior.max_search_calls,
@@ -8391,6 +8416,12 @@ class PersistentChatTUI:
                 40: "Extended · 40 steps",
             }.get(self.agent.max_steps, "custom input")
             return value == preset
+        if kind == "subagent workers":
+            configured = max(
+                0,
+                min(4, int(getattr(self.agent, "max_subagent_concurrency", 0))),
+            )
+            return value == ("auto (provider-aware)" if configured == 0 else str(configured))
         if kind == "model":
             choice = getattr(self, "_model_choices", {}).get(value)
             return (
@@ -8408,11 +8439,12 @@ class PersistentChatTUI:
 
     def _persist_runtime_preferences(self, *keys: str) -> None:
         for key in keys:
-            self._runtime_preferences[key] = (
-                self.agent.max_steps
-                if key == "max_steps"
-                else self.agent.ollama_options.get(key)
-            )
+            if key == "max_steps":
+                self._runtime_preferences[key] = self.agent.max_steps
+            elif key == "max_subagent_concurrency":
+                self._runtime_preferences[key] = self.agent.max_subagent_concurrency
+            else:
+                self._runtime_preferences[key] = self.agent.ollama_options.get(key)
         try:
             _save_runtime_preferences(
                 self.chat_preferences_path,
@@ -9748,6 +9780,29 @@ class PersistentChatTUI:
                 self._persist_runtime_preferences("max_steps")
             self._open_settings_category("runtime", "turn limit:")
             return
+        if self._choice_kind == "subagent workers":
+            if selected == "back":
+                self._open_settings_category("runtime")
+                return
+            if selected == RESET_THEME_CHOICE:
+                self.agent.max_subagent_concurrency = getattr(
+                    self.cfg, "max_subagent_concurrency", 0
+                )
+                self._runtime_preferences.pop("max_subagent_concurrency", None)
+                try:
+                    _save_runtime_preferences(
+                        self.chat_preferences_path,
+                        self._runtime_preferences,
+                    )
+                except OSError as exc:
+                    self.status_error = f"runtime settings were not saved: {exc}"
+            else:
+                self.agent.max_subagent_concurrency = (
+                    0 if selected == "auto (provider-aware)" else int(selected)
+                )
+                self._persist_runtime_preferences("max_subagent_concurrency")
+            self._open_settings_category("runtime", "subagent workers:")
+            return
         if self._choice_kind == "permission preset":
             if selected == "back":
                 self._hide_permission_preview()
@@ -9994,6 +10049,7 @@ class PersistentChatTUI:
             choices = [
                 _choice_section("EXECUTION"),
                 f"turn limit: {self.agent.max_steps} steps",
+                f"subagent workers: {_subagent_parallelism_label(self.agent)}",
                 _choice_section("DEVICE"),
                 f"device: {device}",
                 _choice_section("PERFORMANCE"),
@@ -10215,10 +10271,36 @@ class PersistentChatTUI:
                     preset,
                 )
                 return
+            if selected.startswith("subagent workers:"):
+                configured = max(
+                    0,
+                    min(
+                        4,
+                        int(getattr(self.agent, "max_subagent_concurrency", 0)),
+                    ),
+                )
+                self._begin_choice(
+                    "subagent workers",
+                    [
+                        "auto (provider-aware)",
+                        "1",
+                        "2",
+                        "3",
+                        "4",
+                        "back",
+                        RESET_THEME_CHOICE,
+                    ],
+                    "auto (provider-aware)" if configured == 0 else str(configured),
+                )
+                return
             self.agent.ollama_options.pop("num_gpu", None)
             self.agent.ollama_options.pop("num_thread", None)
             self.agent.max_steps = self.cfg.max_agent_steps
+            self.agent.max_subagent_concurrency = getattr(
+                self.cfg, "max_subagent_concurrency", 0
+            )
             self._runtime_preferences.pop("max_steps", None)
+            self._runtime_preferences.pop("max_subagent_concurrency", None)
             self._runtime_device_mode = "auto"
             self._persist_runtime_preferences("num_gpu", "num_thread")
             _save_runtime_device_mode(self.chat_preferences_path, self._runtime_device_mode)
