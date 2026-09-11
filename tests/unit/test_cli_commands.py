@@ -330,6 +330,7 @@ def test_cloud_context_uses_discovered_limit_and_hides_ollama_tuning(tmp_path):
         reasoning_mode="standard",
         plan_mode=False,
         max_steps=40,
+        max_tool_calls=80,
         ollama_options={"num_ctx": 8192, "num_gpu": -1},
         ollama_code_options={"num_ctx": 4096},
         tools={},
