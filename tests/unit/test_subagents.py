@@ -35,6 +35,7 @@ def test_task_normalizes_objective_and_rejects_unbounded_input():
 def test_budget_is_bounded_and_total_caps_each_child():
     budget = SubagentBudget(
         max_children=99,
+        max_concurrency=99,
         max_steps_per_child=99,
         max_total_steps=3,
         max_tokens_per_child=9_000_000,
@@ -44,12 +45,118 @@ def test_budget_is_bounded_and_total_caps_each_child():
 
     assert budget == SubagentBudget(
         max_children=8,
+        max_concurrency=4,
         max_steps_per_child=3,
         max_total_steps=3,
         max_tokens_per_child=2_048,
         max_total_tokens=2_048,
         max_result_characters=512,
     )
+
+
+def test_stateless_read_only_children_run_concurrently_with_reserved_budgets():
+    barrier = threading.Barrier(2)
+    assignments = []
+    assignment_lock = threading.Lock()
+
+    def worker(assignment):
+        with assignment_lock:
+            assignments.append(assignment)
+        barrier.wait(timeout=2)
+        return SubagentWorkerOutput(
+            assignment.task.objective,
+            model_steps=assignment.max_steps,
+            tool_calls=assignment.max_tool_calls,
+            tools_used=("read_file",),
+            input_tokens=assignment.max_total_tokens,
+        )
+
+    results = SubagentSupervisor(
+        parent_callable_tools={"read_file"},
+        effective_permissions={"read_file": "allow"},
+        worker=worker,
+        budget=SubagentBudget(
+            max_children=2,
+            max_concurrency=2,
+            max_steps_per_child=6,
+            max_total_steps=8,
+            max_tool_calls_per_child=8,
+            max_total_tool_calls=10,
+            max_tokens_per_child=1_000,
+            max_total_tokens=1_600,
+        ),
+    ).run(
+        [
+            SubagentTask("first", task_id="one", requested_tools=("read_file",)),
+            SubagentTask("second", task_id="two", requested_tools=("read_file",)),
+        ]
+    )
+
+    assert [result.summary for result in results] == ["first", "second"]
+    assert [result.status for result in results] == [
+        SubagentStatus.COMPLETED,
+        SubagentStatus.COMPLETED,
+    ]
+    assert sum(item.max_steps for item in assignments) == 8
+    assert sum(item.max_tool_calls for item in assignments) == 10
+    assert sum(item.max_total_tokens for item in assignments) == 1_600
+
+
+def test_concurrent_results_keep_input_order_when_completion_order_differs():
+    first_may_finish = threading.Event()
+
+    def worker(assignment):
+        if assignment.task.task_id == "one":
+            assert first_may_finish.wait(timeout=2)
+        else:
+            first_may_finish.set()
+        return SubagentWorkerOutput(assignment.task.task_id, model_steps=1)
+
+    results = SubagentSupervisor(
+        parent_callable_tools={"read_file"},
+        effective_permissions={"read_file": "allow"},
+        worker=worker,
+        budget=SubagentBudget(max_children=2, max_concurrency=2),
+    ).run(
+        [
+            SubagentTask("first", task_id="one", requested_tools=("read_file",)),
+            SubagentTask("second", task_id="two", requested_tools=("read_file",)),
+        ]
+    )
+
+    assert [result.task_id for result in results] == ["one", "two"]
+    assert [result.summary for result in results] == ["one", "two"]
+
+
+def test_shared_state_tools_force_sequential_execution():
+    active = 0
+    maximum_active = 0
+    state_lock = threading.Lock()
+
+    def worker(_assignment):
+        nonlocal active, maximum_active
+        with state_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time.sleep(0.01)
+        with state_lock:
+            active -= 1
+        return SubagentWorkerOutput("done", model_steps=1, tools_used=("web_search",))
+
+    results = SubagentSupervisor(
+        parent_callable_tools={"web_search"},
+        effective_permissions={"web_search": "allow"},
+        worker=worker,
+        budget=SubagentBudget(max_children=2, max_concurrency=2),
+    ).run(
+        [
+            SubagentTask("first", requested_tools=("web_search",)),
+            SubagentTask("second", requested_tools=("web_search",)),
+        ]
+    )
+
+    assert maximum_active == 1
+    assert all(result.status is SubagentStatus.COMPLETED for result in results)
 
 
 def test_prepare_intersects_role_parent_scope_and_effective_permissions():

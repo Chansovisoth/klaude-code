@@ -5710,6 +5710,16 @@ def test_delegate_preflight_rejects_unsafe_child_tool_requests():
             }
         )
 
+    with pytest.raises(ValueError, match="cannot request"):
+        _delegate_task_preflight(
+            {
+                "objective": "Inspect routing",
+                "additional_tasks": [
+                    {"objective": "Change it", "requested_tools": ["edit_file"]}
+                ],
+            }
+        )
+
 
 def test_delegate_result_passes_host_cancellation_and_event_observer(monkeypatch):
     cancel = threading.Event()
@@ -5749,6 +5759,60 @@ def test_delegate_result_passes_host_cancellation_and_event_observer(monkeypatch
     assert captured["parent"] is agent
     assert captured["cancelled"] is agent.cancellation_check
     assert captured["event_sink"] is agent.subagent_event_observer
+
+
+def test_delegate_result_batches_independent_cloud_tasks_in_input_order(monkeypatch):
+    agent = SimpleNamespace(
+        cancellation_check=lambda: False,
+        subagent_event_observer=None,
+        model_info=ModelInfo("openai_codex", "gpt-test", "GPT Test"),
+    )
+    captured = {}
+
+    def supervise(_parent, tasks, **kwargs):
+        captured.update({"tasks": tasks, **kwargs})
+        return [
+            SubagentResult(
+                task_id=task.task_id,
+                role=task.role,
+                status=SubagentStatus.COMPLETED,
+                summary=f"result {index}",
+                callable_tools=("read_file",),
+                tools_used=("read_file",),
+                model_steps=1,
+                tool_calls=1,
+                input_tokens=10,
+                output_tokens=5,
+            )
+            for index, task in enumerate(tasks, start=1)
+        ]
+
+    monkeypatch.setattr("klaude_cli.main.supervise_agent_tasks", supervise)
+
+    result = _delegate_task_result(
+        agent,
+        "Inspect parser",
+        requested_tools=["read_file"],
+        additional_tasks=[
+            {
+                "objective": "Inspect tests",
+                "role": "test_diagnostic",
+                "requested_tools": ["read_file"],
+            }
+        ],
+    )
+
+    assert [task.objective for task in captured["tasks"]] == [
+        "Inspect parser",
+        "Inspect tests",
+    ]
+    assert captured["budget"].max_children == 2
+    assert captured["budget"].max_concurrency == 2
+    assert result["content"].startswith("Task 1 (read_research):\nresult 1")
+    assert "Task 2 (test_diagnostic):\nresult 2" in result["content"]
+    assert result["metadata"]["status"] == "completed"
+    assert result["metadata"]["task_count"] == 2
+    assert result["metadata"]["model_steps"] == 2
 
 
 def test_parent_agent_executes_one_isolated_delegation_and_accounts_for_it():

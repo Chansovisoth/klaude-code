@@ -67,6 +67,7 @@ from klaude_core import (
     OllamaRuntime,
     OpenAIRuntime,
     PermissionGate,
+    SubagentBudget,
     SubagentEvent,
     SubagentRole,
     SubagentStatus,
@@ -4375,53 +4376,64 @@ def _subagent_activity_text(payload: dict[str, Any]) -> str:
 
 
 def _delegate_task_preflight(args: dict) -> None:
-    requested = args.get("requested_tools")
-    requested_tools = (
-        tuple(str(name) for name in requested) if isinstance(requested, list) else ()
-    )
-    forbidden = set(requested_tools).intersection(
-        {*STATE_CHANGING_TOOLS, "delegate_task", "request_user_input"}
-    )
-    if forbidden:
-        raise ValueError(
-            "delegated tasks cannot request mutation, shell, interactive, or delegation tools"
+    _delegate_tasks_from_arguments(args)
+
+
+def _delegate_tasks_from_arguments(args: dict[str, Any]) -> list[SubagentTask]:
+    specs: list[dict[str, Any]] = [args]
+    additional = args.get("additional_tasks")
+    if additional is not None:
+        if not isinstance(additional, list) or any(
+            not isinstance(item, dict) for item in additional
+        ):
+            raise ValueError("additional delegated tasks must be objects")
+        specs.extend(additional)
+    if len(specs) > 3:
+        raise ValueError("one delegation may contain at most three tasks")
+
+    tasks: list[SubagentTask] = []
+    forbidden_tools = {*STATE_CHANGING_TOOLS, "delegate_task", "request_user_input"}
+    for spec in specs:
+        requested = spec.get("requested_tools")
+        requested_tools = (
+            tuple(str(name) for name in requested) if isinstance(requested, list) else ()
         )
-    SubagentTask(
-        objective=str(args.get("objective") or ""),
-        role=SubagentRole(str(args.get("role") or SubagentRole.READ_RESEARCH.value)),
-        context=str(args.get("context") or ""),
-        requested_tools=requested_tools,
-    )
+        if set(requested_tools).intersection(forbidden_tools):
+            raise ValueError(
+                "delegated tasks cannot request mutation, shell, interactive, "
+                "or delegation tools"
+            )
+        tasks.append(
+            SubagentTask(
+                objective=str(spec.get("objective") or ""),
+                role=SubagentRole(
+                    str(spec.get("role") or SubagentRole.READ_RESEARCH.value)
+                ),
+                context=str(spec.get("context") or ""),
+                requested_tools=requested_tools,
+            )
+        )
+    return tasks
 
 
 def _delegate_task_permission_detail(args: dict) -> str:
+    additional = args.get("additional_tasks")
+    count = 1 + (len(additional) if isinstance(additional, list) else 0)
     role = _activity_value(args.get("role") or "read_research", limit=40).replace("_", "/")
     objective = _activity_value(args.get("objective"), limit=180)
-    return f"Delegate one read-only {role} task? {objective}"
+    if count == 1:
+        return f"Delegate one read-only {role} task? {objective}"
+    return f"Delegate {count} bounded read-only tasks? {objective}"
 
 
-def _delegate_task_result(
-    agent: Agent,
-    objective: str,
-    role: str = "read_research",
-    context: str = "",
-    requested_tools: list[str] | None = None,
-) -> dict[str, Any]:
-    task = SubagentTask(
-        objective=objective,
-        role=SubagentRole(role),
-        context=context,
-        requested_tools=tuple(requested_tools or ()),
-    )
-    results = supervise_agent_tasks(
-        agent,
-        [task],
-        cancelled=agent.cancellation_check,
-        event_sink=agent.subagent_event_observer,
-    )
-    result = results[0]
-    metadata = {
-        "canonical_tool": "delegate_task",
+def _subagent_parallelism(agent: Agent) -> int:
+    """Conservative automatic policy; local inference stays single-worker."""
+    backend = str(getattr(getattr(agent, "model_info", None), "backend", "ollama"))
+    return 1 if backend == "ollama" else 2
+
+
+def _subagent_result_metadata(result) -> dict[str, Any]:
+    return {
         "status": result.status.value,
         "task_id": result.task_id,
         "role": result.role.value,
@@ -4433,13 +4445,78 @@ def _delegate_task_result(
         "unknown_token_requests": result.unknown_token_requests,
         "error_category": result.error_category,
     }
-    if result.status is SubagentStatus.COMPLETED:
-        content = result.summary or "Subagent completed without additional findings."
-    elif result.status is SubagentStatus.CANCELLED:
-        content = "error: delegated task was cancelled at a safe boundary"
-    else:
-        category = result.error_category or "runtime"
-        content = f"error: delegated task failed ({category})"
+
+
+def _delegate_task_result(
+    agent: Agent,
+    objective: str,
+    role: str = "read_research",
+    context: str = "",
+    requested_tools: list[str] | None = None,
+    additional_tasks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    arguments: dict[str, Any] = {
+        "objective": objective,
+        "role": role,
+        "context": context,
+        "requested_tools": requested_tools or [],
+        "additional_tasks": additional_tasks or [],
+    }
+    tasks = _delegate_tasks_from_arguments(arguments)
+    parallelism = _subagent_parallelism(agent)
+    budget = SubagentBudget(
+        max_children=len(tasks),
+        max_concurrency=min(parallelism, len(tasks)),
+    )
+    results = supervise_agent_tasks(
+        agent,
+        tasks,
+        budget=budget,
+        cancelled=agent.cancellation_check,
+        event_sink=agent.subagent_event_observer,
+    )
+    child_metadata = [_subagent_result_metadata(result) for result in results]
+    if len(results) == 1:
+        result = results[0]
+        metadata = {"canonical_tool": "delegate_task", **child_metadata[0]}
+        if result.status is SubagentStatus.COMPLETED:
+            content = result.summary or "Subagent completed without additional findings."
+        elif result.status is SubagentStatus.CANCELLED:
+            content = "error: delegated task was cancelled at a safe boundary"
+        else:
+            category = result.error_category or "runtime"
+            content = f"error: delegated task failed ({category})"
+        return {"content": content, "metadata": metadata}
+
+    status = (
+        "failed"
+        if any(result.status is SubagentStatus.FAILED for result in results)
+        else "cancelled"
+        if any(result.status is SubagentStatus.CANCELLED for result in results)
+        else "completed"
+    )
+    sections = []
+    for index, result in enumerate(results, start=1):
+        if result.status is SubagentStatus.COMPLETED:
+            summary = result.summary or "Completed without additional findings."
+        else:
+            summary = f"{result.status.value}: {result.error_category or 'runtime'}"
+        sections.append(f"Task {index} ({result.role.value}):\n{summary}")
+    content = "\n\n".join(sections)
+    metadata = {
+        "canonical_tool": "delegate_task",
+        "status": status,
+        "task_count": len(results),
+        "max_concurrency": parallelism,
+        "model_steps": sum(result.model_steps for result in results),
+        "tool_calls": sum(result.tool_calls for result in results),
+        "input_tokens": sum(result.input_tokens for result in results),
+        "output_tokens": sum(result.output_tokens for result in results),
+        "unknown_token_requests": sum(
+            result.unknown_token_requests for result in results
+        ),
+        "tasks": child_metadata,
+    }
     return {"content": content, "metadata": metadata}
 
 
@@ -6176,12 +6253,15 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
         ),
         Tool(
             "delegate_task",
-            "Delegate one bounded, independent read-only investigation to a child agent. "
-            "Use only when a separate inspection, research pass, or second opinion would "
-            "materially reduce uncertainty. Do not use for greetings, simple questions, "
-            "mutations, shell commands, Git changes, or work the primary agent can answer "
-            "directly. The child receives only the supplied objective and bounded context, "
-            "cannot ask the user questions, and cannot delegate again.",
+            "Delegate one to three bounded, independent read-only investigations to isolated "
+            "child agents. Put only genuinely independent work in additional_tasks. Cloud "
+            "providers may run audited stateless workspace inspections concurrently; local "
+            "models and shared web, knowledge, or Git services remain sequential. Use only "
+            "when separate inspection, research, or a second opinion materially reduces "
+            "uncertainty. Do not use for greetings, simple questions, mutations, shell "
+            "commands, Git changes, or work the primary agent can answer directly. Children "
+            "receive only supplied objectives and bounded context, cannot ask questions, and "
+            "cannot delegate again.",
             {
                 "type": "object",
                 "properties": {
@@ -6196,16 +6276,45 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
                         "maxItems": 16,
                         "items": {"type": "string", "maxLength": 128},
                     },
+                    "additional_tasks": {
+                        "type": "array",
+                        "maxItems": 2,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "objective": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 2000,
+                                },
+                                "role": {
+                                    "type": "string",
+                                    "enum": ["read_research", "test_diagnostic"],
+                                },
+                                "context": {"type": "string", "maxLength": 8000},
+                                "requested_tools": {
+                                    "type": "array",
+                                    "maxItems": 16,
+                                    "items": {"type": "string", "maxLength": 128},
+                                },
+                            },
+                            "required": ["objective"],
+                            "additionalProperties": False,
+                        },
+                    },
                 },
                 "required": ["objective"],
+                "additionalProperties": False,
             },
-            lambda objective, role="read_research", context="", requested_tools=None: (
+            lambda objective, role="read_research", context="", requested_tools=None,
+            additional_tasks=None: (
                 _delegate_task_result(
                     agent_ref["agent"],
                     objective,
                     role=role,
                     context=context,
                     requested_tools=requested_tools,
+                    additional_tasks=additional_tasks,
                 )
             ),
             detail=_delegate_task_permission_detail,

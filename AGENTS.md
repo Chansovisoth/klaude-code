@@ -836,8 +836,9 @@ the approach; skipped duplicate calls render SKIPPED rather than RAN.
 
 Explicit requests for a subagent, delegation, an independent review, or a second
 opinion may route `delegate_task`; ordinary turns do not receive it automatically.
-The tool defaults to ask and starts at most one sequential child. Children receive
-only a bounded objective/context handoff, never the parent transcript. Host-defined
+The tool defaults to ask and accepts one primary task plus at most two genuinely
+independent additional tasks. Children receive only a bounded objective/context
+handoff, never the parent transcript. Host-defined
 read/research and test/diagnostic roles intersect the current parent-callable tools
 with effective user policies: allow and active process grants may pass through,
 deny always wins, and unresolved ask policies are omitted rather than prompting
@@ -853,8 +854,14 @@ the child while retaining only the provider configuration or authentication
 broker needed to connect. Custom providers that cannot fork fail closed instead
 of silently sharing a transport. Sanitized start/finish events and a bounded
 public final summary are persisted and mirrored to `/resume`; private reasoning and raw tool
-output are never stored as subagent activity. Execution remains sequential until
-aggregate budget reservation and shared tool services are concurrency-safe.
+output are never stored as subagent activity. Local Ollama execution remains
+single-worker. Cloud providers may run two children concurrently only when every
+callable capability is in the audited stateless workspace set (`read_file`,
+`list_dir`, `grep`, `workspace_info`, and `current_time`). Fixed model-step,
+tool-call, and provider-token shares are reserved before concurrent launch, and
+results return in input order even when completion order differs. Web, knowledge,
+Git inspection, shell, mutation, and every unknown capability force sequential
+execution until their shared-state behavior is explicitly proven safe.
 
 The turn governor normalizes exact input/output usage reported by Ollama,
 OpenAI API, OpenAI Codex, and Gemini after every successful provider request.
