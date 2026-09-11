@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add the first controlled-subagent foundation: typed read/research and
+  test/diagnostic child tasks, parent-intersected read-only capability
+  envelopes, conservative permission inheritance, independent and aggregate
+  budgets, bounded structured results, cancellation checks, and public
+  lifecycle events. Live model delegation is not exposed yet.
 - Add typed standard, plan, review, init, and evaluation turn scopes to the
   immutable capability contract. Enforce each scope's tool allowlist before
   provider requests, hard-limit `/init` writes to the workspace-root

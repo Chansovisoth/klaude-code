@@ -1,0 +1,341 @@
+"""Safety-first contracts for bounded child-agent orchestration."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import asdict, dataclass, field
+from enum import StrEnum
+from typing import Any
+from uuid import uuid4
+
+
+class SubagentRole(StrEnum):
+    """Host-defined child roles; models cannot invent broader roles."""
+
+    READ_RESEARCH = "read_research"
+    TEST_DIAGNOSTIC = "test_diagnostic"
+
+
+class SubagentStatus(StrEnum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+_ROLE_TOOLS: dict[SubagentRole, frozenset[str]] = {
+    SubagentRole.READ_RESEARCH: frozenset(
+        {
+            "read_file",
+            "list_dir",
+            "grep",
+            "workspace_info",
+            "git_status",
+            "git_diff",
+            "web_search",
+            "fetch_url",
+            "http_probe",
+            "code_search",
+            "query_knowledge",
+            "huggingface_search",
+            "huggingface_details",
+            "huggingface_readme",
+            "current_time",
+            "weather_lookup",
+            "storage_usage",
+        }
+    ),
+    # Shell remains excluded until a dedicated test sandbox can prove that a
+    # command cannot mutate the workspace or host.
+    SubagentRole.TEST_DIAGNOSTIC: frozenset(
+        {
+            "read_file",
+            "list_dir",
+            "grep",
+            "workspace_info",
+            "git_status",
+            "git_diff",
+            "query_knowledge",
+        }
+    ),
+}
+
+
+@dataclass(frozen=True)
+class SubagentTask:
+    """One bounded, public child task selected by the primary agent."""
+
+    objective: str
+    role: SubagentRole = SubagentRole.READ_RESEARCH
+    context: str = ""
+    requested_tools: tuple[str, ...] = ()
+    task_id: str = field(default_factory=lambda: uuid4().hex)
+
+    def __post_init__(self) -> None:
+        objective = " ".join(self.objective.split())
+        if not objective or len(objective) > 2_000:
+            raise ValueError("subagent objective must contain 1-2,000 characters")
+        if len(self.context) > 8_000:
+            raise ValueError("subagent context must not exceed 8,000 characters")
+        if not self.task_id or len(self.task_id) > 128:
+            raise ValueError("subagent task_id must contain 1-128 characters")
+        requested_tools = tuple(
+            dict.fromkeys(str(name) for name in self.requested_tools if str(name))
+        )
+        if len(requested_tools) > 64 or any(len(name) > 128 for name in requested_tools):
+            raise ValueError("subagent requested_tools exceeds its safe bounds")
+        object.__setattr__(self, "objective", objective)
+        object.__setattr__(self, "role", SubagentRole(self.role))
+        object.__setattr__(self, "requested_tools", requested_tools)
+
+
+@dataclass(frozen=True)
+class SubagentBudget:
+    """Parent-owned limits that children cannot enlarge."""
+
+    max_children: int = 1
+    max_steps_per_child: int = 6
+    max_total_steps: int = 8
+    max_result_characters: int = 8_000
+
+    def bounded(self) -> SubagentBudget:
+        children = max(1, min(8, int(self.max_children)))
+        per_child = max(1, min(20, int(self.max_steps_per_child)))
+        total = max(1, min(64, int(self.max_total_steps)))
+        return SubagentBudget(
+            max_children=children,
+            max_steps_per_child=min(per_child, total),
+            max_total_steps=total,
+            max_result_characters=max(512, min(32_000, int(self.max_result_characters))),
+        )
+
+
+@dataclass(frozen=True)
+class SubagentAssignment:
+    """The exact capability envelope supplied to one child worker."""
+
+    task: SubagentTask
+    callable_tools: tuple[str, ...]
+    unavailable_tools: tuple[tuple[str, str], ...]
+    max_steps: int
+
+
+@dataclass(frozen=True)
+class SubagentWorkerOutput:
+    """Structured output returned by a child runtime adapter."""
+
+    summary: str
+    model_steps: int
+    tool_calls: int = 0
+    tools_used: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SubagentResult:
+    """Bounded public result safe for the primary agent and session UI."""
+
+    task_id: str
+    role: SubagentRole
+    status: SubagentStatus
+    summary: str
+    callable_tools: tuple[str, ...]
+    tools_used: tuple[str, ...]
+    model_steps: int
+    tool_calls: int
+    error_category: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["role"] = self.role.value
+        value["status"] = self.status.value
+        return value
+
+
+@dataclass(frozen=True)
+class SubagentEvent:
+    """Public lifecycle event; never carries reasoning or provider secrets."""
+
+    kind: str
+    task_id: str
+    role: SubagentRole
+    status: SubagentStatus | None = None
+
+    def to_dict(self) -> dict[str, str]:
+        value = {"kind": self.kind, "task_id": self.task_id, "role": self.role.value}
+        if self.status is not None:
+            value["status"] = self.status.value
+        return value
+
+
+SubagentWorker = Callable[[SubagentAssignment], SubagentWorkerOutput]
+SubagentEventSink = Callable[[SubagentEvent], None]
+CancellationCheck = Callable[[], bool]
+
+
+class SubagentSupervisor:
+    """Prepare and run bounded read-only child tasks sequentially.
+
+    Sequential execution is intentional initially: sharing a provider stream
+    concurrently would make cancellation and accounting ambiguous. A future
+    runtime factory may safely enable adaptive concurrency.
+    """
+
+    def __init__(
+        self,
+        *,
+        parent_callable_tools: Iterable[str],
+        effective_permissions: Mapping[str, str],
+        worker: SubagentWorker,
+        process_grants: Iterable[str] = (),
+        budget: SubagentBudget | None = None,
+        cancelled: CancellationCheck | None = None,
+        event_sink: SubagentEventSink | None = None,
+    ) -> None:
+        self.parent_callable_tools = frozenset(parent_callable_tools)
+        self.effective_permissions = dict(effective_permissions)
+        self.process_grants = frozenset(process_grants)
+        self.worker = worker
+        self.budget = (budget or SubagentBudget()).bounded()
+        self.cancelled = cancelled or (lambda: False)
+        self.event_sink = event_sink
+
+    def prepare(self, task: SubagentTask, *, steps_left: int | None = None) -> SubagentAssignment:
+        role_tools = _ROLE_TOOLS[task.role]
+        requested = frozenset(task.requested_tools) if task.requested_tools else role_tools
+        candidates = role_tools & requested & self.parent_callable_tools
+        callable_tools = tuple(
+            sorted(
+                name
+                for name in candidates
+                if self.effective_permissions.get(name, "ask") == "allow"
+                or (
+                    self.effective_permissions.get(name, "ask") == "ask"
+                    and name in self.process_grants
+                )
+            )
+        )
+        unavailable: dict[str, str] = {}
+        for name in sorted(requested):
+            if name not in role_tools:
+                unavailable[name] = "not allowed for child role"
+            elif name not in self.parent_callable_tools:
+                unavailable[name] = "not callable by parent turn"
+            elif name not in callable_tools:
+                unavailable[name] = (
+                    "denied by parent policy"
+                    if self.effective_permissions.get(name, "ask") == "deny"
+                    else "requires an interactive permission decision"
+                )
+        remaining = self.budget.max_total_steps if steps_left is None else max(0, steps_left)
+        return SubagentAssignment(
+            task=task,
+            callable_tools=callable_tools,
+            unavailable_tools=tuple(unavailable.items()),
+            max_steps=min(self.budget.max_steps_per_child, remaining),
+        )
+
+    def run(self, tasks: Iterable[SubagentTask]) -> list[SubagentResult]:
+        queued = list(tasks)
+        if len(queued) > self.budget.max_children:
+            raise ValueError(
+                f"subagent request exceeds child limit ({len(queued)} > "
+                f"{self.budget.max_children})"
+            )
+        if len({task.task_id for task in queued}) != len(queued):
+            raise ValueError("subagent task IDs must be unique")
+
+        results: list[SubagentResult] = []
+        steps_used = 0
+        for task in queued:
+            was_cancelled = self.cancelled()
+            if was_cancelled or steps_used >= self.budget.max_total_steps:
+                result = self._terminal_result(
+                    task,
+                    SubagentStatus.CANCELLED if was_cancelled else SubagentStatus.FAILED,
+                    error_category="cancelled" if was_cancelled else "budget_exhausted",
+                )
+                results.append(result)
+                self._emit(
+                    SubagentEvent("subagent_finished", task.task_id, task.role, result.status)
+                )
+                continue
+            assignment = self.prepare(task, steps_left=self.budget.max_total_steps - steps_used)
+            self._emit(SubagentEvent("subagent_started", task.task_id, task.role))
+            try:
+                output = self.worker(assignment)
+                model_steps = max(0, int(output.model_steps))
+                tool_calls = max(0, int(output.tool_calls))
+                tools_used = tuple(dict.fromkeys(output.tools_used))
+                invalid_tools = set(tools_used) - set(assignment.callable_tools)
+                if model_steps > assignment.max_steps or invalid_tools:
+                    result = self._terminal_result(
+                        task,
+                        SubagentStatus.FAILED,
+                        assignment=assignment,
+                        error_category=(
+                            "budget_violation" if model_steps > assignment.max_steps
+                            else "capability_violation"
+                        ),
+                    )
+                elif self.cancelled():
+                    result = self._terminal_result(
+                        task,
+                        SubagentStatus.CANCELLED,
+                        assignment=assignment,
+                        model_steps=model_steps,
+                        tool_calls=tool_calls,
+                        tools_used=tools_used,
+                    )
+                else:
+                    result = SubagentResult(
+                        task_id=task.task_id,
+                        role=task.role,
+                        status=SubagentStatus.COMPLETED,
+                        summary=str(output.summary)[: self.budget.max_result_characters],
+                        callable_tools=assignment.callable_tools,
+                        tools_used=tools_used,
+                        model_steps=model_steps,
+                        tool_calls=tool_calls,
+                    )
+                steps_used += min(model_steps, assignment.max_steps)
+            except Exception as exc:
+                result = self._terminal_result(
+                    task,
+                    SubagentStatus.FAILED,
+                    assignment=assignment,
+                    error_category=type(exc).__name__,
+                )
+            results.append(result)
+            self._emit(SubagentEvent("subagent_finished", task.task_id, task.role, result.status))
+        return results
+
+    def _terminal_result(
+        self,
+        task: SubagentTask,
+        status: SubagentStatus,
+        *,
+        assignment: SubagentAssignment | None = None,
+        model_steps: int = 0,
+        tool_calls: int = 0,
+        tools_used: tuple[str, ...] = (),
+        error_category: str = "",
+    ) -> SubagentResult:
+        return SubagentResult(
+            task_id=task.task_id,
+            role=task.role,
+            status=status,
+            summary="",
+            callable_tools=assignment.callable_tools if assignment else (),
+            tools_used=tools_used,
+            model_steps=model_steps,
+            tool_calls=tool_calls,
+            error_category=error_category,
+        )
+
+    def _emit(self, event: SubagentEvent) -> None:
+        if self.event_sink is None:
+            return
+        try:
+            self.event_sink(event)
+        except Exception:
+            # UI/session telemetry must never alter child execution.
+            pass

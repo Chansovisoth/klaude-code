@@ -1271,9 +1271,16 @@ Development state at handoff:
   cancellation, and offline transcript capability matrices.
 - The opt-in live behavioral harness records comparable sanitized metrics across
   configured local and cloud models without adding paid/network calls to CI.
+- Core exports the initial controlled-subagent contracts and sequential
+  supervisor. Child roles are host-defined and read-only, intersect the parent
+  callable set with effective user permissions, cannot turn a denied policy into
+  a process grant, have independent and aggregate budgets, return bounded
+  structured results, and emit public lifecycle events without reasoning text.
+  This foundation is not yet connected to a model-callable delegation tool.
 - Full validation can hang in the optional LanceDB roundtrip under some
   restricted sandboxes. Report the focused and non-LanceDB results separately;
   never describe the knowledge suite as green unless it completed.
-- Continue the engineering roadmap incrementally. The next major architecture
-  item is controlled subagent orchestration; do not add background/cloud workers
-  or broad write concurrency as part of that work.
+- Continue controlled subagent orchestration by connecting the supervisor to an
+  isolated child-agent adapter, shared parent-budget accounting, cancellation,
+  durable session events, and then a narrowly routed delegation tool. Do not add
+  background/cloud workers or broad write concurrency as part of that work.

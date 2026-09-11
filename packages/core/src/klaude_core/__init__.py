@@ -35,6 +35,17 @@ from .model_runtime import (
 from .ollama import Ollama, OllamaError
 from .permissions import PermissionDenied, PermissionGate
 from .runtime_context import collect_runtime_context, render_runtime_context
+from .subagents import (
+    SubagentAssignment,
+    SubagentBudget,
+    SubagentEvent,
+    SubagentResult,
+    SubagentRole,
+    SubagentStatus,
+    SubagentSupervisor,
+    SubagentTask,
+    SubagentWorkerOutput,
+)
 
 __all__ = [
     "Agent",
@@ -78,6 +89,15 @@ __all__ = [
     "GeminiRuntime",
     "PermissionDenied",
     "PermissionGate",
+    "SubagentAssignment",
+    "SubagentBudget",
+    "SubagentEvent",
+    "SubagentResult",
+    "SubagentRole",
+    "SubagentStatus",
+    "SubagentSupervisor",
+    "SubagentTask",
+    "SubagentWorkerOutput",
     "collect_runtime_context",
     "render_runtime_context",
 ]
