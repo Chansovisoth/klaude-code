@@ -71,6 +71,22 @@ uv run klaude       # or: uv tool install --editable apps/cli && klaude
 Inside the interactive chat, use `/help` to print the command reference
 without asking the model to summarize it.
 
+Maintainers can compare configured model behavior with the opt-in live harness:
+
+```bash
+uv run python scripts/evaluate_agent_behavior.py \
+  --model ollama/qwen3-coder:30b \
+  --model openai_codex/gpt-5.5 \
+  --timeout 180 --yes
+```
+
+Each scenario runs read-only in a separate process with a hard timeout. Reports
+record tool, retry, permission, token, timing, safety, finalization, and retrieval
+support metrics without saving answer text or raw provider errors. Web-retrieval
+evaluation is excluded by default and requires both `--scenario web-retrieval`
+and `--include-network`. Use `--output PATH` to write a new JSON report inside
+the evaluated workspace; existing files are never overwritten.
+
 The interactive terminal writes its transcript into ordinary terminal
 scrollback, so normal wheel scrolling and drag-to-select work without Shift.
 Completed lines stay above the live composer through refreshes and resizes;

@@ -1222,6 +1222,15 @@ Use focused checks after relevant changes:
 - `uv run python -m py_compile <changed-python-files>`
 - `bash -n scripts/install.sh`
 
+Live behavioral model comparisons are deliberately separate from deterministic
+CI. Run `uv run python scripts/evaluate_agent_behavior.py --model MODEL --yes`
+to evaluate direct response, workspace inspection, and contextual diagnostic
+behavior. Each model/scenario pair runs read-only in an isolated child process
+with a hard timeout. Raw answers, tool output, provider errors, and credentials
+are not written to the report. Network retrieval requires an explicit scenario
+plus `--include-network`; report paths must be new files inside the evaluated
+workspace.
+
 For secret-safe Compose validation:
 
 - `docker compose config --no-env-resolution --no-interpolate`
@@ -1238,7 +1247,7 @@ is the dependency-free artifact validator used by that workflow.
 The worktree may already be dirty with user or generated changes. Never revert
 changes you did not make unless the user explicitly requests it.
 
-## Current Development Handoff (2026-08-30)
+## Current Development Handoff (2026-09-11)
 
 Treat the Ubuntu server checkout at `/home/klaude/klaude-code` as the canonical
 development environment. Windows and VS Code are remote access clients only.
@@ -1246,37 +1255,20 @@ Do not add Windows compatibility unless the user explicitly requests it. Before
 acting, inspect the live Ubuntu environment, repository, configuration,
 dependencies, documentation, and Git state rather than relying on this snapshot.
 
-Release state at handoff:
+Development state at handoff:
 
-- Current release tag: `v0.2.0-alpha.2`.
-- Release commit: `63023ad` (`chore: prepare v0.2.0-alpha.2 prerelease`).
-- `master` and `origin/master` point to that commit.
-- The tag was pushed to GitHub. A GitHub Release page was not created because
-  `gh release create` returned HTTP 404, likely an API-token permission issue.
-- Last recorded release validation: `uv run pytest tests/unit -q` reported 402
-  passing tests; `uv run ruff check .` passed; and
-  `bash -n scripts/install.sh` passed. Re-run relevant checks before claiming
-  current validity.
-
-Current requested workflow:
-
-- Do not refactor or rewrite immediately.
-- First perform repository and Ubuntu-environment reconnaissance.
-- Inspect `README.md`, `CHANGELOG.md`, package manifests, deployment files,
-  configuration examples, tests, Git history/status, TODOs/FIXMEs, and the
-  important implementation files listed below.
-- Report what Klaude is, its architecture and execution flow, Git state,
-  runtime/deployment, dependencies, testing, security/reliability concerns,
-  technical debt, and five high-value next improvements with rationale and
-  rough invasiveness.
-- Wait for user direction after the reconnaissance report before beginning
-  major changes.
-
-Important implementation files to inspect early:
-
-- `packages/core/src/klaude_core/agent.py`
-- `packages/core/src/klaude_core/config.py`
-- `packages/web/src/klaude_web/providers.py`
-- `packages/web/src/klaude_web/facade.py`
-- `packages/knowledge/src/klaude_knowledge/indexing.py`
-- `packages/knowledge/src/klaude_knowledge/store.py`
+- Workspace package identities are `0.2.0a4`; verify the live branch and remote
+  before making release claims.
+- Locked multi-version CI, production mypy, wheel smoke tests, and the manual
+  reproducible release-candidate attestation workflow are implemented.
+- Agent execution now has immutable per-request capability snapshots, bounded
+  non-progress recovery, durable stale-worker recovery, provider-safe stream
+  cancellation, and offline transcript capability matrices.
+- The opt-in live behavioral harness records comparable sanitized metrics across
+  configured local and cloud models without adding paid/network calls to CI.
+- Full validation can hang in the optional LanceDB roundtrip under some
+  restricted sandboxes. Report the focused and non-LanceDB results separately;
+  never describe the knowledge suite as green unless it completed.
+- Continue the engineering roadmap incrementally. The next major architecture
+  item is controlled subagent orchestration; do not add background/cloud workers
+  or broad write concurrency as part of that work.

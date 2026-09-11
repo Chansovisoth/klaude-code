@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add a privacy-bounded live behavioral evaluation harness with isolated
+  read-only model/scenario workers, hard timeouts, explicit network opt-in,
+  non-overwriting report paths, sanitized provider failure categories, and
+  comparable tool/retry/permission/token/finalization/retrieval metrics. Expand
+  deterministic transcript replays across local, cloud, Codex-authenticated,
+  and tool-less capability profiles.
+- Make provider stream cancellation best-effort and idempotent across Ollama,
+  OpenAI/Codex, and Gemini so transport teardown failures cannot escape into TUI
+  controls or session switching.
 - Advance development package identities to `0.2.0a4` so unreleased work never
   reuses the published alpha.3 artifacts. Run CI for every pushed branch as well
   as pull requests and manual dispatches.
