@@ -115,6 +115,20 @@ class TurnGovernor:
             self.stop_reason = "turn wall-time budget reached"
         return self.stop_reason
 
+    def charge_delegated_usage(self, *, model_steps: int, tool_calls: int) -> str:
+        """Charge completed child work to this turn's non-expandable budget."""
+        delegated_steps = max(0, int(model_steps))
+        delegated_calls = max(0, int(tool_calls))
+        self.model_steps_used += delegated_steps
+        self.tool_calls_used += delegated_calls
+        if self.model_steps_used >= self.max_model_steps:
+            self.stop_reason = "model/tool step budget reached"
+        elif self.tool_calls_used >= self.max_tool_calls:
+            self.stop_reason = "tool-call budget reached"
+        elif self.elapsed_seconds >= self.max_elapsed_seconds:
+            self.stop_reason = "turn wall-time budget reached"
+        return self.stop_reason
+
     @property
     def elapsed_seconds(self) -> float:
         return max(0.0, self._clock() - self._started_at)

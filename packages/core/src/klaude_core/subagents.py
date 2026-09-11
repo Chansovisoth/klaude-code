@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
+
+from .capabilities import TurnScope
 
 
 class SubagentRole(StrEnum):
@@ -171,6 +173,116 @@ SubagentEventSink = Callable[[SubagentEvent], None]
 CancellationCheck = Callable[[], bool]
 
 
+class SubagentExecutionError(RuntimeError):
+    """A child agent did not produce a coherent completed result."""
+
+    def __init__(self, *, model_steps: int, tool_calls: int) -> None:
+        super().__init__("child agent did not complete successfully")
+        self.model_steps = max(0, int(model_steps))
+        self.tool_calls = max(0, int(tool_calls))
+
+
+def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> SubagentWorkerOutput:
+    """Run one isolated child conversation on the parent's idle provider runtime.
+
+    The adapter deliberately receives no parent transcript. The bounded task
+    objective and context are the only conversational handoff. Tool closures
+    are reused only after the supervisor has intersected role, parent-turn, and
+    permission boundaries.
+    """
+    from .agent import Agent
+    from .permissions import PermissionGate
+
+    child_tools = [
+        parent.tools[name]
+        for name in assignment.callable_tools
+        if name in parent.tools
+    ]
+    child_gate = PermissionGate(
+        {name: "allow" for name in assignment.callable_tools},
+        lambda _tool, _detail: "n",
+    )
+    parent_prompt = str(parent.messages[0].get("content", "")) if parent.messages else ""
+    child_prompt = (
+        parent_prompt
+        + "\n\n<subagent_contract>\n"
+        + f"Role: {assignment.task.role.value}.\n"
+        + "Complete only the bounded objective below. Work read-only and non-interactively. "
+        + "Do not modify files, execute shell commands, mutate Git, delegate work, request "
+        + "permission, or ask the user questions. Return concise findings with concrete public "
+        + "evidence such as file paths, symbols, or source URLs. Do not expose private reasoning.\n"
+        + f"Maximum model steps: {assignment.max_steps}.\n"
+        + "</subagent_contract>"
+    )
+    child = Agent(
+        parent.runtime,
+        parent.model,
+        child_tools,
+        child_gate,
+        child_prompt,
+        max_steps=assignment.max_steps,
+        max_code_continuations=0,
+        max_code_repairs=0,
+        tool_selector=parent.tool_selector,
+        ollama_options=parent.ollama_options,
+        ollama_think=parent.ollama_think,
+        web_research_budget=parent.web_research_budget,
+        model_info=parent.model_info,
+    )
+    child.workspace = getattr(parent, "workspace", None)
+    child.workdir = getattr(parent, "workdir", None)
+    child.tool_config = getattr(parent, "tool_config", None)
+    child.injected_instruction_paths = tuple(
+        getattr(parent, "injected_instruction_paths", ())
+    )
+    child.injected_instructions_truncated = bool(
+        getattr(parent, "injected_instructions_truncated", False)
+    )
+
+    user_message = (
+        "<subagent_task>\n"
+        f"Role: {assignment.task.role.value}.\n"
+        "Work read-only and non-interactively. Do not modify files, execute shell commands, "
+        "mutate Git, delegate work, request permission, or ask the user questions. Return "
+        "concise findings with concrete public evidence and no private reasoning.\n"
+        f"Objective:\n{assignment.task.objective}"
+    )
+    if assignment.task.context:
+        user_message += f"\n\nBounded context:\n{assignment.task.context}"
+    user_message += "\n</subagent_task>"
+    text_events: list[str] = []
+    text_deltas: list[str] = []
+    tools_used: list[str] = []
+    tool_calls = 0
+    completed = False
+    errors: list[str] = []
+    for event in child.run(user_message, scope=TurnScope.SUBAGENT):
+        if event.kind == "text":
+            text_events.append(str(event.payload.get("content", "")))
+        elif event.kind == "text_delta":
+            text_deltas.append(str(event.payload.get("content", "")))
+        elif event.kind == "tool_start":
+            tools_used.append(str(event.payload.get("tool", "")))
+        elif event.kind == "tool_result":
+            tool_calls += 1
+        elif event.kind == "error":
+            errors.append(str(event.payload.get("message", "")))
+        elif event.kind == "done":
+            completed = True
+    if not completed or errors:
+        raise SubagentExecutionError(
+            model_steps=int(child.last_turn_budget.get("model_steps_used", 0)),
+            tool_calls=tool_calls,
+        )
+    summary = "\n\n".join(text_events).strip() or "".join(text_deltas).strip()
+    return SubagentWorkerOutput(
+        summary=summary,
+        model_steps=int(child.last_turn_budget.get("model_steps_used", 0)),
+        tool_calls=tool_calls,
+        tools_used=tuple(dict.fromkeys(tools_used)),
+    )
+
+
 class SubagentSupervisor:
     """Prepare and run bounded read-only child tasks sequentially.
 
@@ -271,6 +383,9 @@ class SubagentSupervisor:
                         task,
                         SubagentStatus.FAILED,
                         assignment=assignment,
+                        model_steps=model_steps,
+                        tool_calls=tool_calls,
+                        tools_used=tools_used,
                         error_category=(
                             "budget_violation" if model_steps > assignment.max_steps
                             else "capability_violation"
@@ -298,10 +413,15 @@ class SubagentSupervisor:
                     )
                 steps_used += min(model_steps, assignment.max_steps)
             except Exception as exc:
+                model_steps = max(0, int(getattr(exc, "model_steps", 0)))
+                tool_calls = max(0, int(getattr(exc, "tool_calls", 0)))
+                steps_used += min(model_steps, assignment.max_steps)
                 result = self._terminal_result(
                     task,
                     SubagentStatus.FAILED,
                     assignment=assignment,
+                    model_steps=model_steps,
+                    tool_calls=tool_calls,
                     error_category=type(exc).__name__,
                 )
             results.append(result)
@@ -339,3 +459,71 @@ class SubagentSupervisor:
         except Exception:
             # UI/session telemetry must never alter child execution.
             pass
+
+
+def supervise_agent_tasks(
+    parent: Any,
+    tasks: Iterable[SubagentTask],
+    *,
+    budget: SubagentBudget | None = None,
+    cancelled: CancellationCheck | None = None,
+    event_sink: SubagentEventSink | None = None,
+) -> list[SubagentResult]:
+    """Run isolated children and charge their completed usage to the parent turn."""
+    queued = list(tasks)
+    configured_budget = (budget or SubagentBudget()).bounded()
+    if len(queued) > configured_budget.max_children:
+        raise ValueError(
+            f"subagent request exceeds child limit ({len(queued)} > "
+            f"{configured_budget.max_children})"
+        )
+    if len({task.task_id for task in queued}) != len(queued):
+        raise ValueError("subagent task IDs must be unique")
+    governor = getattr(parent, "active_turn_governor", None)
+    if governor is not None:
+        parent_steps_left = max(0, governor.max_model_steps - governor.model_steps_used)
+        if parent_steps_left == 0:
+            return [
+                SubagentResult(
+                    task_id=task.task_id,
+                    role=task.role,
+                    status=SubagentStatus.FAILED,
+                    summary="",
+                    callable_tools=(),
+                    tools_used=(),
+                    model_steps=0,
+                    tool_calls=0,
+                    error_category="parent_budget_exhausted",
+                )
+                for task in queued
+            ]
+        configured_budget = replace(
+            configured_budget,
+            max_steps_per_child=min(
+                configured_budget.max_steps_per_child,
+                parent_steps_left,
+            ),
+            max_total_steps=min(configured_budget.max_total_steps, parent_steps_left),
+        )
+    snapshot = getattr(parent, "last_turn_capabilities", {})
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    callable_tools = snapshot.get("callable_tools", ())
+    if not isinstance(callable_tools, (list, tuple, set, frozenset)):
+        callable_tools = ()
+    supervisor = SubagentSupervisor(
+        parent_callable_tools=(str(name) for name in callable_tools),
+        effective_permissions=getattr(parent.gate, "policies", {}),
+        process_grants=getattr(parent.gate, "process_grants", ()),
+        worker=lambda assignment: run_agent_assignment(parent, assignment),
+        budget=configured_budget,
+        cancelled=cancelled,
+        event_sink=event_sink,
+    )
+    results = supervisor.run(queued)
+    if governor is not None:
+        governor.charge_delegated_usage(
+            model_steps=sum(result.model_steps for result in results),
+            tool_calls=sum(result.tool_calls for result in results),
+        )
+        parent.last_turn_budget = governor.snapshot().to_dict()
+    return results

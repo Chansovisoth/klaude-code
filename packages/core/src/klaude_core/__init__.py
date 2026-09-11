@@ -45,6 +45,8 @@ from .subagents import (
     SubagentSupervisor,
     SubagentTask,
     SubagentWorkerOutput,
+    run_agent_assignment,
+    supervise_agent_tasks,
 )
 
 __all__ = [
@@ -98,6 +100,8 @@ __all__ = [
     "SubagentSupervisor",
     "SubagentTask",
     "SubagentWorkerOutput",
+    "run_agent_assignment",
+    "supervise_agent_tasks",
     "collect_runtime_context",
     "render_runtime_context",
 ]

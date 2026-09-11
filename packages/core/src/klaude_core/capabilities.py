@@ -19,6 +19,7 @@ class TurnScope(StrEnum):
     REVIEW = "review"
     INIT = "init"
     EVALUATION = "evaluation"
+    SUBAGENT = "subagent"
 
 
 @dataclass(frozen=True)

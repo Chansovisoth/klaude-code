@@ -818,7 +818,7 @@ schemas, with reasons for unavailable tools and a separate global-enabled invent
 It records effective ask/allow/deny policies, provider tool/context/effort support,
 injected guidance paths, workspace state, hard safety constraints, and remaining
 turn budgets. Every turn has one typed scope: `standard`, `plan`, `review`, `init`,
-or `evaluation`. Scope allowlists are enforced before provider schemas are built;
+`evaluation`, or `subagent`. Scope allowlists are enforced before provider schemas are built;
 plan and review are read-only, evaluation also omits interactive input, and init
 may write only the workspace-root `AGENTS.md` even if a model supplies another
 path. Plan mode overrides standard and init turns with the stricter plan scope.
@@ -1276,11 +1276,13 @@ Development state at handoff:
   callable set with effective user permissions, cannot turn a denied policy into
   a process grant, have independent and aggregate budgets, return bounded
   structured results, and emit public lifecycle events without reasoning text.
+  Its isolated sequential child adapter receives only the bounded task handoff,
+  not the parent transcript, runs under a dedicated non-interactive scope, and
+  charges completed usage—including failed child usage—to the parent governor.
   This foundation is not yet connected to a model-callable delegation tool.
 - Full validation can hang in the optional LanceDB roundtrip under some
   restricted sandboxes. Report the focused and non-LanceDB results separately;
   never describe the knowledge suite as green unless it completed.
-- Continue controlled subagent orchestration by connecting the supervisor to an
-  isolated child-agent adapter, shared parent-budget accounting, cancellation,
+- Continue controlled subagent orchestration with host cancellation wiring,
   durable session events, and then a narrowly routed delegation tool. Do not add
   background/cloud workers or broad write concurrency as part of that work.

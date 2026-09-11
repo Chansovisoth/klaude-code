@@ -53,3 +53,16 @@ def test_turn_governor_stops_at_safe_boundary_after_wall_time():
 
     assert governor.begin_model_step() == "turn wall-time budget reached"
     assert governor.snapshot().model_steps_used == 1
+
+
+def test_delegated_usage_is_charged_to_parent_budget():
+    governor = TurnGovernor(5, max_tool_calls=6)
+    assert governor.begin_model_step() == ""
+
+    assert governor.charge_delegated_usage(model_steps=3, tool_calls=2) == ""
+    assert governor.snapshot().model_steps_used == 4
+    assert governor.snapshot().tool_calls_used == 2
+    assert (
+        governor.charge_delegated_usage(model_steps=1, tool_calls=0)
+        == "model/tool step budget reached"
+    )

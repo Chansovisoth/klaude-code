@@ -3687,6 +3687,15 @@ _PLAN_SCOPE_TOOLS = _REVIEW_SCOPE_TOOLS | {
     "storage_usage",
 }
 _EVALUATION_SCOPE_TOOLS = _PLAN_SCOPE_TOOLS - {"request_user_input"}
+_SUBAGENT_SCOPE_TOOLS = (
+    _EVALUATION_SCOPE_TOOLS
+    - {
+        "list_commands",
+        "list_recent_sessions",
+        "search_sessions",
+    }
+    | {"current_time", "weather_lookup"}
+)
 _INIT_SCOPE_TOOLS = {
     "read_file",
     "list_dir",
@@ -3749,6 +3758,7 @@ class Agent:
         self.injected_instructions_truncated = False
         self.plan_mode = False
         self.active_turn_scope = TurnScope.STANDARD
+        self.active_turn_governor: TurnGovernor | None = None
         # Host integrations may attach workspace-aware services. Defining the
         # extension seam here keeps those capabilities explicit and typed.
         self.workspace: Any = None
@@ -3776,6 +3786,7 @@ class Agent:
         self.last_web_research_state = None
         self.last_turn_budget = {}
         self.last_turn_capabilities = {}
+        self.active_turn_governor = None
         for turn in turns:
             if turn.get("role") not in {"user", "assistant"}:
                 continue
@@ -3918,6 +3929,7 @@ class Agent:
             TurnScope.REVIEW: _REVIEW_SCOPE_TOOLS,
             TurnScope.INIT: _INIT_SCOPE_TOOLS,
             TurnScope.EVALUATION: _EVALUATION_SCOPE_TOOLS,
+            TurnScope.SUBAGENT: _SUBAGENT_SCOPE_TOOLS,
         }
         allowed = allowed_by_scope.get(effective_scope)
         if allowed is not None:
@@ -3941,6 +3953,7 @@ class Agent:
             self.tools = original_tools
             self.messages[0]["content"] = original_prompt
             self.active_turn_scope = prior_scope
+            self.active_turn_governor = None
 
     def _run(
         self,
@@ -4106,6 +4119,7 @@ class Agent:
         failed_action_counts: dict[str, int] = {}
         retired_tools: set[str] = set()
         governor = TurnGovernor(self.max_steps)
+        self.active_turn_governor = governor
         self.last_turn_budget = governor.snapshot().to_dict()
         gpu_fallback_retried = False
         retrieval_requirement_retries: set[str] = set()
@@ -4227,6 +4241,10 @@ class Agent:
             elif turn_scope == TurnScope.EVALUATION:
                 hard_constraints.append(
                     "Evaluation scope is read-only and cannot request interactive input"
+                )
+            elif turn_scope == TurnScope.SUBAGENT:
+                hard_constraints.append(
+                    "Subagent scope is read-only, non-interactive, and cannot delegate"
                 )
 
             snapshot = TurnCapabilities.create(

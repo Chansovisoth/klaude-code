@@ -1,12 +1,17 @@
 import pytest
 from klaude_core import (
+    Agent,
+    PermissionGate,
     SubagentBudget,
     SubagentRole,
     SubagentStatus,
     SubagentSupervisor,
     SubagentTask,
     SubagentWorkerOutput,
+    supervise_agent_tasks,
 )
+from klaude_core.execution import TurnGovernor
+from klaude_core.subagents import SubagentExecutionError, run_agent_assignment
 
 
 def test_task_normalizes_objective_and_rejects_unbounded_input():
@@ -196,6 +201,21 @@ def test_worker_exception_exposes_only_its_category():
     assert result.summary == ""
 
 
+def test_failed_child_usage_is_still_accounted():
+    def worker(_assignment):
+        raise SubagentExecutionError(model_steps=2, tool_calls=3)
+
+    result = SubagentSupervisor(
+        parent_callable_tools=(),
+        effective_permissions={},
+        worker=worker,
+    ).run([SubagentTask("inspect")])[0]
+
+    assert result.status is SubagentStatus.FAILED
+    assert result.model_steps == 2
+    assert result.tool_calls == 3
+
+
 def test_supervisor_rejects_excess_and_duplicate_children_before_execution():
     supervisor = SubagentSupervisor(
         parent_callable_tools=(),
@@ -236,3 +256,79 @@ def test_diagnostic_role_does_not_receive_shell_execution():
 
     assert assignment.callable_tools == ("read_file",)
     assert dict(assignment.unavailable_tools)["run_shell"] == "not allowed for child role"
+
+
+class _ChildRuntime:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def chat(self, model, messages, tools=None, options=None, think=None):
+        self.calls.append({"model": model, "messages": messages, "tools": tools})
+        return self.responses.pop(0)
+
+
+def test_agent_adapter_uses_isolated_context_and_subagent_scope():
+    runtime = _ChildRuntime([{"role": "assistant", "content": "Found src/router.py."}])
+    parent = Agent(
+        runtime,
+        "test-model",
+        [],
+        PermissionGate({}, lambda *_args: "n"),
+        "parent system",
+        max_steps=20,
+    )
+    parent.messages.append({"role": "user", "content": "private prior conversation"})
+    assignment = SubagentSupervisor(
+        parent_callable_tools=(),
+        effective_permissions={},
+        worker=lambda _assignment: SubagentWorkerOutput("", 0),
+    ).prepare(SubagentTask("Inspect routing", context="Focus on selection."))
+
+    output = run_agent_assignment(parent, assignment)
+
+    assert output.summary == "Found src/router.py."
+    assert output.model_steps == 1
+    request = runtime.calls[0]
+    rendered = "\n".join(str(message["content"]) for message in request["messages"])
+    assert "Role: read_research." in rendered
+    assert "Objective:\nInspect routing" in rendered
+    assert "Bounded context:\nFocus on selection." in rendered
+    assert "private prior conversation" not in rendered
+    assert request["tools"] == []
+
+
+def test_agent_supervision_charges_successful_child_usage_to_parent(monkeypatch):
+    parent = Agent(
+        _ChildRuntime([]),
+        "test-model",
+        [],
+        PermissionGate({"read_file": "allow"}, lambda *_args: "n"),
+        "system",
+        max_steps=10,
+    )
+    parent.last_turn_capabilities = {"callable_tools": ["read_file", "write_file"]}
+    parent.active_turn_governor = TurnGovernor(10, max_tool_calls=20)
+    assert parent.active_turn_governor.begin_model_step() == ""
+    seen = []
+
+    def run_child(_parent, assignment):
+        seen.append(assignment)
+        return SubagentWorkerOutput(
+            "finding",
+            model_steps=2,
+            tool_calls=1,
+            tools_used=("read_file",),
+        )
+
+    monkeypatch.setattr("klaude_core.subagents.run_agent_assignment", run_child)
+    result = supervise_agent_tasks(
+        parent,
+        [SubagentTask("inspect", requested_tools=("read_file", "write_file"))],
+    )[0]
+
+    assert result.status is SubagentStatus.COMPLETED
+    assert seen[0].callable_tools == ("read_file",)
+    assert parent.active_turn_governor.snapshot().model_steps_used == 3
+    assert parent.active_turn_governor.snapshot().tool_calls_used == 1
+    assert parent.last_turn_budget["model_steps_used"] == 3

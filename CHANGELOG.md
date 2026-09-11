@@ -6,7 +6,10 @@
   test/diagnostic child tasks, parent-intersected read-only capability
   envelopes, conservative permission inheritance, independent and aggregate
   budgets, bounded structured results, cancellation checks, and public
-  lifecycle events. Live model delegation is not exposed yet.
+  lifecycle events. Add an isolated sequential child-agent adapter that receives
+  only bounded task context, runs under a dedicated non-interactive scope, and
+  charges successful or failed child usage to the parent governor. Live model
+  delegation is not exposed yet.
 - Add typed standard, plan, review, init, and evaluation turn scopes to the
   immutable capability contract. Enforce each scope's tool allowlist before
   provider requests, hard-limit `/init` writes to the workspace-root
