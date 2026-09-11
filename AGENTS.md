@@ -846,15 +846,25 @@ learn, crawl, or delegate. Their successful and failed usage is charged to the
 parent governor. Model steps and tool calls have both per-child and aggregate
 caps; delegation preserves a parent tool-result slot, and a provider response
 containing multiple calls stops at the first exhausted tool boundary. Ctrl+C
-and steering use the same host cancellation flag and
-fan out transport cancellation to the primary and active child runtimes. Each
+and steering use the same host cancellation flag and fan out transport
+cancellation to the primary and active child runtimes. Each
 built-in provider forks independent mutable stream, usage, and session state for
 the child while retaining only the provider configuration or authentication
 broker needed to connect. Custom providers that cannot fork fail closed instead
-of silently sharing a transport. Sanitized start/finish events and a bounded public final
-summary are persisted and mirrored to `/resume`; private reasoning and raw tool
+of silently sharing a transport. Sanitized start/finish events and a bounded
+public final summary are persisted and mirrored to `/resume`; private reasoning and raw tool
 output are never stored as subagent activity. Execution remains sequential until
 aggregate budgets and lifecycle ordering are concurrency-safe.
+
+The turn governor normalizes exact input/output usage reported by Ollama,
+OpenAI API, OpenAI Codex, and Gemini after every successful provider request.
+Subagents have per-child and aggregate reported-token caps; reaching one blocks
+subsequent tool execution and reserves a tool-free final report. Finalization
+usage is still counted and may exceed the nominal cap because the final report
+is an explicit safety reserve. Missing or partial provider counters increment an
+unknown-request count and are never treated as zero or replaced with estimates.
+Subagent lifecycle metadata exposes only these numeric counters, never tokens or
+provider-private payloads.
 
 Tool preflight checks paths and write locks before asking permission, and execution
 rechecks mutable conditions. Read-only pipelines are classified component by
@@ -1311,7 +1321,7 @@ Development state at handoff:
 - Full validation can hang in the optional LanceDB roundtrip under some
   restricted sandboxes. Report the focused and non-LanceDB results separately;
   never describe the knowledge suite as green unless it completed.
-- Continue controlled subagent orchestration with exact aggregate token budgets,
-  concurrency-safe lifecycle ordering, adaptive concurrency, and live behavioral
+- Continue controlled subagent orchestration with concurrency-safe lifecycle
+  ordering, adaptive concurrency, and live behavioral
   evaluation before considering an implementation-worker role. Do not add
   background/cloud workers or broad write concurrency as part of that work.

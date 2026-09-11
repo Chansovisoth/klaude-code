@@ -66,3 +66,18 @@ def test_delegated_usage_is_charged_to_parent_budget():
         governor.charge_delegated_usage(model_steps=1, tool_calls=0)
         == "model/tool step budget reached"
     )
+
+
+def test_turn_governor_enforces_exact_tokens_and_marks_unknown_usage():
+    governor = TurnGovernor(5, max_total_tokens=100)
+
+    assert governor.observe_model_usage((60, 39)) == ""
+    assert governor.observe_model_usage(None) == ""
+    assert governor.observe_model_usage((1, 0)) == "token budget reached"
+
+    snapshot = governor.snapshot()
+    assert snapshot.input_tokens_used == 61
+    assert snapshot.output_tokens_used == 39
+    assert snapshot.total_tokens_used == 100
+    assert snapshot.tokens_left == 0
+    assert snapshot.token_usage_unknown_requests == 1

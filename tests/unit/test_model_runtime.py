@@ -10,6 +10,7 @@ from klaude_core.model_runtime import (
     load_model_cache,
     local_model_weight_first_key,
     newest_model_first_key,
+    normalize_token_usage,
     save_model_cache,
 )
 from klaude_core.ollama import Ollama
@@ -60,6 +61,29 @@ def test_cloud_runtimes_reject_missing_credentials():
         OpenAIRuntime("")
     with pytest.raises(ValueError, match="Gemini API key"):
         GeminiRuntime("  ")
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        ({"prompt_eval_count": 12, "eval_count": 4}, (12, 4)),
+        ({"usage": {"input_tokens": 20, "output_tokens": 7}}, (20, 7)),
+        (
+            {
+                "usage": type(
+                    "Usage",
+                    (),
+                    {"prompt_token_count": 9, "candidates_token_count": 3},
+                )()
+            },
+            (9, 3),
+        ),
+        ({"usage": {"input_tokens": 20}}, None),
+        ({}, None),
+    ],
+)
+def test_normalize_token_usage_across_builtin_provider_shapes(metadata, expected):
+    assert normalize_token_usage(metadata) == expected
 
 
 def test_builtin_runtimes_fork_independent_child_transport_state():

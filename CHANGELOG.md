@@ -12,8 +12,11 @@
   child usage to the parent governor. Host cancellation fans out to the primary
   and active child transports. Child tool calls now have independent and
   aggregate caps, reserve the enclosing parent tool-result slot, and stop
-  provider-emitted parallel call batches at the first exhausted safe boundary. Explicit
-  delegation and second-opinion requests now narrowly expose one permission-
+  provider-emitted parallel call batches at the first exhausted safe boundary.
+  Exact Ollama, OpenAI/Codex, and Gemini input/output counters now accumulate
+  across every child request under per-child and aggregate token caps; missing
+  or partial provider counters remain explicitly unknown rather than estimated.
+  Explicit delegation and second-opinion requests now narrowly expose one permission-
   controlled `delegate_task`; completed public child summaries and sanitized
   lifecycle metadata persist for local and resumed clients.
 - Add typed standard, plan, review, init, and evaluation turn scopes to the

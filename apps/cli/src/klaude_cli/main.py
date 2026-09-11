@@ -88,6 +88,7 @@ from klaude_core.model_runtime import (
     load_model_cache,
     local_model_weight_first_key,
     newest_model_first_key,
+    normalize_token_usage,
     save_model_cache,
 )
 from klaude_core.runtime_context import (
@@ -2022,20 +2023,7 @@ def _metadata_mapping(value: object) -> dict[str, Any]:
 
 def _token_usage(metadata: object) -> tuple[int, int] | None:
     """Normalize exact Ollama, OpenAI Responses, and Gemini token counters."""
-    outer = _metadata_mapping(metadata)
-    usage = _metadata_mapping(outer.get("usage"))
-    prompt = outer.get("prompt_eval_count")
-    output = outer.get("eval_count")
-    if prompt is None:
-        prompt = usage.get("input_tokens", usage.get("prompt_token_count"))
-    if output is None:
-        output = usage.get("output_tokens", usage.get("candidates_token_count"))
-    if prompt is None and output is None:
-        return None
-    try:
-        return max(0, int(prompt or 0)), max(0, int(output or 0))
-    except (TypeError, ValueError):
-        return None
+    return normalize_token_usage(metadata)
 
 
 def _apply_token_usage(state: ChatUIState, metadata: object) -> bool:
@@ -4362,11 +4350,22 @@ def _subagent_activity_text(payload: dict[str, Any]) -> str:
     )
     steps = max(0, int(payload.get("model_steps") or 0))
     calls = max(0, int(payload.get("tool_calls") or 0))
+    tokens = max(0, int(payload.get("input_tokens") or 0)) + max(
+        0, int(payload.get("output_tokens") or 0)
+    )
+    unknown_token_requests = max(0, int(payload.get("unknown_token_requests") or 0))
     metrics = []
     if steps:
         metrics.append(f"{steps} model {'step' if steps == 1 else 'steps'}")
     if calls:
         metrics.append(f"{calls} tool {'call' if calls == 1 else 'calls'}")
+    if tokens:
+        metrics.append(f"{tokens:,} tokens")
+    if unknown_token_requests:
+        metrics.append(
+            f"token usage unavailable for {unknown_token_requests} "
+            f"{'request' if unknown_token_requests == 1 else 'requests'}"
+        )
     suffix = f" ({' · '.join(metrics)})" if metrics else ""
     rendered = f"[{label}] {role} subagent {status}{suffix}"
     summary = _activity_value(payload.get("summary"), limit=500)
@@ -4427,6 +4426,9 @@ def _delegate_task_result(
         "model_steps": result.model_steps,
         "tool_calls": result.tool_calls,
         "tools_used": list(result.tools_used),
+        "input_tokens": result.input_tokens,
+        "output_tokens": result.output_tokens,
+        "unknown_token_requests": result.unknown_token_requests,
         "error_category": result.error_category,
     }
     if result.status is SubagentStatus.COMPLETED:

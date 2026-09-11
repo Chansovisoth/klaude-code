@@ -119,6 +119,19 @@ class TurnCapabilities:
         }
         constraints = " ".join(self.hard_constraints)
         instructions = ", ".join(self.injected_instructions) or "(none)"
+        token_budget = (
+            f"{self.budget.total_tokens_used:,}/{self.budget.max_total_tokens:,} "
+            "reported provider tokens used; "
+            if self.budget.max_total_tokens is not None
+            else ""
+        )
+        unknown_usage = (
+            f"{self.budget.token_usage_unknown_requests} "
+            f"{'request' if self.budget.token_usage_unknown_requests == 1 else 'requests'} "
+            "lacked exact token usage; "
+            if self.budget.token_usage_unknown_requests
+            else ""
+        )
         return (
             "<turn_capabilities>\n"
             f"Turn scope: {self.scope.value}.\n"
@@ -147,6 +160,7 @@ class TurnCapabilities:
             f"Execution budget: {self.budget.model_steps_used}/"
             f"{self.budget.max_model_steps} model steps and "
             f"{self.budget.tool_calls_used}/{self.budget.max_tool_calls} tool calls used; "
+            f"{token_budget}{unknown_usage}"
             "one tool-free finalization request is reserved. "
             f"Hard constraints: {constraints or '(none)'}.\n"
             "</turn_capabilities>"

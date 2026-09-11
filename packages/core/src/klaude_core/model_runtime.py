@@ -30,6 +30,47 @@ BACKEND_METADATA = {
 }
 
 
+def _metadata_mapping(value: object) -> dict[str, Any]:
+    """Normalize SDK usage objects without retaining provider-private fields."""
+    if isinstance(value, dict):
+        return value
+    dumper = getattr(value, "model_dump", None)
+    if callable(dumper):
+        dumped = dumper()
+        return dumped if isinstance(dumped, dict) else {}
+    result: dict[str, Any] = {}
+    for name in (
+        "input_tokens",
+        "output_tokens",
+        "prompt_token_count",
+        "candidates_token_count",
+    ):
+        item = getattr(value, name, None)
+        if item is not None:
+            result[name] = item
+    return result
+
+
+def normalize_token_usage(metadata: object) -> tuple[int, int] | None:
+    """Return exact input/output counters reported by supported providers."""
+    outer = _metadata_mapping(metadata)
+    usage = _metadata_mapping(outer.get("usage"))
+    prompt = outer.get("prompt_eval_count")
+    output = outer.get("eval_count")
+    if prompt is None:
+        prompt = usage.get("input_tokens", usage.get("prompt_token_count"))
+    if output is None:
+        output = usage.get("output_tokens", usage.get("candidates_token_count"))
+    # A partial counter cannot safely enforce an aggregate total. Preserve the
+    # request as explicitly unknown instead of treating the missing side as 0.
+    if prompt is None or output is None:
+        return None
+    try:
+        return max(0, int(prompt or 0)), max(0, int(output or 0))
+    except (TypeError, ValueError):
+        return None
+
+
 def is_chat_model_id(backend: str, model_id: str) -> bool:
     """Conservatively exclude endpoint-specific models from chat pickers."""
     if backend not in {"openai_api", "openai_codex"}:

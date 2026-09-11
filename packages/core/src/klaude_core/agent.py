@@ -27,7 +27,7 @@ from uuid import uuid4
 from .capabilities import TurnCapabilities, TurnScope
 from .entities import structured_domains_for_text
 from .execution import TurnGovernor
-from .model_runtime import ModelInfo, ModelRuntime
+from .model_runtime import ModelInfo, ModelRuntime, normalize_token_usage
 from .ollama import Ollama
 from .permissions import PermissionDenied, PermissionGate
 
@@ -3728,6 +3728,7 @@ class Agent:
         code_context: str = "",
         model_info: ModelInfo | None = None,
         max_tool_calls: int | None = None,
+        max_total_tokens: int | None = None,
     ):
         self.runtime = ollama
         # Compatibility alias for integrations which still inspect `ollama`.
@@ -3742,6 +3743,7 @@ class Agent:
         self.gate = gate
         self.max_steps = max_steps
         self.max_tool_calls = max_tool_calls
+        self.max_total_tokens = max_total_tokens
         self.max_code_continuations = max(0, min(3, max_code_continuations))
         self.max_code_repairs = max(0, min(3, max_code_repairs))
         self.tool_selector = tool_selector
@@ -4155,7 +4157,11 @@ class Agent:
         failed_action_signatures: set[str] = set()
         failed_action_counts: dict[str, int] = {}
         retired_tools: set[str] = set()
-        governor = TurnGovernor(self.max_steps, max_tool_calls=self.max_tool_calls)
+        governor = TurnGovernor(
+            self.max_steps,
+            max_tool_calls=self.max_tool_calls,
+            max_total_tokens=self.max_total_tokens,
+        )
         self.active_turn_governor = governor
         self.last_turn_budget = governor.snapshot().to_dict()
         gpu_fallback_retried = False
@@ -4373,6 +4379,13 @@ class Agent:
             if research.actions or research.web_actions_used:
                 payload["web_research"] = research.to_dict()
             return payload
+
+        def observe_runtime_usage() -> str:
+            reason = governor.observe_model_usage(
+                normalize_token_usage(getattr(self.ollama, "last_chat_metadata", {}))
+            )
+            self.last_turn_budget = governor.snapshot().to_dict()
+            return reason
 
         def record_finish(content: str, *, best_effort: bool = False) -> None:
             if not research.actions and not research.web_actions_used:
@@ -5062,6 +5075,7 @@ class Agent:
                 yield AgentEvent("error", {"message": _runtime_error_message(e)})
                 return
 
+            observe_runtime_usage()
             self.messages.append(msg)
             content = msg.get("content", "")
             raw_tool_calls = msg.get("tool_calls")
@@ -5427,6 +5441,7 @@ class Agent:
                     final_msg = self.ollama.chat(self.model, self.messages, **final_kwargs)
                 else:
                     final_msg = self.ollama.chat(self.model, self.messages, tools=[])
+                observe_runtime_usage()
                 self.messages.append(final_msg)
                 final_content = str(final_msg.get("content", "")).strip()
                 if final_content:
@@ -5452,6 +5467,7 @@ class Agent:
                 if request_think is not None:
                     synthesis_kwargs["think"] = request_think
                 final_msg = self.ollama.chat(self.model, self.messages, **synthesis_kwargs)
+                observe_runtime_usage()
                 self.messages.append(final_msg)
                 final_content = str(final_msg.get("content", "")).strip()
                 if final_content:

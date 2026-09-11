@@ -84,6 +84,81 @@ def test_parallel_tool_response_stops_at_the_nonexpandable_call_budget():
     assert agent.last_turn_budget["stop_reason"] == "tool-call budget reached"
 
 
+def test_exact_provider_tokens_accumulate_and_stop_post_budget_tools():
+    executed = []
+
+    class TokenRuntime(ScriptedOllama):
+        def __init__(self):
+            super().__init__(
+                [
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "function": {
+                                    "name": "inspect",
+                                    "arguments": {"value": "first"},
+                                },
+                            },
+                            {
+                                "id": "call-2",
+                                "function": {
+                                    "name": "inspect",
+                                    "arguments": {"value": "second"},
+                                },
+                            },
+                        ],
+                    },
+                    {"role": "assistant", "content": "Token-bounded final report."},
+                ]
+            )
+            self.last_chat_metadata = {}
+            self.usages = [(80, 20), (15, 5)]
+
+        def chat(self, *args, **kwargs):
+            response = super().chat(*args, **kwargs)
+            input_tokens, output_tokens = self.usages.pop(0)
+            self.last_chat_metadata = {
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                }
+            }
+            return response
+
+    runtime = TokenRuntime()
+    agent = Agent(
+        runtime,
+        "fake-model",
+        [
+            Tool(
+                "inspect",
+                "Inspect one value.",
+                {"type": "object", "properties": {"value": {"type": "string"}}},
+                lambda value: executed.append(value) or f"inspected {value}",
+            )
+        ],
+        PermissionGate({"inspect": "allow"}, lambda *_args: "n"),
+        "system",
+        max_total_tokens=100,
+    )
+
+    events = list(agent.run("Inspect both values"))
+
+    assert executed == []
+    tool_results = [event.payload for event in events if event.kind == "tool_result"]
+    assert len(tool_results) == 1
+    assert tool_results[0]["metadata"]["executed"] is False
+    assert [event.payload["content"] for event in events if event.kind == "text"] == [
+        "Token-bounded final report."
+    ]
+    assert agent.last_turn_budget["input_tokens_used"] == 95
+    assert agent.last_turn_budget["output_tokens_used"] == 25
+    assert agent.last_turn_budget["stop_reason"] == "token budget reached"
+
+
 def test_read_only_review_blocks_model_requested_writes_and_restores_tools():
     executed = []
     ollama = ScriptedOllama(

@@ -2827,6 +2827,8 @@ def test_restored_transcript_replays_completed_subagent_activity():
                     "status": "completed",
                     "model_steps": 2,
                     "tool_calls": 1,
+                    "input_tokens": 120,
+                    "output_tokens": 30,
                     "summary": "Found parser routing in src/parser.py.",
                 },
                 "ts": 1_700_000_000,
@@ -2835,7 +2837,10 @@ def test_restored_transcript_replays_completed_subagent_activity():
         80,
     )
 
-    assert "[explored] read/research subagent completed (2 model steps · 1 tool call)" in transcript
+    assert (
+        "[explored] read/research subagent completed "
+        "(2 model steps · 1 tool call · 150 tokens)"
+    ) in transcript
     assert "└ Found parser routing in src/parser.py." in transcript
 
 

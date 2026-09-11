@@ -32,6 +32,8 @@ def test_budget_is_bounded_and_total_caps_each_child():
         max_children=99,
         max_steps_per_child=99,
         max_total_steps=3,
+        max_tokens_per_child=9_000_000,
+        max_total_tokens=2_048,
         max_result_characters=1,
     ).bounded()
 
@@ -39,6 +41,8 @@ def test_budget_is_bounded_and_total_caps_each_child():
         max_children=8,
         max_steps_per_child=3,
         max_total_steps=3,
+        max_tokens_per_child=2_048,
+        max_total_tokens=2_048,
         max_result_characters=512,
     )
 
@@ -91,12 +95,15 @@ def test_supervisor_returns_bounded_structured_result_and_public_events():
     def worker(assignment):
         assert assignment.max_steps == 4
         assert assignment.max_tool_calls == 8
+        assert assignment.max_total_tokens == 96_000
         assert assignment.callable_tools == ("read_file",)
         return SubagentWorkerOutput(
             summary="evidence" * 200,
             model_steps=2,
             tool_calls=1,
             tools_used=("read_file",),
+            input_tokens=80,
+            output_tokens=20,
         )
 
     supervisor = SubagentSupervisor(
@@ -125,6 +132,8 @@ def test_supervisor_returns_bounded_structured_result_and_public_events():
             "tool_calls": 1,
             "tools_used": ["read_file"],
             "summary": "evidence" * 64,
+            "input_tokens": 80,
+            "output_tokens": 20,
         },
     ]
 
@@ -171,6 +180,7 @@ def test_supervisor_stops_children_at_shared_budget_and_honors_cancellation():
     [
         (SubagentWorkerOutput("", model_steps=7), "budget_violation"),
         (SubagentWorkerOutput("", model_steps=1, tool_calls=9), "budget_violation"),
+        (SubagentWorkerOutput("", model_steps=1, input_tokens=96_001), "budget_violation"),
         (
             SubagentWorkerOutput("", model_steps=1, tools_used=("write_file",)),
             "capability_violation",
@@ -248,6 +258,42 @@ def test_supervisor_enforces_aggregate_child_tool_call_budget():
 
     assert calls == [("one", 2)]
     assert results[0].status is SubagentStatus.COMPLETED
+    assert results[1].error_category == "budget_exhausted"
+
+
+def test_supervisor_enforces_exact_per_child_and_aggregate_token_budgets():
+    calls = []
+
+    def worker(assignment):
+        calls.append((assignment.task.task_id, assignment.max_total_tokens))
+        return SubagentWorkerOutput(
+            "done",
+            model_steps=1,
+            input_tokens=1_500,
+            output_tokens=548,
+        )
+
+    results = SubagentSupervisor(
+        parent_callable_tools=(),
+        effective_permissions={},
+        worker=worker,
+        budget=SubagentBudget(
+            max_children=2,
+            max_total_steps=4,
+            max_tokens_per_child=2_048,
+            max_total_tokens=2_048,
+        ),
+    ).run(
+        [
+            SubagentTask("first", task_id="one"),
+            SubagentTask("second", task_id="two"),
+        ]
+    )
+
+    assert calls == [("one", 2_048)]
+    assert results[0].status is SubagentStatus.COMPLETED
+    assert results[0].input_tokens == 1_500
+    assert results[0].output_tokens == 548
     assert results[1].error_category == "budget_exhausted"
 
 
@@ -366,6 +412,7 @@ def test_agent_adapter_uses_isolated_context_and_subagent_scope():
     assert len(runtime.children) == 1
     assert runtime.children[0] is not runtime
     assert runtime.children[0].closed is True
+    assert output.unknown_token_requests == 1
 
 
 def test_agent_adapter_fails_closed_without_an_isolated_runtime_factory():
@@ -421,7 +468,11 @@ def test_agent_supervision_charges_successful_child_usage_to_parent(monkeypatch)
         max_steps=10,
     )
     parent.last_turn_capabilities = {"callable_tools": ["read_file", "write_file"]}
-    parent.active_turn_governor = TurnGovernor(10, max_tool_calls=20)
+    parent.active_turn_governor = TurnGovernor(
+        10,
+        max_tool_calls=20,
+        max_total_tokens=10_000,
+    )
     assert parent.active_turn_governor.begin_model_step() == ""
     seen = []
 
@@ -432,6 +483,8 @@ def test_agent_supervision_charges_successful_child_usage_to_parent(monkeypatch)
             model_steps=2,
             tool_calls=1,
             tools_used=("read_file",),
+            input_tokens=120,
+            output_tokens=30,
         )
 
     monkeypatch.setattr("klaude_core.subagents.run_agent_assignment", run_child)
@@ -442,8 +495,10 @@ def test_agent_supervision_charges_successful_child_usage_to_parent(monkeypatch)
 
     assert result.status is SubagentStatus.COMPLETED
     assert seen[0].callable_tools == ("read_file",)
+    assert seen[0].max_total_tokens == 10_000
     assert parent.active_turn_governor.snapshot().model_steps_used == 3
     assert parent.active_turn_governor.snapshot().tool_calls_used == 1
+    assert parent.active_turn_governor.snapshot().total_tokens_used == 150
     assert parent.last_turn_budget["model_steps_used"] == 3
 
 
@@ -494,3 +549,35 @@ def test_parent_tool_budget_preserves_slot_for_delegate_result():
 
     assert result.status is SubagentStatus.FAILED
     assert result.error_category == "parent_budget_exhausted"
+
+
+def test_parent_remaining_token_budget_is_never_expanded(monkeypatch):
+    parent = Agent(
+        _ChildRuntime([]),
+        "test-model",
+        [],
+        PermissionGate({}, lambda *_args: "n"),
+        "system",
+        max_steps=5,
+        max_total_tokens=500,
+    )
+    parent.last_turn_capabilities = {"callable_tools": []}
+    parent.active_turn_governor = TurnGovernor(
+        5,
+        max_tool_calls=4,
+        max_total_tokens=500,
+    )
+    parent.active_turn_governor.observe_model_usage((440, 10))
+    assignments = []
+
+    def run_child(_parent, assignment):
+        assignments.append(assignment)
+        return SubagentWorkerOutput("done", model_steps=1, input_tokens=40, output_tokens=10)
+
+    monkeypatch.setattr("klaude_core.subagents.run_agent_assignment", run_child)
+
+    result = supervise_agent_tasks(parent, [SubagentTask("inspect")])[0]
+
+    assert assignments[0].max_total_tokens == 50
+    assert result.status is SubagentStatus.COMPLETED
+    assert parent.active_turn_governor.snapshot().tokens_left == 0

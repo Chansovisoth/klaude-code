@@ -18,6 +18,45 @@ def budget() -> TurnBudgetSnapshot:
     )
 
 
+def test_model_capability_text_includes_bounded_exact_token_usage():
+    bounded = TurnBudgetSnapshot(
+        max_model_steps=6,
+        model_steps_used=1,
+        max_tool_calls=8,
+        tool_calls_used=0,
+        max_elapsed_seconds=1_800,
+        elapsed_seconds=1,
+        no_progress_streak=0,
+        max_no_progress=3,
+        max_total_tokens=10_000,
+        input_tokens_used=1_200,
+        output_tokens_used=300,
+        token_usage_unknown_requests=1,
+    )
+    snapshot = TurnCapabilities.create(
+        globally_enabled_tools=(),
+        callable_tools=(),
+        unavailable_tools={},
+        effective_permissions={},
+        hard_constraints=(),
+        provider_backend="ollama",
+        provider_model="test",
+        provider_supports_tools=True,
+        provider_context_window=8_192,
+        provider_effort_levels=(),
+        injected_instructions=(),
+        instructions_truncated=False,
+        plan_mode=False,
+        workspace_write_enabled=False,
+        budget=bounded,
+        scope=TurnScope.SUBAGENT,
+    )
+
+    rendered = snapshot.render_for_model()
+    assert "1,500/10,000 reported provider tokens used" in rendered
+    assert "1 request lacked exact token usage" in rendered
+
+
 def test_capability_snapshot_is_sorted_immutable_and_serializable():
     snapshot = TurnCapabilities.create(
         globally_enabled_tools={"write_file", "read_file"},

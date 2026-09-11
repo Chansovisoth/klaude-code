@@ -99,6 +99,8 @@ class SubagentBudget:
     max_total_steps: int = 8
     max_tool_calls_per_child: int = 8
     max_total_tool_calls: int = 12
+    max_tokens_per_child: int = 96_000
+    max_total_tokens: int = 96_000
     max_result_characters: int = 8_000
 
     def bounded(self) -> SubagentBudget:
@@ -107,12 +109,16 @@ class SubagentBudget:
         total = max(1, min(64, int(self.max_total_steps)))
         calls_per_child = max(1, min(64, int(self.max_tool_calls_per_child)))
         total_calls = max(1, min(128, int(self.max_total_tool_calls)))
+        tokens_per_child = max(1, min(1_000_000, int(self.max_tokens_per_child)))
+        total_tokens = max(1, min(2_000_000, int(self.max_total_tokens)))
         return SubagentBudget(
             max_children=children,
             max_steps_per_child=min(per_child, total),
             max_total_steps=total,
             max_tool_calls_per_child=min(calls_per_child, total_calls),
             max_total_tool_calls=total_calls,
+            max_tokens_per_child=min(tokens_per_child, total_tokens),
+            max_total_tokens=total_tokens,
             max_result_characters=max(512, min(32_000, int(self.max_result_characters))),
         )
 
@@ -126,6 +132,7 @@ class SubagentAssignment:
     unavailable_tools: tuple[tuple[str, str], ...]
     max_steps: int
     max_tool_calls: int
+    max_total_tokens: int
 
 
 @dataclass(frozen=True)
@@ -136,6 +143,9 @@ class SubagentWorkerOutput:
     model_steps: int
     tool_calls: int = 0
     tools_used: tuple[str, ...] = ()
+    input_tokens: int = 0
+    output_tokens: int = 0
+    unknown_token_requests: int = 0
 
 
 @dataclass(frozen=True)
@@ -151,6 +161,9 @@ class SubagentResult:
     model_steps: int
     tool_calls: int
     error_category: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    unknown_token_requests: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -171,6 +184,9 @@ class SubagentEvent:
     tool_calls: int = 0
     tools_used: tuple[str, ...] = ()
     summary: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    unknown_token_requests: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         value: dict[str, Any] = {
@@ -188,6 +204,12 @@ class SubagentEvent:
             value["tools_used"] = list(self.tools_used)
         if self.summary:
             value["summary"] = self.summary[:4_000]
+        if self.input_tokens:
+            value["input_tokens"] = self.input_tokens
+        if self.output_tokens:
+            value["output_tokens"] = self.output_tokens
+        if self.unknown_token_requests:
+            value["unknown_token_requests"] = self.unknown_token_requests
         return value
 
 
@@ -199,10 +221,21 @@ CancellationCheck = Callable[[], bool]
 class SubagentExecutionError(RuntimeError):
     """A child agent did not produce a coherent completed result."""
 
-    def __init__(self, *, model_steps: int, tool_calls: int) -> None:
+    def __init__(
+        self,
+        *,
+        model_steps: int,
+        tool_calls: int,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        unknown_token_requests: int = 0,
+    ) -> None:
         super().__init__("child agent did not complete successfully")
         self.model_steps = max(0, int(model_steps))
         self.tool_calls = max(0, int(tool_calls))
+        self.input_tokens = max(0, int(input_tokens))
+        self.output_tokens = max(0, int(output_tokens))
+        self.unknown_token_requests = max(0, int(unknown_token_requests))
 
 
 def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> SubagentWorkerOutput:
@@ -243,6 +276,7 @@ def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> Subagen
         + "evidence such as file paths, symbols, or source URLs. Do not expose private reasoning.\n"
         + f"Maximum model steps: {assignment.max_steps}.\n"
         + f"Maximum tool calls: {assignment.max_tool_calls}.\n"
+        + f"Maximum reported provider tokens: {assignment.max_total_tokens}.\n"
         + "</subagent_contract>"
     )
     parent_selector = parent.tool_selector
@@ -260,6 +294,7 @@ def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> Subagen
             child_prompt,
             max_steps=assignment.max_steps,
             max_tool_calls=assignment.max_tool_calls,
+            max_total_tokens=assignment.max_total_tokens,
             max_code_continuations=0,
             max_code_repairs=0,
             tool_selector=child_selector,
@@ -319,16 +354,24 @@ def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> Subagen
             elif event.kind == "done":
                 completed = True
         if not completed or errors:
+            usage = child.last_turn_budget
             raise SubagentExecutionError(
-                model_steps=int(child.last_turn_budget.get("model_steps_used", 0)),
+                model_steps=int(usage.get("model_steps_used", 0)),
                 tool_calls=tool_calls,
+                input_tokens=int(usage.get("input_tokens_used", 0)),
+                output_tokens=int(usage.get("output_tokens_used", 0)),
+                unknown_token_requests=int(usage.get("token_usage_unknown_requests", 0)),
             )
         summary = "\n\n".join(text_events).strip() or "".join(text_deltas).strip()
+        usage = child.last_turn_budget
         return SubagentWorkerOutput(
             summary=summary,
-            model_steps=int(child.last_turn_budget.get("model_steps_used", 0)),
+            model_steps=int(usage.get("model_steps_used", 0)),
             tool_calls=tool_calls,
             tools_used=tuple(dict.fromkeys(tools_used)),
+            input_tokens=int(usage.get("input_tokens_used", 0)),
+            output_tokens=int(usage.get("output_tokens_used", 0)),
+            unknown_token_requests=int(usage.get("token_usage_unknown_requests", 0)),
         )
     finally:
         parent.unregister_child_runtime(child_runtime)
@@ -374,6 +417,7 @@ class SubagentSupervisor:
         *,
         steps_left: int | None = None,
         tool_calls_left: int | None = None,
+        tokens_left: int | None = None,
     ) -> SubagentAssignment:
         role_tools = _ROLE_TOOLS[task.role]
         requested = frozenset(task.requested_tools) if task.requested_tools else role_tools
@@ -407,12 +451,16 @@ class SubagentSupervisor:
             if tool_calls_left is None
             else max(0, tool_calls_left)
         )
+        remaining_tokens = (
+            self.budget.max_total_tokens if tokens_left is None else max(0, tokens_left)
+        )
         return SubagentAssignment(
             task=task,
             callable_tools=callable_tools,
             unavailable_tools=tuple(unavailable.items()),
             max_steps=min(self.budget.max_steps_per_child, remaining),
             max_tool_calls=min(self.budget.max_tool_calls_per_child, remaining_calls),
+            max_total_tokens=min(self.budget.max_tokens_per_child, remaining_tokens),
         )
 
     def run(self, tasks: Iterable[SubagentTask]) -> list[SubagentResult]:
@@ -428,11 +476,13 @@ class SubagentSupervisor:
         results: list[SubagentResult] = []
         steps_used = 0
         tool_calls_used = 0
+        tokens_used = 0
         for task in queued:
             was_cancelled = self.cancelled()
             budget_exhausted = (
                 steps_used >= self.budget.max_total_steps
                 or tool_calls_used >= self.budget.max_total_tool_calls
+                or tokens_used >= self.budget.max_total_tokens
             )
             if was_cancelled or budget_exhausted:
                 result = self._terminal_result(
@@ -447,17 +497,23 @@ class SubagentSupervisor:
                 task,
                 steps_left=self.budget.max_total_steps - steps_used,
                 tool_calls_left=self.budget.max_total_tool_calls - tool_calls_used,
+                tokens_left=self.budget.max_total_tokens - tokens_used,
             )
             self._emit(SubagentEvent("subagent_started", task.task_id, task.role))
             try:
                 output = self.worker(assignment)
                 model_steps = max(0, int(output.model_steps))
                 tool_calls = max(0, int(output.tool_calls))
+                input_tokens = max(0, int(output.input_tokens))
+                output_tokens = max(0, int(output.output_tokens))
+                unknown_token_requests = max(0, int(output.unknown_token_requests))
+                child_tokens = input_tokens + output_tokens
                 tools_used = tuple(dict.fromkeys(output.tools_used))
                 invalid_tools = set(tools_used) - set(assignment.callable_tools)
                 if (
                     model_steps > assignment.max_steps
                     or tool_calls > assignment.max_tool_calls
+                    or child_tokens > assignment.max_total_tokens
                     or invalid_tools
                 ):
                     result = self._terminal_result(
@@ -467,10 +523,14 @@ class SubagentSupervisor:
                         model_steps=model_steps,
                         tool_calls=tool_calls,
                         tools_used=tools_used,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        unknown_token_requests=unknown_token_requests,
                         error_category=(
                             "budget_violation"
                             if model_steps > assignment.max_steps
                             or tool_calls > assignment.max_tool_calls
+                            or child_tokens > assignment.max_total_tokens
                             else "capability_violation"
                         ),
                     )
@@ -482,6 +542,9 @@ class SubagentSupervisor:
                         model_steps=model_steps,
                         tool_calls=tool_calls,
                         tools_used=tools_used,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        unknown_token_requests=unknown_token_requests,
                     )
                 else:
                     result = SubagentResult(
@@ -493,14 +556,28 @@ class SubagentSupervisor:
                         tools_used=tools_used,
                         model_steps=model_steps,
                         tool_calls=tool_calls,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        unknown_token_requests=unknown_token_requests,
                     )
                 steps_used += min(model_steps, assignment.max_steps)
                 tool_calls_used += min(tool_calls, assignment.max_tool_calls)
+                tokens_used += min(child_tokens, assignment.max_total_tokens)
             except Exception as exc:
                 model_steps = max(0, int(getattr(exc, "model_steps", 0)))
                 tool_calls = max(0, int(getattr(exc, "tool_calls", 0)))
+                input_tokens = max(0, int(getattr(exc, "input_tokens", 0)))
+                output_tokens = max(0, int(getattr(exc, "output_tokens", 0)))
+                unknown_token_requests = max(
+                    0,
+                    int(getattr(exc, "unknown_token_requests", 0)),
+                )
                 steps_used += min(model_steps, assignment.max_steps)
                 tool_calls_used += min(tool_calls, assignment.max_tool_calls)
+                tokens_used += min(
+                    input_tokens + output_tokens,
+                    assignment.max_total_tokens,
+                )
                 was_cancelled = self.cancelled()
                 result = self._terminal_result(
                     task,
@@ -508,6 +585,9 @@ class SubagentSupervisor:
                     assignment=assignment,
                     model_steps=model_steps,
                     tool_calls=tool_calls,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    unknown_token_requests=unknown_token_requests,
                     error_category="cancelled" if was_cancelled else type(exc).__name__,
                 )
             results.append(result)
@@ -523,6 +603,9 @@ class SubagentSupervisor:
         model_steps: int = 0,
         tool_calls: int = 0,
         tools_used: tuple[str, ...] = (),
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        unknown_token_requests: int = 0,
         error_category: str = "",
     ) -> SubagentResult:
         return SubagentResult(
@@ -535,6 +618,9 @@ class SubagentSupervisor:
             model_steps=model_steps,
             tool_calls=tool_calls,
             error_category=error_category,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            unknown_token_requests=unknown_token_requests,
         )
 
     def _emit(self, event: SubagentEvent) -> None:
@@ -557,6 +643,9 @@ class SubagentSupervisor:
             tool_calls=result.tool_calls,
             tools_used=result.tools_used,
             summary=result.summary,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            unknown_token_requests=result.unknown_token_requests,
         )
 
 
@@ -588,7 +677,12 @@ def supervise_agent_tasks(
         # The parent loop charges the delegate_task invocation after this
         # helper returns. Preserve one slot for that enclosing tool result.
         child_tool_calls_left = max(0, parent_tool_calls_left - 1)
-        if parent_steps_left == 0 or child_tool_calls_left == 0:
+        parent_tokens_left = governor.snapshot().tokens_left
+        if (
+            parent_steps_left == 0
+            or child_tool_calls_left == 0
+            or parent_tokens_left == 0
+        ):
             results = [
                 SubagentResult(
                     task_id=task.task_id,
@@ -626,6 +720,20 @@ def supervise_agent_tasks(
                 configured_budget.max_total_tool_calls,
                 child_tool_calls_left,
             ),
+            **(
+                {
+                    "max_tokens_per_child": min(
+                        configured_budget.max_tokens_per_child,
+                        parent_tokens_left,
+                    ),
+                    "max_total_tokens": min(
+                        configured_budget.max_total_tokens,
+                        parent_tokens_left,
+                    ),
+                }
+                if parent_tokens_left is not None
+                else {}
+            ),
         )
     snapshot = getattr(parent, "last_turn_capabilities", {})
     snapshot = snapshot if isinstance(snapshot, dict) else {}
@@ -646,6 +754,11 @@ def supervise_agent_tasks(
         governor.charge_delegated_usage(
             model_steps=sum(result.model_steps for result in results),
             tool_calls=sum(result.tool_calls for result in results),
+            input_tokens=sum(result.input_tokens for result in results),
+            output_tokens=sum(result.output_tokens for result in results),
+            unknown_token_requests=sum(
+                result.unknown_token_requests for result in results
+            ),
         )
         parent.last_turn_budget = governor.snapshot().to_dict()
     return results

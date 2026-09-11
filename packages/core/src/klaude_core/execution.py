@@ -29,6 +29,10 @@ class TurnBudgetSnapshot:
     no_progress_streak: int
     max_no_progress: int
     stop_reason: str = ""
+    max_total_tokens: int | None = None
+    input_tokens_used: int = 0
+    output_tokens_used: int = 0
+    token_usage_unknown_requests: int = 0
 
     @property
     def model_steps_left(self) -> int:
@@ -38,10 +42,22 @@ class TurnBudgetSnapshot:
     def tool_calls_left(self) -> int:
         return max(0, self.max_tool_calls - self.tool_calls_used)
 
+    @property
+    def total_tokens_used(self) -> int:
+        return self.input_tokens_used + self.output_tokens_used
+
+    @property
+    def tokens_left(self) -> int | None:
+        if self.max_total_tokens is None:
+            return None
+        return max(0, self.max_total_tokens - self.total_tokens_used)
+
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["model_steps_left"] = self.model_steps_left
         value["tool_calls_left"] = self.tool_calls_left
+        value["total_tokens_used"] = self.total_tokens_used
+        value["tokens_left"] = self.tokens_left
         return value
 
 
@@ -60,17 +76,24 @@ class TurnGovernor:
         max_tool_calls: int | None = None,
         max_elapsed_seconds: float = 1_800.0,
         max_no_progress: int = 3,
+        max_total_tokens: int | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.max_model_steps = max(1, max_model_steps)
         self.max_tool_calls = max(1, max_tool_calls or max(4, self.max_model_steps * 2))
         self.max_elapsed_seconds = max(1.0, max_elapsed_seconds)
         self.max_no_progress = max(1, max_no_progress)
+        self.max_total_tokens = (
+            max(1, int(max_total_tokens)) if max_total_tokens is not None else None
+        )
         self._clock = clock
         self._started_at = clock()
         self.model_steps_used = 0
         self.tool_calls_used = 0
         self.no_progress_streak = 0
+        self.input_tokens_used = 0
+        self.output_tokens_used = 0
+        self.token_usage_unknown_requests = 0
         self.stop_reason = ""
         self._successful_outcomes: set[str] = set()
 
@@ -115,18 +138,49 @@ class TurnGovernor:
             self.stop_reason = "turn wall-time budget reached"
         return self.stop_reason
 
-    def charge_delegated_usage(self, *, model_steps: int, tool_calls: int) -> str:
+    def charge_delegated_usage(
+        self,
+        *,
+        model_steps: int,
+        tool_calls: int,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        unknown_token_requests: int = 0,
+    ) -> str:
         """Charge completed child work to this turn's non-expandable budget."""
         delegated_steps = max(0, int(model_steps))
         delegated_calls = max(0, int(tool_calls))
         self.model_steps_used += delegated_steps
         self.tool_calls_used += delegated_calls
+        self.input_tokens_used += max(0, int(input_tokens))
+        self.output_tokens_used += max(0, int(output_tokens))
+        self.token_usage_unknown_requests += max(0, int(unknown_token_requests))
         if self.model_steps_used >= self.max_model_steps:
             self.stop_reason = "model/tool step budget reached"
         elif self.tool_calls_used >= self.max_tool_calls:
             self.stop_reason = "tool-call budget reached"
+        elif (
+            self.max_total_tokens is not None
+            and self.input_tokens_used + self.output_tokens_used >= self.max_total_tokens
+        ):
+            self.stop_reason = "token budget reached"
         elif self.elapsed_seconds >= self.max_elapsed_seconds:
             self.stop_reason = "turn wall-time budget reached"
+        return self.stop_reason
+
+    def observe_model_usage(self, usage: tuple[int, int] | None) -> str:
+        """Charge one provider request using exact counters when available."""
+        if usage is None:
+            self.token_usage_unknown_requests += 1
+            return self.stop_reason
+        input_tokens, output_tokens = usage
+        self.input_tokens_used += max(0, int(input_tokens))
+        self.output_tokens_used += max(0, int(output_tokens))
+        if (
+            self.max_total_tokens is not None
+            and self.input_tokens_used + self.output_tokens_used >= self.max_total_tokens
+        ):
+            self.stop_reason = "token budget reached"
         return self.stop_reason
 
     @property
@@ -144,4 +198,8 @@ class TurnGovernor:
             no_progress_streak=self.no_progress_streak,
             max_no_progress=self.max_no_progress,
             stop_reason=self.stop_reason,
+            max_total_tokens=self.max_total_tokens,
+            input_tokens_used=self.input_tokens_used,
+            output_tokens_used=self.output_tokens_used,
+            token_usage_unknown_requests=self.token_usage_unknown_requests,
         )
