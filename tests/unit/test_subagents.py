@@ -1,8 +1,13 @@
+import threading
+import time
+
 import pytest
 from klaude_core import (
     Agent,
     PermissionGate,
     SubagentBudget,
+    SubagentEvent,
+    SubagentEventDispatcher,
     SubagentRole,
     SubagentStatus,
     SubagentSupervisor,
@@ -112,6 +117,7 @@ def test_supervisor_returns_bounded_structured_result_and_public_events():
         worker=worker,
         budget=SubagentBudget(max_steps_per_child=4, max_result_characters=512),
         event_sink=events.append,
+        event_batch_id="batch-1",
     )
     task = SubagentTask("inspect", task_id="child-1", requested_tools=("read_file",))
 
@@ -122,7 +128,13 @@ def test_supervisor_returns_bounded_structured_result_and_public_events():
     assert result.tools_used == ("read_file",)
     assert result.to_dict()["role"] == "read_research"
     assert [event.to_dict() for event in events] == [
-        {"kind": "subagent_started", "task_id": "child-1", "role": "read_research"},
+        {
+            "kind": "subagent_started",
+            "task_id": "child-1",
+            "role": "read_research",
+            "batch_id": "batch-1",
+            "sequence": 1,
+        },
         {
             "kind": "subagent_finished",
             "task_id": "child-1",
@@ -134,8 +146,75 @@ def test_supervisor_returns_bounded_structured_result_and_public_events():
             "summary": "evidence" * 64,
             "input_tokens": 80,
             "output_tokens": 20,
+            "batch_id": "batch-1",
+            "sequence": 2,
         },
     ]
+
+
+def test_event_dispatcher_serializes_concurrent_lifecycles_in_sequence():
+    emitted = []
+    callback_lock = threading.Lock()
+    active_callbacks = 0
+    maximum_callbacks = 0
+
+    def sink(event):
+        nonlocal active_callbacks, maximum_callbacks
+        with callback_lock:
+            active_callbacks += 1
+            maximum_callbacks = max(maximum_callbacks, active_callbacks)
+        time.sleep(0.001)
+        emitted.append(event)
+        with callback_lock:
+            active_callbacks -= 1
+
+    dispatcher = SubagentEventDispatcher(sink, batch_id="concurrent-batch")
+
+    def lifecycle(index):
+        task_id = f"child-{index}"
+        assert dispatcher.emit(
+            SubagentEvent("subagent_started", task_id, SubagentRole.READ_RESEARCH)
+        )
+        assert dispatcher.emit(
+            SubagentEvent(
+                "subagent_finished",
+                task_id,
+                SubagentRole.READ_RESEARCH,
+                SubagentStatus.COMPLETED,
+            )
+        )
+
+    threads = [threading.Thread(target=lifecycle, args=(index,)) for index in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert maximum_callbacks == 1
+    assert [event.sequence for event in emitted] == list(range(1, 17))
+    assert {event.batch_id for event in emitted} == {"concurrent-batch"}
+    for index in range(8):
+        kinds = [event.kind for event in emitted if event.task_id == f"child-{index}"]
+        assert kinds == ["subagent_started", "subagent_finished"]
+
+
+def test_event_dispatcher_drops_duplicate_or_impossible_transitions():
+    emitted = []
+    dispatcher = SubagentEventDispatcher(emitted.append, batch_id="dedupe-batch")
+    started = SubagentEvent("subagent_started", "child", SubagentRole.READ_RESEARCH)
+    finished = SubagentEvent(
+        "subagent_finished",
+        "child",
+        SubagentRole.READ_RESEARCH,
+        SubagentStatus.COMPLETED,
+    )
+
+    assert dispatcher.emit(finished) is False
+    assert dispatcher.emit(started) is True
+    assert dispatcher.emit(started) is False
+    assert dispatcher.emit(finished) is True
+    assert dispatcher.emit(finished) is False
+    assert [event.sequence for event in emitted] == [1, 2]
 
 
 def test_supervisor_stops_children_at_shared_budget_and_honors_cancellation():
@@ -519,16 +598,19 @@ def test_parent_budget_rejection_emits_a_terminal_child_event():
         parent,
         [SubagentTask("inspect", task_id="budget-child")],
         event_sink=events.append,
+        event_batch_id="budget-batch",
     )[0]
 
     assert result.status is SubagentStatus.FAILED
     assert result.error_category == "parent_budget_exhausted"
     assert [event.to_dict() for event in events] == [
         {
-            "kind": "subagent_finished",
+            "kind": "subagent_rejected",
             "task_id": "budget-child",
             "role": "read_research",
             "status": "failed",
+            "batch_id": "budget-batch",
+            "sequence": 1,
         }
     ]
 

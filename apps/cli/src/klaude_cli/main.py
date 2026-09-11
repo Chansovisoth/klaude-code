@@ -4338,7 +4338,8 @@ def _active_tool_status(tool: str, args: dict) -> str:
 
 
 def _subagent_activity_text(payload: dict[str, Any]) -> str:
-    if payload.get("kind") != "subagent_finished":
+    kind = payload.get("kind")
+    if kind not in {"subagent_finished", "subagent_rejected"}:
         return ""
     status = str(payload.get("status", "failed")).casefold()
     label = {
@@ -4367,7 +4368,8 @@ def _subagent_activity_text(payload: dict[str, Any]) -> str:
             f"{'request' if unknown_token_requests == 1 else 'requests'}"
         )
     suffix = f" ({' · '.join(metrics)})" if metrics else ""
-    rendered = f"[{label}] {role} subagent {status}{suffix}"
+    outcome = "rejected" if kind == "subagent_rejected" else status
+    rendered = f"[{label}] {role} subagent {outcome}{suffix}"
     summary = _activity_value(payload.get("summary"), limit=500)
     return rendered + (f"\n  └ {summary}" if summary else "")
 

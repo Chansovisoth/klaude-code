@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
+from threading import Lock
 from typing import Any
 from uuid import uuid4
 
@@ -187,6 +188,8 @@ class SubagentEvent:
     input_tokens: int = 0
     output_tokens: int = 0
     unknown_token_requests: int = 0
+    batch_id: str = ""
+    sequence: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         value: dict[str, Any] = {
@@ -210,12 +213,68 @@ class SubagentEvent:
             value["output_tokens"] = self.output_tokens
         if self.unknown_token_requests:
             value["unknown_token_requests"] = self.unknown_token_requests
+        if self.batch_id:
+            value["batch_id"] = self.batch_id
+        if self.sequence:
+            value["sequence"] = self.sequence
         return value
 
 
 SubagentWorker = Callable[[SubagentAssignment], SubagentWorkerOutput]
 SubagentEventSink = Callable[[SubagentEvent], None]
 CancellationCheck = Callable[[], bool]
+
+
+class SubagentEventDispatcher:
+    """Serialize public child lifecycles and assign monotonic batch order."""
+
+    def __init__(
+        self,
+        sink: SubagentEventSink | None = None,
+        *,
+        batch_id: str = "",
+    ) -> None:
+        self.sink = sink
+        self.batch_id = batch_id.strip() or uuid4().hex
+        if len(self.batch_id) > 128:
+            raise ValueError("subagent event batch_id must not exceed 128 characters")
+        self._lock = Lock()
+        self._sequence = 0
+        self._states: dict[str, str] = {}
+
+    def emit(self, event: SubagentEvent) -> bool:
+        """Publish one valid transition; duplicate or impossible events are dropped."""
+        with self._lock:
+            state = self._states.get(event.task_id)
+            if event.kind == "subagent_started":
+                if state is not None:
+                    return False
+                self._states[event.task_id] = "started"
+            elif event.kind == "subagent_finished":
+                if state != "started":
+                    return False
+                self._states[event.task_id] = "terminal"
+            elif event.kind == "subagent_rejected":
+                if state is not None:
+                    return False
+                self._states[event.task_id] = "terminal"
+            else:
+                return False
+            self._sequence += 1
+            sequenced = replace(
+                event,
+                batch_id=self.batch_id,
+                sequence=self._sequence,
+            )
+            if self.sink is not None:
+                try:
+                    # Keep callback order identical to assigned order. Hosts
+                    # must keep this telemetry callback bounded and non-blocking.
+                    self.sink(sequenced)
+                except Exception:
+                    # UI/session telemetry must never alter child execution.
+                    pass
+            return True
 
 
 class SubagentExecutionError(RuntimeError):
@@ -387,9 +446,9 @@ def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> Subagen
 class SubagentSupervisor:
     """Prepare and run bounded read-only child tasks sequentially.
 
-    Sequential execution remains intentional until aggregate budgets and event
-    ordering are concurrency-safe. Each child already owns an independent
-    provider stream and cancellation tracker.
+    Sequential execution remains intentional until aggregate budget reservation
+    and shared tool services are concurrency-safe. Each child already owns an
+    independent provider stream, cancellation tracker, and ordered event stream.
     """
 
     def __init__(
@@ -402,6 +461,7 @@ class SubagentSupervisor:
         budget: SubagentBudget | None = None,
         cancelled: CancellationCheck | None = None,
         event_sink: SubagentEventSink | None = None,
+        event_batch_id: str = "",
     ) -> None:
         self.parent_callable_tools = frozenset(parent_callable_tools)
         self.effective_permissions = dict(effective_permissions)
@@ -409,7 +469,7 @@ class SubagentSupervisor:
         self.worker = worker
         self.budget = (budget or SubagentBudget()).bounded()
         self.cancelled = cancelled or (lambda: False)
-        self.event_sink = event_sink
+        self.events = SubagentEventDispatcher(event_sink, batch_id=event_batch_id)
 
     def prepare(
         self,
@@ -491,7 +551,7 @@ class SubagentSupervisor:
                     error_category="cancelled" if was_cancelled else "budget_exhausted",
                 )
                 results.append(result)
-                self._emit(self._finished_event(result))
+                self._emit(self._terminal_event(result, started=False))
                 continue
             assignment = self.prepare(
                 task,
@@ -591,7 +651,7 @@ class SubagentSupervisor:
                     error_category="cancelled" if was_cancelled else type(exc).__name__,
                 )
             results.append(result)
-            self._emit(self._finished_event(result))
+            self._emit(self._terminal_event(result, started=True))
         return results
 
     def _terminal_result(
@@ -624,18 +684,12 @@ class SubagentSupervisor:
         )
 
     def _emit(self, event: SubagentEvent) -> None:
-        if self.event_sink is None:
-            return
-        try:
-            self.event_sink(event)
-        except Exception:
-            # UI/session telemetry must never alter child execution.
-            pass
+        self.events.emit(event)
 
     @staticmethod
-    def _finished_event(result: SubagentResult) -> SubagentEvent:
+    def _terminal_event(result: SubagentResult, *, started: bool) -> SubagentEvent:
         return SubagentEvent(
-            "subagent_finished",
+            "subagent_finished" if started else "subagent_rejected",
             result.task_id,
             result.role,
             result.status,
@@ -656,6 +710,7 @@ def supervise_agent_tasks(
     budget: SubagentBudget | None = None,
     cancelled: CancellationCheck | None = None,
     event_sink: SubagentEventSink | None = None,
+    event_batch_id: str = "",
 ) -> list[SubagentResult]:
     """Run isolated children and charge their completed usage to the parent turn."""
     queued = list(tasks)
@@ -683,6 +738,7 @@ def supervise_agent_tasks(
             or child_tool_calls_left == 0
             or parent_tokens_left == 0
         ):
+            events = SubagentEventDispatcher(event_sink, batch_id=event_batch_id)
             results = [
                 SubagentResult(
                     task_id=task.task_id,
@@ -697,13 +753,8 @@ def supervise_agent_tasks(
                 )
                 for task in queued
             ]
-            if event_sink is not None:
-                for result in results:
-                    try:
-                        event_sink(SubagentSupervisor._finished_event(result))
-                    except Exception:
-                        # Session/UI telemetry cannot change the terminal result.
-                        pass
+            for result in results:
+                events.emit(SubagentSupervisor._terminal_event(result, started=False))
             return results
         configured_budget = replace(
             configured_budget,
@@ -748,6 +799,7 @@ def supervise_agent_tasks(
         budget=configured_budget,
         cancelled=cancelled,
         event_sink=event_sink,
+        event_batch_id=event_batch_id,
     )
     results = supervisor.run(queued)
     if governor is not None:

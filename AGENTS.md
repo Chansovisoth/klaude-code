@@ -854,7 +854,7 @@ broker needed to connect. Custom providers that cannot fork fail closed instead
 of silently sharing a transport. Sanitized start/finish events and a bounded
 public final summary are persisted and mirrored to `/resume`; private reasoning and raw tool
 output are never stored as subagent activity. Execution remains sequential until
-aggregate budgets and lifecycle ordering are concurrency-safe.
+aggregate budget reservation and shared tool services are concurrency-safe.
 
 The turn governor normalizes exact input/output usage reported by Ollama,
 OpenAI API, OpenAI Codex, and Gemini after every successful provider request.
@@ -865,6 +865,16 @@ is an explicit safety reserve. Missing or partial provider counters increment an
 unknown-request count and are never treated as zero or replaced with estimates.
 Subagent lifecycle metadata exposes only these numeric counters, never tokens or
 provider-private payloads.
+
+Every supervised child batch owns a random full-length batch ID and a monotonic
+event sequence. A thread-safe dispatcher serializes host callbacks in that exact
+order, permits one `subagent_started` followed by one `subagent_finished` per
+started task, and drops duplicate or impossible transitions. A task blocked by
+cancellation or budget before its worker begins emits `subagent_rejected`
+instead of a misleading finished event. Rejected work renders as rejected in
+local output, saved transcript, exports, and `/resume`. Batch sequence numbers
+are scoped to their batch ID; durable session event IDs remain the total order
+across separate delegations.
 
 Tool preflight checks paths and write locks before asking permission, and execution
 rechecks mutable conditions. Read-only pipelines are classified component by
@@ -1321,7 +1331,6 @@ Development state at handoff:
 - Full validation can hang in the optional LanceDB roundtrip under some
   restricted sandboxes. Report the focused and non-LanceDB results separately;
   never describe the knowledge suite as green unless it completed.
-- Continue controlled subagent orchestration with concurrency-safe lifecycle
-  ordering, adaptive concurrency, and live behavioral
+- Continue controlled subagent orchestration with adaptive concurrency and live behavioral
   evaluation before considering an implementation-worker role. Do not add
   background/cloud workers or broad write concurrency as part of that work.

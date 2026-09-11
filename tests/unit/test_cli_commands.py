@@ -2860,6 +2860,18 @@ def test_subagent_activity_uses_semantic_terminal_status(status, label):
     assert rendered == f"[{label}] test/diagnostic subagent {status}"
 
 
+def test_subagent_activity_distinguishes_work_rejected_before_start():
+    rendered = _subagent_activity_text(
+        {
+            "kind": "subagent_rejected",
+            "role": "read_research",
+            "status": "failed",
+        }
+    )
+
+    assert rendered == "[failed] read/research subagent rejected"
+
+
 @pytest.mark.parametrize(
     "tool,args,active,completed,detail",
     [

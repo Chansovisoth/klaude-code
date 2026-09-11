@@ -16,6 +16,10 @@
   Exact Ollama, OpenAI/Codex, and Gemini input/output counters now accumulate
   across every child request under per-child and aggregate token caps; missing
   or partial provider counters remain explicitly unknown rather than estimated.
+  Public child events now carry a host-issued batch ID and monotonic batch
+  sequence, serialize callbacks across worker threads, reject duplicate or
+  impossible lifecycle transitions, and distinguish work rejected before start
+  from work that actually started and finished.
   Explicit delegation and second-opinion requests now narrowly expose one permission-
   controlled `delegate_task`; completed public child summaries and sanitized
   lifecycle metadata persist for local and resumed clients.
