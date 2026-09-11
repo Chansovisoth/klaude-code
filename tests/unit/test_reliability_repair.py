@@ -7,7 +7,7 @@ from klaude_cli.main import (
     _select_tool_names,
     resolve_command_help_request,
 )
-from klaude_core import Agent, AgentEvent, PermissionGate, Tool
+from klaude_core import Agent, AgentEvent, PermissionGate, Tool, TurnScope
 from klaude_core.memory import Memory
 from klaude_core.model_runtime import ModelCapabilities, ModelInfo
 from klaude_tools import Workspace, build_tools, classify_command
@@ -501,6 +501,52 @@ def test_explicit_workspace_inspection_preflights_bounded_evidence():
     assert events[1].payload["metadata"]["host_preflight"] is True
     assert runtime.requests[0][0][-1]["role"] == "tool"
     assert runtime.requests[0][0][-1]["content"] == "language: Python"
+
+
+def test_contextual_storage_followup_retains_bounded_diagnostic_tool():
+    runtime = Runtime([{"role": "assistant", "content": "Use storage diagnostics."}])
+    tool = Tool("storage_usage", "inspect storage", {}, lambda: "root: 10G")
+    agent = make_agent(runtime, [tool], selector=lambda *_: [])
+    agent.messages.extend(
+        [
+            {"role": "user", "content": "How can I inspect disk usage safely?"},
+            {
+                "role": "assistant",
+                "content": "Use read-only storage diagnostics such as df and du.",
+            },
+        ]
+    )
+
+    events = list(agent.run("Run them"))
+
+    assert {item["function"]["name"] for item in runtime.requests[0][1]} == {"storage_usage"}
+    assert [event.kind for event in events[:2]] == ["tool_start", "tool_result"]
+    assert events[1].payload["metadata"]["host_preflight"] is True
+
+
+def test_contextual_storage_followup_ignores_unavailable_shell_hint_in_scoped_turn():
+    runtime = Runtime([{"role": "assistant", "content": "Storage inspected."}])
+    tools = [
+        Tool("storage_usage", "inspect storage", {}, lambda: "root: 10G"),
+        Tool("workspace_info", "inspect workspace", {}, lambda: "workspace"),
+        Tool("run_shell", "run shell", {}, lambda: pytest.fail("shell unavailable")),
+    ]
+    agent = make_agent(runtime, tools, selector=_select_tool_names)
+    agent.messages.extend(
+        [
+            {"role": "user", "content": "How can I inspect disk usage safely?"},
+            {
+                "role": "assistant",
+                "content": "Use read-only storage diagnostics such as df and du.",
+            },
+        ]
+    )
+
+    list(agent.run("Run them", scope=TurnScope.EVALUATION))
+
+    names = {item["function"]["name"] for item in runtime.requests[0][1]}
+    assert "storage_usage" in names
+    assert "run_shell" not in names
 
 
 def test_done_event_contains_same_sanitized_capability_snapshot():

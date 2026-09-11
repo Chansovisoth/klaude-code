@@ -2935,9 +2935,19 @@ def _looks_like_followup_search(text: str) -> bool:
 
 def _needs_contextual_tool_route(text: str, selected_names: list[str]) -> bool:
     """Recognize short dependent turns without treating all short text as lookup."""
-    if selected_names or len(text.split()) > 10:
-        return False
     normalized = " ".join(text.casefold().strip().strip(".,!?;:").split())
+    # A workspace-location hint can be selected for generic execution wording
+    # (because the shell tool is unavailable in a scoped turn). It is not useful
+    # evidence for resolving "run them", so let the preceding diagnostic turn
+    # supply its safe capability instead.
+    only_location_hint = set(selected_names) <= {"workspace_info"}
+    if selected_names and not (
+        only_location_hint
+        and re.search(r"\b(?:run|execute|launch|do)\b", normalized)
+    ):
+        return False
+    if len(text.split()) > 10:
+        return False
     if not normalized:
         return False
     return bool(
@@ -4028,7 +4038,14 @@ class Agent:
         selected_tools = available_tools
         if self.tool_selector is not None:
             selected_names = self.tool_selector(user_message, available_tools)
-            if _needs_contextual_tool_route(user_message, selected_names):
+            # Route based on tools that are actually callable in this scope. A
+            # diagnostic follow-up can heuristically mention `run_shell`, but a
+            # plan/evaluation scope may remove it; that must not suppress safe
+            # inheritance of the preceding storage diagnostic capability.
+            if _needs_contextual_tool_route(
+                user_message,
+                [name for name in selected_names if name in available_tools],
+            ):
                 # Resolve a dependent turn from the nearest substantive public
                 # message. Inherit inspection/retrieval capabilities only;
                 # assistant prose is never authorization for a write, shell,
@@ -4131,6 +4148,25 @@ class Agent:
             selected_tools = {
                 name: available_tools[name] for name in selected_names if name in available_tools
             }
+            # Short execution follow-ups often refer to diagnostic commands in the
+            # immediately preceding exchange (for example, "run them"). Preserve
+            # the safe structured storage capability even when the follow-up has
+            # no diagnostic noun of its own; never infer shell or mutation tools.
+            if (
+                not selected_tools
+                and "storage_usage" in available_tools
+                and re.search(r"\b(?:run|execute|launch|do)\b", user_message, re.I)
+                and any(
+                    re.search(
+                        r"\b(?:disk|drive|storage|filesystem|capacity|df|du|ncdu)\b",
+                        str(message.get("content", "")),
+                        re.I,
+                    )
+                    for message in self.messages[:-1]
+                    if message.get("role") in {"user", "assistant"}
+                )
+            ):
+                selected_tools["storage_usage"] = available_tools["storage_usage"]
         # Asking the user is a control-plane capability rather than a content
         # retrieval heuristic. It must remain available whenever a host can
         # service it, including otherwise direct-response turns.
@@ -4358,6 +4394,26 @@ class Agent:
                     "call the supplied workspace_info tool (and any other supplied read-only "
                     "file tool needed for evidence). Do not guess from the prompt or claim "
                     "workspace findings without a tool result."
+                )
+            storage_followup = (
+                "storage_usage" in selected_tools
+                and re.search(r"\b(?:run|execute|launch|do)\b", user_message, re.I)
+                and any(
+                    re.search(
+                        r"\b(?:disk|drive|storage|filesystem|capacity|df|du|ncdu)\b",
+                        str(message.get("content", "")),
+                        re.I,
+                    )
+                    for message in self.messages[:-1]
+                    if message.get("role") in {"user", "assistant"}
+                )
+            )
+            if storage_followup:
+                context += (
+                    "\nThis is a contextual storage-diagnostic follow-up. Call the supplied "
+                    "storage_usage tool before answering; it is the bounded read-only "
+                    "replacement for arbitrary df/du shell commands. Do not guess from "
+                    "generic disk-usage knowledge."
                 )
             recent = next(
                 (
@@ -4951,22 +5007,36 @@ class Agent:
             )
             and "workspace_info" in selected_tools
         )
-        if workspace_preflight:
-            # Explicit workspace inspection is deterministic host-side context, not
-            # an optional model guess. Collect the bounded workspace metadata first,
-            # then let the model interpret it and request any additional read-only
-            # evidence it needs.
-            preflight_tool = selected_tools["workspace_info"]
+        storage_preflight = bool(
+            "storage_usage" in selected_tools
+            and re.search(r"\b(?:run|execute|launch|do)\b", user_message, re.I)
+            and any(
+                re.search(
+                    r"\b(?:disk|drive|storage|filesystem|capacity|df|du|ncdu)\b",
+                    str(message.get("content", "")),
+                    re.I,
+                )
+                for message in self.messages[:-1]
+                if message.get("role") in {"user", "assistant"}
+            )
+        )
+        for preflight_name in (
+            ("workspace_info",) if workspace_preflight else ()
+        ) + (("storage_usage",) if storage_preflight else ()):
+            # Explicit inspection and contextual diagnostics are deterministic
+            # host-side context, not optional model guesses. Collect bounded
+            # read-only evidence first, then let the model interpret it.
+            preflight_tool = selected_tools[preflight_name]
             preflight_id = uuid4().hex
             yield AgentEvent(
                 "tool_start",
-                {"tool": "workspace_info", "args": {}, "execution_id": preflight_id},
+                {"tool": preflight_name, "args": {}, "execution_id": preflight_id},
             )
             preflight_executed = False
             try:
-                self.gate.check("workspace_info", preflight_tool.detail({}))
                 if preflight_tool.preflight is not None:
                     preflight_tool.preflight({})
+                self.gate.check(preflight_name, preflight_tool.detail({}))
                 preflight_result = str(preflight_tool.fn())
                 preflight_executed = True
             except PermissionDenied as error:
@@ -4978,11 +5048,13 @@ class Agent:
                 "executed": preflight_executed,
                 "host_preflight": True,
             }
-            used_tools.add("workspace_info")
+            governor.observe_tool_result(preflight_name, preflight_result, preflight_metadata)
+            self.last_turn_budget = governor.snapshot().to_dict()
+            used_tools.add(preflight_name)
             yield AgentEvent(
                 "tool_result",
                 {
-                    "tool": "workspace_info",
+                    "tool": preflight_name,
                     "args": {},
                     "result": preflight_result,
                     "metadata": preflight_metadata,
@@ -4991,7 +5063,7 @@ class Agent:
             self.messages.append(
                 {
                     "role": "tool",
-                    "tool_name": "workspace_info",
+                    "tool_name": preflight_name,
                     "content": preflight_result,
                     "metadata": preflight_metadata,
                 }
