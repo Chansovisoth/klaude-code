@@ -141,6 +141,10 @@ defaults to on. Input Field → Height → Enter min/max accepts two whole numbe
 (for example `2 10`). The composer grows between those limits; valid limits
 satisfy `1 ≤ min ≤ max ≤ 12`, with defaults of 8 and 12. Enter saves, Escape or
 Ctrl+C cancels, and typing `reset to default` restores both defaults.
+Runtime also exposes Subagent Workers: Auto uses one local Ollama worker or two
+cloud workers, while an explicit 1–4 value is available for quota and hardware
+tuning. Only audited independent read-only workspace inspections can overlap;
+web, knowledge, shell, Git, and mutation work remains sequential.
 Each category can be reset independently. Autumn is the
 default interface theme, with Crimson Red, Egg Yolk, Hacker Green, Neon Synth,
 and rainbow-ordered Pastelle Red, Orange, Yellow, Lime, Green, Cyan, Azure,
