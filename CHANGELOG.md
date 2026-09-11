@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fix explicit workspace-inspection routing for weak local models: recognize
+  natural inspection/review wording, keep the selected schema read-only, and
+  run one bounded `workspace_info` preflight before synthesis. Persist its
+  real start/result events and evidence so a model cannot silently guess the
+  implementation language without inspecting the workspace.
 - Add the first controlled-subagent foundation: typed read/research and
   test/diagnostic child tasks, parent-intersected read-only capability
   envelopes, conservative permission inheritance, independent and aggregate

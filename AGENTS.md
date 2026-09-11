@@ -749,6 +749,10 @@ The agent loop in `packages/core/src/klaude_core/agent.py` handles:
   `prefer ddgs`;
 - deterministic tool exposure for casual turns, command-help requests,
   workspace requests, local knowledge, web lookup, and follow-ups;
+- explicit workspace inspection requests receive a bounded host-side
+  `workspace_info` preflight before the model answers, so weak local models
+  cannot silently substitute a guess for real workspace evidence; the result
+  is persisted as an ordinary tool start/result pair;
 - bounded hierarchical repository guidance. Applicable `AGENTS.md` files load
   root-to-leaf into the refreshed system prompt with a combined
   12,000-character budget. Every readable file receives a share and the closest
@@ -795,7 +799,7 @@ Klaude, a local-first coding assistant.
 
 Use tools when they materially improve correctness or perform a requested
 action. The model, not a keyword router, decides whether to call an exposed
-tool. The system prompt requires retrieval for fresh public facts and explicit
+tool except for the bounded `workspace_info` preflight above. The system prompt requires retrieval for fresh public facts and explicit
 lookups, while ordinary conversation and stable explanations should answer
 directly. The runtime bounds and deduplicates calls but never fabricates a
 search merely because the model did not ask for one.

@@ -4343,6 +4343,22 @@ class Agent:
                     *self.messages[1:],
                 ]
             context = "\n\n" + snapshot.render_for_model()
+            workspace_inspection = (
+                re.search(r"\b(?:inspect|analy[sz]e|review|explore|audit)\b", user_message, re.I)
+                and re.search(
+                    r"\b(?:workspace|repo(?:sitory)?|codebase|project files|"
+                    r"files in (?:this|the))\b",
+                    user_message,
+                    re.I,
+                )
+            )
+            if workspace_inspection and selected_tools and "workspace_info" in selected_tools:
+                context += (
+                    "\nThis is an explicit workspace-inspection request. Before answering, "
+                    "call the supplied workspace_info tool (and any other supplied read-only "
+                    "file tool needed for evidence). Do not guess from the prompt or claim "
+                    "workspace findings without a tool result."
+                )
             recent = next(
                 (
                     str(m.get("content", ""))
@@ -4925,6 +4941,61 @@ class Agent:
         # Retrieval is model-led. The host enforces tool safety and budgets but
         # never synthesizes a search or knowledge query from the user's words.
         governor_stop_instruction_sent = False
+        workspace_preflight = bool(
+            re.search(r"\b(?:inspect|analy[sz]e|review|explore|audit)\b", user_message, re.I)
+            and re.search(
+                r"\b(?:workspace|repo(?:sitory)?|codebase|project files|"
+                r"files in (?:this|the))\b",
+                user_message,
+                re.I,
+            )
+            and "workspace_info" in selected_tools
+        )
+        if workspace_preflight:
+            # Explicit workspace inspection is deterministic host-side context, not
+            # an optional model guess. Collect the bounded workspace metadata first,
+            # then let the model interpret it and request any additional read-only
+            # evidence it needs.
+            preflight_tool = selected_tools["workspace_info"]
+            preflight_id = uuid4().hex
+            yield AgentEvent(
+                "tool_start",
+                {"tool": "workspace_info", "args": {}, "execution_id": preflight_id},
+            )
+            preflight_executed = False
+            try:
+                self.gate.check("workspace_info", preflight_tool.detail({}))
+                if preflight_tool.preflight is not None:
+                    preflight_tool.preflight({})
+                preflight_result = str(preflight_tool.fn())
+                preflight_executed = True
+            except PermissionDenied as error:
+                preflight_result = f"permission denied: {error}"
+            except Exception as error:
+                preflight_result = f"tool error: {type(error).__name__}: {error}"
+            preflight_metadata = {
+                "execution_id": preflight_id,
+                "executed": preflight_executed,
+                "host_preflight": True,
+            }
+            used_tools.add("workspace_info")
+            yield AgentEvent(
+                "tool_result",
+                {
+                    "tool": "workspace_info",
+                    "args": {},
+                    "result": preflight_result,
+                    "metadata": preflight_metadata,
+                },
+            )
+            self.messages.append(
+                {
+                    "role": "tool",
+                    "tool_name": "workspace_info",
+                    "content": preflight_result,
+                    "metadata": preflight_metadata,
+                }
+            )
         for _step in range(self.max_steps):
             governor_reason = governor.begin_model_step()
             self.last_turn_budget = governor.snapshot().to_dict()

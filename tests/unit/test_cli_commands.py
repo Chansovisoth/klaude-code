@@ -6312,6 +6312,28 @@ def test_tool_selector_preserves_workspace_and_search_routing():
     ]
 
 
+def test_tool_selector_routes_explicit_workspace_inspection_to_read_only_tools():
+    tools = {
+        name: Tool(
+            name,
+            f"{name}.",
+            {"type": "object", "properties": {}, "required": []},
+            lambda: "",
+        )
+        for name in ("workspace_info", "list_dir", "read_file", "run_shell")
+    }
+
+    selected = _select_tool_names(
+        "Inspect this workspace read-only and identify its primary implementation language.",
+        tools,
+    )
+
+    assert "workspace_info" in selected
+    assert "read_file" in selected
+    assert "list_dir" in selected
+    assert "run_shell" not in selected
+
+
 def test_tool_selector_exposes_web_for_lookup_without_question_mark():
     tools = {
         name: Tool(

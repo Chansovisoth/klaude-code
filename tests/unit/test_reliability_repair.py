@@ -486,6 +486,23 @@ def test_provider_without_tool_support_receives_no_schemas():
     )
 
 
+def test_explicit_workspace_inspection_preflights_bounded_evidence():
+    runtime = Runtime([{"role": "assistant", "content": "Python is used here."}])
+    tool = Tool("workspace_info", "inspect workspace", {}, lambda: "language: Python")
+    agent = make_agent(
+        runtime,
+        [tool],
+        selector=lambda *_: ["workspace_info"],
+    )
+
+    events = list(agent.run("Inspect this workspace read-only and identify its language."))
+
+    assert [event.kind for event in events[:2]] == ["tool_start", "tool_result"]
+    assert events[1].payload["metadata"]["host_preflight"] is True
+    assert runtime.requests[0][0][-1]["role"] == "tool"
+    assert runtime.requests[0][0][-1]["content"] == "language: Python"
+
+
 def test_done_event_contains_same_sanitized_capability_snapshot():
     runtime = Runtime([{"role": "assistant", "content": "Done."}])
     observed_capabilities = []

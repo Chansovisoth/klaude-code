@@ -4883,6 +4883,17 @@ WORKSPACE_LOCATION_PATTERNS = (
     "working directory",
     "repo root",
     "repository root",
+    "inspect this workspace",
+    "inspect the workspace",
+    "inspect workspace",
+    "inspect this repo",
+    "inspect the repo",
+    "inspect repository",
+    "analyze this workspace",
+    "analyze the workspace",
+    "analyze this repo",
+    "analyze the codebase",
+    "identify the primary implementation language",
 )
 
 
@@ -5017,7 +5028,14 @@ def _tool_use_route(user_message: str) -> ToolUseRoute:
         or resolve_command_help_request(user_message) is not None
     ):
         return ToolUseRoute.COMMAND_REFERENCE
-    if any(word in text for word in WORKSPACE_LOCATION_PATTERNS):
+    workspace_inspection = (
+        re.search(r"\b(?:inspect|analy[sz]e|review|explore|audit)\b", text)
+        and re.search(
+            r"\b(?:workspace|repo(?:sitory)?|codebase|project files|files in (?:this|the))\b",
+            text,
+        )
+    )
+    if any(word in text for word in WORKSPACE_LOCATION_PATTERNS) or workspace_inspection:
         return ToolUseRoute.WORKSPACE_TOOL
     if _is_standalone_code_generation_request(user_message):
         return ToolUseRoute.DIRECT_RESPONSE
