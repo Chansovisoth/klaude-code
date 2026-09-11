@@ -201,6 +201,31 @@ def test_evaluation_scope_omits_mutation_and_interactive_input_tools():
     }
 
 
+def test_subagent_scope_cannot_mutate_prompt_or_delegate_again():
+    ollama = ScriptedOllama([{"role": "assistant", "content": "findings"}])
+    tools = [
+        Tool(name, name, {"type": "object"}, lambda **_kwargs: "ok")
+        for name in ("read_file", "web_search", "write_file", "delegate_task")
+    ]
+    agent = Agent(
+        ollama,
+        "fake-model",
+        tools,
+        PermissionGate({tool.name: "allow" for tool in tools}, lambda *_args: "y"),
+        "system",
+        tool_selector=lambda _message, available: list(available),
+    )
+
+    list(agent.run("Inspect independently", scope=TurnScope.SUBAGENT))
+
+    names = {item["function"]["name"] for item in ollama.calls[0]["tools"]}
+    assert names == {"read_file", "web_search"}
+    snapshot = agent.last_turn_capabilities
+    assert snapshot["scope"] == "subagent"
+    assert snapshot["unavailable_tools"]["write_file"] == "subagent scope"
+    assert snapshot["unavailable_tools"]["delegate_task"] == "subagent scope"
+
+
 def test_user_input_tool_is_omitted_for_a_direct_greeting():
     ollama = ScriptedOllama([{"role": "assistant", "content": "Need a choice."}])
     agent = Agent(

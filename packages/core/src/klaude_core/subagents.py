@@ -160,11 +160,27 @@ class SubagentEvent:
     task_id: str
     role: SubagentRole
     status: SubagentStatus | None = None
+    model_steps: int = 0
+    tool_calls: int = 0
+    tools_used: tuple[str, ...] = ()
+    summary: str = ""
 
-    def to_dict(self) -> dict[str, str]:
-        value = {"kind": self.kind, "task_id": self.task_id, "role": self.role.value}
+    def to_dict(self) -> dict[str, Any]:
+        value: dict[str, Any] = {
+            "kind": self.kind,
+            "task_id": self.task_id,
+            "role": self.role.value,
+        }
         if self.status is not None:
             value["status"] = self.status.value
+        if self.model_steps:
+            value["model_steps"] = self.model_steps
+        if self.tool_calls:
+            value["tool_calls"] = self.tool_calls
+        if self.tools_used:
+            value["tools_used"] = list(self.tools_used)
+        if self.summary:
+            value["summary"] = self.summary[:4_000]
         return value
 
 
@@ -214,6 +230,12 @@ def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> Subagen
         + f"Maximum model steps: {assignment.max_steps}.\n"
         + "</subagent_contract>"
     )
+    parent_selector = parent.tool_selector
+    child_selector = (
+        None
+        if parent_selector is None
+        else lambda _message, tools: parent_selector(assignment.task.objective, tools)
+    )
     child = Agent(
         parent.runtime,
         parent.model,
@@ -223,7 +245,7 @@ def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> Subagen
         max_steps=assignment.max_steps,
         max_code_continuations=0,
         max_code_repairs=0,
-        tool_selector=parent.tool_selector,
+        tool_selector=child_selector,
         ollama_options=parent.ollama_options,
         ollama_think=parent.ollama_think,
         web_research_budget=parent.web_research_budget,
@@ -366,9 +388,7 @@ class SubagentSupervisor:
                     error_category="cancelled" if was_cancelled else "budget_exhausted",
                 )
                 results.append(result)
-                self._emit(
-                    SubagentEvent("subagent_finished", task.task_id, task.role, result.status)
-                )
+                self._emit(self._finished_event(result))
                 continue
             assignment = self.prepare(task, steps_left=self.budget.max_total_steps - steps_used)
             self._emit(SubagentEvent("subagent_started", task.task_id, task.role))
@@ -416,16 +436,17 @@ class SubagentSupervisor:
                 model_steps = max(0, int(getattr(exc, "model_steps", 0)))
                 tool_calls = max(0, int(getattr(exc, "tool_calls", 0)))
                 steps_used += min(model_steps, assignment.max_steps)
+                was_cancelled = self.cancelled()
                 result = self._terminal_result(
                     task,
-                    SubagentStatus.FAILED,
+                    SubagentStatus.CANCELLED if was_cancelled else SubagentStatus.FAILED,
                     assignment=assignment,
                     model_steps=model_steps,
                     tool_calls=tool_calls,
-                    error_category=type(exc).__name__,
+                    error_category="cancelled" if was_cancelled else type(exc).__name__,
                 )
             results.append(result)
-            self._emit(SubagentEvent("subagent_finished", task.task_id, task.role, result.status))
+            self._emit(self._finished_event(result))
         return results
 
     def _terminal_result(
@@ -460,6 +481,19 @@ class SubagentSupervisor:
             # UI/session telemetry must never alter child execution.
             pass
 
+    @staticmethod
+    def _finished_event(result: SubagentResult) -> SubagentEvent:
+        return SubagentEvent(
+            "subagent_finished",
+            result.task_id,
+            result.role,
+            result.status,
+            model_steps=result.model_steps,
+            tool_calls=result.tool_calls,
+            tools_used=result.tools_used,
+            summary=result.summary,
+        )
+
 
 def supervise_agent_tasks(
     parent: Any,
@@ -483,7 +517,7 @@ def supervise_agent_tasks(
     if governor is not None:
         parent_steps_left = max(0, governor.max_model_steps - governor.model_steps_used)
         if parent_steps_left == 0:
-            return [
+            results = [
                 SubagentResult(
                     task_id=task.task_id,
                     role=task.role,
@@ -497,6 +531,14 @@ def supervise_agent_tasks(
                 )
                 for task in queued
             ]
+            if event_sink is not None:
+                for result in results:
+                    try:
+                        event_sink(SubagentSupervisor._finished_event(result))
+                    except Exception:
+                        # Session/UI telemetry cannot change the terminal result.
+                        pass
+            return results
         configured_budget = replace(
             configured_budget,
             max_steps_per_child=min(

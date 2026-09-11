@@ -8,8 +8,10 @@
   budgets, bounded structured results, cancellation checks, and public
   lifecycle events. Add an isolated sequential child-agent adapter that receives
   only bounded task context, runs under a dedicated non-interactive scope, and
-  charges successful or failed child usage to the parent governor. Live model
-  delegation is not exposed yet.
+  charges successful or failed child usage to the parent governor. Explicit
+  delegation and second-opinion requests now narrowly expose one permission-
+  controlled `delegate_task`; completed public child summaries and sanitized
+  lifecycle metadata persist for local and resumed clients.
 - Add typed standard, plan, review, init, and evaluation turn scopes to the
   immutable capability contract. Enforce each scope's tool allowlist before
   provider requests, hard-limit `/init` writes to the workspace-root

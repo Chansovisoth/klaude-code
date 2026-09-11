@@ -238,7 +238,8 @@ max_results = 5
 # allow_network_lookup = false   # network mode remains opt-in
 
 [permissions]
-# run_shell = "ask"    # ask | allow | deny
-# edit_file = "ask"
-# crawl_site = "ask"
-# learn_source = "ask"
+# run_shell     = "ask"      # ask | allow | deny
+# delegate_task = "ask"      # bounded read-only child; permissions never escalate
+# edit_file     = "ask"
+# crawl_site    = "ask"
+# learn_source  = "ask"

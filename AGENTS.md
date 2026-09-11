@@ -172,6 +172,9 @@ Chat slash commands currently include:
   ask -> allow -> deny -> ask and persists the custom map; exact preset matches
   are detected automatically. Reset restores configured defaults. Hard workspace,
   transport, and command-safety boundaries remain effective under Full Access.
+  `delegate_task` appears under Orchestration and defaults to ask. Read Only also
+  keeps it at ask because delegation can consume model quota even though the
+  child cannot mutate state.
   Memory shows a persistent Automatic Memory toggle, the durable-fact count,
   and up to eight recent facts; reset restores automatic memory to on. Skills
   is a read-only inventory of installed skills with their library and indexed
@@ -831,6 +834,21 @@ is permitted before a visible error. Arguments are checked against the built-in
 schema subset before preflight and approval. Repeated non-web tool failures stop
 the approach; skipped duplicate calls render SKIPPED rather than RAN.
 
+Explicit requests for a subagent, delegation, an independent review, or a second
+opinion may route `delegate_task`; ordinary turns do not receive it automatically.
+The tool defaults to ask and starts at most one sequential child. Children receive
+only a bounded objective/context handoff, never the parent transcript. Host-defined
+read/research and test/diagnostic roles intersect the current parent-callable tools
+with effective user policies: allow and active process grants may pass through,
+deny always wins, and unresolved ask policies are omitted rather than prompting
+inside a child. Children cannot write, run shell, mutate Git, ask the user, remember,
+learn, crawl, or delegate. Their successful and failed usage is charged to the
+parent governor. Ctrl+C and steering use the same host cancellation flag and
+provider transport close. Sanitized start/finish events and a bounded public final
+summary are persisted and mirrored to `/resume`; private reasoning and raw tool
+output are never stored as subagent activity. Execution remains sequential until
+independent provider-runtime isolation makes concurrency safe.
+
 Tool preflight checks paths and write locks before asking permission, and execution
 rechecks mutable conditions. Read-only pipelines are classified component by
 component; unknown evaluation/control syntax and output redirection remain risky.
@@ -1279,10 +1297,12 @@ Development state at handoff:
   Its isolated sequential child adapter receives only the bounded task handoff,
   not the parent transcript, runs under a dedicated non-interactive scope, and
   charges completed usage—including failed child usage—to the parent governor.
-  This foundation is not yet connected to a model-callable delegation tool.
+  Narrow explicit-intent routing now exposes one permission-controlled delegation;
+  host cancellation and durable, resumable public child outcomes are connected.
 - Full validation can hang in the optional LanceDB roundtrip under some
   restricted sandboxes. Report the focused and non-LanceDB results separately;
   never describe the knowledge suite as green unless it completed.
-- Continue controlled subagent orchestration with host cancellation wiring,
-  durable session events, and then a narrowly routed delegation tool. Do not add
+- Continue controlled subagent orchestration with provider-runtime isolation,
+  adaptive concurrency, stronger aggregate token/tool budgets, and live behavioral
+  evaluation before considering an implementation-worker role. Do not add
   background/cloud workers or broad write concurrency as part of that work.

@@ -120,6 +120,10 @@ def test_supervisor_returns_bounded_structured_result_and_public_events():
             "task_id": "child-1",
             "role": "read_research",
             "status": "completed",
+            "model_steps": 2,
+            "tool_calls": 1,
+            "tools_used": ["read_file"],
+            "summary": "evidence" * 64,
         },
     ]
 
@@ -214,6 +218,25 @@ def test_failed_child_usage_is_still_accounted():
     assert result.status is SubagentStatus.FAILED
     assert result.model_steps == 2
     assert result.tool_calls == 3
+
+
+def test_worker_failure_after_host_cancellation_is_reported_as_cancelled():
+    cancelled = [False]
+
+    def worker(_assignment):
+        cancelled[0] = True
+        raise SubagentExecutionError(model_steps=1, tool_calls=0)
+
+    result = SubagentSupervisor(
+        parent_callable_tools=(),
+        effective_permissions={},
+        worker=worker,
+        cancelled=lambda: cancelled[0],
+    ).run([SubagentTask("inspect")])[0]
+
+    assert result.status is SubagentStatus.CANCELLED
+    assert result.error_category == "cancelled"
+    assert result.model_steps == 1
 
 
 def test_supervisor_rejects_excess_and_duplicate_children_before_execution():
@@ -332,3 +355,34 @@ def test_agent_supervision_charges_successful_child_usage_to_parent(monkeypatch)
     assert parent.active_turn_governor.snapshot().model_steps_used == 3
     assert parent.active_turn_governor.snapshot().tool_calls_used == 1
     assert parent.last_turn_budget["model_steps_used"] == 3
+
+
+def test_parent_budget_rejection_emits_a_terminal_child_event():
+    parent = Agent(
+        _ChildRuntime([]),
+        "test-model",
+        [],
+        PermissionGate({}, lambda *_args: "n"),
+        "system",
+        max_steps=1,
+    )
+    parent.active_turn_governor = TurnGovernor(1, max_tool_calls=2)
+    assert parent.active_turn_governor.begin_model_step() == ""
+    events = []
+
+    result = supervise_agent_tasks(
+        parent,
+        [SubagentTask("inspect", task_id="budget-child")],
+        event_sink=events.append,
+    )[0]
+
+    assert result.status is SubagentStatus.FAILED
+    assert result.error_category == "parent_budget_exhausted"
+    assert [event.to_dict() for event in events] == [
+        {
+            "kind": "subagent_finished",
+            "task_id": "budget-child",
+            "role": "read_research",
+            "status": "failed",
+        }
+    ]

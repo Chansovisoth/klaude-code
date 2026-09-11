@@ -576,6 +576,7 @@ DEFAULT_PERMISSIONS = {
     "list_commands": "allow",
     "request_user_input": "allow",
     "remember_fact": "ask",
+    "delegate_task": "ask",
 }
 
 

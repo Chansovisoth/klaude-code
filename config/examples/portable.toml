@@ -19,5 +19,6 @@ provider = "quality"
 provider_order = ["brave", "ddgs", "searxng", "brave_api", "google", "parallel", "exa", "tavily", "firecrawl"]
 
 [permissions]
-# run_shell = "ask"
-# edit_file = "ask"
+# run_shell     = "ask"
+# delegate_task = "ask"      # bounded read-only child; permissions never escalate
+# edit_file     = "ask"

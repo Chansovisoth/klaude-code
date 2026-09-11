@@ -67,10 +67,15 @@ from klaude_core import (
     OllamaRuntime,
     OpenAIRuntime,
     PermissionGate,
+    SubagentEvent,
+    SubagentRole,
+    SubagentStatus,
+    SubagentTask,
     Tool,
     TurnScope,
     WebResearchBudget,
     load_config,
+    supervise_agent_tasks,
 )
 from klaude_core.config import CONFIG_DIR, DEFAULT_PERMISSIONS, SOURCE_ROOT
 from klaude_core.dates import find_establishment_date, operating_duration_since
@@ -385,6 +390,10 @@ PERMISSION_TOOL_GROUPS = (
     (
         "USER INTERACTION",
         (("request_user_input", "Request user input"),),
+    ),
+    (
+        "ORCHESTRATION",
+        (("delegate_task", "Delegate read-only task"),),
     ),
 )
 PERMISSION_TOOL_LABELS = {
@@ -1482,7 +1491,16 @@ def _permission_preset_policies(preset: str, names: list[str]) -> dict[str, str]
     if preset == "Cautious":
         return {name: "allow" if name in CAUTIOUS_ALLOWED_TOOLS else "ask" for name in names}
     if preset == "Read Only":
-        return {name: "deny" if name in STATE_CHANGING_TOOLS else "allow" for name in names}
+        return {
+            name: (
+                "deny"
+                if name in STATE_CHANGING_TOOLS
+                else "ask"
+                if name == "delegate_task"
+                else "allow"
+            )
+            for name in names
+        }
     if preset == "Full Access":
         return dict.fromkeys(names, "allow")
     raise ValueError(f"Unknown permission preset: {preset}")
@@ -4245,6 +4263,12 @@ def _tool_activity(tool: str, args: dict, *, completed: bool) -> tuple[str, str]
         library = _activity_value(args.get("library"))
         detail = (url or "source") + (f" into {library}" if library else "")
         return ("learned" if completed else "learning", detail)
+    if tool == "delegate_task":
+        role = _activity_value(args.get("role") or "read_research").replace("_", "/")
+        return (
+            "explored" if completed else "exploring",
+            f"{role} subagent",
+        )
     return ("worked" if completed else "working", tool.replace("_", " "))
 
 
@@ -4323,6 +4347,96 @@ def _active_tool_status(tool: str, args: dict) -> str:
     }:
         detail = remainder
     return f"{label} {detail}".strip()
+
+
+def _subagent_activity_text(payload: dict[str, Any]) -> str:
+    if payload.get("kind") != "subagent_finished":
+        return ""
+    status = str(payload.get("status", "failed")).casefold()
+    label = {
+        "completed": "explored",
+        "cancelled": "cancelled",
+    }.get(status, "failed")
+    role = _activity_value(payload.get("role") or "read_research", limit=40).replace(
+        "_", "/"
+    )
+    steps = max(0, int(payload.get("model_steps") or 0))
+    calls = max(0, int(payload.get("tool_calls") or 0))
+    metrics = []
+    if steps:
+        metrics.append(f"{steps} model {'step' if steps == 1 else 'steps'}")
+    if calls:
+        metrics.append(f"{calls} tool {'call' if calls == 1 else 'calls'}")
+    suffix = f" ({' · '.join(metrics)})" if metrics else ""
+    rendered = f"[{label}] {role} subagent {status}{suffix}"
+    summary = _activity_value(payload.get("summary"), limit=500)
+    return rendered + (f"\n  └ {summary}" if summary else "")
+
+
+def _delegate_task_preflight(args: dict) -> None:
+    requested = args.get("requested_tools")
+    requested_tools = (
+        tuple(str(name) for name in requested) if isinstance(requested, list) else ()
+    )
+    forbidden = set(requested_tools).intersection(
+        {*STATE_CHANGING_TOOLS, "delegate_task", "request_user_input"}
+    )
+    if forbidden:
+        raise ValueError(
+            "delegated tasks cannot request mutation, shell, interactive, or delegation tools"
+        )
+    SubagentTask(
+        objective=str(args.get("objective") or ""),
+        role=SubagentRole(str(args.get("role") or SubagentRole.READ_RESEARCH.value)),
+        context=str(args.get("context") or ""),
+        requested_tools=requested_tools,
+    )
+
+
+def _delegate_task_permission_detail(args: dict) -> str:
+    role = _activity_value(args.get("role") or "read_research", limit=40).replace("_", "/")
+    objective = _activity_value(args.get("objective"), limit=180)
+    return f"Delegate one read-only {role} task? {objective}"
+
+
+def _delegate_task_result(
+    agent: Agent,
+    objective: str,
+    role: str = "read_research",
+    context: str = "",
+    requested_tools: list[str] | None = None,
+) -> dict[str, Any]:
+    task = SubagentTask(
+        objective=objective,
+        role=SubagentRole(role),
+        context=context,
+        requested_tools=tuple(requested_tools or ()),
+    )
+    results = supervise_agent_tasks(
+        agent,
+        [task],
+        cancelled=agent.cancellation_check,
+        event_sink=agent.subagent_event_observer,
+    )
+    result = results[0]
+    metadata = {
+        "canonical_tool": "delegate_task",
+        "status": result.status.value,
+        "task_id": result.task_id,
+        "role": result.role.value,
+        "model_steps": result.model_steps,
+        "tool_calls": result.tool_calls,
+        "tools_used": list(result.tools_used),
+        "error_category": result.error_category,
+    }
+    if result.status is SubagentStatus.COMPLETED:
+        content = result.summary or "Subagent completed without additional findings."
+    elif result.status is SubagentStatus.CANCELLED:
+        content = "error: delegated task was cancelled at a safe boundary"
+    else:
+        category = result.error_category or "runtime"
+        content = f"error: delegated task failed ({category})"
+    return {"content": content, "metadata": metadata}
 
 
 def _query_knowledge_tool_result(
@@ -4833,6 +4947,36 @@ def _select_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
         # when the user's requested action is already fully represented.
         return ["learn_source"] if "learn_source" in tools else []
     text = user_message.casefold()
+    explicit_delegation = bool(
+        re.search(
+            r"\b(?:delegate|sub-?agent|second opinion|"
+            r"independent(?:ly)?\s+(?:inspect|research|review|investigate)|"
+            r"(?:research|diagnostic) worker)\b",
+            text,
+        )
+    )
+    if explicit_delegation and "delegate_task" in tools:
+        selected = _heuristic_tool_names(user_message, tools)
+        selected.extend(
+            name
+            for name in ("read_file", "list_dir", "grep", "workspace_info", "delegate_task")
+            if name in tools
+        )
+        return [
+            name
+            for name in dict.fromkeys(selected)
+            if name
+            not in {
+                "write_file",
+                "edit_file",
+                "run_shell",
+                "git_commit",
+                "crawl_site",
+                "learn_source",
+                "remember_fact",
+                "request_user_input",
+            }
+        ]
     storage = bool(
         re.search(r"\b(disks?|drives?|storage|filesystems?|capacity|diskspace|df|du|ncdu)\b", text)
     )
@@ -5692,6 +5836,7 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
     memory = Memory(cfg.memory_file, cfg.sessions_db)
     ws = Workspace(workdir)
     tools = build_tools(ws)
+    agent_ref: dict[str, Agent] = {}
     user_input_broker = UserInputBroker()
 
     runtime_result = _runtime_context_result(cfg, workdir)
@@ -6025,6 +6170,43 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
             user_input_broker.request,
             detail=lambda args: str(args.get("question", ""))[:200],
         ),
+        Tool(
+            "delegate_task",
+            "Delegate one bounded, independent read-only investigation to a child agent. "
+            "Use only when a separate inspection, research pass, or second opinion would "
+            "materially reduce uncertainty. Do not use for greetings, simple questions, "
+            "mutations, shell commands, Git changes, or work the primary agent can answer "
+            "directly. The child receives only the supplied objective and bounded context, "
+            "cannot ask the user questions, and cannot delegate again.",
+            {
+                "type": "object",
+                "properties": {
+                    "objective": {"type": "string", "minLength": 1, "maxLength": 2000},
+                    "role": {
+                        "type": "string",
+                        "enum": ["read_research", "test_diagnostic"],
+                    },
+                    "context": {"type": "string", "maxLength": 8000},
+                    "requested_tools": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": {"type": "string", "maxLength": 128},
+                    },
+                },
+                "required": ["objective"],
+            },
+            lambda objective, role="read_research", context="", requested_tools=None: (
+                _delegate_task_result(
+                    agent_ref["agent"],
+                    objective,
+                    role=role,
+                    context=context,
+                    requested_tools=requested_tools,
+                )
+            ),
+            detail=_delegate_task_permission_detail,
+            preflight=_delegate_task_preflight,
+        ),
     ]
 
     gate = PermissionGate(cfg.permissions, _ask_permission)
@@ -6054,6 +6236,7 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
             repeated_query_similarity=(cfg.web_search.behavior.max_repeated_query_similarity),
         ),
     )
+    agent_ref["agent"] = agent
     agent.workspace = ws
     agent.local_ollama = ollama
     agent.workdir = workdir.resolve()
@@ -6424,9 +6607,21 @@ def _render(
         )
     _print_trace(f"-> model [{getattr(agent, 'model', 'local')}] thinking...")
     prior_capability_observer = getattr(agent, "capability_observer", None)
+    prior_subagent_observer = getattr(agent, "subagent_event_observer", None)
+    prior_cancellation_check = getattr(agent, "cancellation_check", None)
     agent.capability_observer = lambda snapshot: publish(
         "capabilities", {"snapshot": snapshot}
     )
+
+    def publish_subagent(event: SubagentEvent) -> None:
+        payload = event.to_dict()
+        publish("subagent", payload)
+        memory.log_turn(session_id, "system", {"event": "subagent_activity", **payload})
+        if activity := _subagent_activity_text(payload):
+            _print_trace(activity)
+
+    agent.subagent_event_observer = publish_subagent
+    agent.cancellation_check = lambda: False
     assistant_text: list[str] = []
     streamed_fragments: list[str] = []
     streamed_logged = False
@@ -6497,6 +6692,8 @@ def _render(
                     lines = _fetch_url_display_lines(merged, event.payload["result"])
                 elif tool_name == "http_probe":
                     lines = _http_probe_display_lines(merged, event.payload["result"])
+                elif tool_name == "delegate_task":
+                    lines = []
                 else:
                     lines = [f"   {str(event.payload['result'])[:200].replace(chr(10), ' ')}"]
                 for line in lines:
@@ -6536,6 +6733,9 @@ def _render(
         raise
     finally:
         agent.capability_observer = prior_capability_observer
+        agent.subagent_event_observer = prior_subagent_observer
+        if prior_cancellation_check is not None:
+            agent.cancellation_check = prior_cancellation_check
         if streamed_fragments and not streamed_logged:
             partial = "".join(streamed_fragments)
             memory.log_turn(session_id, "assistant", partial)
@@ -7185,6 +7385,10 @@ def _export_session(memory, session_id: str, agent, cfg, requested: str) -> Path
                 blocks.append(f"\n> [INPUT · KLAUDE] {content.get('question', '')}\n")
             if content.get("event") == "input_answer" and content.get("answer") is not None:
                 blocks.append(f"\n> [INPUT · YOU] {content.get('answer', '')}\n")
+            if content.get("event") == "subagent_activity":
+                activity = _subagent_activity_text(content)
+                if activity:
+                    blocks.append(f"\n> {activity}\n")
             continue
         if not isinstance(content, str):
             content = json.dumps(content, ensure_ascii=False)
@@ -7228,6 +7432,10 @@ def _restored_transcript(session_id: str, turns: list[dict], width: int) -> str:
                 blocks.append(f"\n[input · you] {event.get('answer', '')}\n")
             if event.get("event") == "session_update" and event.get("detail"):
                 blocks.append(f"\n[session] {event.get('detail', '')}\n")
+            if event.get("event") == "subagent_activity":
+                activity = _subagent_activity_text(event)
+                if activity:
+                    blocks.append(f"\n{activity}\n")
             continue
         if turn["role"] not in {"user", "assistant"}:
             continue
@@ -8293,6 +8501,13 @@ class PersistentChatTUI:
                 )
                 if activity:
                     self._append(f"\n{activity}\n")
+            elif event["kind"] == "subagent":
+                if payload.get("kind") == "subagent_started":
+                    role = _activity_value(payload.get("role"), limit=40).replace("_", "/")
+                    self.activity = f"exploring {role} subagent"
+                elif activity := _subagent_activity_text(payload):
+                    if self.show_activity_updates:
+                        self._append(f"\n{activity}\n")
             elif event["kind"] == "input_request":
                 if self._user_input_request is None:
                     self._set_input("")
@@ -11108,6 +11323,8 @@ class PersistentChatTUI:
         turn_failed = False
         pending_edits: list[dict] = []
         prior_capability_observer = getattr(self.agent, "capability_observer", None)
+        prior_subagent_observer = getattr(self.agent, "subagent_event_observer", None)
+        prior_cancellation_check = getattr(self.agent, "cancellation_check", None)
 
         def flush_edits() -> None:
             if not pending_edits:
@@ -11130,6 +11347,21 @@ class PersistentChatTUI:
                 "capabilities", {"snapshot": snapshot}, turn_id=turn_id
             )
 
+        def publish_subagent(event: SubagentEvent) -> None:
+            payload = event.to_dict()
+            self._publish_shared_event("subagent", payload, turn_id=turn_id)
+            self.memory.log_turn(
+                self.session_id,
+                "system",
+                {"event": "subagent_activity", **payload},
+            )
+            if event.kind == "subagent_started":
+                role = _activity_value(event.role.value, limit=40).replace("_", "/")
+                self._emit("activity", f"exploring {role} subagent")
+            elif activity := _subagent_activity_text(payload):
+                if self.show_activity_updates:
+                    self._emit("append", f"\n{activity}\n")
+
         try:
             builder = getattr(self.agent, "system_prompt_builder", None)
             if builder:
@@ -11146,6 +11378,8 @@ class PersistentChatTUI:
                 self._emit("activity", "working")
                 self._publish_shared_event("activity", {"text": "working"}, turn_id=turn_id)
             self.agent.capability_observer = publish_capabilities
+            self.agent.subagent_event_observer = publish_subagent
+            self.agent.cancellation_check = cancel_event.is_set
             effective_scope = scope if scope is not None else (
                 TurnScope.REVIEW if read_only else None
             )
@@ -11265,6 +11499,15 @@ class PersistentChatTUI:
                         self.session_id, "system", {"event": "tool_audit", **audit}
                     )
                     if self.show_activity_updates:
+                        if tool == "delegate_task":
+                            self._emit("activity", "working on response")
+                            self._publish_shared_event(
+                                "activity", {"text": "working on response"}, turn_id=turn_id
+                            )
+                            if cancel_event.is_set():
+                                cancelled = True
+                                break
+                            continue
                         edit = metadata.get("edit")
                         if isinstance(edit, dict):
                             if edit.get("changed"):
@@ -11363,6 +11606,9 @@ class PersistentChatTUI:
                 )
         finally:
             self.agent.capability_observer = prior_capability_observer
+            self.agent.subagent_event_observer = prior_subagent_observer
+            if prior_cancellation_check is not None:
+                self.agent.cancellation_check = prior_cancellation_check
             partial = "".join(assistant_parts).strip()
             if partial and not assistant_saved:
                 self.memory.log_turn(self.session_id, "assistant", partial)

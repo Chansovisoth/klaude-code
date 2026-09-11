@@ -68,6 +68,8 @@ from klaude_cli.main import (
     _completed_tool_activity,
     _control_ollama_service,
     _control_ollama_service_with_sudo,
+    _delegate_task_preflight,
+    _delegate_task_result,
     _diff_syntax_lines,
     _edit_summary,
     _fenced_code_lines,
@@ -117,6 +119,7 @@ from klaude_cli.main import (
     _select_tool_names,
     _status_columns,
     _styled_recent_sessions,
+    _subagent_activity_text,
     _system_prompt,
     _tool_availability_preferences,
     _tui_style,
@@ -144,6 +147,10 @@ from klaude_core import (
     ModelCapabilities,
     ModelInfo,
     PermissionGate,
+    SubagentEvent,
+    SubagentResult,
+    SubagentRole,
+    SubagentStatus,
     Tool,
     TurnScope,
 )
@@ -1573,6 +1580,63 @@ def test_run_turn_mirrors_live_capability_snapshots(tmp_path):
     ].index("turn_done")
 
 
+def test_run_turn_persists_and_mirrors_subagent_lifecycle(tmp_path):
+    tui = _fake_persistent_tui()
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    emitted = []
+    original_emit = tui._emit
+
+    def capture(kind, payload=None):
+        emitted.append((kind, payload))
+        original_emit(kind, payload)
+
+    tui._emit = capture
+
+    def run(_message, *, scope=None):
+        tui.agent.subagent_event_observer(
+            SubagentEvent("subagent_started", "child-1", SubagentRole.READ_RESEARCH)
+        )
+        tui.agent.subagent_event_observer(
+            SubagentEvent(
+                "subagent_finished",
+                "child-1",
+                SubagentRole.READ_RESEARCH,
+                SubagentStatus.COMPLETED,
+                model_steps=2,
+                tool_calls=1,
+                tools_used=("read_file",),
+            )
+        )
+        return iter([AgentEvent("text", {"content": "Done."})])
+
+    tui.agent.run = run
+
+    tui._run_turn("Delegate inspection", threading.Event(), turn_id="turn-1")
+
+    saved = [
+        turn["content"]
+        for turn in tui.memory.load_session(tui.session_id)
+        if turn["role"] == "system"
+        and isinstance(turn["content"], dict)
+        and turn["content"].get("event") == "subagent_activity"
+    ]
+    assert [event["kind"] for event in saved] == [
+        "subagent_started",
+        "subagent_finished",
+    ]
+    assert saved[1]["tools_used"] == ["read_file"]
+    shared = tui.memory.session_events_since(tui.session_id, 0)
+    subagent_events = [event["payload"] for event in shared if event["kind"] == "subagent"]
+    assert [event["kind"] for event in subagent_events] == [
+        "subagent_started",
+        "subagent_finished",
+    ]
+    assert any(
+        kind == "append" and "[explored] read/research subagent completed" in str(payload)
+        for kind, payload in emitted
+    )
+
+
 def test_transcript_dividers_refresh_after_resize():
     tui = _fake_persistent_tui()
     timestamp = datetime(2026, 9, 5, 12, 34, 56)
@@ -2384,6 +2448,46 @@ def test_resumed_observer_receives_structured_activity_updates(tmp_path):
     assert "[explored] (8s) Read src/app.py" in observer.output.text
 
 
+def test_resumed_observer_receives_subagent_lifecycle(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    observer = _fake_persistent_tui(tmp_path / "appearance.json")
+    observer.memory = memory
+    observer.session_id = "shared"
+    observer._session_event_cursor = 0
+    memory.publish_session_event(
+        "shared",
+        "remote-owner",
+        "subagent",
+        {
+            "kind": "subagent_started",
+            "task_id": "child-1",
+            "role": "read_research",
+        },
+        turn_id="remote-turn",
+    )
+
+    observer._sync_shared_session()
+
+    assert observer.activity == "exploring read/research subagent"
+    memory.publish_session_event(
+        "shared",
+        "remote-owner",
+        "subagent",
+        {
+            "kind": "subagent_finished",
+            "task_id": "child-1",
+            "role": "read_research",
+            "status": "completed",
+            "model_steps": 2,
+        },
+        turn_id="remote-turn",
+    )
+
+    observer._sync_shared_session()
+
+    assert "[explored] read/research subagent completed (2 model steps)" in observer.output.text
+
+
 def test_tools_settings_persist_independent_validation_toggles(tmp_path):
     path = tmp_path / "chat-preferences.json"
     tui = _fake_persistent_tui(chat_preferences_path=path)
@@ -2412,6 +2516,7 @@ def test_permission_command_opens_grouped_settings_and_replaces_plural_command(t
     assert "Write file: ASK" in tui._choice_values
     assert "Web search: ALLOW" in tui._choice_values
     assert "Remember fact: ASK" in tui._choice_values
+    assert "Delegate read-only task: ASK" in tui._choice_values
     assert tui._choice_values.index("reset to default") < tui._choice_values.index("back")
 
     tui._cancel_choice()
@@ -2706,6 +2811,48 @@ def test_restored_transcript_replays_model_session_updates():
         "[session] model openai_codex/gpt-5 · thinking · conversation retained"
         in transcript
     )
+
+
+def test_restored_transcript_replays_completed_subagent_activity():
+    transcript = _restored_transcript(
+        "session-1",
+        [
+            {
+                "role": "system",
+                "content": {
+                    "event": "subagent_activity",
+                    "kind": "subagent_finished",
+                    "task_id": "child-1",
+                    "role": "read_research",
+                    "status": "completed",
+                    "model_steps": 2,
+                    "tool_calls": 1,
+                    "summary": "Found parser routing in src/parser.py.",
+                },
+                "ts": 1_700_000_000,
+            }
+        ],
+        80,
+    )
+
+    assert "[explored] read/research subagent completed (2 model steps · 1 tool call)" in transcript
+    assert "└ Found parser routing in src/parser.py." in transcript
+
+
+@pytest.mark.parametrize(
+    ("status", "label"),
+    [("completed", "explored"), ("failed", "failed"), ("cancelled", "cancelled")],
+)
+def test_subagent_activity_uses_semantic_terminal_status(status, label):
+    rendered = _subagent_activity_text(
+        {
+            "kind": "subagent_finished",
+            "role": "test_diagnostic",
+            "status": status,
+        }
+    )
+
+    assert rendered == f"[{label}] test/diagnostic subagent {status}"
 
 
 @pytest.mark.parametrize(
@@ -5504,6 +5651,174 @@ def test_tool_selector_exposes_list_commands_when_asked():
     selected = _select_tool_names("show me all slash commands", {"list_commands": tool})
 
     assert selected == ["list_commands"]
+
+
+def test_tool_selector_routes_explicit_delegation_without_mutation_tools():
+    tools = {
+        name: Tool(name, name, {"type": "object"}, lambda **_kwargs: "")
+        for name in (
+            "delegate_task",
+            "read_file",
+            "list_dir",
+            "grep",
+            "workspace_info",
+            "write_file",
+            "run_shell",
+            "git_commit",
+        )
+    }
+
+    selected = _select_tool_names(
+        "Use a subagent for an independent review of the parser",
+        tools,
+    )
+
+    assert selected == [
+        "read_file",
+        "list_dir",
+        "grep",
+        "workspace_info",
+        "delegate_task",
+    ]
+    assert not {"write_file", "run_shell", "git_commit"}.intersection(selected)
+
+
+def test_delegate_preflight_rejects_unsafe_child_tool_requests():
+    with pytest.raises(ValueError, match="cannot request"):
+        _delegate_task_preflight(
+            {
+                "objective": "Run the tests",
+                "role": "test_diagnostic",
+                "requested_tools": ["run_shell"],
+            }
+        )
+
+
+def test_delegate_result_passes_host_cancellation_and_event_observer(monkeypatch):
+    cancel = threading.Event()
+    observed = []
+    agent = SimpleNamespace(
+        cancellation_check=cancel.is_set,
+        subagent_event_observer=observed.append,
+    )
+    captured = {}
+
+    def supervise(parent, tasks, **kwargs):
+        captured.update({"parent": parent, "tasks": tasks, **kwargs})
+        task = tasks[0]
+        return [
+            SubagentResult(
+                task_id=task.task_id,
+                role=task.role,
+                status=SubagentStatus.COMPLETED,
+                summary="Found the routing boundary.",
+                callable_tools=("read_file",),
+                tools_used=("read_file",),
+                model_steps=2,
+                tool_calls=1,
+            )
+        ]
+
+    monkeypatch.setattr("klaude_cli.main.supervise_agent_tasks", supervise)
+
+    result = _delegate_task_result(
+        agent,
+        "Inspect routing",
+        requested_tools=["read_file"],
+    )
+
+    assert result["content"] == "Found the routing boundary."
+    assert result["metadata"]["status"] == "completed"
+    assert captured["parent"] is agent
+    assert captured["cancelled"] is agent.cancellation_check
+    assert captured["event_sink"] is agent.subagent_event_observer
+
+
+def test_parent_agent_executes_one_isolated_delegation_and_accounts_for_it():
+    class NestedRuntime:
+        def __init__(self):
+            self.responses = [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "delegate_task",
+                                "arguments": {
+                                    "objective": "Inspect parser routing",
+                                    "requested_tools": ["read_file"],
+                                },
+                            }
+                        }
+                    ],
+                },
+                {"role": "assistant", "content": "Child found parser.py."},
+                {"role": "assistant", "content": "The parser route is in parser.py."},
+            ]
+            self.calls = []
+
+        def chat(self, model, messages, tools=None, options=None, think=None):
+            self.calls.append({"messages": messages, "tools": tools})
+            return self.responses.pop(0)
+
+    runtime = NestedRuntime()
+    agent_ref = {}
+    tools = [
+        Tool(
+            "read_file",
+            "Read file",
+            {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+            lambda path: f"contents of {path}",
+        ),
+        Tool(
+            "delegate_task",
+            "Delegate safely",
+            {
+                "type": "object",
+                "properties": {
+                    "objective": {"type": "string"},
+                    "requested_tools": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["objective"],
+            },
+            lambda objective, requested_tools=None: _delegate_task_result(
+                agent_ref["agent"],
+                objective,
+                requested_tools=requested_tools,
+            ),
+        ),
+    ]
+    agent = Agent(
+        runtime,
+        "test-model",
+        tools,
+        PermissionGate({"read_file": "allow", "delegate_task": "allow"}, lambda *_args: "n"),
+        "system",
+        tool_selector=lambda _message, available: list(available),
+    )
+    agent_ref["agent"] = agent
+
+    events = list(agent.run("Use a subagent to inspect parser routing"))
+
+    assert [event.payload.get("content") for event in events if event.kind == "text"] == [
+        "The parser route is in parser.py."
+    ]
+    delegated = [
+        event
+        for event in events
+        if event.kind == "tool_result" and event.payload.get("tool") == "delegate_task"
+    ]
+    assert len(delegated) == 1
+    assert delegated[0].payload["metadata"]["status"] == "completed"
+    assert delegated[0].payload["result"] == "Child found parser.py."
+    assert len(runtime.calls) == 3
+    assert agent.last_turn_budget["model_steps_used"] == 3
+    assert agent.last_turn_budget["tool_calls_used"] == 1
 
 
 def test_tool_selector_does_not_use_commands_for_identity_questions():

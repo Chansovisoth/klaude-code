@@ -3685,8 +3685,9 @@ _PLAN_SCOPE_TOOLS = _REVIEW_SCOPE_TOOLS | {
     "list_commands",
     "request_user_input",
     "storage_usage",
+    "delegate_task",
 }
-_EVALUATION_SCOPE_TOOLS = _PLAN_SCOPE_TOOLS - {"request_user_input"}
+_EVALUATION_SCOPE_TOOLS = _PLAN_SCOPE_TOOLS - {"request_user_input", "delegate_task"}
 _SUBAGENT_SCOPE_TOOLS = (
     _EVALUATION_SCOPE_TOOLS
     - {
@@ -3771,6 +3772,8 @@ class Agent:
         self.user_input_broker: Any = None
         self.system_prompt_builder: Callable[[], str] | None = None
         self.capability_observer: Callable[[dict[str, Any]], None] | None = None
+        self.cancellation_check: Callable[[], bool] = lambda: False
+        self.subagent_event_observer: Callable[[Any], None] | None = None
 
     def set_system_prompt(self, system_prompt: str) -> None:
         if self.messages and self.messages[0].get("role") == "system":
