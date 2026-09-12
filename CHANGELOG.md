@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add OpenRouter as a first-class Cloud model provider with authenticated live
+  model discovery, truthful tool/context/reasoning capabilities, SSE streaming,
+  native Klaude tool calls, usage accounting, cancellation, and private
+  reasoning-continuation state. Add Settings > Providers for masked API-key
+  entry/removal across cloud models and all configured web, hosted-fetch/crawl,
+  and Hugging Face providers, with atomic owner-only `config/.env` persistence
+  that never exposes values in transcript or session state.
 - Fix explicit workspace-inspection routing for weak local models: recognize
   natural inspection/review wording, keep the selected schema read-only, and
   run one bounded `workspace_info` preflight before synthesis. Persist its

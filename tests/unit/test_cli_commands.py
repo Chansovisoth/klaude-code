@@ -2625,6 +2625,7 @@ def test_rebuilding_any_settings_page_preserves_its_selected_logical_row(tmp_pat
         ("theme", "text/code theme:"),
         ("input field", "border:"),
         ("memory", "automatic memory:"),
+        ("providers", "OpenRouter:"),
         ("tools", "web search validation:"),
         ("permissions", "Write file:"),
         ("runtime", "CPU threads:"),
@@ -2638,13 +2639,14 @@ def test_rebuilding_any_settings_page_preserves_its_selected_logical_row(tmp_pat
         assert tui._choice_values[tui._choice_index].startswith(selected)
 
 
-def test_settings_include_memory_and_skills_categories():
+def test_settings_include_memory_skills_and_provider_categories():
     tui = _fake_persistent_tui()
 
     categories = tui._settings_categories()
 
     assert "memory" in categories
     assert "skills" in categories
+    assert "providers" in categories
 
 
 def test_memory_settings_toggle_show_facts_and_reset_to_enabled(tmp_path):
@@ -4136,12 +4138,12 @@ def test_persistent_tui_renders_unavailable_picker_options_in_gray(monkeypatch):
     assert tui._choice_values[-3:] == [
         "back",
         "",
-        "Tip: use `klaude auth login openai-codex`, or add API keys to config/.env",
+        "Tip: use OpenAI Codex login, or configure API keys in Settings → Providers",
     ]
     assert ("class:choice.disabled", "\n") in fragments
     assert (
         "class:choice.disabled",
-        "    Tip: use `klaude auth login openai-codex`, or add API keys to config/.env",
+        "    Tip: use OpenAI Codex login, or configure API keys in Settings → Providers",
     ) in fragments
 
 
@@ -4154,6 +4156,9 @@ def test_unavailable_picker_options_can_be_highlighted_but_not_accepted(monkeypa
     tui._move_choice(1)
     openai = tui._choice_index
     assert tui._choice_values[openai] == "OpenAI — API key not configured"
+    tui._move_choice(1)
+    openrouter = tui._choice_index
+    assert tui._choice_values[openrouter] == "OpenRouter — API key not configured"
     tui._move_choice(1)
     google = tui._choice_index
     assert tui._choice_values[google] == "Google — API key not configured"
@@ -4951,8 +4956,63 @@ def test_masked_secret_composer_round_trip_clears_input_and_can_cancel():
 
     assert result == ["private-api-key"]
     assert tui.input.text == ""
+
+
+def test_provider_settings_collect_and_save_api_key_through_masked_composer(monkeypatch):
+    tui = _fake_persistent_tui()
+    saved = []
+    monkeypatch.setattr(
+        "klaude_cli.main.save_provider_secret",
+        lambda config_dir, name, value: saved.append((config_dir, name, value)),
+    )
+    monkeypatch.setattr("klaude_cli.main._refresh_cloud_model_cache", lambda _cfg: None)
+
+    tui._open_settings_category("providers")
+    row = next(value for value in tui._choice_values if value.startswith("OpenRouter:"))
+    tui._choice_index = tui._choice_values.index(row)
+    tui._accept_choice()
+
+    assert tui._secret_request is not None
+    password_processor = next(
+        processor
+        for processor in tui.input.control.input_processors
+        if type(getattr(processor, "processor", None)).__name__ == "PasswordProcessor"
+    )
+    assert password_processor.filter()
+    tui._set_input("sk-or-secret")
+    tui._submit_secret_response()
+
+    assert saved == [(tui.cfg.config_dir, "OPENROUTER_API_KEY", "sk-or-secret")]
+    assert tui.cfg.openrouter_api_key == "sk-or-secret"
+    assert "sk-or-secret" not in tui.output.text
+    assert tui._choice_kind == "providers settings"
     assert tui._secret_request is None
     assert not password_processor.filter()
+
+    tui._open_settings_category("providers")
+    assert "\0section:WEB SEARCH API KEYS" in tui._choice_values
+    assert "Brave Search: not configured" in tui._choice_values
+    assert "Parallel: not configured" in tui._choice_values
+    assert "Tavily: not configured" in tui._choice_values
+    assert "Exa: not configured" in tui._choice_values
+    assert "\0section:HOSTED WEB FETCHING & CRAWLING" in tui._choice_values
+    assert "Firecrawl: not configured" in tui._choice_values
+    assert "Crawl4AI Cloud: not configured" in tui._choice_values
+    assert "Hugging Face: not configured" in tui._choice_values
+
+    tui._choice_index = tui._choice_values.index("Brave Search: not configured")
+    tui._accept_choice()
+    tui._set_input("brave-private-key")
+    tui._submit_secret_response()
+
+    assert saved[-1] == (
+        tui.cfg.config_dir,
+        "BRAVE_SEARCH_API_KEY",
+        "brave-private-key",
+    )
+    assert tui.cfg.brave_search_api_key == "brave-private-key"
+    assert "brave-private-key" not in tui.output.text
+    assert "remove Brave Search key" in tui._choice_values
 
     cancelled = threading.Event()
     tui._secret_request = {

@@ -22,6 +22,7 @@ from .ollama import Ollama
 BACKEND_METADATA = {
     "ollama": ("Local", "Ollama"),
     "openai_api": ("Cloud", "OpenAI"),
+    "openrouter": ("Cloud", "OpenRouter"),
     "gemini_api": ("Cloud", "Google"),
     "openai_codex": ("Cloud", "OpenAI Codex"),
     # Reserved for later agent bridges; they are intentionally not runnable.
@@ -42,6 +43,8 @@ def _metadata_mapping(value: object) -> dict[str, Any]:
     for name in (
         "input_tokens",
         "output_tokens",
+        "prompt_tokens",
+        "completion_tokens",
         "prompt_token_count",
         "candidates_token_count",
     ):
@@ -58,9 +61,15 @@ def normalize_token_usage(metadata: object) -> tuple[int, int] | None:
     prompt = outer.get("prompt_eval_count")
     output = outer.get("eval_count")
     if prompt is None:
-        prompt = usage.get("input_tokens", usage.get("prompt_token_count"))
+        prompt = usage.get(
+            "input_tokens",
+            usage.get("prompt_tokens", usage.get("prompt_token_count")),
+        )
     if output is None:
-        output = usage.get("output_tokens", usage.get("candidates_token_count"))
+        output = usage.get(
+            "output_tokens",
+            usage.get("completion_tokens", usage.get("candidates_token_count")),
+        )
     # A partial counter cannot safely enforce an aggregate total. Preserve the
     # request as explicitly unknown instead of treating the missing side as 0.
     if prompt is None or output is None:
@@ -73,7 +82,7 @@ def normalize_token_usage(metadata: object) -> tuple[int, int] | None:
 
 def is_chat_model_id(backend: str, model_id: str) -> bool:
     """Conservatively exclude endpoint-specific models from chat pickers."""
-    if backend not in {"openai_api", "openai_codex"}:
+    if backend not in {"openai_api", "openai_codex", "openrouter"}:
         return True
     value = model_id.casefold()
     return not any(
@@ -137,7 +146,7 @@ def load_model_cache(path: Path) -> list[ModelInfo]:
         backend = item.get("backend")
         model_id = item.get("model_id")
         if (
-            backend not in {"openai_api", "openai_codex", "gemini_api"}
+            backend not in {"openai_api", "openai_codex", "openrouter", "gemini_api"}
             or not isinstance(model_id, str)
             or not is_chat_model_id(backend, model_id)
         ):
@@ -178,7 +187,7 @@ def save_model_cache(path: Path, models: list[ModelInfo]) -> None:
                 "released_at": item.released_at,
             }
             for item in models
-            if item.backend in {"openai_api", "openai_codex", "gemini_api"}
+            if item.backend in {"openai_api", "openai_codex", "openrouter", "gemini_api"}
             and is_chat_model_id(item.backend, item.model_id)
         ]
     }
@@ -630,6 +639,277 @@ class OpenAIRuntime(_CancelableResponseRuntime):
             "content": content,
             **({"tool_calls": calls} if calls else {}),
         }
+
+
+class OpenRouterRuntime(_CancelableResponseRuntime):
+    """OpenRouter Chat Completions adapter with streaming tool assembly."""
+
+    backend = "openrouter"
+    base_url = "https://openrouter.ai/api/v1"
+
+    def __init__(self, api_key: str):
+        if not api_key.strip():
+            raise ValueError("OpenRouter API key is not configured.")
+        self.api_key = api_key
+        self.last_chat_metadata: dict[str, Any] = {}
+        self._init_active_response()
+
+    def _client(self):
+        try:
+            from openai import OpenAI
+        except ImportError as exc:  # pragma: no cover - optional cloud extra
+            raise RuntimeError("OpenRouter support requires `klaude-core[cloud]`.") from exc
+        return OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+        )
+
+    def fork_for_child(self) -> OpenRouterRuntime:
+        return OpenRouterRuntime(self.api_key)
+
+    @staticmethod
+    def _messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        call_ids = {
+            str(call.get("id", ""))
+            for message in messages
+            if message.get("role") == "assistant"
+            for call in message.get("tool_calls", []) or []
+            if isinstance(call, dict) and call.get("id")
+        }
+        output_ids = {
+            str(message.get("tool_call_id", ""))
+            for message in messages
+            if message.get("role") == "tool" and message.get("tool_call_id")
+        }
+        complete_call_ids = call_ids & output_ids
+        result: list[dict[str, Any]] = []
+        for message in messages:
+            role = str(message.get("role", ""))
+            if role == "tool":
+                call_id = str(message.get("tool_call_id", ""))
+                if call_id in complete_call_ids:
+                    result.append(
+                        {"role": "tool", "tool_call_id": call_id, "content": _content(message)}
+                    )
+                continue
+            if role not in {"system", "user", "assistant"}:
+                continue
+            item: dict[str, Any] = {"role": role, "content": _content(message)}
+            calls = message.get("tool_calls")
+            if role == "assistant" and isinstance(calls, list) and calls:
+                complete_calls = []
+                for call in calls:
+                    if (
+                        not isinstance(call, dict)
+                        or str(call.get("id", "")) not in complete_call_ids
+                    ):
+                        continue
+                    function = call.get("function", {})
+                    if not isinstance(function, dict):
+                        continue
+                    arguments = function.get("arguments", "{}")
+                    if not isinstance(arguments, str):
+                        arguments = json.dumps(arguments)
+                    complete_calls.append(
+                        {
+                            "id": str(call["id"]),
+                            "type": "function",
+                            "function": {
+                                "name": str(function.get("name", "")),
+                                "arguments": arguments,
+                            },
+                        }
+                    )
+                if complete_calls:
+                    item["tool_calls"] = complete_calls
+            reasoning_details = message.get("openrouter_reasoning_details")
+            all_calls_complete = not calls or (
+                isinstance(calls, list)
+                and all(
+                    isinstance(call, dict)
+                    and str(call.get("id", "")) in complete_call_ids
+                    for call in calls
+                )
+            )
+            if (
+                role == "assistant"
+                and isinstance(reasoning_details, list)
+                and all_calls_complete
+            ):
+                # OpenRouter requires this sequence to be echoed unchanged and
+                # in order across tool continuations. It remains private model
+                # state and is never rendered as transcript text.
+                item["reasoning_details"] = reasoning_details
+            result.append(item)
+        return result
+
+    @staticmethod
+    def _attribute(value: Any, name: str, default: Any = None) -> Any:
+        if isinstance(value, dict):
+            return value.get(name, default)
+        return getattr(value, name, default)
+
+    @staticmethod
+    def _reasoning_details(value: Any) -> list[dict[str, Any]]:
+        details: list[dict[str, Any]] = []
+        for item in value or []:
+            mapped = _metadata_mapping(item)
+            if mapped:
+                details.append(mapped)
+        return details
+
+    @classmethod
+    def _raise_chunk_error(cls, chunk: Any) -> None:
+        error = cls._attribute(chunk, "error", None)
+        if not error:
+            return
+        message = cls._attribute(error, "message", None)
+        raise RuntimeError(str(message or "OpenRouter stream failed."))
+
+    def _stream(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        think: bool | str | None,
+    ):
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": self._messages(messages),
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            kwargs["tools"] = tools
+        if think not in {None, False, "off", "auto"}:
+            kwargs["extra_body"] = {"reasoning": {"effort": str(think)}}
+        return self._client().chat.completions.create(**kwargs)
+
+    def chat(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        options: dict[str, Any] | None = None,
+        think: bool | str | None = None,
+    ) -> dict[str, Any]:
+        response_stream = self._track_active_response(
+            self._stream(model, messages, tools, think)
+        )
+        content: list[str] = []
+        calls: dict[int, dict[str, Any]] = {}
+        reasoning_details: list[dict[str, Any]] = []
+        response_id = ""
+        usage: Any = None
+        completed = False
+        try:
+            for chunk in response_stream:
+                self._raise_chunk_error(chunk)
+                response_id = str(self._attribute(chunk, "id", response_id) or response_id)
+                usage = self._attribute(chunk, "usage", None) or usage
+                choices = self._attribute(chunk, "choices", []) or []
+                for choice in choices:
+                    if self._attribute(choice, "finish_reason", None) is not None:
+                        completed = True
+                    delta = self._attribute(choice, "delta", {}) or {}
+                    reasoning_details.extend(
+                        self._reasoning_details(
+                            self._attribute(delta, "reasoning_details", [])
+                        )
+                    )
+                    if piece := self._attribute(delta, "content", ""):
+                        content.append(str(piece))
+                    for fragment in self._attribute(delta, "tool_calls", []) or []:
+                        index = int(self._attribute(fragment, "index", 0) or 0)
+                        current = calls.setdefault(
+                            index,
+                            {"id": "", "function": {"name": "", "arguments": ""}},
+                        )
+                        if call_id := self._attribute(fragment, "id", ""):
+                            current["id"] = str(call_id)
+                        function = self._attribute(fragment, "function", {}) or {}
+                        if name := self._attribute(function, "name", ""):
+                            current["function"]["name"] += str(name)
+                        if arguments := self._attribute(function, "arguments", ""):
+                            current["function"]["arguments"] += str(arguments)
+        finally:
+            self._clear_active_response(response_stream)
+        if not completed:
+            raise RuntimeError("OpenRouter stream ended without a completion reason.")
+        assembled_calls = [calls[index] for index in sorted(calls)]
+        for call in assembled_calls:
+            if not call["id"] or not call["function"]["name"]:
+                raise RuntimeError("OpenRouter returned a malformed function call.")
+            try:
+                arguments = json.loads(call["function"]["arguments"] or "{}")
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("OpenRouter returned malformed function arguments.") from exc
+            if not isinstance(arguments, dict):
+                raise RuntimeError("OpenRouter returned non-object function arguments.")
+        self.last_chat_metadata = {
+            "provider": self.backend,
+            **({"response_id": response_id} if response_id else {}),
+            "usage": _metadata_mapping(usage),
+        }
+        return {
+            "role": "assistant",
+            "content": "".join(content),
+            **({"tool_calls": assembled_calls} if assembled_calls else {}),
+            **(
+                {"openrouter_reasoning_details": reasoning_details}
+                if reasoning_details
+                else {}
+            ),
+        }
+
+    def chat_stream(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        options: dict[str, Any] | None = None,
+        think: bool | str | None = None,
+    ):
+        response_stream = self._track_active_response(
+            self._stream(model, messages, None, think)
+        )
+        response_id = ""
+        usage: Any = None
+        reasoning_details: list[dict[str, Any]] = []
+        completed = False
+        try:
+            for chunk in response_stream:
+                self._raise_chunk_error(chunk)
+                response_id = str(self._attribute(chunk, "id", response_id) or response_id)
+                usage = self._attribute(chunk, "usage", None) or usage
+                choices = self._attribute(chunk, "choices", []) or []
+                for choice in choices:
+                    if self._attribute(choice, "finish_reason", None) is not None:
+                        completed = True
+                    delta = self._attribute(choice, "delta", {}) or {}
+                    reasoning_details.extend(
+                        self._reasoning_details(
+                            self._attribute(delta, "reasoning_details", [])
+                        )
+                    )
+                    piece = self._attribute(delta, "content", "") or ""
+                    if piece:
+                        yield {"role": "assistant", "content": str(piece)}
+            if reasoning_details:
+                yield {
+                    "role": "assistant",
+                    "content": "",
+                    "openrouter_reasoning_details": reasoning_details,
+                }
+        finally:
+            self._clear_active_response(response_stream)
+            self.last_chat_metadata = {
+                "provider": self.backend,
+                **({"response_id": response_id} if response_id else {}),
+                "usage": _metadata_mapping(usage),
+            }
+        if not completed:
+            raise RuntimeError("OpenRouter stream ended without a completion reason.")
+
 
 class CodexRuntime(OpenAIRuntime):
     """Responses adapter authenticated by the official Codex app-server."""
@@ -1122,6 +1402,74 @@ def discover_openai_models(api_key: str) -> list[ModelInfo]:
                     released_at=int(getattr(item, "created", 0) or 0),
                 )
             )
+    return sorted(result, key=newest_model_first_key)
+
+
+def discover_openrouter_models(api_key: str) -> list[ModelInfo]:
+    """Return text chat models from OpenRouter's authenticated public catalog."""
+    if not api_key:
+        return []
+    try:
+        runtime = OpenRouterRuntime(api_key)
+        models = runtime._client().models.list()
+    except Exception:
+        return []
+    result: list[ModelInfo] = []
+    for item in getattr(models, "data", models) or []:
+        metadata = _metadata_mapping(item)
+        model_id = metadata.get("id", getattr(item, "id", ""))
+        if not isinstance(model_id, str) or not model_id or not is_chat_model_id(
+            "openrouter", model_id
+        ):
+            continue
+        supported = (
+            metadata.get("supported_parameters")
+            or getattr(item, "supported_parameters", None)
+            or ()
+        )
+        architecture_value = metadata.get("architecture") or getattr(
+            item, "architecture", None
+        )
+        architecture = _metadata_mapping(architecture_value)
+        output_modalities = architecture.get("output_modalities") or getattr(
+            architecture_value, "output_modalities", None
+        )
+        if output_modalities and "text" not in output_modalities:
+            continue
+        context_length = metadata.get("context_length") or getattr(
+            item, "context_length", None
+        )
+        reasoning = _metadata_mapping(
+            metadata.get("reasoning") or getattr(item, "reasoning", None)
+        )
+        advertised_efforts = reasoning.get("supported_efforts")
+        if advertised_efforts:
+            effort_levels = tuple(
+                value
+                for value in advertised_efforts
+                if value in {"low", "medium", "high"}
+            )
+            if not reasoning.get("mandatory"):
+                effort_levels = ("off", *effort_levels)
+        else:
+            effort_levels = ModelCapabilities().effort_levels
+        result.append(
+            ModelInfo(
+                "openrouter",
+                model_id,
+                str(metadata.get("name") or getattr(item, "name", "") or model_id),
+                capabilities=ModelCapabilities(
+                    effort_levels=effort_levels,
+                    supports_tools=(not supported or "tools" in supported),
+                    context_window=(
+                        int(context_length)
+                        if isinstance(context_length, int) and context_length > 0
+                        else None
+                    ),
+                ),
+                released_at=int(metadata.get("created") or getattr(item, "created", 0) or 0),
+            )
+        )
     return sorted(result, key=newest_model_first_key)
 
 

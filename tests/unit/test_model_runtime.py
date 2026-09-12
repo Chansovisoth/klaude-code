@@ -5,7 +5,9 @@ from klaude_core.model_runtime import (
     ModelInfo,
     OllamaRuntime,
     OpenAIRuntime,
+    OpenRouterRuntime,
     discover_codex_models,
+    discover_openrouter_models,
     grouped_local_models,
     load_model_cache,
     local_model_weight_first_key,
@@ -61,6 +63,184 @@ def test_cloud_runtimes_reject_missing_credentials():
         OpenAIRuntime("")
     with pytest.raises(ValueError, match="Gemini API key"):
         GeminiRuntime("  ")
+    with pytest.raises(ValueError, match="OpenRouter API key"):
+        OpenRouterRuntime("")
+
+
+def test_openrouter_stream_assembles_text_tools_and_usage(monkeypatch):
+    captured = {}
+    chunks = [
+        {
+            "id": "gen-1",
+            "choices": [
+                {
+                    "delta": {
+                        "content": "Checking.",
+                        "reasoning_details": [
+                            {
+                                "type": "reasoning.encrypted",
+                                "data": "opaque-state",
+                                "index": 0,
+                            }
+                        ],
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-1",
+                                "function": {"name": "read_file", "arguments": '{"pa'},
+                            }
+                        ],
+                    }
+                }
+            ],
+        },
+        {
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "function": {"arguments": 'th":"README.md"}'},
+                            }
+                        ]
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 4},
+        },
+    ]
+
+    class Completions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return iter(chunks)
+
+    client = type(
+        "Client",
+        (),
+        {"chat": type("Chat", (), {"completions": Completions()})()},
+    )()
+    runtime = OpenRouterRuntime("sk-or-test")
+    monkeypatch.setattr(runtime, "_client", lambda: client)
+
+    message = runtime.chat(
+        "openai/test",
+        [{"role": "user", "content": "read it"}],
+        tools=[{"type": "function", "function": {"name": "read_file"}}],
+    )
+
+    assert captured["stream"] is True
+    assert captured["stream_options"] == {"include_usage": True}
+    assert message["content"] == "Checking."
+    assert message["tool_calls"][0]["function"]["arguments"] == '{"path":"README.md"}'
+    assert message["openrouter_reasoning_details"] == [
+        {"type": "reasoning.encrypted", "data": "opaque-state", "index": 0}
+    ]
+    assert runtime.last_chat_metadata["response_id"] == "gen-1"
+    assert normalize_token_usage(runtime.last_chat_metadata) == (12, 4)
+
+    continued = runtime._messages(
+        [
+            message,
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": "file contents",
+            },
+        ]
+    )
+    assert continued[0]["reasoning_details"] == message[
+        "openrouter_reasoning_details"
+    ]
+    assert continued[0]["tool_calls"] == [
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": '{"path":"README.md"}'},
+        }
+    ]
+
+
+def test_openrouter_history_drops_orphaned_tool_protocol_items():
+    messages = OpenRouterRuntime._messages(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "orphan",
+                        "function": {"name": "read_file", "arguments": {"path": "a"}},
+                    }
+                ],
+                "openrouter_reasoning_details": [
+                    {"type": "reasoning.encrypted", "data": "opaque"}
+                ],
+            },
+            {"role": "user", "content": "continue"},
+        ]
+    )
+
+    assert messages == [
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": "continue"},
+    ]
+
+
+def test_openrouter_stream_fails_closed_without_terminal_reason(monkeypatch):
+    runtime = OpenRouterRuntime("sk-or-test")
+    monkeypatch.setattr(
+        runtime,
+        "_stream",
+        lambda *_args: iter([{"choices": [{"delta": {"content": "partial"}}]}]),
+    )
+
+    with pytest.raises(RuntimeError, match="without a completion reason"):
+        list(runtime.chat_stream("openai/test", [{"role": "user", "content": "hi"}]))
+
+
+def test_openrouter_stream_surfaces_in_band_error(monkeypatch):
+    runtime = OpenRouterRuntime("sk-or-test")
+    monkeypatch.setattr(
+        runtime,
+        "_stream",
+        lambda *_args: iter([{"error": {"message": "provider unavailable"}}]),
+    )
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        runtime.chat("openai/test", [{"role": "user", "content": "hi"}])
+
+
+def test_openrouter_model_discovery_preserves_capabilities(monkeypatch):
+    models = [
+        type(
+            "Model",
+            (),
+            {
+                "id": "anthropic/claude-test",
+                "name": "Claude Test",
+                "supported_parameters": ["tools", "temperature"],
+                "architecture": type("Architecture", (), {"output_modalities": ["text"]})(),
+                "context_length": 200_000,
+                "created": 123,
+            },
+        )()
+    ]
+    monkeypatch.setattr(
+        OpenRouterRuntime,
+        "_client",
+        lambda _self: type(
+            "Client", (), {"models": type("Models", (), {"list": lambda _self: models})()}
+        )(),
+    )
+
+    discovered = discover_openrouter_models("sk-or-test")
+
+    assert discovered[0].ref == "openrouter/anthropic/claude-test"
+    assert discovered[0].capabilities.supports_tools is True
+    assert discovered[0].capabilities.context_window == 200_000
 
 
 @pytest.mark.parametrize(

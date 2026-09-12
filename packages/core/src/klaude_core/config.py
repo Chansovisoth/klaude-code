@@ -9,6 +9,8 @@ Hardware tiers map to model presets so the same repo runs on any machine.
 from __future__ import annotations
 
 import os
+import re
+import tempfile
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -197,6 +199,69 @@ def _env_value(name: str, default: str = "") -> str:
     return value.strip() if isinstance(value, str) else default
 
 
+def save_provider_secret(config_dir: Path, name: str, value: str) -> Path:
+    """Atomically persist one provider secret in an owner-only dotenv file.
+
+    The value is never returned or logged. Empty values remove the assignment
+    while preserving comments and unrelated settings.
+    """
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+        raise ValueError("invalid provider secret name")
+    if "\x00" in value or "\n" in value or "\r" in value:
+        raise ValueError("provider secrets must be a single line")
+    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = config_dir / ".env"
+    try:
+        existing = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        existing = []
+    assignment = re.compile(rf"^\s*{re.escape(name)}\s*=")
+    replacement = f"{name}={value}"
+    updated: list[str] = []
+    replaced = False
+    for line in existing:
+        if assignment.match(line):
+            if value and not replaced:
+                updated.append(replacement)
+            replaced = True
+            continue
+        updated.append(line)
+    if value and not replaced:
+        if updated and updated[-1]:
+            updated.append("")
+        updated.append(replacement)
+    payload = "\n".join(updated) + ("\n" if updated else "")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".env.", dir=config_dir)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+        path.chmod(0o600)
+        # Make the rename durable as well as the file contents. This matters
+        # for credentials because a power loss must not leave the UI claiming
+        # that a key was saved when only the directory entry was pending.
+        directory_descriptor = os.open(config_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except Exception:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+    if value:
+        os.environ[name] = value
+    else:
+        os.environ.pop(name, None)
+    return path
+
+
 def _provider_config_from_dict(
     current: WebProviderConfig,
     values: dict,
@@ -373,6 +438,7 @@ class Config:
     web_provider: str = "quality"  # quality | auto | local | brave | brave_api | exa
     gemini_api_key: str = ""
     openai_api_key: str = ""
+    openrouter_api_key: str = ""
     brave_search_api_key: str = ""
     parallel_api_key: str = ""
     tavily_api_key: str = ""
@@ -643,9 +709,9 @@ def load_config() -> Config:
     cfg.ollama_url = services.get("ollama_url", cfg.ollama_url)
     cfg.searxng_url = services.get("searxng_url", cfg.searxng_url)
     cfg.crawl4ai_url = services.get("crawl4ai_url", cfg.crawl4ai_url)
-    cfg.crawl4ai_api_key = services.get(
-        "crawl4ai_api_key",
-        os.environ.get("CRAWL4AI_API_KEY", cfg.crawl4ai_api_key),
+    cfg.crawl4ai_api_key = _env_value(
+        "CRAWL4AI_API_KEY",
+        str(services.get("crawl4ai_api_key", cfg.crawl4ai_api_key) or ""),
     )
 
     web = user.get("web", {})
@@ -956,54 +1022,50 @@ def load_config() -> Config:
         )
         for name, current in cfg.web_providers.items()
     }
-    cfg.gemini_api_key = web.get("gemini_api_key", _env_value("GEMINI_API_KEY", cfg.gemini_api_key))
+    cfg.gemini_api_key = _env_value(
+        "GEMINI_API_KEY",
+        str(web.get("gemini_api_key", cfg.gemini_api_key) or ""),
+    )
     # Chat-model credentials are deliberately independent from web providers.
     # GEMINI_API_KEY remains shared with the existing Google search provider.
-    cfg.openai_api_key = str(
-        cloud.get("openai_api_key", _env_value("OPENAI_API_KEY", cfg.openai_api_key)) or ""
-    ).strip()
-    cfg.brave_search_api_key = str(
-        web.get(
-            "brave_search_api_key",
-            _env_value("BRAVE_SEARCH_API_KEY", cfg.brave_search_api_key),
-        )
-        or ""
-    ).strip()
-    cfg.parallel_api_key = web.get(
-        "parallel_api_key",
-        _env_value("PARALLEL_API_KEY", cfg.parallel_api_key),
+    cfg.openai_api_key = _env_value(
+        "OPENAI_API_KEY",
+        str(cloud.get("openai_api_key", cfg.openai_api_key) or ""),
     )
-    cfg.tavily_api_key = str(
-        web.get(
-            "tavily_api_key",
-            _env_value("TAVILY_API_KEY", cfg.tavily_api_key),
-        )
-        or ""
-    ).strip()
-    cfg.firecrawl_api_key = str(
-        web.get(
-            "firecrawl_api_key",
-            _env_value("FIRECRAWL_API_KEY", cfg.firecrawl_api_key),
-        )
-        or ""
-    ).strip()
+    cfg.openrouter_api_key = _env_value(
+        "OPENROUTER_API_KEY",
+        str(cloud.get("openrouter_api_key", cfg.openrouter_api_key) or ""),
+    )
+    cfg.brave_search_api_key = _env_value(
+        "BRAVE_SEARCH_API_KEY",
+        str(web.get("brave_search_api_key", cfg.brave_search_api_key) or ""),
+    )
+    cfg.parallel_api_key = _env_value(
+        "PARALLEL_API_KEY",
+        str(web.get("parallel_api_key", cfg.parallel_api_key) or ""),
+    )
+    cfg.tavily_api_key = _env_value(
+        "TAVILY_API_KEY",
+        str(web.get("tavily_api_key", cfg.tavily_api_key) or ""),
+    )
+    cfg.firecrawl_api_key = _env_value(
+        "FIRECRAWL_API_KEY",
+        str(web.get("firecrawl_api_key", cfg.firecrawl_api_key) or ""),
+    )
     cfg.searxng_secret = web.get(
         "searxng_secret",
         _env_value("SEARXNG_SECRET", cfg.searxng_secret),
     )
-    cfg.exa_api_key = str(
-        web.get(
-            "exa_api_key",
-            _env_value("EXA_API_KEY", cfg.exa_api_key),
-        )
-        or ""
-    ).strip()
+    cfg.exa_api_key = _env_value(
+        "EXA_API_KEY",
+        str(web.get("exa_api_key", cfg.exa_api_key) or ""),
+    )
     cfg.exa_base_url = web.get("exa_base_url", cfg.exa_base_url)
 
     huggingface = user.get("huggingface", {})
-    cfg.huggingface_api_key = huggingface.get(
-        "api_key",
-        os.environ.get("HUGGINGFACE_API_KEY", cfg.huggingface_api_key),
+    cfg.huggingface_api_key = _env_value(
+        "HUGGINGFACE_API_KEY",
+        str(huggingface.get("api_key", cfg.huggingface_api_key) or ""),
     )
     cfg.huggingface_base_url = huggingface.get("base_url", cfg.huggingface_base_url)
 

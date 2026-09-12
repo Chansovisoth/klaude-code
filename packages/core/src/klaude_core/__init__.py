@@ -8,7 +8,7 @@ from .codex_auth import (
     CodexRateLimitWindow,
     CodexUsageStatus,
 )
-from .config import Config, load_config
+from .config import Config, load_config, save_provider_secret
 from .entities import (
     EntityRecord,
     EntityResolver,
@@ -31,6 +31,7 @@ from .model_runtime import (
     ModelInfo,
     OllamaRuntime,
     OpenAIRuntime,
+    OpenRouterRuntime,
 )
 from .ollama import Ollama, OllamaError
 from .permissions import PermissionDenied, PermissionGate
@@ -58,6 +59,7 @@ __all__ = [
     "WebResearchBudget",
     "Config",
     "load_config",
+    "save_provider_secret",
     "TurnCapabilities",
     "TurnScope",
     "CodexAuthError",
@@ -88,6 +90,7 @@ __all__ = [
     "ModelInfo",
     "OllamaRuntime",
     "OpenAIRuntime",
+    "OpenRouterRuntime",
     "CodexRuntime",
     "GeminiRuntime",
     "PermissionDenied",

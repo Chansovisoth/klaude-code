@@ -336,6 +336,8 @@ environment variables belong in Ollama's own service or container configuration.
 Optional provider keys use the `PROVIDER_API_KEY` pattern:
 
 ```bash
+OPENAI_API_KEY=...
+OPENROUTER_API_KEY=...
 GEMINI_API_KEY=...
 BRAVE_SEARCH_API_KEY=...
 PARALLEL_API_KEY=...
@@ -351,12 +353,21 @@ knowledge indexing. Install their SDKs with `uv sync --extra cloud`. For a
 ChatGPT-backed Codex model, install the official `codex` CLI and run
 `klaude auth login openai-codex`; Klaude delegates device login, secure storage,
 refresh, and logout to that installation and never copies its tokens. OpenAI API
-key access remains a separate provider configured with `OPENAI_API_KEY`, and
-Gemini API access uses `GEMINI_API_KEY`. In chat, `/model` groups OpenAI Codex,
-OpenAI API, and Gemini API under Cloud, with Ollama under Local. `klaude models`
+key access remains a separate provider configured with `OPENAI_API_KEY`.
+OpenRouter uses `OPENROUTER_API_KEY` with its live, text-chat model catalog, and
+Gemini API access uses `GEMINI_API_KEY`. API keys for every configured cloud
+model, web-search, hosted-fetch/crawl, and Hugging Face provider can be pasted
+through the masked **Settings → Providers** composer; Klaude atomically saves
+them only in the private, gitignored `config/.env` with owner-only permissions
+and never places them in transcript, session, input history, or preferences.
+SearXNG's deployment secret remains separately managed in `config/searxng.env`.
+In chat,
+`/model` groups OpenAI Codex, OpenAI API, OpenRouter, and Gemini API under Cloud,
+with Ollama under Local. `klaude models`
 remains the local Ollama diagnostic. Saved selections use canonical references
-such as `openai_codex/gpt-5.6-sol` or `openai_api/gpt-5`; older saved bare model
-names continue to mean Ollama.
+such as `openai_codex/gpt-5.6-sol`, `openai_api/gpt-5`, or
+`openrouter/anthropic/claude-sonnet-4`; older saved bare model names continue to
+mean Ollama.
 
 Klaude uses relevance-first provider routing for web search. Configured
 providers are tried according to query intent, missing optional keys are skipped

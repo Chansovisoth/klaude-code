@@ -1,7 +1,44 @@
 import os
 
 import klaude_core.config as config_module
-from klaude_core.config import load_config
+from klaude_core.config import load_config, save_provider_secret
+
+
+def test_provider_secret_storage_is_atomic_private_and_removable(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text("# providers\nOPENAI_API_KEY=keep-me\n")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    path = save_provider_secret(config_dir, "OPENROUTER_API_KEY", "sk-or-test")
+
+    assert path.read_text() == (
+        "# providers\nOPENAI_API_KEY=keep-me\n\nOPENROUTER_API_KEY=sk-or-test\n"
+    )
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert os.environ["OPENROUTER_API_KEY"] == "sk-or-test"
+
+    save_provider_secret(config_dir, "OPENROUTER_API_KEY", "")
+
+    assert "OPENROUTER_API_KEY" not in path.read_text()
+    assert "OPENROUTER_API_KEY" not in os.environ
+
+
+def test_provider_secret_replaces_spaced_assignment_without_touching_other_values(
+    tmp_path, monkeypatch
+):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text(
+        "OPENROUTER_API_KEY = old\nOPENAI_API_KEY=keep-me\n"
+    )
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    save_provider_secret(config_dir, "OPENROUTER_API_KEY", "new")
+
+    assert (config_dir / ".env").read_text() == (
+        "OPENROUTER_API_KEY=new\nOPENAI_API_KEY=keep-me\n"
+    )
 
 
 def test_agent_step_budget_defaults_low_and_clamps_overrides(tmp_path, monkeypatch):
@@ -185,6 +222,7 @@ def test_load_config_reads_dotenv_for_provider_keys(tmp_path, monkeypatch):
     monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
     monkeypatch.delenv("CRAWL4AI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("PARALLEL_API_KEY", raising=False)
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("EXA_API_KEY", raising=False)
@@ -194,6 +232,7 @@ def test_load_config_reads_dotenv_for_provider_keys(tmp_path, monkeypatch):
     (config_dir / ".env").write_text(
         "CRAWL4AI_API_KEY=crawl4ai-from-dotenv\n"
         "GEMINI_API_KEY=gemini-from-dotenv\n"
+        "OPENROUTER_API_KEY=openrouter-from-dotenv\n"
         "PARALLEL_API_KEY=parallel-from-dotenv\n"
         "TAVILY_API_KEY=tavily-from-dotenv\n"
         "EXA_API_KEY=from-dotenv\n"
@@ -206,6 +245,7 @@ def test_load_config_reads_dotenv_for_provider_keys(tmp_path, monkeypatch):
 
     assert cfg.crawl4ai_api_key == "crawl4ai-from-dotenv"
     assert cfg.gemini_api_key == "gemini-from-dotenv"
+    assert cfg.openrouter_api_key == "openrouter-from-dotenv"
     assert cfg.parallel_api_key == "parallel-from-dotenv"
     assert cfg.tavily_api_key == "tavily-from-dotenv"
     assert cfg.exa_api_key == "from-dotenv"
@@ -214,12 +254,68 @@ def test_load_config_reads_dotenv_for_provider_keys(tmp_path, monkeypatch):
     assert cfg.web_provider == "auto"
     os.environ.pop("CRAWL4AI_API_KEY", None)
     os.environ.pop("GEMINI_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
     os.environ.pop("PARALLEL_API_KEY", None)
     os.environ.pop("TAVILY_API_KEY", None)
     os.environ.pop("EXA_API_KEY", None)
     os.environ.pop("FIRECRAWL_API_KEY", None)
     os.environ.pop("HUGGINGFACE_API_KEY", None)
     os.environ.pop("KLAUDE_WEB_PROVIDER", None)
+
+
+def test_environment_cloud_key_overrides_legacy_toml_secret(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    data_dir = tmp_path / "data"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        '[cloud]\nopenrouter_api_key = "legacy-toml-key"\n'
+    )
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "private-env-key")
+
+    assert load_config().openrouter_api_key == "private-env-key"
+
+
+def test_environment_tool_keys_override_legacy_toml_secrets(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    data_dir = tmp_path / "data"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        "[services]\n"
+        'crawl4ai_api_key = "legacy-crawl"\n'
+        "[web]\n"
+        'brave_search_api_key = "legacy-brave"\n'
+        'parallel_api_key = "legacy-parallel"\n'
+        'tavily_api_key = "legacy-tavily"\n'
+        'exa_api_key = "legacy-exa"\n'
+        'firecrawl_api_key = "legacy-firecrawl"\n'
+        "[huggingface]\n"
+        'api_key = "legacy-huggingface"\n'
+    )
+    monkeypatch.setattr(config_module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(config_module, "DATA_DIR", data_dir)
+    expected = {
+        "CRAWL4AI_API_KEY": "saved-crawl",
+        "BRAVE_SEARCH_API_KEY": "saved-brave",
+        "PARALLEL_API_KEY": "saved-parallel",
+        "TAVILY_API_KEY": "saved-tavily",
+        "EXA_API_KEY": "saved-exa",
+        "FIRECRAWL_API_KEY": "saved-firecrawl",
+        "HUGGINGFACE_API_KEY": "saved-huggingface",
+    }
+    for name, value in expected.items():
+        monkeypatch.setenv(name, value)
+
+    cfg = load_config()
+
+    assert cfg.crawl4ai_api_key == expected["CRAWL4AI_API_KEY"]
+    assert cfg.brave_search_api_key == expected["BRAVE_SEARCH_API_KEY"]
+    assert cfg.parallel_api_key == expected["PARALLEL_API_KEY"]
+    assert cfg.tavily_api_key == expected["TAVILY_API_KEY"]
+    assert cfg.exa_api_key == expected["EXA_API_KEY"]
+    assert cfg.firecrawl_api_key == expected["FIRECRAWL_API_KEY"]
+    assert cfg.huggingface_api_key == expected["HUGGINGFACE_API_KEY"]
 
 
 def test_config_dir_dotenv_precedes_project_dotenv(tmp_path, monkeypatch):

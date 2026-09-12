@@ -66,6 +66,7 @@ from klaude_core import (
     Ollama,
     OllamaRuntime,
     OpenAIRuntime,
+    OpenRouterRuntime,
     PermissionGate,
     SubagentBudget,
     SubagentEvent,
@@ -76,6 +77,7 @@ from klaude_core import (
     TurnScope,
     WebResearchBudget,
     load_config,
+    save_provider_secret,
     supervise_agent_tasks,
 )
 from klaude_core.config import CONFIG_DIR, DEFAULT_PERMISSIONS, SOURCE_ROOT
@@ -85,6 +87,7 @@ from klaude_core.model_runtime import (
     discover_codex_models,
     discover_gemini_models,
     discover_openai_models,
+    discover_openrouter_models,
     grouped_local_models,
     load_model_cache,
     local_model_weight_first_key,
@@ -323,6 +326,7 @@ SETTINGS_CATEGORIES = (
     "input field",
     _choice_section("AGENT"),
     "models",
+    "providers",
     "memory",
     "skills",
     "tools",
@@ -331,6 +335,37 @@ SETTINGS_CATEGORIES = (
     RESET_THEME_CHOICE,
     CANCEL_CHOICE,
 )
+
+MODEL_API_KEY_PROVIDERS = {
+    "OpenAI API": ("OPENAI_API_KEY", "openai_api_key"),
+    "OpenRouter": ("OPENROUTER_API_KEY", "openrouter_api_key"),
+    "Gemini API": ("GEMINI_API_KEY", "gemini_api_key"),
+}
+
+TOOL_API_KEY_PROVIDERS = {
+    "Brave Search": ("BRAVE_SEARCH_API_KEY", "brave_search_api_key"),
+    "Parallel": ("PARALLEL_API_KEY", "parallel_api_key"),
+    "Tavily": ("TAVILY_API_KEY", "tavily_api_key"),
+    "Exa": ("EXA_API_KEY", "exa_api_key"),
+    "Firecrawl": ("FIRECRAWL_API_KEY", "firecrawl_api_key"),
+    "Crawl4AI Cloud": ("CRAWL4AI_API_KEY", "crawl4ai_api_key"),
+    "Hugging Face": ("HUGGINGFACE_API_KEY", "huggingface_api_key"),
+}
+
+PROVIDER_API_KEY_PROVIDERS = {**MODEL_API_KEY_PROVIDERS, **TOOL_API_KEY_PROVIDERS}
+
+PROVIDER_API_KEY_SECTIONS = (
+    ("CLOUD MODEL API KEYS", tuple(MODEL_API_KEY_PROVIDERS)),
+    ("WEB SEARCH API KEYS", ("Brave Search", "Parallel", "Tavily", "Exa")),
+    ("HOSTED WEB FETCHING & CRAWLING", ("Firecrawl", "Crawl4AI Cloud")),
+    ("MODEL & DATA PLATFORM", ("Hugging Face",)),
+)
+
+MODEL_BACKEND_FOR_API_KEY = {
+    "OPENAI_API_KEY": "openai_api",
+    "OPENROUTER_API_KEY": "openrouter",
+    "GEMINI_API_KEY": "gemini_api",
+}
 
 PERMISSION_PRESETS = ("Custom", "Balanced", "Cautious", "Read Only", "Full Access")
 PERMISSION_PRESET_DESCRIPTIONS = {
@@ -2458,11 +2493,12 @@ CHAT_COMMANDS = (
         "settings",
         CommandSurface.CHAT,
         "/settings [CATEGORY]",
-        "Configure Theme, Input Field, Models, Tools, or Runtime settings.",
+        "Configure Theme, Input Field, Models, Providers, Tools, or Runtime settings.",
         examples=(
             "/settings",
             "/settings theme",
             "/settings models",
+            "/settings providers",
             "/settings tools",
             "/settings runtime",
         ),
@@ -3347,6 +3383,8 @@ def _agent_configuration_context(
             chat_providers.append("OpenAI Codex (ChatGPT account)")
         if getattr(cfg, "openai_api_key", ""):
             chat_providers.append("OpenAI API (API key)")
+        if getattr(cfg, "openrouter_api_key", ""):
+            chat_providers.append("OpenRouter (API key)")
         if getattr(cfg, "gemini_api_key", ""):
             chat_providers.append("Gemini API (API key)")
         lines.append(
@@ -7125,6 +7163,7 @@ def _available_chat_models(cfg, ollama: Ollama) -> list[ModelInfo]:
         backend
         for backend, key in (
             ("openai_api", cfg.openai_api_key),
+            ("openrouter", cfg.openrouter_api_key),
             ("gemini_api", cfg.gemini_api_key),
         )
         if key
@@ -7163,6 +7202,7 @@ def _refresh_cloud_model_cache(cfg) -> None:
     codex_signed_in: bool | None = None
     for backend, key, discover in (
         ("openai_api", cfg.openai_api_key, discover_openai_models),
+        ("openrouter", cfg.openrouter_api_key, discover_openrouter_models),
         ("gemini_api", cfg.gemini_api_key, discover_gemini_models),
     ):
         if not key:
@@ -7227,6 +7267,8 @@ def _resolve_requested_chat_model(cfg, ollama: Ollama, name: str) -> ModelInfo |
             discovered = discover_codex_models()
     elif backend == "openai_api" and cfg.openai_api_key:
         discovered = discover_openai_models(cfg.openai_api_key)
+    elif backend == "openrouter" and cfg.openrouter_api_key:
+        discovered = discover_openrouter_models(cfg.openrouter_api_key)
     elif backend == "gemini_api" and cfg.gemini_api_key:
         discovered = discover_gemini_models(cfg.gemini_api_key)
     return _resolve_chat_model(discovered, name)
@@ -7266,6 +7308,7 @@ def _model_picker_rows(
         label = {
             "ollama": "Ollama",
             "openai_api": "OpenAI API",
+            "openrouter": "OpenRouter",
             "openai_codex": "OpenAI Codex",
             "gemini_api": "Gemini API",
         }[backend]
@@ -7282,6 +7325,9 @@ def _set_agent_model(agent: Agent, cfg, ollama: Ollama, info: ModelInfo) -> None
         runtime = OllamaRuntime(ollama) if isinstance(ollama, Ollama) else ollama
     elif info.backend == "openai_api":
         runtime = OpenAIRuntime(cfg.openai_api_key)
+        runtime._client()
+    elif info.backend == "openrouter":
+        runtime = OpenRouterRuntime(cfg.openrouter_api_key)
         runtime._client()
     elif info.backend == "openai_codex":
         runtime = CodexRuntime()
@@ -9494,9 +9540,12 @@ class PersistentChatTUI:
         rows = [
             "OpenAI Codex" if codex_ready else "OpenAI Codex — not signed in",
             "OpenAI" if self.cfg.openai_api_key else "OpenAI — API key not configured",
+            "OpenRouter"
+            if self.cfg.openrouter_api_key
+            else "OpenRouter — API key not configured",
             "Google" if self.cfg.gemini_api_key else "Google — API key not configured",
             "back",
-            "Tip: use `klaude auth login openai-codex`, or add API keys to config/.env",
+            "Tip: use OpenAI Codex login, or configure API keys in Settings → Providers",
         ]
         self._begin_choice("model cloud provider", rows, "OpenAI")
 
@@ -9577,6 +9626,7 @@ class PersistentChatTUI:
             "input field settings": "settings",
             "memory settings": "settings",
             "skills settings": "settings",
+            "providers settings": "settings",
             "permission settings": "settings",
             "permission preset": "permissions",
             "runtime settings": "settings",
@@ -9711,6 +9761,8 @@ class PersistentChatTUI:
                 self._open_model_backend("openai_codex", "cloud")
             elif selected == "OpenAI":
                 self._open_model_backend("openai_api", "cloud")
+            elif selected == "OpenRouter":
+                self._open_model_backend("openrouter", "cloud")
             elif selected == "Google":
                 self._open_model_backend("gemini_api", "cloud")
             return
@@ -9862,6 +9914,7 @@ class PersistentChatTUI:
             "input field settings",
             "memory settings",
             "skills settings",
+            "providers settings",
             "tools settings",
             "permission settings",
             "runtime settings",
@@ -10057,6 +10110,33 @@ class PersistentChatTUI:
             )
             self._begin_choice(
                 "skills settings", choices, _settings_choice_default(choices, default)
+            )
+            return
+        if category == "providers":
+            choices = []
+            for section, labels in PROVIDER_API_KEY_SECTIONS:
+                if choices:
+                    choices.append("")
+                choices.append(_choice_section(section))
+                for label in labels:
+                    _env_name, attribute = PROVIDER_API_KEY_PROVIDERS[label]
+                    configured = bool(getattr(self.cfg, attribute, ""))
+                    choices.append(f"{label}: {'configured' if configured else 'not configured'}")
+                    if configured:
+                        choices.append(f"remove {label} key")
+            choices.extend(
+                [
+                    "",
+                    _choice_info(
+                        "Gemini API is shared by Gemini chat and Google web search"
+                    ),
+                    _choice_info("Keys are masked and saved only to private config/.env"),
+                    "back",
+                    CANCEL_CHOICE,
+                ]
+            )
+            self._begin_choice(
+                "providers settings", choices, _settings_choice_default(choices, default)
             )
             return
         if category == "runtime":
@@ -10374,6 +10454,20 @@ class PersistentChatTUI:
             _apply_tool_availability_preferences(self.agent, self.chat_preferences_path)
             _apply_web_provider_preferences(self.agent, self.chat_preferences_path)
             self._open_settings_category("tools", selected)
+            return
+        if kind == "providers settings":
+            if selected.startswith("remove ") and selected.endswith(" key"):
+                label = selected.removeprefix("remove ").removesuffix(" key")
+                if label in PROVIDER_API_KEY_PROVIDERS:
+                    env_name, attribute = PROVIDER_API_KEY_PROVIDERS[label]
+                    self._save_provider_key(label, env_name, attribute, "")
+                return
+            label = selected.split(":", 1)[0]
+            if label in PROVIDER_API_KEY_PROVIDERS:
+                self._begin_provider_key_input(label)
+                return
+            self.status_error = "Select a provider API key"
+            self.application.invalidate()
             return
         if kind == "memory settings":
             enabled = (
@@ -11179,6 +11273,8 @@ class PersistentChatTUI:
                 "input field": "input field",
                 "model": "models",
                 "models": "models",
+                "provider": "providers",
+                "providers": "providers",
                 "memory": "memory",
                 "skill": "skills",
                 "skills": "skills",
@@ -11191,8 +11287,8 @@ class PersistentChatTUI:
             }
             if requested not in category_aliases:
                 self._append(
-                    "\n[error] Settings category must be theme, input, models, memory, "
-                    "skills, tools, permissions, runtime, or reset.\n"
+                    "\n[error] Settings category must be theme, input, models, providers, "
+                    "memory, skills, tools, permissions, runtime, or reset.\n"
                 )
                 return
             category = category_aliases[requested]
@@ -12073,8 +12169,54 @@ class PersistentChatTUI:
         value = request.pop("value", None)
         return str(value) if isinstance(value, str) and value else None
 
+    def _begin_provider_key_input(self, label: str) -> None:
+        env_name, attribute = PROVIDER_API_KEY_PROVIDERS[label]
+        self._choice_kind = None
+        self._choice_values = []
+        self._set_input("")
+        self._secret_request = {
+            "label": f"{label} API key",
+            "prompt": f"Paste the {label} API key and press Enter. Escape cancels.",
+            "on_submit": (label, env_name, attribute),
+        }
+        self.activity = "waiting for masked input"
+        self._append(
+            f"\n[secret · {label}]\n"
+            f"Paste the API key for {env_name}. The value is masked and saved only "
+            "to private config/.env (owner read/write).\n"
+        )
+        self.application.invalidate()
+
+    def _save_provider_key(self, label: str, env_name: str, attribute: str, value: str) -> None:
+        try:
+            save_provider_secret(self.cfg.config_dir, env_name, value)
+        except (OSError, ValueError) as exc:
+            self._append(f"\n[error] {label} key was not saved: {exc}\n")
+        else:
+            setattr(self.cfg, attribute, value)
+            backend = MODEL_BACKEND_FOR_API_KEY.get(env_name)
+            if backend:
+                cached = [
+                    item
+                    for item in load_model_cache(self.cfg.data_dir / "model-cache.json")
+                    if item.backend != backend
+                ]
+                save_model_cache(self.cfg.data_dir / "model-cache.json", cached)
+                if value:
+                    threading.Thread(
+                        target=_refresh_cloud_model_cache,
+                        args=(self.cfg,),
+                        name=f"klaude-{env_name.casefold()}-catalog-refresh",
+                        daemon=True,
+                    ).start()
+            action = "saved securely" if value else "removed"
+            self._append(f"\n[success] {label} API key {action}.\n")
+        self.status_error = ""
+        self.activity = "ready" if not self.running else self.activity
+        self._open_settings_category("providers", f"{label}:")
+
     def _submit_secret_response(self) -> None:
-        value = self.input.text
+        value = self.input.text.strip()
         self._set_input("")
         self._answer_secret(value or None)
 
@@ -12083,11 +12225,22 @@ class PersistentChatTUI:
         if request is None:
             return
         self._set_input("")
-        request["value"] = value
-        done = cast(threading.Event, request["done"])
         self._secret_request = None
-        self.activity = "secret submitted" if value else "secret entry cancelled"
-        done.set()
+        callback = request.get("on_submit")
+        if isinstance(callback, tuple) and len(callback) == 3:
+            if value:
+                self._save_provider_key(
+                    str(callback[0]), str(callback[1]), str(callback[2]), value
+                )
+            else:
+                self.activity = "secret entry cancelled"
+                self._open_settings_category("providers")
+        else:
+            request["value"] = value
+            done = request.get("done")
+            if isinstance(done, threading.Event):
+                done.set()
+            self.activity = "secret submitted" if value else "secret entry cancelled"
         self.application.invalidate()
 
     def _submit_permission_response(self) -> None:
@@ -12300,6 +12453,7 @@ def chat(
     cfg = load_config()
     if (
         cfg.openai_api_key
+        or cfg.openrouter_api_key
         or cfg.gemini_api_key
         or os.environ.get("KLAUDE_CODEX_BIN")
         or shutil.which("codex")
@@ -13535,13 +13689,20 @@ def status():
         "cloud chat models",
         (
             "available"
-            if (codex_auth.authenticated or cfg.openai_api_key or cfg.gemini_api_key)
+            if (
+                codex_auth.authenticated
+                or cfg.openai_api_key
+                or cfg.openrouter_api_key
+                or cfg.gemini_api_key
+            )
             else "not configured"
         ),
         "OpenAI Codex="
         + codex_detail
         + "; OpenAI API="
         + ("configured" if cfg.openai_api_key else "no key")
+        + "; OpenRouter="
+        + ("configured" if cfg.openrouter_api_key else "no key")
         + "; Gemini API="
         + ("configured" if cfg.gemini_api_key else "no key"),
     )
@@ -13740,6 +13901,12 @@ def doctor():
             bool(cfg.openai_api_key),
             "OPENAI_API_KEY",
             lambda: OpenAIRuntime(cfg.openai_api_key)._client(),
+        ),
+        (
+            "OpenRouter",
+            bool(cfg.openrouter_api_key),
+            "OPENROUTER_API_KEY",
+            lambda: OpenRouterRuntime(cfg.openrouter_api_key)._client(),
         ),
         (
             "Gemini API",

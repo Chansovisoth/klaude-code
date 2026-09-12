@@ -157,10 +157,8 @@
 # api_key_env = "BRAVE_SEARCH_API_KEY"
 # Optional official Brave Web Search API. This provider may incur charges.
 
-# Optional cloud chat providers.  Keys are normally supplied through the
-# environment rather than committed configuration.
-# [cloud]
-# openai_api_key = "${OPENAI_API_KEY}"
+# Optional Cloud chat keys belong in private config/.env. They can also be
+# entered through Settings > Providers; never commit credentials in this file.
 
 [web.providers.parallel]
 # enabled = true

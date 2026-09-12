@@ -132,8 +132,9 @@ Chat slash commands currently include:
 - `/keybinds`: print only keyboard controls directly. Slash commands belong in
   `/help` and the `/` completion popup.
 - `/settings [CATEGORY]`: configure categorized Theme, Input Field, Models,
-  Memory, Skills, Tools, Permissions, and Runtime controls. Models opens the same source, provider, model,
-  mode, and effort selection flow as `/model`. Tools persists independent
+  Providers, Memory, Skills, Tools, Permissions, and Runtime controls. Models
+  opens the same source, provider, model, mode, and effort selection flow as
+  `/model`. Tools persists independent
   validation toggles for web-search
   and local-knowledge candidates; turning validation off exposes unvalidated
   leads only and does not bypass transport, provenance, or fetch safety bounds.
@@ -206,6 +207,16 @@ Chat slash commands currently include:
   `chat-preferences.json`, and reset restores
   `[agent].max_subagent_concurrency` (`0` means Auto). This setting never widens
   the audited concurrent-tool allowlist or any permission boundary.
+  Providers securely collects cloud-model keys plus the API keys for Brave,
+  Parallel, Tavily, Exa, Firecrawl, Crawl4AI Cloud, and Hugging Face in the
+  existing masked-secret composer. It atomically writes only the corresponding
+  environment assignment to private, gitignored `config/.env` with mode `0600`,
+  preserving comments and unrelated values. Secrets never enter transcript,
+  sessions, shared drafts, completion, input history, or preferences. Removing
+  a model key clears its cached catalog; saving one refreshes discovery in the
+  background without blocking picker input. Gemini remains one shared key for
+  Gemini chat and Google web search. SearXNG's deployment secret stays in its
+  separate `config/searxng.env` configuration.
   Input border defaults on. Every category includes its own reset action.
   Runtime also offers scoped external
   Nano editors for Klaude's `config.toml` and saved runtime preferences; they
@@ -706,8 +717,8 @@ closed instead of being treated as successful output. Codex reconciles streamed
 tool/reasoning items against the authoritative completed response, deduplicates
 items by provider ID, and falls back to completed response text when a transport
 omits text deltas. Non-secret response IDs and terminal status are retained as
-runtime metadata for diagnostics. Exact Ollama, OpenAI/Codex, and Gemini
-input/output token counts feed the local footer and are mirrored to `/resume`
+runtime metadata for diagnostics. Exact Ollama, OpenAI/Codex, OpenRouter, and
+Gemini input/output token counts feed the local footer and are mirrored to `/resume`
 observers through a bounded, whitelisted completion payload. Missing or malformed
 provider usage must not erase an existing estimated context count. Runtime
 metadata is not used as server-side continuation
@@ -734,6 +745,14 @@ models use bounded thinking budgets, including budget zero for supported Flash
 requests. Provider model discovery must reject blank keys and filter obviously
 incompatible audio, image, moderation, realtime, transcription, TTS, and
 search-preview models.
+OpenRouter is a distinct `openrouter` backend using the OpenAI-compatible
+streaming Chat Completions endpoint. Its authenticated live catalog supplies
+model IDs, context limits, tool support, and reasoning capabilities. Klaude
+executes only its own permission-controlled tools; OpenRouter server tools and
+plugins are not enabled. Streamed function-call fragments are validated and
+assembled locally, and complete `reasoning_details` sequences are preserved
+privately and in order for provider tool continuations without rendering private
+reasoning in the transcript.
 
 ## Agent And Tool Routing
 
