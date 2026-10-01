@@ -755,6 +755,24 @@ def test_explicit_local_knowledge_search_requires_query_knowledge_not_web():
     ]
 
 
+@pytest.mark.parametrize(
+    "user_request",
+    [
+        "Using the learned documentation, answer the question.",
+        "Using the learned evaluation-aerolith documentation, answer the question.",
+        "Answer from the local docs.",
+        "Based on the knowledge library, summarize the rule.",
+        "According to the learned docs, what is the limit?",
+    ],
+)
+def test_source_constrained_local_document_requests_require_retrieval(user_request):
+    from klaude_core.agent import _explicit_retrieval_tools
+
+    assert _explicit_retrieval_tools(user_request, {"query_knowledge", "web_search"}) == (
+        "query_knowledge",
+    )
+
+
 def test_explicit_current_git_state_requires_git_status_even_without_web_search():
     from klaude_core.agent import _explicit_retrieval_tools
 
@@ -852,6 +870,90 @@ def test_length_limited_fenced_code_is_continued_once_without_repeating_it():
     assert [event.payload["content"] for event in events if event.kind == "text"] == [
         "```gdscript\nfunc attack():\n    swing_sword()\n```"
     ]
+
+
+@pytest.mark.parametrize("followup", ["bruh", "im in Ta Khmau", "find it then"])
+def test_search_preserves_model_resolved_local_recommendation(followup):
+    from klaude_core.agent import _contextual_search_query
+
+    history = [
+        {"role": "user", "content": "whats the best local coffee shop"},
+        {"role": "assistant", "content": "The approximate region is Cambodia."},
+        {"role": "user", "content": followup},
+    ]
+    query = "best coffee shops Ta Khmau Cambodia"
+    assert _contextual_search_query(query, followup, history) == query
+
+
+def test_coffee_conversation_keeps_tools_task_and_city_across_followups():
+    from klaude_cli.main import _select_tool_names
+
+    queries = []
+
+    def search(query):
+        queries.append(query)
+        return "No verified results; do not invent a recommendation."
+
+    tool = Tool("web_search", "Search public websites", {"type": "object", "properties": {
+        "query": {"type": "string"}}, "required": ["query"]}, search)
+    runtime = ScriptedOllama([
+        tool_call("web_search", query="coffee shops Cambodia"),
+        {"role": "assistant", "content": "I searched Cambodia but have no verified results."},
+        tool_call("web_search", query="coffee shops Cambodia reviews"),
+        {"role": "assistant", "content": "No verified options yet."},
+        tool_call("web_search", query="coffee shops Ta Khmau Cambodia"),
+        {"role": "assistant", "content": "No verified results in Ta Khmau."},
+    ])
+    agent = Agent(runtime, "fake-model", [tool],
+                  PermissionGate({"web_search": "allow"}, lambda *_: "n"), "system",
+                  tool_selector=_select_tool_names)
+    for prompt in ("hi there where can i find a coffee shop near here?",
+                   "Can you find them for me", "I'm in Ta Khmau"):
+        events = list(agent.run(prompt))
+        assert any(event.kind == "done" for event in events)
+        assert not any(event.kind == "error" for event in events)
+    assert len(queries) == 3
+    assert "coffee" in queries[-1].lower() and "Ta Khmau" in queries[-1]
+    sent = str(runtime.calls[-1]["messages"])
+    assert "coffee shop near here" in sent and "I'm in Ta Khmau" in sent
+
+
+def test_length_limited_prose_continues_without_asking_user_to_repeat():
+    class Runtime(ScriptedOllama):
+        def chat(self, *args, **kwargs):
+            self.last_chat_metadata = {"done_reason": "length" if not self.calls else "stop"}
+            return super().chat(*args, **kwargs)
+
+    runtime = Runtime([
+        {"role": "assistant", "content": "The new features include MCP "},
+        {"role": "assistant", "content": "discovery and secure setup."},
+    ])
+    agent = Agent(runtime, "fake-model", [], PermissionGate({}, lambda *_: "y"), "system")
+    events = list(agent.run("Describe the new features"))
+    assert len(runtime.calls) == 2
+    assert "MCP discovery" in "".join(
+        event.payload["content"] for event in events if event.kind == "text"
+    )
+
+
+def test_compaction_reserves_recap_before_large_tool_exchange():
+    agent = Agent(object(), "fake-model", [], PermissionGate({}, lambda *_: "y"), "system",
+                  ollama_options={"num_ctx": 4096, "num_predict": 2048})
+    agent.messages.extend([
+        {"role": "user", "content": "Find coffee shops near my area"},
+        {"role": "assistant", "content": "Checking Cambodia first."},
+        {"role": "user", "content": "im in Ta Khmau"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call-1", "function": {"name": "web_search", "arguments": {}}},
+        ]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "x" * 5200},
+        {"role": "assistant", "content": "Search pending."},
+        {"role": "user", "content": "continue"},
+    ])
+    agent._compact_history([])
+    context = "\n".join(message.get("content", "") for message in agent.messages)
+    assert "coffee shops" in context and "Ta Khmau" in context
+    assert "x" * 1000 not in context
 
 
 def test_code_answer_that_promises_a_cleaner_script_is_replaced():

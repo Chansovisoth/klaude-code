@@ -21,7 +21,12 @@ from .entities import (
     structured_domains_for_text,
     structured_entity_profile,
 )
-from .evaluation import EvaluationResult, EvaluationScenario, evaluate_agent_turn
+from .evaluation import (
+    EvaluationResult,
+    EvaluationScenario,
+    GroundingExpectation,
+    evaluate_agent_turn,
+)
 from .execution import TurnBudgetSnapshot, TurnGovernor
 from .memory import Memory
 from .model_runtime import (
@@ -82,6 +87,7 @@ __all__ = [
     "TurnGovernor",
     "EvaluationResult",
     "EvaluationScenario",
+    "GroundingExpectation",
     "evaluate_agent_turn",
     "Memory",
     "Ollama",

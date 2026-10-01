@@ -8,6 +8,7 @@ shape that the agent has always used.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import threading
@@ -18,6 +19,7 @@ from typing import Any, Protocol
 
 from .codex_auth import CODEX_RESPONSES_BASE_URL, CodexAuthError, CodexAuthManager
 from .ollama import Ollama
+from .settings_store import atomic_write_private, read_settings, settings_lock
 
 BACKEND_METADATA = {
     "ollama": ("Local", "Ollama"),
@@ -139,6 +141,10 @@ def load_model_cache(path: Path) -> list[ModelInfo]:
     except (OSError, json.JSONDecodeError):
         return []
     entries = raw.get("models", []) if isinstance(raw, dict) else []
+    return models_from_records(entries)
+
+
+def models_from_records(entries: object) -> list[ModelInfo]:
     result: list[ModelInfo] = []
     for item in entries if isinstance(entries, list) else []:
         if not isinstance(item, dict):
@@ -173,9 +179,9 @@ def load_model_cache(path: Path) -> list[ModelInfo]:
     return result
 
 
-def save_model_cache(path: Path, models: list[ModelInfo]) -> None:
-    """Atomically cache public model identifiers only—never credentials."""
-    payload = {
+def model_records(models: list[ModelInfo]) -> list[dict[str, Any]]:
+    """Serialize only public catalog fields, for caches and private worker IPC."""
+    return {
         "models": [
             {
                 "backend": item.backend,
@@ -190,14 +196,45 @@ def save_model_cache(path: Path, models: list[ModelInfo]) -> None:
             if item.backend in {"openai_api", "openai_codex", "openrouter", "gemini_api"}
             and is_chat_model_id(item.backend, item.model_id)
         ]
-    }
+    }["models"]
+
+
+def model_cache_generation(path: Path, backend: str) -> str:
+    raw = read_settings(path).get("generations", {})
+    return str(raw.get(backend, "")) if isinstance(raw, dict) else ""
+
+
+def save_model_cache(
+    path: Path, models: list[ModelInfo], *, backend: str | None = None,
+    expected_generation: str | None = None, invalidate: bool = False,
+) -> bool:
+    """Merge one provider under a lock and reject results invalidated during discovery.
+
+    The unscoped form remains an explicit full snapshot for bootstrap/tests.
+    Production refreshes and logout/key changes must pass a backend.
+    """
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(payload, indent=2) + "\n")
-        temporary.replace(path)
+        with settings_lock(path):
+            payload = read_settings(path)
+            generations = payload.get("generations", {})
+            generations = dict(generations) if isinstance(generations, dict) else {}
+            if backend is not None:
+                if (
+                    expected_generation is not None
+                    and generations.get(backend, "") != expected_generation
+                ):
+                    return False
+                if invalidate:
+                    generations[backend] = uuid.uuid4().hex
+                existing = models_from_records(payload.get("models", []))
+                models = [item for item in existing if item.backend != backend] + [
+                    item for item in models if item.backend == backend
+                ]
+            payload.update(models=model_records(models), generations=generations)
+            atomic_write_private(path, json.dumps(payload, indent=2) + "\n")
+            return True
     except OSError:
-        pass
+        return False
 
 
 def newest_model_first_key(item: ModelInfo) -> tuple[object, ...]:
@@ -409,7 +446,31 @@ class OpenAIRuntime(_CancelableResponseRuntime):
             raise ValueError("OpenAI API key is not configured.")
         self.api_key = api_key
         self.last_chat_metadata: dict[str, Any] = {}
+        self._prompt_cache_key = self._cache_key(uuid.uuid4().hex)
+        self._compaction_threshold: int | None = None
         self._init_active_response()
+
+    @staticmethod
+    def _cache_key(session_id: str) -> str:
+        """Build a non-identifying, bounded cache-routing key."""
+        digest = hashlib.sha256(session_id.encode("utf-8", errors="replace")).hexdigest()
+        return f"klaude-session-{digest[:40]}"
+
+    def set_session_context(self, session_id: str, context_window: int | None) -> None:
+        """Bind cache routing and native compaction to one Klaude session."""
+        self._prompt_cache_key = self._cache_key(session_id)
+        window = int(context_window or 0)
+        # Let provider compaction run before Agent's conservative local
+        # extractive fallback. Tiny/unknown windows keep the local fallback.
+        self._compaction_threshold = max(16_000, window * 3 // 4) if window >= 32_000 else None
+
+    def _continuity_options(self) -> dict[str, Any]:
+        options: dict[str, Any] = {"prompt_cache_key": self._prompt_cache_key}
+        if self._compaction_threshold is not None:
+            options["context_management"] = [
+                {"type": "compaction", "compact_threshold": self._compaction_threshold}
+            ]
+        return options
 
     def _client(self):
         try:
@@ -446,7 +507,16 @@ class OpenAIRuntime(_CancelableResponseRuntime):
         result: list[dict[str, Any]] = []
         for message in messages:
             role = message.get("role")
-            result.extend(cls._provider_input_items(message))
+            provider_items = cls._provider_input_items(message)
+            has_provider_assistant_items = any(
+                item.get("type") in {"message", "function_call"}
+                for item in provider_items
+            )
+            for item in provider_items:
+                if item.get("type") != "function_call" or str(
+                    item.get("call_id", "")
+                ) in complete_call_ids:
+                    result.append(item)
             if role == "tool":
                 call_id = str(message.get("tool_call_id", ""))
                 if not call_id or call_id not in complete_call_ids:
@@ -458,6 +528,11 @@ class OpenAIRuntime(_CancelableResponseRuntime):
                         "output": _content(message),
                     }
                 )
+            elif role == "assistant" and has_provider_assistant_items:
+                # Stateless Responses continuation replays the provider-issued
+                # assistant items verbatim. Reconstructing the same assistant
+                # text or function calls here would duplicate them.
+                continue
             elif role == "assistant" and message.get("tool_calls"):
                 for call in message["tool_calls"]:
                     call_id = str(call.get("id", ""))
@@ -474,11 +549,26 @@ class OpenAIRuntime(_CancelableResponseRuntime):
                     )
             elif role in {"system", "user", "assistant"}:
                 result.append({"role": role, "content": _content(message)})
-        return result
+        compaction_indexes = [
+            index for index, item in enumerate(result) if item.get("type") == "compaction"
+        ]
+        if not compaction_indexes:
+            return result
+        latest = compaction_indexes[-1]
+        # The latest opaque item replaces older dialogue state, but Klaude's
+        # current system contract remains authoritative and can change between
+        # turns as capabilities and permissions change.
+        current_instructions = [
+            item
+            for item in result[:latest]
+            if item.get("role") in {"system", "developer"}
+        ]
+        return [*current_instructions, *result[latest:]]
 
     @staticmethod
-    def _provider_input_items(_message: dict[str, Any]) -> list[dict[str, Any]]:
-        return []
+    def _provider_input_items(message: dict[str, Any]) -> list[dict[str, Any]]:
+        items = message.get("openai_response_items", [])
+        return [dict(item) for item in items if isinstance(item, dict)]
 
     @staticmethod
     def _tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -504,10 +594,12 @@ class OpenAIRuntime(_CancelableResponseRuntime):
             "model": model,
             "input": self._input(messages),
             "tools": self._tools(tools),
+            "include": ["reasoning.encrypted_content"],
             # Klaude is local-first. OpenAI Responses are retained by default,
             # so cloud calls explicitly opt out unless a future user setting
             # deliberately changes that privacy boundary.
             "store": False,
+            **self._continuity_options(),
         }
         if think not in {None, False, "off", "auto"}:
             kwargs["reasoning"] = {"effort": str(think)}
@@ -528,6 +620,8 @@ class OpenAIRuntime(_CancelableResponseRuntime):
             "input": self._input(messages),
             "stream": True,
             "store": False,
+            "include": ["reasoning.encrypted_content"],
+            **self._continuity_options(),
         }
         if think not in {None, False, "off", "auto"}:
             kwargs["reasoning"] = {"effort": str(think)}
@@ -613,10 +707,123 @@ class OpenAIRuntime(_CancelableResponseRuntime):
         raise RuntimeError(str(message))
 
     @staticmethod
-    def _message(response: Any) -> dict[str, Any]:
+    def _response_item(item: Any) -> dict[str, Any] | None:
+        """Keep only provider state required for stateless Responses replay."""
+        kind = str(getattr(item, "type", "") or "")
+        if kind == "compaction":
+            item_id = str(getattr(item, "id", "") or "").strip()
+            encrypted = getattr(item, "encrypted_content", None)
+            if not item_id or not encrypted:
+                return None
+            compaction_result: dict[str, Any] = {
+                "id": item_id,
+                "type": "compaction",
+                "encrypted_content": str(encrypted),
+            }
+            if agent := getattr(item, "agent", None):
+                compaction_result["agent"] = str(agent)
+            return compaction_result
+        if kind == "reasoning":
+            item_id = str(getattr(item, "id", "") or "").strip()
+            encrypted = getattr(item, "encrypted_content", None)
+            if not item_id or not encrypted:
+                return None
+            summary: list[dict[str, Any]] = []
+            for part in getattr(item, "summary", None) or []:
+                if isinstance(part, dict):
+                    dumped = dict(part)
+                elif hasattr(part, "model_dump"):
+                    dumped = part.model_dump(exclude_none=True)
+                else:
+                    part_type = getattr(part, "type", None)
+                    text = getattr(part, "text", None)
+                    dumped = {
+                        **({"type": str(part_type)} if part_type else {}),
+                        **({"text": str(text)} if text is not None else {}),
+                    }
+                if dumped:
+                    summary.append(dumped)
+            result: dict[str, Any] = {
+                "id": item_id,
+                "type": "reasoning",
+                "summary": summary,
+                "encrypted_content": str(encrypted),
+            }
+            if status := getattr(item, "status", None):
+                result["status"] = str(status)
+            return result
+        if kind == "function_call":
+            call_id = str(getattr(item, "call_id", "") or "").strip()
+            name = str(getattr(item, "name", "") or "").strip()
+            arguments = getattr(item, "arguments", None)
+            if not call_id or not name or not isinstance(arguments, str):
+                return None
+            result = {
+                "type": "function_call",
+                "call_id": call_id,
+                "name": name,
+                "arguments": arguments,
+            }
+            if function_item_id := getattr(item, "id", None):
+                result["id"] = str(function_item_id)
+            if status := getattr(item, "status", None):
+                result["status"] = str(status)
+            return result
+        if kind != "message" or getattr(item, "role", "") != "assistant":
+            return None
+        item_id = str(getattr(item, "id", "") or "").strip()
+        if not item_id:
+            return None
+        content: list[dict[str, Any]] = []
+        for part in getattr(item, "content", None) or []:
+            part_type = str(getattr(part, "type", "") or "")
+            if part_type == "output_text":
+                annotations: list[dict[str, Any]] = []
+                for annotation in getattr(part, "annotations", None) or []:
+                    if isinstance(annotation, dict):
+                        dumped_annotation = dict(annotation)
+                    elif hasattr(annotation, "model_dump"):
+                        dumped_annotation = annotation.model_dump(exclude_none=True)
+                    else:
+                        dumped_annotation = {}
+                    if dumped_annotation:
+                        annotations.append(dumped_annotation)
+                content.append(
+                    {
+                        "type": "output_text",
+                        "text": str(getattr(part, "text", "") or ""),
+                        "annotations": annotations,
+                    }
+                )
+            elif part_type == "refusal":
+                content.append(
+                    {
+                        "type": "refusal",
+                        "refusal": str(getattr(part, "refusal", "") or ""),
+                    }
+                )
+        if not content:
+            return None
+        result = {
+            "id": item_id,
+            "type": "message",
+            "role": "assistant",
+            "content": content,
+        }
+        if status := getattr(item, "status", None):
+            result["status"] = str(status)
+        if phase := getattr(item, "phase", None):
+            result["phase"] = str(phase)
+        return result
+
+    @classmethod
+    def _message(cls, response: Any) -> dict[str, Any]:
         calls = []
         refusals: list[str] = []
+        response_items: list[dict[str, Any]] = []
         for item in getattr(response, "output", []) or []:
+            if replay_item := cls._response_item(item):
+                response_items.append(replay_item)
             if getattr(item, "type", "") == "function_call":
                 calls.append(
                     {
@@ -638,6 +845,7 @@ class OpenAIRuntime(_CancelableResponseRuntime):
             "role": "assistant",
             "content": content,
             **({"tool_calls": calls} if calls else {}),
+            **({"openai_response_items": response_items} if response_items else {}),
         }
 
 
@@ -921,6 +1129,8 @@ class CodexRuntime(OpenAIRuntime):
         self.last_chat_metadata: dict[str, Any] = {}
         self._init_active_response()
         self._session_id = str(uuid.uuid4())
+        self._prompt_cache_key = self._cache_key(uuid.uuid4().hex)
+        self._compaction_threshold: int | None = None
 
     def _client(self, *, refresh: bool = False):
         try:
@@ -984,6 +1194,7 @@ class CodexRuntime(OpenAIRuntime):
             "tools": self._tools(tools),
             "stream": True,
             "store": False,
+            **self._continuity_options(),
         }
         if think not in {None, False, "off", "auto"}:
             kwargs["reasoning"] = {"effort": str(think)}
@@ -1044,6 +1255,11 @@ class CodexRuntime(OpenAIRuntime):
             "content": content,
             **({"tool_calls": calls} if calls else {}),
             **({"codex_reasoning_items": reasoning_items} if reasoning_items else {}),
+            **(
+                {"openai_response_items": terminal["openai_response_items"]}
+                if terminal.get("openai_response_items")
+                else {}
+            ),
         }
 
     def chat_stream(
@@ -1058,6 +1274,7 @@ class CodexRuntime(OpenAIRuntime):
             "input": self._input(messages),
             "stream": True,
             "store": False,
+            **self._continuity_options(),
         }
         if think not in {None, False, "off", "auto"}:
             kwargs["reasoning"] = {"effort": str(think)}
@@ -1068,14 +1285,6 @@ class CodexRuntime(OpenAIRuntime):
                 kind = getattr(event, "type", "")
                 if kind in {"response.output_text.delta", "response.refusal.delta"}:
                     yield {"role": "assistant", "content": getattr(event, "delta", "") or ""}
-                elif kind == "response.output_item.done":
-                    reasoning = self._reasoning_item(getattr(event, "item", None))
-                    if reasoning:
-                        yield {
-                            "role": "assistant",
-                            "content": "",
-                            "codex_reasoning_items": [reasoning],
-                        }
                 elif kind == "response.completed":
                     response = getattr(event, "response", None)
                     if response is None:
@@ -1085,6 +1294,14 @@ class CodexRuntime(OpenAIRuntime):
                     self._record(response)
                     self._raise_for_terminal_response(response)
                     completed = True
+                    terminal = self._message(response)
+                    metadata = {
+                        key: value
+                        for key, value in terminal.items()
+                        if key not in {"role", "content", "tool_calls"}
+                    }
+                    if metadata:
+                        yield {"role": "assistant", "content": "", **metadata}
                 elif kind in {"response.failed", "response.incomplete"}:
                     response = getattr(event, "response", None)
                     self._record(response)
@@ -1129,40 +1346,14 @@ class CodexRuntime(OpenAIRuntime):
 
     @staticmethod
     def _reasoning_item(item: Any) -> dict[str, Any] | None:
-        if getattr(item, "type", "") != "reasoning":
-            return None
-        item_id = getattr(item, "id", None)
-        encrypted = getattr(item, "encrypted_content", None)
-        if not item_id or not encrypted:
-            return None
-        # Responses reasoning input items require both `id` and `summary`, even
-        # when the summary is empty. Preserve only the provider-issued opaque
-        # continuation state; it stays in message metadata and is never
-        # rendered as assistant text.
-        summary: list[dict[str, Any]] = []
-        for part in getattr(item, "summary", None) or []:
-            if isinstance(part, dict):
-                dumped = dict(part)
-            elif hasattr(part, "model_dump"):
-                dumped = part.model_dump(exclude_none=True)
-            else:
-                kind = getattr(part, "type", None)
-                text = getattr(part, "text", None)
-                dumped = {
-                    **({"type": str(kind)} if kind else {}),
-                    **({"text": str(text)} if text is not None else {}),
-                }
-            if dumped:
-                summary.append(dumped)
-        return {
-            "id": str(item_id),
-            "type": "reasoning",
-            "summary": summary,
-            "encrypted_content": str(encrypted),
-        }
+        replay_item = OpenAIRuntime._response_item(item)
+        return replay_item if replay_item and replay_item.get("type") == "reasoning" else None
 
     @staticmethod
     def _provider_input_items(message: dict[str, Any]) -> list[dict[str, Any]]:
+        response_items = message.get("openai_response_items", [])
+        if isinstance(response_items, list) and response_items:
+            return [dict(item) for item in response_items if isinstance(item, dict)]
         items = message.get("codex_reasoning_items", [])
         return [dict(item) for item in items if isinstance(item, dict)]
 

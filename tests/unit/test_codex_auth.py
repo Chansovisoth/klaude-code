@@ -1,5 +1,6 @@
 import json
 import queue
+import threading
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ from klaude_cli import main as cli_main
 from klaude_core.codex_auth import (
     CODEX_DEVICE_URL,
     CodexAppServer,
+    CodexAuthCancelled,
     CodexAuthError,
     CodexAuthManager,
     CodexAuthStatus,
@@ -124,6 +126,47 @@ def test_logout_uses_official_account_rpc():
     assert client.requests == [("account/logout", None)]
 
 
+def test_device_login_cooperative_cancel_requests_broker_cancellation():
+    cancel = threading.Event()
+    client = FakeClient(
+        {"account/login/start": {"loginId": "login-1", "userCode": "CODE"}},
+        login_error=CodexAuthCancelled("cancelled"),
+    )
+    with pytest.raises(CodexAuthCancelled):
+        _manager(client).login(lambda *_args: cancel.set(), cancel_event=cancel)
+    assert ("account/login/cancel", {"loginId": "login-1"}) in client.requests
+
+
+def test_broker_cancel_wakes_empty_queue_without_waiting_for_login_timeout():
+    client = CodexAppServer()
+    client.cancel_event = threading.Event()
+    timer = threading.Timer(0.02, client.cancel_event.set)
+    timer.start()
+    try:
+        with pytest.raises(CodexAuthCancelled):
+            client._next_message(900)
+    finally:
+        timer.join()
+
+
+def test_broker_login_timeout_is_not_reset_by_notifications(monkeypatch):
+    client = CodexAppServer()
+    ticks = iter([0.0, 899.0, 901.0])
+    monkeypatch.setattr("klaude_core.codex_auth.time.monotonic", lambda: next(ticks))
+    waits = []
+
+    def next_message(timeout):
+        waits.append(timeout)
+        if timeout <= 0:
+            raise CodexAuthError("Timed out")
+        return {"method": "other/event"}
+
+    monkeypatch.setattr(client, "_next_message", next_message)
+    with pytest.raises(CodexAuthError, match="Timed out"):
+        client.wait_for_login("login-1")
+    assert waits == [1.0, 0.0]
+
+
 def test_rate_limits_parse_all_windows_and_cache_result():
     client = FakeClient(
         {
@@ -236,8 +279,11 @@ def test_account_id_supports_namespaced_official_claim():
     assert _account_id(f"header.{body}.signature") == "acct-nested"
 
 
-def test_auth_login_cli_uses_device_ux_and_refreshes_catalog(monkeypatch):
+def test_auth_login_cli_uses_device_ux_and_refreshes_catalog(monkeypatch, tmp_path):
     refreshed = []
+    from types import SimpleNamespace
+
+    from klaude_core.model_runtime import ModelInfo
 
     class Auth:
         def login(self, display):
@@ -245,8 +291,13 @@ def test_auth_login_cli_uses_device_ux_and_refreshes_catalog(monkeypatch):
             return CodexAuthStatus(True, "chatgpt", "plus")
 
     monkeypatch.setattr(cli_main, "CodexAuthManager", Auth)
-    monkeypatch.setattr(cli_main, "_refresh_cloud_model_cache", refreshed.append)
-    monkeypatch.setattr(cli_main, "load_config", lambda: object())
+    monkeypatch.setattr(cli_main, "discover_codex_models", lambda: [
+        ModelInfo("openai_codex", "gpt-test", "Test")
+    ])
+    monkeypatch.setattr(
+        cli_main, "save_model_cache", lambda *args, **kwargs: refreshed.append(kwargs)
+    )
+    monkeypatch.setattr(cli_main, "load_config", lambda: SimpleNamespace(data_dir=tmp_path))
 
     result = CliRunner().invoke(cli_main.app, ["auth", "login", "openai-codex"])
 
@@ -256,6 +307,7 @@ def test_auth_login_cli_uses_device_ux_and_refreshes_catalog(monkeypatch):
     assert "Waiting for authorization" in result.output
     assert "Signed in" in result.output
     assert len(refreshed) == 1
+    assert refreshed[0]["backend"] == "openai_codex"
 
 
 def test_auth_status_cli_keeps_api_key_auth_separate(monkeypatch):
@@ -288,10 +340,12 @@ def test_auth_logout_cli_removes_only_codex_catalog(monkeypatch):
     monkeypatch.setattr(cli_main, "CodexAuthManager", Auth)
     monkeypatch.setattr(cli_main, "load_config", lambda: cfg)
     monkeypatch.setattr(cli_main, "load_model_cache", lambda _path: cached)
-    monkeypatch.setattr(cli_main, "save_model_cache", lambda _path, models: saved.extend(models))
+    monkeypatch.setattr(
+        cli_main, "save_model_cache", lambda _path, models, **kwargs: saved.append((models, kwargs))
+    )
 
     result = CliRunner().invoke(cli_main.app, ["auth", "logout", "openai-codex"])
 
     assert result.exit_code == 0, result.output
     assert calls == ["logout"]
-    assert [item.backend for item in saved] == ["openai_api"]
+    assert saved == [([], {"backend": "openai_codex", "invalidate": True})]

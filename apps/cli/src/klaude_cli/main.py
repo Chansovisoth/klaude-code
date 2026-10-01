@@ -17,6 +17,7 @@ Commands:
   klaude remember "fact"      append a durable fact to memory
   klaude memory               inspect and manage durable memory
   klaude auth                 manage cloud account authentication
+  klaude mcp                  connect and manage external MCP servers
   klaude session-search "q"   search previous conversation sessions
   klaude status               show configured modes, storage, and tool permissions
   klaude system-info          show normalized runtime context diagnostics
@@ -25,6 +26,7 @@ Commands:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import queue
@@ -38,19 +40,28 @@ import textwrap
 import threading
 import time
 import uuid
+import webbrowser
 from collections import deque
+from collections.abc import Awaitable, Callable
+from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
 from difflib import get_close_matches
 from enum import StrEnum
 from functools import partial
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from importlib import resources
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path
-from typing import Any, cast
-from urllib.parse import urlparse
+from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:
+    from klaude_core.mcp_catalog import MCPCatalogServer, MCPInstallPlan
+    from klaude_core.mcp_client import MCPServerConfig
+    from mcp.shared.auth import AuthorizationCodeResult
 
 import httpx
 import typer
@@ -80,8 +91,19 @@ from klaude_core import (
     save_provider_secret,
     supervise_agent_tasks,
 )
-from klaude_core.config import CONFIG_DIR, DEFAULT_PERMISSIONS, SOURCE_ROOT
+from klaude_core.config import (
+    CONFIG_DIR,
+    DEFAULT_PERMISSIONS,
+    SOURCE_ROOT,
+    provider_credential_current,
+    provider_secret_revision,
+)
 from klaude_core.dates import find_establishment_date, operating_duration_since
+from klaude_core.intent import (
+    explicit_workspace_inspection,
+    explicitly_disallows_tools,
+    has_nonnegated_action,
+)
 from klaude_core.memory import explicit_memory_candidate, is_sensitive_memory
 from klaude_core.model_runtime import (
     discover_codex_models,
@@ -91,15 +113,18 @@ from klaude_core.model_runtime import (
     grouped_local_models,
     load_model_cache,
     local_model_weight_first_key,
+    model_cache_generation,
     newest_model_first_key,
     normalize_token_usage,
     save_model_cache,
 )
+from klaude_core.research_receipts import research_receipt
 from klaude_core.runtime_context import (
     collect_runtime_context,
     context_to_dict,
     render_runtime_context,
 )
+from klaude_core.settings_store import DELETE, settings_lock, update_settings
 from prompt_toolkit import Application, PromptSession
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.application.current import get_app
@@ -149,6 +174,23 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from .background_jobs import OwnedBackgroundJobs
+from .mcp_mutations import (
+    MCPAddDisabled,
+    MCPEnable,
+    MCPImport,
+    MCPMutation,
+    MCPMutationResult,
+    MCPMutationWriter,
+    MCPReload,
+    MCPToggle,
+)
+from .pickers import PickerController, PickerRow, match_score
+from .session_actions import AutomaticMemoryUpdate, SessionActionWriter, SessionSettingUpdate
+from .session_io import SessionIOCoordinator, SessionIORequest, SessionIOResult, collect_session_io
+from .settings_overview import SettingsOverviewSnapshot
+from .settings_writer import SettingsWriter
+
 app = typer.Typer(
     add_completion=False,
     invoke_without_command=True,
@@ -175,6 +217,13 @@ auth_app = typer.Typer(
     invoke_without_command=True,
 )
 app.add_typer(auth_app, name="auth")
+mcp_app = typer.Typer(
+    help="Connect and manage external Model Context Protocol servers.",
+    invoke_without_command=True,
+)
+app.add_typer(mcp_app, name="mcp")
+mcp_auth_app = typer.Typer(help="Manage OAuth for remote MCP servers.")
+mcp_app.add_typer(mcp_auth_app, name="auth")
 
 
 @app.callback(invoke_without_command=True)
@@ -265,6 +314,14 @@ def _choice_info(text: str) -> str:
     return f"{CHOICE_INFO_PREFIX}{text}"
 
 
+class UnavailableChoice(str):
+    """A visible picker action that can receive focus but cannot be confirmed."""
+
+
+def _choice_unavailable(text: str) -> str:
+    return UnavailableChoice(text)
+
+
 def _is_choice_section(value: str) -> bool:
     return value.startswith(CHOICE_SECTION_PREFIX)
 
@@ -275,7 +332,8 @@ def _is_choice_info(value: str) -> bool:
 
 def _is_choice_unavailable(value: str) -> bool:
     return (
-        "API key not configured" in value
+        isinstance(value, UnavailableChoice)
+        or "API key not configured" in value
         or "not signed in" in value
         or "models unavailable" in value
         or value.startswith("Ollama unavailable")
@@ -313,33 +371,28 @@ def _settings_choice_default(values: list[str], default: str | None) -> str:
     if default in selectable:
         return default
     if default:
-        label = default.split(":", 1)[0]
-        matches = [value for value in selectable if value.split(":", 1)[0] == label]
+        label = default.split(":", 1)[0].casefold()
+        matches = [
+            value
+            for value in selectable
+            if value.split(":", 1)[0].casefold() == label
+        ]
         if len(matches) == 1:
             return matches[0]
     return selectable[0]
 
 
-SETTINGS_CATEGORIES = (
-    _choice_section("APPEARANCE"),
-    "theme",
-    "input field",
-    _choice_section("AGENT"),
-    "models",
-    "providers",
-    "memory",
-    "skills",
-    "tools",
-    "permissions",
-    "runtime",
-    RESET_THEME_CHOICE,
-    CANCEL_CHOICE,
-)
-
 MODEL_API_KEY_PROVIDERS = {
     "OpenAI API": ("OPENAI_API_KEY", "openai_api_key"),
     "OpenRouter": ("OPENROUTER_API_KEY", "openrouter_api_key"),
     "Gemini API": ("GEMINI_API_KEY", "gemini_api_key"),
+}
+
+MODEL_PROVIDER_FOR_BACKEND = {
+    "openai_codex": "OpenAI Codex",
+    "openai_api": "OpenAI API",
+    "openrouter": "OpenRouter",
+    "gemini_api": "Gemini API",
 }
 
 TOOL_API_KEY_PROVIDERS = {
@@ -360,6 +413,31 @@ PROVIDER_API_KEY_SECTIONS = (
     ("HOSTED WEB FETCHING & CRAWLING", ("Firecrawl", "Crawl4AI Cloud")),
     ("MODEL & DATA PLATFORM", ("Hugging Face",)),
 )
+
+PROVIDER_API_KEY_DESCRIPTIONS = {
+    "OpenAI API": "OpenAI API-platform chat models; separate from Codex login.",
+    "OpenRouter": "OpenRouter's unified catalog of cloud chat models.",
+    "Gemini API": "Gemini chat models and the Google web-search provider.",
+    "Brave Search": "The official Brave Search API; keyless Brave remains available.",
+    "Parallel": "Parallel hosted web search.",
+    "Tavily": "Tavily hosted web search.",
+    "Exa": "Exa search, code-search highlights, and hosted extraction.",
+    "Firecrawl": "Firecrawl hosted search, fetching, and crawling.",
+    "Crawl4AI Cloud": "Authenticated Crawl4AI Cloud fetching and crawling.",
+    "Hugging Face": "Authenticated Hugging Face Hub model and dataset access.",
+}
+
+SETTINGS_CATEGORY_FOR_KIND = {
+    "theme settings": "theme",
+    "input field settings": "input field",
+    "memory settings": "memory",
+    "skills settings": "skills",
+    "providers settings": "providers",
+    "mcp settings": "mcp servers",
+    "tools settings": "tools",
+    "permission settings": "permissions",
+    "runtime settings": "runtime",
+}
 
 MODEL_BACKEND_FOR_API_KEY = {
     "OPENAI_API_KEY": "openai_api",
@@ -1308,29 +1386,39 @@ def _load_tui_appearance(path: Path) -> TUIAppearance:
     )
 
 
-def _save_tui_appearance(path: Path, appearance: TUIAppearance) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps(
-            {
-                "theme": {
-                    "interface": appearance.theme,
-                    "text": appearance.text_theme,
-                },
-                "input_field": {
-                    "border": appearance.input_border,
-                    "height": appearance.input_height,
-                    "min_height": appearance.input_height,
-                    "max_height": appearance.input_max_height,
-                },
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
-        + "\n"
+def _appearance_changes(
+    appearance: TUIAppearance, *, fields: tuple[str, ...] | None = None
+) -> dict[tuple[str, ...], object]:
+    values: dict[str, dict[tuple[str, ...], object]] = {
+        "theme": {("theme", "interface"): appearance.theme},
+        "text_theme": {("theme", "text"): appearance.text_theme},
+        "input_border": {("input_field", "border"): appearance.input_border},
+        "input_height": {
+            ("input_field", "height"): appearance.input_height,
+            ("input_field", "min_height"): appearance.input_height,
+        },
+        "input_max_height": {("input_field", "max_height"): appearance.input_max_height},
+    }
+    changes: dict[tuple[str, ...], object] = {}
+    for field_name in fields if fields is not None else values:
+        changes.update(values[field_name])
+    return changes
+
+
+def _migrate_appearance(value: dict[str, Any]) -> None:
+    if isinstance(value.get("theme"), str):
+        value["theme"] = {
+            "interface": value["theme"],
+            "text": value.get("text_theme", DEFAULT_TEXT_THEME),
+        }
+
+
+def _save_tui_appearance(
+    path: Path, appearance: TUIAppearance, *, fields: tuple[str, ...] | None = None
+) -> None:
+    update_settings(
+        path, _appearance_changes(appearance, fields=fields), prepare=_migrate_appearance
     )
-    temporary.replace(path)
 
 
 def _load_last_chat_model(path: Path) -> str | None:
@@ -1347,17 +1435,8 @@ def _load_chat_preferences(path: Path) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
-def _write_chat_preferences(path: Path, value: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
-    temporary.replace(path)
-
-
 def _save_last_chat_model(path: Path, model: str) -> None:
-    value = _load_chat_preferences(path)
-    value["last_model"] = model
-    _write_chat_preferences(path, value)
+    update_settings(path, {("last_model",): model})
 
 
 def _load_runtime_preferences(path: Path) -> dict[str, int | None]:
@@ -1416,14 +1495,12 @@ def _migrate_runtime_device_preference(
         return preferences, mode
     migrated = dict(preferences)
     migrated["num_gpu"] = None
-    _save_runtime_preferences(path, migrated)
+    _save_runtime_preferences(path, {"num_gpu": None})
     return migrated, mode
 
 
 def _save_runtime_device_mode(path: Path, mode: str) -> None:
-    value = _load_chat_preferences(path)
-    value["runtime_device_mode"] = mode
-    _write_chat_preferences(path, value)
+    update_settings(path, {("runtime_device_mode",): mode})
 
 
 def _tool_validation_preferences(path: Path) -> dict[str, bool]:
@@ -1543,7 +1620,7 @@ def _permission_preset_policies(preset: str, names: list[str]) -> dict[str, str]
                 "deny"
                 if name in STATE_CHANGING_TOOLS
                 else "ask"
-                if name == "delegate_task"
+                if name == "delegate_task" or name.startswith("mcp__")
                 else "allow"
             )
             for name in names
@@ -1569,10 +1646,53 @@ def _permission_group_rows(names: list[str]) -> list[tuple[str, list[tuple[str, 
         if group_rows:
             rows.append((group_name, group_rows))
             grouped.update(name for name, _label in group_rows)
+    mcp_rows = [
+        (name, name.removeprefix("mcp__").replace("__", " · ").replace("_", " "))
+        for name in names
+        if name.startswith("mcp__") and name not in grouped
+    ]
+    if mcp_rows:
+        rows.append(("MCP SERVERS", mcp_rows))
+        grouped.update(name for name, _label in mcp_rows)
     other = [(name, name.replace("_", " ").title()) for name in names if name not in grouped]
     if other:
         rows.append(("OTHER", other))
     return rows
+
+
+def _mcp_permission_server_rows(agent) -> dict[str, list[tuple[str, str]]]:
+    """Group active MCP tools by their original configured server name."""
+    servers: dict[str, list[tuple[str, str]]] = {}
+    for name in _permission_tool_names(agent):
+        if not name.startswith("mcp__"):
+            continue
+        tool = getattr(agent, "tools", {}).get(name)
+        description = str(getattr(tool, "description", ""))
+        match = re.match(r"MCP server ([A-Za-z0-9._-]+): ", description)
+        server = match.group(1) if match else name.removeprefix("mcp__").split("__", 1)[0]
+        remote = name.split("__", 2)[-1]
+        remote = re.sub(r"_[a-f0-9]{8}$", "", remote)
+        label = remote.replace("_", " ")
+        existing = {item_label for _tool_name, item_label in servers.get(server, [])}
+        if label in existing:
+            label = f"{label} ({name[-8:]})"
+        servers.setdefault(server, []).append((name, label))
+    return dict(sorted(servers.items(), key=lambda item: item[0].casefold()))
+
+
+def _mcp_server_permission_state(rows: list[tuple[str, str]], policies: dict[str, str]) -> str:
+    states = {policies[name] for name, _label in rows}
+    return states.pop().upper() if len(states) == 1 else "CUSTOM"
+
+
+def _mcp_server_permission_label(
+    server: str, rows: list[tuple[str, str]], policies: dict[str, str]
+) -> str:
+    count = len(rows)
+    return (
+        f"{server}: {_mcp_server_permission_state(rows, policies)}"
+        f" · {count} {'tool' if count == 1 else 'tools'}"
+    )
 
 
 def _permission_preview(preset: str, policies: dict[str, str], names: list[str]) -> str:
@@ -1756,6 +1876,13 @@ def _codex_usage_rows(agent) -> list[tuple[str, str]]:
     except Exception:
         return [("Codex limits", "temporarily unavailable"), details]
 
+    return _codex_usage_snapshot_rows(usage)
+
+
+def _codex_usage_snapshot_rows(usage) -> list[tuple[str, str]]:
+    """Format public quota metadata without making a provider request."""
+    details = ("Usage details", "https://chatgpt.com/codex/settings/usage")
+
     rows: list[tuple[str, str]] = []
     for bucket in getattr(usage, "buckets", ()):
         identity = " ".join(
@@ -1775,7 +1902,47 @@ def _codex_usage_rows(agent) -> list[tuple[str, str]]:
     return rows
 
 
-def _chat_status(agent, memory, session_id: str, *, title_hint: str = "") -> str:
+def _prompt_cache_status(agent) -> tuple[str, str] | None:
+    """Return exact provider cache counters when the API reports them."""
+    metadata = _metadata_mapping(
+        getattr(getattr(agent, "ollama", None), "last_chat_metadata", {})
+    )
+    usage = _metadata_mapping(metadata.get("usage"))
+    details = _metadata_mapping(
+        usage.get("input_tokens_details", usage.get("prompt_tokens_details"))
+    )
+    def counter(value: object) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if not isinstance(value, (int, str)):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return parsed if 0 <= parsed <= 2_000_000_000 else None
+
+    cached = counter(details.get("cached_tokens"))
+    written = counter(details.get("cache_write_tokens"))
+    if cached is None and written is None:
+        return None
+    input_tokens = counter(usage.get("input_tokens", usage.get("prompt_tokens")))
+    parts = []
+    if cached is not None:
+        cached_text = f"{cached:,}"
+        if input_tokens is not None:
+            cached_text += f"/{input_tokens:,} input tokens"
+        parts.append(f"{cached_text} cached")
+    if written is not None:
+        parts.append(f"{written:,} written")
+    return "Prompt cache", " · ".join(parts)
+
+
+def _chat_status(
+    agent, memory, session_id: str, *, title_hint: str = "",
+    usage_rows: list[tuple[str, str]] | None = None,
+    snapshot_only: bool = False, memory_enabled: bool | None = None,
+) -> str:
     context = _agent_context_window(agent)
     used = sum(len(str(m.get("content", ""))) for m in agent.messages) // 4
     capabilities = getattr(agent, "last_turn_capabilities", {})
@@ -1794,18 +1961,28 @@ def _chat_status(agent, memory, session_id: str, *, title_hint: str = "") -> str
         for policy in ("allow", "ask", "deny")
     }
     title_getter = getattr(memory, "session_title", None)
-    title = title_getter(session_id) if callable(title_getter) else "Untitled session"
+    title = (
+        title_hint or "Untitled session" if snapshot_only
+        else title_getter(session_id) if callable(title_getter) else "Untitled session"
+    )
     if title == "Untitled session" and title_hint:
         title = title_hint
-    instruction_context, instruction_files, instructions_truncated = (
-        _repository_instruction_context(agent)
-    )
-    agent.injected_instruction_paths = (
-        tuple(str(path) for path in instruction_files) if instruction_context else ()
-    )
-    agent.injected_instructions_truncated = bool(
-        instruction_context and instructions_truncated
-    )
+    # Status observes the actual prompt/request snapshot; never reload guidance
+    # or turn newly detected files into an "injected" claim.
+    recorded_instructions = capabilities.get("injected_instructions")
+    if isinstance(recorded_instructions, list):
+        instruction_files = tuple(str(path) for path in recorded_instructions)
+        instructions_truncated = bool(capabilities.get("instructions_truncated"))
+        guidance_state = "none injected"
+    else:
+        instruction_files = tuple(getattr(agent, "injected_instruction_paths", ()))
+        instructions_truncated = bool(getattr(agent, "injected_instructions_truncated", False))
+        detected = tuple(getattr(agent, "detected_instruction_paths", ()))
+        guidance_state = (
+            "detected but unreadable" if detected and not instruction_files
+            else "not found at prompt build" if getattr(agent, "instruction_snapshot_ready", False)
+            else "not injected (no prompt snapshot yet)"
+        )
     rows = [
         ("Session ID", session_id),
         ("Session name", title),
@@ -1863,14 +2040,18 @@ def _chat_status(agent, memory, session_id: str, *, title_hint: str = "") -> str
         )
         if budget.get("stop_reason"):
             rows.append(("Turn stopped", str(budget["stop_reason"])))
-    if instruction_context:
+    if instruction_files:
         state = "injected (bounded)" if instructions_truncated else "injected"
         rows.append(("AGENTS.md", state))
         rows.extend(("", str(path)) for path in instruction_files)
-    elif instruction_files:
-        rows.append(("AGENTS.md", "detected but unreadable"))
     else:
-        rows.append(("AGENTS.md", "not found"))
+        rows.append(("AGENTS.md", guidance_state))
+    if not snapshot_only:
+        memory_enabled = memory.auto_memory_enabled()
+    memory_status = (
+        "on" if memory_enabled is True else "off" if memory_enabled is False
+        else "unknown"
+    )
     rows.extend(
         [
             (
@@ -1878,11 +2059,13 @@ def _chat_status(agent, memory, session_id: str, *, title_hint: str = "") -> str
                 f"allow {permission_counts['allow']} · ask {permission_counts['ask']} · "
                 f"deny {permission_counts['deny']}",
             ),
-            ("Memory", "on" if memory.auto_memory_enabled() else "off"),
+            ("Memory", memory_status),
             ("Tools", str(len(policies))),
         ]
     )
-    rows.extend(_codex_usage_rows(agent))
+    if prompt_cache := _prompt_cache_status(agent):
+        rows.append(prompt_cache)
+    rows.extend(_codex_usage_rows(agent) if usage_rows is None else usage_rows)
     return _status_columns(rows)
 
 
@@ -1979,9 +2162,7 @@ def _chat_skills(cfg) -> str:
 
 
 def _save_runtime_preferences(path: Path, preferences: dict[str, int | None]) -> None:
-    value = _load_chat_preferences(path)
-    value["runtime_options"] = preferences
-    _write_chat_preferences(path, value)
+    update_settings(path, {("runtime_options", key): value for key, value in preferences.items()})
 
 
 def _apply_runtime_preferences(agent: Agent, preferences: dict[str, int | None]) -> None:
@@ -2103,7 +2284,7 @@ def _public_model_metadata(metadata: object) -> dict[str, Any]:
     }
     usage = _metadata_mapping(source.get("usage"))
     if usage:
-        public["usage"] = {
+        public_usage = {
             key: usage[key]
             for key in (
                 "input_tokens",
@@ -2115,6 +2296,17 @@ def _public_model_metadata(metadata: object) -> dict[str, Any]:
             )
             if usage.get(key) is not None
         }
+        input_details = _metadata_mapping(
+            usage.get("input_tokens_details", usage.get("prompt_tokens_details"))
+        )
+        public_input_details = {
+            key: input_details[key]
+            for key in ("cached_tokens", "cache_write_tokens")
+            if input_details.get(key) is not None
+        }
+        if public_input_details:
+            public_usage["input_tokens_details"] = public_input_details
+        public["usage"] = public_usage
     return public
 
 
@@ -2340,6 +2532,12 @@ CLI_COMMANDS = (
         "auth",
         "Manage Cloud AI account authentication.",
     ),
+    CommandSpec(
+        "mcp",
+        CommandSurface.CLI,
+        "mcp",
+        "Connect and manage external MCP servers.",
+    ),
     CommandSpec("sessions", CommandSurface.CLI, "sessions", "List recent conversation sessions."),
     CommandSpec(
         "sessions-delete",
@@ -2435,6 +2633,12 @@ CHAT_COMMANDS = (
         CommandSurface.CHAT,
         "/permission",
         "Open persistent ask, allow, and deny tool permission settings.",
+    ),
+    CommandSpec(
+        "mcp",
+        CommandSurface.CHAT,
+        "/mcp",
+        "Search the official registry and manage MCP servers.",
     ),
     CommandSpec(
         "plan",
@@ -2711,14 +2915,25 @@ def _completion_display(text: str, match: str):
 class ChatCommandCompleter(Completer):
     """Complete registered slash commands, including immediately after `/`."""
 
-    def __init__(self, workdir_provider=None, completion_enabled=None) -> None:
+    def __init__(
+        self, workdir_provider=None, completion_enabled=None, mcp_suggestions_provider=None
+    ) -> None:
         self._workdir_provider = workdir_provider or Path.cwd
         self._completion_enabled = completion_enabled or (lambda: True)
+        self._mcp_suggestions_provider = mcp_suggestions_provider or (lambda _query: None)
 
     def get_completions(self, document: Document, complete_event):
         if not self._completion_enabled():
             return
         prefix = document.text_before_cursor
+        hints = self._mcp_suggestions_provider(prefix)
+        if hints is not None:
+            for name, source in hints:
+                yield Completion(
+                    name, start_position=-len(prefix),
+                    display=_completion_display(name, prefix), display_meta=source,
+                )
+            return
         attachment_fragment = _inline_attachment_completion_fragment(prefix)
         attachment_fragment = (
             prefix.removeprefix("/attach ")
@@ -2863,7 +3078,7 @@ class CursorOffsetFloatContainer(FloatContainer):
         self,
         *args,
         offset_float: Float,
-        offset_columns: int,
+        offset_columns: int | Callable[[], int],
         anchor_columns=None,
         **kwargs,
     ):
@@ -2882,7 +3097,7 @@ class CursorOffsetFloatContainer(FloatContainer):
         window = fl.attach_to_window
         original_position = screen.menu_positions.get(window)
         position = screen.get_menu_position(window)
-        shift = self._offset_columns
+        shift = self._offset_columns() if callable(self._offset_columns) else self._offset_columns
         if self._anchor_columns is not None:
             # The cursor begins one cell after the first typed character.
             # Offset the growing prefix too, keeping the popup stationary.
@@ -3430,6 +3645,8 @@ def _agent_configuration_context(
     agent.injected_instructions_truncated = bool(
         instruction_context and instructions_truncated
     )
+    agent.detected_instruction_paths = tuple(str(path) for path in instruction_files)
+    agent.instruction_snapshot_ready = True
     if instruction_context:
         lines.append(
             "- Repository guidance: injected"
@@ -4921,17 +5138,6 @@ WORKSPACE_LOCATION_PATTERNS = (
     "working directory",
     "repo root",
     "repository root",
-    "inspect this workspace",
-    "inspect the workspace",
-    "inspect workspace",
-    "inspect this repo",
-    "inspect the repo",
-    "inspect repository",
-    "analyze this workspace",
-    "analyze the workspace",
-    "analyze this repo",
-    "analyze the codebase",
-    "identify the primary implementation language",
 )
 
 
@@ -5066,13 +5272,7 @@ def _tool_use_route(user_message: str) -> ToolUseRoute:
         or resolve_command_help_request(user_message) is not None
     ):
         return ToolUseRoute.COMMAND_REFERENCE
-    workspace_inspection = (
-        re.search(r"\b(?:inspect|analy[sz]e|review|explore|audit)\b", text)
-        and re.search(
-            r"\b(?:workspace|repo(?:sitory)?|codebase|project files|files in (?:this|the))\b",
-            text,
-        )
-    )
+    workspace_inspection = explicit_workspace_inspection(text)
     if any(word in text for word in WORKSPACE_LOCATION_PATTERNS) or workspace_inspection:
         return ToolUseRoute.WORKSPACE_TOOL
     if _is_standalone_code_generation_request(user_message):
@@ -5086,6 +5286,29 @@ def _tool_use_route(user_message: str) -> ToolUseRoute:
     if _is_direct_response_request(user_message):
         return ToolUseRoute.DIRECT_RESPONSE
     return ToolUseRoute.HEURISTIC_TOOL_SELECTION
+
+
+def _matching_mcp_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
+    """Select a small relevant MCP subset without flooding constrained models."""
+    text = _normalized_request_text(user_message)
+    words = {word for word in re.findall(r"[a-z0-9]+", text) if len(word) >= 3}
+    ranked: list[tuple[int, str]] = []
+    for name, tool in tools.items():
+        if not name.startswith("mcp__"):
+            continue
+        parts = name.split("__", 2)
+        server = parts[1].replace("_", " ").casefold() if len(parts) > 1 else ""
+        haystack = f"{name.replace('_', ' ')} {tool.description}".casefold()
+        tokens = {word for word in re.findall(r"[a-z0-9]+", haystack) if len(word) >= 3}
+        score = len(words & tokens)
+        if server and server in text:
+            score += 8
+        if "mcp" in words and score:
+            score += 2
+        if score:
+            ranked.append((score, name))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return [name for _score, name in ranked[:6]]
 
 
 def _select_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
@@ -5105,11 +5328,25 @@ def _select_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
             )
             if name in tools
         ]
+    if explicitly_disallows_tools(user_message):
+        return []
     if _knowledge_ingestion_intent(user_message):
-        # Persistent learning is its own explicit mutation. Do not distract
-        # the model with ordinary search, fetch, file-edit, shell, or Git tools
-        # when the user's requested action is already fully represented.
-        return ["learn_source"] if "learn_source" in tools else []
+        if re.search(r"https?://\S+", user_message, flags=re.IGNORECASE):
+            # Persistent learning is its own explicit mutation when the user
+            # already supplied the source. Do not distract the model with
+            # ordinary search, file-edit, shell, or Git tools.
+            return ["learn_source"] if "learn_source" in tools else []
+        # A user may identify a public source by product, project, or skill
+        # name instead of pasting its URL. Give the model a bounded discovery
+        # path so it can locate and verify an official source before asking to
+        # persist it. Search snippets alone are never learned as source text.
+        selected: list[str] = [
+            name
+            for name in ("web_search", "fetch_url", "learn_source", "request_user_input")
+            if name in tools
+        ]
+        selected.extend(_matching_mcp_tool_names(user_message, tools))
+        return list(dict.fromkeys(selected))[:14]
     text = user_message.casefold()
     explicit_delegation = bool(
         re.search(
@@ -5147,20 +5384,19 @@ def _select_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
     diagnostic = storage or bool(
         re.search(r"\b(diagnos\w*|fastfetch|neofetch|system|hardware|memory|cpu|gpu)\b", text)
     )
-    execute = bool(re.search(r"\b(run|execute|launch)\b", text))
+    execute = has_nonnegated_action(text, r"\b(?:run|execute|launch)\b")
     normalized_tools = text.replace("_", " ").replace("-", " ")
-    mutation = bool(
-        re.search(
-            r"\b(?:edit(?:ed|ing)?|writ(?:e|es|ing|ten)|implement(?:ed|ing|s|ation)?|"
-            r"creat(?:e|es|ed|ing)|modif(?:y|ies|ied|ying)|updat(?:e|es|ed|ing)|"
-            r"fix(?:es|ed|ing)?|repair(?:s|ed|ing)?|add(?:s|ed|ing)?|delete(?:s|d|ing)?|"
-            r"install(?:s|ed|ing)?|commit(?:s|ted|ting)?|stag(?:e|es|ed|ing)|"
-            r"stash(?:es|ed|ing)?|push(?:es|ed|ing)?|clean\s*up|"
-            r"finali[sz](?:e|es|ed|ing)|finish(?:es|ed|ing)?)\b",
-            normalized_tools,
-        )
+    mutation = has_nonnegated_action(
+        normalized_tools,
+        r"\b(?:edit(?:ed|ing)?|writ(?:e|es|ing|ten)|implement(?:ed|ing|s|ation)?|"
+        r"creat(?:e|es|ed|ing)|modif(?:y|ies|ied|ying)|updat(?:e|es|ed|ing)|"
+        r"fix(?:es|ed|ing)?|repair(?:s|ed|ing)?|add(?:s|ed|ing)?|delete(?:s|d|ing)?|"
+        r"install(?:s|ed|ing)?|commit(?:s|ted|ting)?|stag(?:e|es|ed|ing)|"
+        r"stash(?:es|ed|ing)?|push(?:es|ed|ing)?|clean\s*up|"
+        r"finali[sz](?:e|es|ed|ing)|finish(?:es|ed|ing)?)\b",
     )
     names = _heuristic_tool_names(user_message, tools)
+    names.extend(_matching_mcp_tool_names(user_message, tools))
     if mutation:
         mutation_tools = [
             name
@@ -5178,16 +5414,19 @@ def _select_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
         if not re.search(r"\b(?:git|commit|stage|stash|push)\b", normalized_tools):
             names = [name for name in names if name != "git_commit"]
     if diagnostic or execute:
-        for name in ("workspace_info", "storage_usage" if storage else "run_shell"):
+        diagnostic_names = (
+            ("storage_usage",) if storage else ("workspace_info", "run_shell")
+        )
+        for name in diagnostic_names:
             if name in tools and name not in names:
                 names.append(name)
-        if execute and "run_shell" in tools and "run_shell" not in names:
+        if execute and not storage and "run_shell" in tools and "run_shell" not in names:
             names.append("run_shell")
         if not mutation:
             names = [
                 name for name in names if name not in {"write_file", "edit_file", "git_commit"}
             ]
-    return names
+    return list(dict.fromkeys(names))[:14]
 
 
 def _heuristic_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
@@ -5267,6 +5506,18 @@ def _heuristic_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str
         "links",
     )
     if any(word in text for word in search_words):
+        add("web_search", "fetch_url")
+    # Discovery/recommendation requests often contain no literal "search".
+    # Expose read-only discovery without treating "find a file" as web intent.
+    local_discovery = bool(re.search(
+        r"\b(?:near(?:by| me| here)?|local|around here|in my area)\b", text
+    )) and bool(re.search(r"\b(?:find|where|recommend|best|looking for)\b", text))
+    public_discovery = bool(re.search(
+        r"\b(?:recommend|recommendations|find (?:them|it|those|some|options))\b", text
+    ))
+    if (local_discovery or public_discovery) and not re.search(
+        r"\b(?:file|folder|directory|repo|repository|code|function|workspace)\b", text
+    ) and not _explicitly_disallows_retrieval(user_message):
         add("web_search", "fetch_url")
 
     probe_words = (
@@ -5399,7 +5650,6 @@ def _heuristic_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str
         "edit",
         "implement",
         "test",
-        "run",
         "commit",
         "diff",
         "git",
@@ -5531,7 +5781,30 @@ def _knowledge_ingestion_intent(user_message: str) -> bool:
     command_like_learn = has_url and bool(
         re.match(r"^\s*(?:please\s+)?(?:learn|ingest|index|archive|import)\b", text)
     )
-    return explicit_ingest or explicit_store or explicit_teach or command_like_learn
+    named_source_request = bool(
+        re.match(
+            r"^\s*(?:please\s+)?(?:learn|ingest|index|archive|import|save|add|"
+            r"download|install)\b(?!\s+(?:about|how|why|what)\b).*\b(?:skill|url|"
+            r"link|source|page|document|docs?|documentation|website|site|knowledge|"
+            r"library)\b",
+            text,
+        )
+    )
+    named_from_request = bool(
+        re.match(
+            r"^\s*(?:please\s+)?learn\s+from\s+"
+            r"(?!(?:this|that|me|us|mistakes?|experience)\b)\S+",
+            text,
+        )
+    )
+    return (
+        explicit_ingest
+        or explicit_store
+        or explicit_teach
+        or command_like_learn
+        or named_source_request
+        or named_from_request
+    )
 
 
 def _crawl_source_name(start_url: str, library: str, name: str = "") -> str:
@@ -5991,6 +6264,84 @@ def _ask_line_user_input(
     return answer, "custom"
 
 
+def _configured_mcp_tools(
+    cfg, *, servers: dict[str, MCPServerConfig] | None = None, strict: bool = False
+) -> list[Tool]:
+    """Load cached external MCP schemas without connecting during TUI startup."""
+    from klaude_core.mcp_client import (
+        MCPClientManager,
+        MCPRegistry,
+        namespaced_tool_name,
+    )
+
+    if servers is None:
+        registry = MCPRegistry(cfg.mcp_servers_file)
+        try:
+            servers = registry.load()
+        except ValueError:
+            if strict:
+                raise
+            return []
+    if not any(server.enabled and server.tools for server in servers.values()):
+        return []
+    client = getattr(cfg, "_mcp_client_manager", None)
+    if client is None:
+        auth_dir = getattr(cfg, "mcp_auth_dir", cfg.mcp_servers_file.parent / "mcp-auth")
+        client = MCPClientManager(auth_dir=auth_dir)
+        cfg._mcp_client_manager = client
+
+    def make_invoke(server, remote_name: str):
+        def invoke(**arguments):
+            return json.dumps(
+                client.call(server, remote_name, arguments),
+                ensure_ascii=False,
+            )
+
+        return invoke
+
+    def make_detail(server_name: str, remote_name: str):
+        return lambda args: (
+            f"{server_name}.{remote_name} " + json.dumps(args, ensure_ascii=False)[:160]
+        )
+
+    result: list[Tool] = []
+    used_names: set[str] = set()
+    for server in servers.values():
+        if not server.enabled:
+            continue
+        for remote in server.tools:
+            remote_name = str(remote.get("name") or "")
+            if not remote_name:
+                continue
+            local_name = namespaced_tool_name(server.name, remote_name)
+            if local_name in used_names:
+                continue
+            used_names.add(local_name)
+            schema = remote.get("inputSchema")
+            parameters = (
+                dict(schema)
+                if isinstance(schema, dict)
+                else {"type": "object", "properties": {}}
+            )
+
+            result.append(
+                Tool(
+                    local_name,
+                    f"MCP server {server.name}: {str(remote.get('description') or remote_name)}",
+                    parameters,
+                    make_invoke(server, remote_name),
+                    detail=make_detail(server.name, remote_name),
+                )
+            )
+    return result
+
+
+def _close_agent_mcp(agent) -> None:
+    manager = getattr(agent, "mcp_client_manager", None)
+    if manager is not None:
+        manager.close()
+
+
 def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory]:
     from klaude_tools import Workspace, build_tools
     from klaude_web import Web
@@ -6000,6 +6351,7 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
     memory = Memory(cfg.memory_file, cfg.sessions_db)
     ws = Workspace(workdir)
     tools = build_tools(ws)
+    tools.extend(_configured_mcp_tools(cfg))
     agent_ref: dict[str, Agent] = {}
     user_input_broker = UserInputBroker()
 
@@ -6443,6 +6795,7 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
     # tool instances; config.toml remains the durable administrator default.
     agent.tool_config = cfg
     agent.user_input_broker = user_input_broker
+    agent.mcp_client_manager = getattr(cfg, "_mcp_client_manager", None)
     preferences_path = cfg.data_dir / "chat-preferences.json"
     appearance_path = cfg.data_dir / "appearance.json"
     agent.set_system_prompt(
@@ -6849,7 +7202,16 @@ def _render(
                 else:
                     _print_assistant_text(event.payload["content"], metadata, plain=plain)
                     publish("assistant_delta", {"text": event.payload["content"]})
-                memory.log_turn(session_id, "assistant", event.payload["content"])
+                model_message = event.payload.get("model_message")
+                if model_message is None:
+                    memory.log_turn(session_id, "assistant", event.payload["content"])
+                else:
+                    memory.log_turn(
+                        session_id,
+                        "assistant",
+                        event.payload["content"],
+                        model_content=model_message,
+                    )
                 assistant_text.append(event.payload["content"])
             elif event.kind == "tool_start":
                 tool_name = event.payload["tool"]
@@ -6869,6 +7231,14 @@ def _render(
                     _print_trace(f"-> {tool_name}")
             elif event.kind == "tool_result":
                 metadata = event.payload.get("metadata") or {}
+                receipt = research_receipt(
+                    str(event.payload.get("tool") or ""),
+                    event.payload.get("args") or {},
+                    metadata,
+                    event.payload.get("result", ""),
+                )
+                if receipt is not None:
+                    memory.log_turn(session_id, "system", receipt)
                 publish(
                     "tool_audit",
                     {
@@ -6941,6 +7311,15 @@ def _render(
             if partial not in assistant_text:
                 assistant_text.append(partial)
             streamed_logged = True
+        if interrupted:
+            marker = getattr(agent, "mark_interrupted_turn", None)
+            if callable(marker):
+                marker()
+            memory.log_turn(
+                session_id,
+                "system",
+                {"event": "interruption", "message": "Interrupted at a safe boundary."},
+            )
         if not assistant_text and not interrupted and not turn_failed:
             turn_failed = True
             memory.log_turn(
@@ -7153,7 +7532,7 @@ def _resolve_model(ollama: Ollama, name: str) -> str | None:
     return None
 
 
-def _available_chat_models(cfg, ollama: Ollama) -> list[ModelInfo]:
+def _available_chat_models(cfg, ollama: Ollama, include_local: bool = True) -> list[ModelInfo]:
     """Return cached cloud catalogs immediately plus live local models.
 
     Cloud discovery refreshes separately in the background so normal picker
@@ -7178,10 +7557,11 @@ def _available_chat_models(cfg, ollama: Ollama) -> list[ModelInfo]:
         for item in load_model_cache(cfg.data_dir / "model-cache.json")
         if item.backend in enabled_backends
     ]
-    try:
-        models.extend(ModelInfo("ollama", name, name) for name in ollama.list_models())
-    except Exception:
-        pass
+    if include_local:
+        try:
+            models.extend(ModelInfo("ollama", name, name) for name in ollama.list_models())
+        except Exception:
+            pass
     return sorted(
         models,
         key=lambda item: (
@@ -7192,39 +7572,6 @@ def _available_chat_models(cfg, ollama: Ollama) -> list[ModelInfo]:
             else newest_model_first_key(item),
         ),
     )
-
-
-def _refresh_cloud_model_cache(cfg) -> None:
-    """Refresh each configured provider without discarding a usable old cache."""
-    path = cfg.data_dir / "model-cache.json"
-    cached = load_model_cache(path)
-    refreshed: list[ModelInfo] = []
-    codex_signed_in: bool | None = None
-    for backend, key, discover in (
-        ("openai_api", cfg.openai_api_key, discover_openai_models),
-        ("openrouter", cfg.openrouter_api_key, discover_openrouter_models),
-        ("gemini_api", cfg.gemini_api_key, discover_gemini_models),
-    ):
-        if not key:
-            continue
-        current = discover(key)
-        if current:
-            refreshed.extend(current)
-        else:
-            refreshed.extend(item for item in cached if item.backend == backend)
-    try:
-        codex_signed_in = CodexAuthManager().status().authenticated
-    except CodexAuthError:
-        refreshed.extend(item for item in cached if item.backend == "openai_codex")
-    else:
-        if codex_signed_in:
-            codex_models = discover_codex_models()
-            if codex_models:
-                refreshed.extend(codex_models)
-            else:
-                refreshed.extend(item for item in cached if item.backend == "openai_codex")
-    if refreshed or codex_signed_in is False:
-        save_model_cache(path, refreshed)
 
 
 def _resolve_chat_model(models: list[ModelInfo], name: str) -> ModelInfo | None:
@@ -7279,9 +7626,13 @@ def _model_picker_rows(
     ollama: Ollama,
     backend: str,
     active_model: ModelInfo | None = None,
+    *, inventory: list[ModelInfo] | None = None,
 ) -> tuple[list[str], dict[str, ModelInfo]]:
     """Model rows for one backend, grouped by local model family when useful."""
-    models = _available_chat_models(cfg, ollama)
+    models = (
+        inventory if inventory is not None
+        else _available_chat_models(cfg, ollama, backend == "ollama")
+    )
     mapping: dict[str, ModelInfo] = {}
     rows: list[str] = []
     available = [item for item in models if item.backend == backend]
@@ -7312,29 +7663,35 @@ def _model_picker_rows(
             "openai_codex": "OpenAI Codex",
             "gemini_api": "Gemini API",
         }[backend]
-        rows.append(f"{label} — models unavailable")
+        rows.append(_choice_unavailable(f"{label} — models unavailable"))
     elif backend == "ollama" and not any(item.backend == "ollama" for item in models):
-        rows.append("Ollama unavailable — showing active model only")
+        rows.append(_choice_unavailable("Ollama unavailable — showing active model only"))
     return rows, mapping
 
 
-def _set_agent_model(agent: Agent, cfg, ollama: Ollama, info: ModelInfo) -> None:
+def _set_agent_model(
+    agent: Agent, cfg, ollama: Ollama, info: ModelInfo, *, validated: bool = False,
+) -> None:
     runtime: Any
     if info.backend == "ollama":
         # Unit-test and plugin fakes may already be a compatible runtime.
         runtime = OllamaRuntime(ollama) if isinstance(ollama, Ollama) else ollama
     elif info.backend == "openai_api":
         runtime = OpenAIRuntime(cfg.openai_api_key)
-        runtime._client()
+        if not validated:
+            runtime._client().close()
     elif info.backend == "openrouter":
         runtime = OpenRouterRuntime(cfg.openrouter_api_key)
-        runtime._client()
+        if not validated:
+            runtime._client().close()
     elif info.backend == "openai_codex":
         runtime = CodexRuntime()
-        runtime.auth.credentials()
+        if not validated:
+            runtime.auth.credentials()
     elif info.backend == "gemini_api":
         runtime = GeminiRuntime(cfg.gemini_api_key)
-        runtime._sdk()
+        if not validated:
+            runtime._sdk()
     else:
         raise ValueError(f"unsupported model backend: {info.backend}")
     # Only mutate the active session after configuration and optional SDK
@@ -7343,6 +7700,16 @@ def _set_agent_model(agent: Agent, cfg, ollama: Ollama, info: ModelInfo) -> None
     agent.model_info = info
     agent.runtime = runtime
     agent.ollama = runtime
+    session_id = str(getattr(agent, "session_id", ""))
+    if session_id:
+        _set_agent_session_context(agent, session_id)
+
+
+def _set_agent_session_context(agent: Agent, session_id: str) -> None:
+    """Bind capable runtimes while remaining compatible with host test doubles."""
+    setter = getattr(agent, "set_session_context", None)
+    if callable(setter):
+        setter(session_id)
 
 
 def _agent_local_ollama(agent: Agent):
@@ -7721,6 +8088,7 @@ class PersistentChatTUI:
     """Normal-screen chat surface with a live input while the agent is running."""
 
     _QUEUE_PREVIEW_LIMIT = 4
+    _SKILLS_INVENTORY_CACHE_SECONDS = 5.0
 
     def __init__(
         self,
@@ -7735,6 +8103,7 @@ class PersistentChatTUI:
         self.agent = agent
         self.memory = memory
         self.session_id = session_id
+        _set_agent_session_context(self.agent, session_id)
         self.client_id = uuid.uuid4().hex
         self._turn_id = ""
         prune_events = getattr(memory, "prune_session_events", None)
@@ -7774,25 +8143,107 @@ class PersistentChatTUI:
         self._pending_attachments: list[Path] = []
         self._choice_kind: str | None = None
         self._choice_values: list[str] = []
+        self._choice_all_values: list[str] = []
+        self._choice_filter_query = ""
+        self._picker: PickerController | None = None
+        self._picker_context: tuple[str, str] | None = None
+        self._picker_states: dict[tuple[str, str], PickerController] = {}
         self._resume_choices: dict[str, str] = {}
         self._choice_index = 0
-        self._choice_click_index: int | None = None
+        self._choice_click_id: str | None = None
         self._choice_prior_model: str | None = None
         self._choice_prior_model_info: ModelInfo | None = None
+        self._choice_prior_runtime_state: dict[str, Any] | None = None
+        self._model_activation_future: asyncio.Future[bool] | None = None
+        self._model_activation_id = ""
         self._model_flow_parent = ""
+        self._model_auth_backend = ""
+        self._model_choices: dict[str, ModelInfo] = {}
+        self._codex_auth_state: bool | None = None
+        self._codex_auth_checking = False
+        self._codex_usage_rows_cache: list[tuple[str, str]] | None = None
+        self._codex_usage_loaded_at = 0.0
+        self._codex_usage_checked_at = 0.0
+        self._codex_usage_loading = False
+        self._codex_usage_request: tuple[str, str] | None = None
+        self._local_models: list[ModelInfo] = []
+        self._local_models_loading = False
+        self._local_models_loaded_at = 0.0
+        self._local_models_error = ""
+        self._background_jobs = OwnedBackgroundJobs(self._emit)
+        self._session_io = SessionIOCoordinator(memory, self._emit)
+        self._session_actions = SessionActionWriter(memory, self._emit)
+        self._mcp_mutations = MCPMutationWriter(
+            cfg.mcp_servers_file, self._emit, self._prepare_mcp_catalog
+        )
+        self._mcp_mutation_pending: tuple[MCPMutation, float] | None = None
+        self._mcp_mutation_warned = False
+        self._mcp_catalog_unconfirmed = False
+        self._last_session_io_submit = 0.0
+        self._status_memory_enabled: bool | None = None
+        self._memory_inventory: dict[str, Any] | None = None
+        self._memory_inventory_scope: tuple[str, str] | None = None
+        self._memory_inventory_request: tuple[str, str, tuple[str, str], int] | None = None
+        self._memory_inventory_loaded_at = 0.0
+        self._memory_inventory_error = ""
+        self._memory_save_revision = 0
+        self._memory_save_state = ""
+        self._mcp_inventory: dict[str, Any] | None = None
+        self._mcp_inventory_scope = ""
+        self._mcp_inventory_request: tuple[str, str, str] | None = None
+        self._mcp_inventory_loaded_at = 0.0
+        self._mcp_inventory_error = ""
+        self._mcp_detail_server: MCPCatalogServer | None = None
+        self._mcp_review_request: tuple[str, str, str, str] | None = None
+        self._mcp_enable_fingerprint = ""
+        self._status_metadata_loaded_at = 0.0
+        self._status_metadata_session = ""
+        self._status_metadata_loading = False
+        self._status_metadata_request: tuple[str, str, str] | None = None
+        self._settings_overview = SettingsOverviewSnapshot()
+        self._settings_overview_scope: tuple[str, str] | None = None
+        self._settings_overview_request: tuple[str, str, tuple[str, str]] | None = None
+        self._settings_overview_checked_at = 0.0
+        self._runtime_save_revision = 0
+        self._runtime_save_state = ""
+        self._setup_job: asyncio.Task[None] | None = None
+        self._setup_cancel = threading.Event()
+        self._setup_title = ""
+        self._setup_started_at = 0.0
         self._choice_preview_appearance: tuple[str, str] | None = None
         self._last_picker_session_sync = 0.0
         self._text_theme_preview_visible = False
         self._permission_preview_visible = False
         self._permission_custom_snapshot: dict[str, str] | None = None
+        self._permission_mcp_server: str | None = None
+        self._permission_return_to_mcp = False
+        self._provider_key_label = ""
+        self._skills_inventory: list[dict[str, object]] | None = None
+        self._skills_inventory_loading = False
+        self._skills_inventory_loaded_at = 0.0
+        self._skills_inventory_error = ""
+        self._mcp_catalog_query = False
+        self._mcp_catalog_request_id = ""
+        self._mcp_catalog_query_text = ""
+        self._mcp_catalog_cached = False
+        self._mcp_catalog_results: dict[str, MCPCatalogServer] = {}
+        self._mcp_suggestion_names: list[str] = []
+        self._mcp_suggestion_query: str | None = None
+        self._mcp_suggestion_due = 0.0
+        self._next_prompt_model: tuple[str, ModelInfo] | None = None
+        self._mcp_catalog_install_choices: dict[str, MCPInstallPlan] = {}
+        self._mcp_setup: dict[str, object] | None = None
+        self._mcp_enable_name = ""
         self._text_theme_preview_original: str | None = None
         self._text_theme_preview_pending = ""
         self._height_edit = False
         self._runtime_edit: str | None = None
+        self._calibration_request: tuple[str, str, str, tuple[object, ...]] | None = None
         self._queue_edit_index: int | None = None
         self._queue_edit_draft = ""
         self._permission_request: dict[str, object] | None = None
         self._secret_request: dict[str, object] | None = None
+        self._settings_input_request: dict[str, object] | None = None
         self._user_input_request: dict[str, object] | None = None
         self._user_input_index = 0
         self._ollama_control_action: str | None = None
@@ -7808,7 +8259,25 @@ class PersistentChatTUI:
         self.chat_preferences_path = chat_preferences_path or (
             cfg.data_dir / "chat-preferences.json"
         )
+        self._settings_writer = SettingsWriter(
+            self.chat_preferences_path, self._emit, publish_tools=True
+        )
+        self._appearance_writer = SettingsWriter(
+            self.appearance_path,
+            lambda _kind, payload: self._emit("appearance_saved", payload),
+            prepare=_migrate_appearance,
+            publish_permissions=False,
+        )
+        self._appearance_save_revision = 0
+        self._appearance_save_state = ""
+        self._model_save_state = ""
         self.show_activity_updates = _activity_updates_enabled(self.chat_preferences_path)
+        self._tool_validation = _tool_validation_preferences(self.chat_preferences_path)
+        self._tool_availability = _tool_availability_preferences(self.chat_preferences_path)
+        self._web_provider_availability = _web_provider_preferences(
+            self.chat_preferences_path, self.cfg
+        )
+        self._apply_live_tool_preferences()
         self.composer_mode = _composer_mode(self.chat_preferences_path)
         self._runtime_preferences, self._runtime_device_mode = _migrate_runtime_device_preference(
             self.chat_preferences_path,
@@ -7892,7 +8361,10 @@ class PersistentChatTUI:
             auto_suggest=ConditionalAutoSuggest(
                 AutoSuggestFromHistory(),
                 Condition(
-                    lambda: self._secret_request is None and self._user_input_request is None
+                    lambda: self._secret_request is None
+                    and self._settings_input_request is None
+                    and self._user_input_request is None
+                    and not self._mcp_catalog_query
                 ),
             ),
             completer=ChatCommandCompleter(
@@ -7901,8 +8373,10 @@ class PersistentChatTUI:
                     self._choice_kind is None
                     and self._permission_request is None
                     and self._secret_request is None
+                    and self._settings_input_request is None
                     and self._user_input_request is None
                 ),
+                self._mcp_search_suggestions,
             ),
             complete_while_typing=True,
             wrap_lines=True,
@@ -8132,7 +8606,7 @@ class PersistentChatTUI:
             content=body,
             floats=[self.completion_float],
             offset_float=self.completion_float,
-            offset_columns=3,
+            offset_columns=lambda: 1 if self._mcp_catalog_query else 3,
         )
         self.application: Application[None] = Application(
             layout=Layout(root, focused_element=self.input),
@@ -8170,6 +8644,12 @@ class PersistentChatTUI:
                 ("class:frame.label", f"select {self._choice_kind}"),
                 ("", f"  {self._choice_index + 1}/{len(self._choice_values)}"),
             ]
+        if self._mcp_catalog_query:
+            return [("class:frame.label", "search · official MCP Registry")]
+        if self._settings_input_request:
+            return [
+                ("class:frame.label", f"input · {self._settings_input_request['label']}")
+            ]
         if self._secret_request:
             return [("class:frame.label", f"secret · {self._secret_request['label']}")]
         if self._user_input_request:
@@ -8182,7 +8662,12 @@ class PersistentChatTUI:
         ]
 
     def _composer_rail_style(self) -> str:
-        if self._permission_request or self._secret_request or self._user_input_request:
+        if (
+            self._permission_request
+            or self._secret_request
+            or self._settings_input_request
+            or self._user_input_request
+        ):
             return "class:composer.rail.warning"
         if self.status_error:
             return "class:composer.rail.error"
@@ -8312,6 +8797,9 @@ class PersistentChatTUI:
         )
 
     def _choice_scroll(self, _window) -> int:
+        if self._picker is not None and self._choice_kind:
+            self._sync_picker_selection()
+            return self._picker.viewport(self._choice_height())
         visible = self._choice_height()
         maximum = max(0, len(self._choice_values) - visible)
         centered = self._choice_index - (visible // 2)
@@ -8320,11 +8808,15 @@ class PersistentChatTUI:
     def _choice_fragments(self):
         width = max(20, self._transcript_content_width() - 6)
         settings_columns = self._choice_kind in {
+            "settings",
             "theme settings",
             "input field settings",
             "memory settings",
             "runtime settings",
             "tools settings",
+            "providers settings",
+            "mcp settings",
+            "provider key settings",
             "permission settings",
         }
         column_labels = [
@@ -8351,6 +8843,26 @@ class PersistentChatTUI:
             if _is_choice_info(value):
                 suffix = "\n" if index < len(self._choice_values) - 1 else ""
                 label = value.removeprefix(CHOICE_INFO_PREFIX)
+                if settings_columns and ": " in label:
+                    option_name, option_value = label.split(": ", 1)
+                    option_name = textwrap.shorten(
+                        option_name,
+                        width=column_width,
+                        placeholder="…",
+                    ).ljust(column_width)
+                    option_width = max(1, width - column_width - len(column_gap))
+                    option_value = textwrap.shorten(
+                        option_value,
+                        width=option_width,
+                        placeholder="…",
+                    )
+                    fragments.append(
+                        (
+                            "class:choice.disabled",
+                            f"    {option_name}{column_gap}{option_value}{suffix}",
+                        )
+                    )
+                    continue
                 fragments.append(("class:choice.disabled", f"    {label}{suffix}"))
                 continue
             selected = index == self._choice_index
@@ -8506,7 +9018,9 @@ class PersistentChatTUI:
             return value == _permission_preset_name(current, names)
         return False
 
-    def _persist_runtime_preferences(self, *keys: str) -> None:
+    def _persist_runtime_preferences(self, *keys: str, remove: tuple[str, ...] = ()) -> None:
+        if self._calibration_request is not None:
+            self._cancel_runtime_calibration()
         for key in keys:
             if key == "max_steps":
                 self._runtime_preferences[key] = self.agent.max_steps
@@ -8514,16 +9028,46 @@ class PersistentChatTUI:
                 self._runtime_preferences[key] = self.agent.max_subagent_concurrency
             else:
                 self._runtime_preferences[key] = self.agent.ollama_options.get(key)
-        try:
-            _save_runtime_preferences(
-                self.chat_preferences_path,
-                self._runtime_preferences,
-            )
-        except OSError as exc:
-            self.status_error = f"runtime settings were not saved: {exc}"
+        changes: dict[tuple[str, ...], object] = {
+            ("runtime_options", key): self._runtime_preferences[key] for key in keys
+        }
+        changes.update({("runtime_options", key): DELETE for key in remove})
+        if "num_gpu" in keys:
+            changes[("runtime_device_mode",)] = self._runtime_device_mode
+        self._submit_preference_changes(changes)
+
+    def _apply_live_tool_preferences(self) -> None:
+        """Apply authoritative UI snapshots without reading pending disk state."""
+        unrelated = set(getattr(self.agent, "disabled_tool_names", set())) - set(
+            TOOL_AVAILABILITY_LABELS
+        )
+        self.agent.disabled_tool_names = unrelated | {
+            name for name, enabled in self._tool_availability.items() if not enabled
+        }
+        cfg = getattr(self.agent, "tool_config", None)
+        if cfg is not None:
+            cfg.web_search.result_validation_enabled = self._tool_validation["web_search"]
+            cfg.retrieval_validation_enabled = self._tool_validation["knowledge_search"]
+            for name, enabled in self._web_provider_availability.items():
+                if name in cfg.web_providers:
+                    cfg.web_providers[name].enabled = enabled
+
+    def _submit_preference_changes(self, changes: dict[tuple[str, ...], object]) -> None:
+        """Shared revision covers runtime, composer, permission and tool saves."""
+        self._runtime_save_revision = self._settings_writer.submit(changes)
+        self._runtime_save_state = "saving"
+        if self.status_error.startswith((
+            "Runtime save could not be confirmed", "Preferences save could not be confirmed"
+        )):
+            self.status_error = ""
 
     def _open_runtime_config_editor(self, target: str) -> None:
         """Temporarily hand the terminal to nano for a scoped runtime file."""
+        if target == "preferences" and self._runtime_save_state == "saving":
+            self.status_error = (
+                "Wait for runtime settings to finish saving before opening the editor"
+            )
+            return
         paths = {
             "config": (self.cfg.config_file, "Klaude config.toml"),
             "preferences": (self.chat_preferences_path, "runtime preferences"),
@@ -8535,22 +9079,26 @@ class PersistentChatTUI:
             return
         if not path.exists():
             if target == "preferences":
-                _write_chat_preferences(path, {})
+                update_settings(path, {})
             else:
                 self.status_error = f"{label} does not exist: {path}"
                 self._open_settings_category("runtime")
                 return
         self._choice_kind = None
         self._choice_values = []
-        self._choice_click_index = None
+        self._choice_click_id = None
         self._set_input("")
         self.status_error = ""
         self.activity = f"editing {label}"
 
         async def edit() -> None:
+            def launch() -> int:
+                with settings_lock(path):
+                    return subprocess.run(["nano", str(path)], check=False).returncode
+
             try:
                 returncode = await run_in_terminal(
-                    lambda: subprocess.run(["nano", str(path)], check=False).returncode
+                    launch
                 )
             except OSError as exc:
                 self.status_error = f"could not open nano: {exc}"
@@ -8586,6 +9134,12 @@ class PersistentChatTUI:
         """Keep a fully typed slash command available for Enter and Tab."""
         document = buffer.document
         prefix = document.text_before_cursor
+        if self._mcp_catalog_query:
+            completions = list(self.input.completer.get_completions(document, None))
+            if len(completions) == 1 and completions[0].text == prefix:
+                buffer.complete_state = CompletionState(document, completions)
+                buffer.on_completions_changed.fire()
+            return
         if (
             self._choice_kind
             or not prefix.startswith("/")
@@ -8601,16 +9155,20 @@ class PersistentChatTUI:
 
     def _composer_text_changed(self, _buffer) -> None:
         self._discard_missing_pastes()
-        # Persist at most once per rendered frame; publishing synchronously for
-        # every keypress would add avoidable SQLite contention.
+        if self._mcp_catalog_query:
+            self._mcp_suggestion_due = time.monotonic() + 0.35
+        # The next coalesced worker request captures the latest public draft.
         self._last_draft_publish = 0.0
 
     def _publish_live_composer(self) -> None:
+        """Synchronous test adapter; production rendering uses session I/O snapshots."""
         if (
             self.shutting_down
             or self._choice_kind
             or self._permission_request
             or self._secret_request
+            or self._settings_input_request
+            or self._mcp_catalog_query
         ):
             return
         now = time.monotonic()
@@ -8634,20 +9192,66 @@ class PersistentChatTUI:
         self._last_draft_publish = now
 
     def _sync_shared_session(self) -> None:
+        """Synchronous diagnostic/test adapter; render uses the owned coordinator."""
+        request = self._session_io_request()
+        result = collect_session_io(self.memory, request)
+        self._apply_session_io(request, result)
+
+    def _session_io_request(self) -> SessionIORequest:
         now = time.monotonic()
-        if self.running and self._turn_id and now - self._last_lease_renewal >= 5.0:
-            renewed = self.memory.renew_session_lease(
-                self.session_id,
-                self.client_id,
-                self._turn_id,
-            )
-            if not renewed:
-                self.status_error = "session worker lease was lost; interrupting safely"
-                self.cancel_requested.set()
-                self._cancel_active_transport()
-            self._last_lease_renewal = now
-        self._publish_live_composer()
-        live = self.memory.session_live_state(self.session_id)
+        draft = None
+        queue_value = tuple(str(item) for item in self.pending)
+        public = not (
+            self.shutting_down or self._choice_kind or self._permission_request
+            or self._secret_request or self._settings_input_request
+            or self._mcp_catalog_query
+        )
+        if public and (
+            not self._last_draft_publish or now - self._last_draft_publish >= 0.1
+        ) and (
+            self.input.text != self._published_draft or queue_value != self._published_queue
+            or not self._last_draft_publish or now - self._last_draft_publish >= 5
+        ):
+            draft = self.input.text
+        return SessionIORequest(
+            self.session_id, self.client_id, self._turn_id, self._session_event_cursor,
+            bool(self.running and self._turn_id and now - self._last_lease_renewal >= 5),
+            draft, queue_value, self._watching_remote, self._choice_kind == "session",
+        )
+
+    def _request_session_sync(self) -> None:
+        now = time.monotonic()
+        if (
+            self.running and self._turn_id and not self.cancel_requested.is_set()
+            and now - self._last_lease_renewal >= 12
+        ):
+            self.status_error = "Session lease could not be renewed; interrupting safely"
+            self.cancel_requested.set()
+            self._cancel_active_transport()
+        if self.shutting_down or now - self._last_session_io_submit < 0.1:
+            return
+        self._last_session_io_submit = now
+        self._session_io.submit(self._session_io_request())
+
+    def _apply_session_io(self, request: SessionIORequest, result: SessionIOResult) -> None:
+        if (
+            self.shutting_down or request.session_id != self.session_id
+            or request.turn_id != self._turn_id
+        ):
+            return
+        if self.status_error == "Session storage busy/unavailable; retrying":
+            self.status_error = ""
+        if result.renewed is False:
+            self.status_error = "session worker lease was lost; interrupting safely"
+            self.cancel_requested.set()
+            self._cancel_active_transport()
+        elif result.renewed:
+            self._last_lease_renewal = result.renewed_at
+        if request.draft is not None:
+            self._published_draft = request.draft
+            self._published_queue = request.queue
+            self._last_draft_publish = time.monotonic()
+        live = result.live
         self._session_live_revision = int(live["revision"])
         remote_owner = (
             live["state"] == "running"
@@ -8657,10 +9261,7 @@ class PersistentChatTUI:
         was_watching = self._watching_remote
         self._watching_remote = bool(remote_owner)
         if was_watching and not remote_owner and live.get("state") == "running":
-            recovered = self.memory.session_snapshot(self.session_id)
-            live = recovered["live"]
-            self._session_live_revision = int(live["revision"])
-            if not recovered.get("recovered_turn_ids"):
+            if not result.recovered:
                 self._append(
                     "\n[interrupted] Remote worker lease expired; saved output is preserved.\n"
                 )
@@ -8669,7 +9270,7 @@ class PersistentChatTUI:
         )
         active_clients = [
             state
-            for state in self.memory.session_client_states(self.session_id)
+            for state in result.clients
             if state["client_id"] != self.client_id
             and time.time() - float(state["updated_at"]) < 30.0
         ]
@@ -8678,11 +9279,9 @@ class PersistentChatTUI:
             "",
         )
         self._remote_queue = [str(value) for state in active_clients for value in state["queue"]]
-        events = self.memory.session_events_since(
-            self.session_id,
-            self._session_event_cursor,
-        )
-        for event in events:
+        for event in result.events:
+            if int(event["id"]) <= self._session_event_cursor:
+                continue
             self._session_event_cursor = max(self._session_event_cursor, int(event["id"]))
             if event["client_id"] == self.client_id:
                 continue
@@ -8737,8 +9336,8 @@ class PersistentChatTUI:
                     self.activity = "waiting for user input"
                     self._append(f"\n[input · klaude] {self._user_input_request['question']}\n")
             elif event["kind"] == "input_answer":
-                request = self._user_input_request
-                if request is not None and str(request.get("request_id", "")) == str(
+                input_request = self._user_input_request
+                if input_request is not None and str(input_request.get("request_id", "")) == str(
                     payload.get("request_id", "")
                 ):
                     answer = payload.get("answer")
@@ -8780,7 +9379,10 @@ class PersistentChatTUI:
                 # The other process owns a separate Agent instance. Refresh
                 # this client's model context before it can consume a queued
                 # follow-up to the newly completed remote turn.
-                self.agent.restore_session(self.memory.load_session(self.session_id))
+                if result.history is not None:
+                    self.agent.restore_session(result.history)
+        if result.sessions is not None:
+            self._refresh_resume_choices(result.sessions)
         if was_watching and not self._watching_remote and self.pending and not self.running:
             self._start_next()
 
@@ -8789,6 +9391,8 @@ class PersistentChatTUI:
         state = self.input.buffer.complete_state
         document = state.original_document if state else self.input.buffer.document
         prefix = document.text_before_cursor
+        if self._mcp_catalog_query:
+            return 0
         if prefix.startswith("/attach "):
             return len("/attach ")
         mention = _INLINE_ATTACHMENT_COMPLETION.search(prefix)
@@ -8810,6 +9414,16 @@ class PersistentChatTUI:
         return "class:scrollbar.background"
 
     def _status_fragments(self):
+        if self._setup_job is not None:
+            indicator = BRAILLE_LOADING_FRAMES[
+                int(time.monotonic() * 10) % len(BRAILLE_LOADING_FRAMES)
+            ]
+            elapsed = _activity_elapsed(int(time.monotonic() - self._setup_started_at))
+            return [
+                ("class:runtime_busy", f" {indicator} WAITING {elapsed} · {self._setup_title} "),
+                ("class:runtime_text", "Esc / Ctrl+C cancel "),
+                ("class:runtime_error", self.status_error),
+            ]
         if self._height_edit:
             return [
                 (
@@ -8826,6 +9440,12 @@ class PersistentChatTUI:
             return [
                 ("class:runtime_busy", f" SECRET · {label} "),
                 ("class:runtime_text", "masked · Enter submit · Ctrl+C cancel "),
+            ]
+        if self._settings_input_request:
+            return [
+                ("class:runtime_busy", f" INPUT · {self._settings_input_request['label']} "),
+                ("class:runtime_text", "Enter submit · Esc cancel "),
+                ("class:runtime_error", self.status_error),
             ]
         if self._permission_request:
             tool = str(self._permission_request["tool"])
@@ -8963,11 +9583,9 @@ class PersistentChatTUI:
         ]
 
     def _set_composer_mode(self, mode: str) -> None:
+        self._submit_preference_changes({("composer_mode",): mode})
         self.composer_mode = mode
         self.application.editing_mode = EditingMode.VI if mode == "vim" else EditingMode.EMACS
-        preferences = _load_chat_preferences(self.chat_preferences_path)
-        preferences["composer_mode"] = mode
-        _write_chat_preferences(self.chat_preferences_path, preferences)
         self.input.buffer.cancel_completion()
         self.activity = f"{mode} composer"
         self.application.invalidate()
@@ -8998,15 +9616,30 @@ class PersistentChatTUI:
         @bindings.add(
             "escape",
             filter=Condition(
-                lambda: bool(self._choice_kind) or self._height_edit or self._runtime_edit
+                lambda: bool(self._choice_kind)
+                or self._height_edit
+                or self._runtime_edit
+                or self._mcp_catalog_query
             ),
         )
         def dismiss_picker(event) -> None:
+            if self._mcp_catalog_query:
+                self.input.buffer.cancel_completion()
+                self._mcp_catalog_query = False
+                self._set_input("")
+                self._open_settings_category("mcp servers")
+                return
             self._dismiss_picker()
 
         @bindings.add("escape", filter=Condition(lambda: self._secret_request is not None))
         def dismiss_secret(event) -> None:
-            self._answer_secret(None)
+            self._answer_secret(None, cancelled=True)
+
+        @bindings.add(
+            "escape", filter=Condition(lambda: self._settings_input_request is not None)
+        )
+        def dismiss_settings_input(event) -> None:
+            self._answer_settings_input(None)
 
         @bindings.add("escape", filter=Condition(lambda: self._user_input_request is not None))
         def dismiss_user_input(event) -> None:
@@ -9026,6 +9659,7 @@ class PersistentChatTUI:
         def type_picker_choice(event) -> None:
             if event.data:
                 self.input.buffer.insert_text(event.data)
+                self._refresh_choice_filter()
                 self.application.invalidate()
 
         @bindings.add("pageup", filter=Condition(lambda: bool(self._choice_kind)))
@@ -9071,6 +9705,9 @@ class PersistentChatTUI:
             if self._choice_kind:
                 self._submit_choice_response()
                 return
+            if self._settings_input_request:
+                self._submit_settings_input_response()
+                return
             if self._secret_request:
                 self._submit_secret_response()
                 return
@@ -9088,6 +9725,8 @@ class PersistentChatTUI:
             @bindings.add(key)
             def permission_answer(event, key=key) -> None:
                 self.input.buffer.insert_text(key)
+                if self._choice_kind:
+                    self._refresh_choice_filter()
 
         @bindings.add("escape", "enter")
         @bindings.add("c-j")
@@ -9107,6 +9746,9 @@ class PersistentChatTUI:
         def delete_and_refresh_command_completion(event) -> None:
             buffer = self.input.buffer
             buffer.delete_before_cursor(count=1)
+            if self._choice_kind:
+                self._refresh_choice_filter()
+                return
             prefix = buffer.document.text_before_cursor
             if (
                 prefix.startswith("/") and not any(char.isspace() for char in prefix)
@@ -9116,10 +9758,17 @@ class PersistentChatTUI:
         @bindings.add("c-c")
         def cancel(event) -> None:
             if self._secret_request:
-                self._answer_secret(None)
+                self._answer_secret(None, cancelled=True)
+            elif self._settings_input_request:
+                self._answer_settings_input(None)
             elif self._user_input_request:
                 self._answer_user_input(None, "cancelled")
-            elif self._choice_kind or self._height_edit or self._runtime_edit:
+            elif (
+                self._choice_kind
+                or self._height_edit
+                or self._runtime_edit
+                or self._mcp_catalog_query
+            ):
                 self._cancel_choice()
             elif self._queue_edit_index is not None:
                 self._cancel_queue_edit()
@@ -9219,11 +9868,15 @@ class PersistentChatTUI:
             self._choice_kind
             or self._permission_request
             or self._secret_request
+            or self._settings_input_request
             or self._height_edit
             or self._runtime_edit
+            or self._mcp_catalog_query
         )
         if modal or len(text) < LARGE_PASTE_CHARACTER_THRESHOLD:
             self.input.buffer.insert_text(text)
+            if self._choice_kind:
+                self._refresh_choice_filter()
             return
 
         base = f"[Pasted {len(text):,} chars]"
@@ -9248,6 +9901,8 @@ class PersistentChatTUI:
         """Describe the response expected when the composer is temporarily modal."""
         if self._secret_request:
             return str(self._secret_request["prompt"])
+        if self._settings_input_request:
+            return str(self._settings_input_request["prompt"])
         if self._permission_request:
             return "Type y/yes, n/no, or a/always · Enter allows once."
         if self._user_input_request:
@@ -9256,6 +9911,8 @@ class PersistentChatTUI:
             return "Enter minimum and maximum input height, then press Enter."
         if self._runtime_edit:
             return "Enter a value, then press Enter. Esc or Ctrl+C goes back."
+        if self._mcp_catalog_query:
+            return "Search active servers in the official MCP Registry · suggested searches below."
         return INPUT_PLACEHOLDER_TEXT
 
     def _move_history(self, delta: int) -> None:
@@ -9349,7 +10006,14 @@ class PersistentChatTUI:
     def _move_choice(self, delta: int) -> None:
         if not self._choice_values:
             return
-        self._choice_click_index = None
+        selectable = [
+            index
+            for index, value in enumerate(self._choice_values)
+            if not _is_choice_section(value) and not _is_choice_nonselectable(value)
+        ]
+        if not selectable:
+            return
+        self._choice_click_id = None
         direction = 1 if delta >= 0 else -1
         for _ in range(max(1, abs(delta))):
             self._choice_index = (self._choice_index + direction) % len(self._choice_values)
@@ -9360,18 +10024,85 @@ class PersistentChatTUI:
         self._apply_choice_preview()
         self.application.invalidate()
 
+    @staticmethod
+    def _choice_match_score(value: str, query: str) -> float:
+        """Rank picker rows using exact, prefix, token-prefix, then fuzzy matching."""
+        return match_score(value, query)
+
+    def _picker_rows(self, kind: str, values: list[str]) -> list[PickerRow]:
+        """Bind stable domain identities independently from displayed values."""
+        rows = []
+        for index, value in enumerate(values):
+            selectable = not _is_choice_section(value) and not _is_choice_nonselectable(value)
+            identity = str(value)
+            if not selectable:
+                identity = f"decoration:{index}:{value}"
+            elif kind == "session" and value in self._resume_choices:
+                identity = f"session:{self._resume_choices[value]}"
+            elif kind == "model" and value in self._model_choices:
+                identity = f"model:{self._model_choices[value].ref}"
+            elif kind == "model" and value in {"Login", "Logout"}:
+                identity = "account-auth"
+            elif kind == "mcp registry results" and value in self._mcp_catalog_results:
+                identity = f"registry:{self._mcp_catalog_results[value].name}"
+            elif kind == "provider key settings" and value in {"Add API key", "Update API key"}:
+                identity = "save-api-key"
+            elif kind == "runtime settings" and value in {"auto calibrate", "cancel calibration"}:
+                identity = "auto-calibrate"
+            elif kind == "settings" or kind.endswith(" settings"):
+                # These rows are keyed by the fixed option name; the part after
+                # ': ' is a live value, not identity (model names keep colons).
+                identity = value.split(": ", 1)[0].split(" — ", 1)[0].casefold()
+            rows.append(PickerRow(
+                identity, value, selectable, value in {"back", CANCEL_CHOICE},
+                enabled=not _is_choice_unavailable(value),
+            ))
+        return rows
+
+    def _sync_picker_selection(self) -> None:
+        if self._picker is not None:
+            self._picker.select(self._choice_index)
+
+    def _apply_picker_state(self) -> None:
+        if self._picker is None:
+            return
+        self._choice_all_values = [row.label for row in self._picker.rows]
+        self._choice_values = [row.label for row in self._picker.visible]
+        self._choice_index = self._picker.index
+        self._choice_filter_query = self._picker.query
+        if not any(row.id == self._choice_click_id for row in self._picker.visible):
+            self._choice_click_id = None
+
+    def _refresh_choice_filter(self) -> None:
+        """Filter any picker as text is entered while retaining its canonical rows."""
+        if not self._choice_kind or self._picker is None:
+            return
+        self._sync_picker_selection()
+        if self.input.text != self._picker.query:
+            self._choice_click_id = None
+        self._picker.filter(self.input.text)
+        self._apply_picker_state()
+        self._apply_choice_preview()
+        self.application.invalidate()
+
     def _click_choice(self, index: int) -> None:
         """Select once by mouse, then confirm only on a second click."""
+        if not 0 <= index < len(self._choice_values):
+            return
         if _is_choice_section(self._choice_values[index]) or _is_choice_nonselectable(
             self._choice_values[index]
         ):
             return
-        if index == self._choice_click_index:
-            self._choice_click_index = None
+        identity = (
+            self._picker.visible[index].id if self._picker is not None
+            else self._choice_values[index]
+        )
+        self._choice_index = index
+        if identity == self._choice_click_id:
+            self._choice_click_id = None
             self._accept_choice()
             return
-        self._choice_click_index = index
-        self._choice_index = index
+        self._choice_click_id = identity
         self._apply_choice_preview()
         self.application.invalidate()
 
@@ -9405,6 +10136,8 @@ class PersistentChatTUI:
         self._text_theme_preview_visible = False
 
     def _show_permission_preview(self, text: str) -> None:
+        if self._permission_preview_visible and self.text_theme_preview.text == text:
+            return
         if not self._permission_preview_visible:
             self._text_theme_preview_original = self.output.text
             self._text_theme_preview_pending = ""
@@ -9434,7 +10167,13 @@ class PersistentChatTUI:
     def _apply_choice_preview(self) -> None:
         if self._choice_kind == "permission preset":
             selected = self._choice_values[self._choice_index]
+            if _is_choice_nonselectable(selected):
+                self._hide_permission_preview()
+                return
             if selected in {"back", CANCEL_CHOICE}:
+                self._hide_permission_preview()
+                return
+            if _is_choice_unavailable(selected):
                 self._hide_permission_preview()
                 return
             names = _permission_tool_names(self.agent)
@@ -9486,7 +10225,38 @@ class PersistentChatTUI:
         self._hide_text_theme_preview()
         self._hide_permission_preview()
 
-    def _begin_choice(self, kind: str, values: list[str], default: str) -> None:
+    def _begin_choice(
+        self,
+        kind: str,
+        values: list[str],
+        default: str,
+        *,
+        restore: bool = False,
+        refresh: bool = False,
+    ) -> None:
+        previous_kind = self._choice_kind
+        mcp_inventory_modes = {"mcp settings", "mcp registry detail"}
+        if previous_kind != kind and not (
+            previous_kind in mcp_inventory_modes and kind in mcp_inventory_modes
+        ):
+            self._cancel_inventory_job(previous_kind)
+        if (kind in {"permission settings", "mcp permission tools", "tools settings"}
+                and self._runtime_save_state):
+            values = [*values, _choice_info(self._preference_save_hint())]
+        if kind in {"theme settings", "input field settings"} and self._appearance_save_state:
+            hint = (
+                "Saving appearance…" if self._appearance_save_state == "saving"
+                else "Appearance saved" if self._appearance_save_state == "saved"
+                else "Appearance save unconfirmed · active for this session"
+            )
+            values = [*values, _choice_info(hint)]
+        if kind == "settings" and any(row.startswith("MCP servers:") for row in values):
+            self._refresh_settings_overview()
+            values = self._settings_categories()
+        previous_selection = (
+            self._choice_values[self._choice_index] if self._choice_values else ""
+        )
+        self._sync_picker_selection()
         exit_choice = "back" if "back" in values else CANCEL_CHOICE
         trailing_hints = (
             [value for value in values if value.startswith("Tip: ")]
@@ -9497,7 +10267,20 @@ class PersistentChatTUI:
         values = [value for value in values if value not in trailing_hints]
         values.extend(
             [exit_choice]
-            if kind in {"session", "model source", "model cloud provider", "skills settings"}
+            if kind
+            in {
+                "session",
+                "model source",
+                "model cloud provider",
+                "model logout confirmation",
+                "skills settings",
+                "mcp registry results",
+                "mcp registry detail",
+                "mcp transport",
+                "mcp remote authentication",
+                "mcp enable confirmation",
+                "setup job",
+            }
             else [RESET_THEME_CHOICE, exit_choice]
         )
         if trailing_hints:
@@ -9506,22 +10289,40 @@ class PersistentChatTUI:
             self._append(f"\n[error] No {kind} choices are available.\n")
             return
         self.input.buffer.cancel_completion()
+        scope = (
+            self._model_auth_backend if kind == "model"
+            else self._provider_key_label if kind == "provider key settings" else ""
+        )
+        context = (kind, scope)
+        same_page = previous_kind == kind and self._picker_context == context
+        if not same_page:
+            self._choice_click_id = None
+        saved = self._picker_states.get(context)
+        rows = self._picker_rows(kind, values)
+        if kind == "settings":
+            default = _settings_choice_default(values, default)
+        default_id = next((row.id for row in rows if row.label == default), "")
+        reuse = saved if (
+            restore
+            or previous_selection in {"back", CANCEL_CHOICE}
+            or same_page and (refresh or saved is not None and default_id == saved.selected_id)
+        ) else None
+        self._picker = reuse or PickerController(rows, default_id)
+        if reuse is not None:
+            reuse.replace(rows)
+        self._picker_context = context
+        if kind != "setup job":
+            self._picker_states[context] = self._picker
         self._choice_kind = kind
-        self._choice_values = values
-        self._choice_index = values.index(default) if default in values else 0
-        if _is_choice_section(values[self._choice_index]) or _is_choice_nonselectable(
-            values[self._choice_index]
-        ):
-            self._move_choice(1)
-        self._choice_click_index = None
-        if kind in {"theme", "text theme"}:
+        self._apply_picker_state()
+        if kind in {"theme", "text theme"} and not same_page:
             self._choice_preview_appearance = (
                 self.appearance.theme,
                 self.appearance.text_theme,
             )
         if kind != "permission preset":
             self._permission_custom_snapshot = None
-        self._set_input("")
+        self._set_input(self._picker.query)
         self.activity = f"select {kind}"
         self.status_error = ""
         self._apply_choice_preview()
@@ -9535,34 +10336,457 @@ class PersistentChatTUI:
         self._begin_choice("model source", ["Local", "Cloud", exit_choice], "Local")
 
     def _open_cloud_provider(self) -> None:
-        cached = load_model_cache(self.cfg.data_dir / "model-cache.json")
-        codex_ready = any(item.backend == "openai_codex" for item in cached)
         rows = [
-            "OpenAI Codex" if codex_ready else "OpenAI Codex — not signed in",
-            "OpenAI" if self.cfg.openai_api_key else "OpenAI — API key not configured",
-            "OpenRouter"
-            if self.cfg.openrouter_api_key
-            else "OpenRouter — API key not configured",
-            "Google" if self.cfg.gemini_api_key else "Google — API key not configured",
+            "OpenAI Codex",
+            "OpenAI",
+            "OpenRouter",
+            "Google",
             "back",
-            "Tip: use OpenAI Codex login, or configure API keys in Settings → Providers",
+            "Tip: open any cloud provider to sign in, sign out, or choose a model",
         ]
         self._begin_choice("model cloud provider", rows, "OpenAI")
 
+    def _model_backend_authenticated(self, backend: str) -> bool:
+        if backend == "openai_codex":
+            if self._codex_auth_state is not None:
+                return self._codex_auth_state
+            return any(
+                item.backend == "openai_codex"
+                for item in load_model_cache(self.cfg.data_dir / "model-cache.json")
+            )
+        label = MODEL_PROVIDER_FOR_BACKEND.get(backend, "")
+        provider = MODEL_API_KEY_PROVIDERS.get(label)
+        return bool(provider and getattr(self.cfg, provider[1], ""))
+
     def _open_model_backend(self, backend: str, parent: str) -> None:
+        if backend != "ollama":
+            self._background_jobs.cancel("local-models")
+            self._local_models_loading = False
         rows, choices = _model_picker_rows(
             self.cfg,
             _agent_local_ollama(self.agent),
             backend,
             getattr(self.agent, "model_info", None),
+            inventory=self._local_models if backend == "ollama" else None,
         )
+        if backend == "ollama":
+            if not self._local_models_loaded_at:
+                rows.append(_choice_info("Loading Ollama models…"))
+            if self._local_models_error:
+                rows.append(_choice_info(self._local_models_error))
         self._model_choices = choices
         self._model_parent = parent
+        self._model_auth_backend = backend
+        provider = MODEL_PROVIDER_FOR_BACKEND.get(backend, "Ollama")
+        authenticated = False
+        if backend != "ollama":
+            authenticated = self._model_backend_authenticated(backend)
+            auth_action = "Logout" if authenticated else "Login"
+            status = "signed in" if authenticated else "not signed in"
+            model_rows = list(rows)
+            rows = [
+                _choice_section(provider.upper()),
+                auth_action,
+                _choice_info(f"Status: {status}"),
+                _choice_section("MODELS"),
+                *model_rows,
+            ]
+            if not model_rows:
+                rows.append(
+                    _choice_info(
+                        "Sign in to load models"
+                        if not authenticated
+                        else "Model catalog is refreshing; reopen this page shortly"
+                    )
+                )
         default = next(
             (row for row, info in choices.items() if info.ref == _agent_model_ref(self.agent)),
-            rows[0],
+            "Logout" if backend != "ollama" and authenticated else rows[0],
         )
-        self._begin_choice("model", [*rows, "back"], default)
+        self._begin_choice("model", [*rows, "back"], default, refresh=True)
+        if backend == "openai_codex" and self._codex_auth_state is None:
+            self._refresh_codex_auth_state()
+        elif backend == "ollama":
+            self._refresh_local_models()
+
+    def _refresh_local_models(self) -> None:
+        if self._local_models_loading or (
+            self._local_models_loaded_at
+            and time.monotonic() - self._local_models_loaded_at < 30
+        ):
+            return
+        self._local_models_loading = True
+        self._background_jobs.submit(
+            "local-models", {"kind": "local_models", "base_url": self.cfg.ollama_url},
+            timeout=8,
+        )
+
+    def _status_usage_rows(self) -> list[tuple[str, str]]:
+        if getattr(getattr(self.agent, "model_info", None), "backend", "") != "openai_codex":
+            return []
+        if not self._codex_usage_loading and (
+            not self._codex_usage_checked_at
+            or time.monotonic() - self._codex_usage_checked_at >= 30
+        ):
+            self._codex_usage_loading = True
+            identity = self._background_jobs.submit(
+                "codex-usage", {"kind": "codex_usage"}, timeout=8
+            )
+            self._codex_usage_request = (self.session_id, identity)
+        if self._codex_usage_rows_cache is not None:
+            age = int(max(0, time.monotonic() - self._codex_usage_loaded_at))
+            state = f"cached ({age}s old)" if self._codex_usage_loaded_at else "unavailable"
+            if self._codex_usage_loading:
+                state += "; refresh pending"
+            return [*self._codex_usage_rows_cache, ("Limits snapshot", state)]
+        return [
+            ("Codex limits", "loading account limits…"),
+            ("Usage details", "https://chatgpt.com/codex/settings/usage"),
+        ]
+
+    def _refresh_status_metadata(self) -> None:
+        path = getattr(self.memory, "sessions_db", None)
+        if path is None:
+            return
+        if self._status_metadata_loading:
+            request = self._status_metadata_request
+            if request is not None and request[:2] == (self.session_id, self._session_title_hint):
+                return
+            self._invalidate_status_metadata()
+        if (
+            self._status_metadata_loaded_at
+            and self._status_metadata_session == self.session_id
+            and time.monotonic() - self._status_metadata_loaded_at < 30
+        ):
+            return
+        self._status_metadata_loading = True
+        identity = self._background_jobs.submit(
+            "status-metadata", {
+                "kind": "status_metadata", "sessions_db": str(path), "session_id": self.session_id,
+            }, timeout=8,
+        )
+        self._status_metadata_request = (self.session_id, self._session_title_hint, identity)
+
+    def _invalidate_status_metadata(self) -> None:
+        self._background_jobs.cancel("status-metadata")
+        self._status_metadata_loading = False
+        self._status_metadata_loaded_at = 0.0
+        self._status_metadata_request = None
+
+    def _refresh_codex_auth_state(self) -> None:
+        if self._codex_auth_checking:
+            return
+        self._codex_auth_checking = True
+
+        self._background_jobs.submit("codex-status", {"kind": "codex_status"})
+
+    def _start_model_catalog_refresh(self, backend: str) -> None:
+        if self.shutting_down:
+            return
+        provider = MODEL_PROVIDER_FOR_BACKEND.get(backend, "")
+        env_name, attribute = MODEL_API_KEY_PROVIDERS.get(provider, ("", ""))
+        key = str(getattr(self.cfg, attribute, "")) if attribute else ""
+        if backend != "openai_codex" and not key:
+            return
+        try:
+            revision = provider_secret_revision(self.cfg.config_dir, env_name) if env_name else ""
+            if env_name and not provider_credential_current(
+                self.cfg.config_dir, env_name, key, revision
+            ):
+                return  # another client replaced/removed this process's key
+            generation = model_cache_generation(self.cfg.data_dir / "model-cache.json", backend)
+        except OSError:
+            self.status_error = "Model catalog state unavailable; retry"
+            return
+        self._background_jobs.submit(
+            f"models:{backend}", {
+                "kind": "models", "backend": backend, "key": key,
+                "config_dir": str(self.cfg.config_dir), "env_name": env_name,
+                "revision": revision, "generation": generation,
+                "cache_file": str(self.cfg.data_dir / "model-cache.json"),
+            },
+        )
+
+    def _begin_model_logout_confirmation(self, backend: str) -> None:
+        self._model_auth_backend = backend
+        provider = MODEL_PROVIDER_FOR_BACKEND[backend]
+        self._begin_choice(
+            "model logout confirmation",
+            [f"Confirm logout from {provider}", "back"],
+            f"Confirm logout from {provider}",
+        )
+
+    def _run_codex_auth_action(self, action: str) -> None:
+        """Keep the composer responsive while the official broker owns auth."""
+        backend = "openai_codex"
+        self._background_jobs.cancel("codex-status")
+        self._background_jobs.cancel(f"models:{backend}")
+        self._codex_auth_checking = False
+        self._background_jobs.cancel("codex-usage")
+        self._codex_usage_loading = False
+        self._codex_usage_rows_cache = None
+        self._codex_usage_loaded_at = 0.0
+        self._codex_usage_checked_at = 0.0
+        self._codex_usage_request = None
+
+        async def operation(cancel: threading.Event) -> str:
+            manager = CodexAuthManager()
+
+            def display(url: str, code: str) -> None:
+                self._emit("setup_progress", (cancel, ["Visit:", url, "Code:", code]))
+
+            def authenticate() -> str:
+                if action == "Login":
+                    status = manager.login(display, cancel_event=cancel)
+                    detail = f" ({status.plan_type})" if status.plan_type else ""
+                    return f"Signed in to OpenAI Codex{detail}"
+                manager.logout(cancel_event=cancel)
+                return "Signed out of OpenAI Codex"
+
+            worker = asyncio.create_task(asyncio.to_thread(authenticate))
+            try:
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                cancel.set()
+                # Drain the owned broker's bounded cancellation/teardown before
+                # permitting a new job; do not leave a login running in a thread.
+                await asyncio.gather(worker, return_exceptions=True)
+                raise
+
+        def finish(message: str | None) -> None:
+            if message is not None:
+                self._codex_auth_state = action == "Login"
+                if action == "Logout":
+                    save_model_cache(
+                        self.cfg.data_dir / "model-cache.json", [], backend=backend, invalidate=True
+                    )
+                else:
+                    self._start_model_catalog_refresh(backend)
+                self._append(f"\n[success] {message}.\n")
+            self._open_model_backend(backend, "cloud")
+
+        self._start_setup_job(f"OpenAI Codex {action.lower()}", operation, finish, timeout=900)
+
+    def _start_setup_job(
+        self,
+        title: str,
+        operation: Callable[[threading.Event], Awaitable[str]],
+        finish: Callable[[str | None], None],
+        *,
+        timeout: float,
+        allow_active: bool = False,
+    ) -> None:
+        if (self._setup_job is not None or self.running and not allow_active
+                or self._mcp_mutation_pending is not None):
+            self.status_error = "Finish or cancel the current operation before starting setup"
+            return
+        self._setup_title = title
+        self._setup_started_at = time.monotonic()
+        self._setup_cancel = threading.Event()
+        self._begin_choice("setup job", [_choice_info(title), CANCEL_CHOICE], CANCEL_CHOICE)
+
+        async def run() -> None:
+            message: str | None = None
+            error = ""
+            try:
+                message = await asyncio.wait_for(operation(self._setup_cancel), timeout)
+            except asyncio.CancelledError:
+                error = f"{title} cancelled"
+            except TimeoutError:
+                error = f"{title} timed out; retry when the service is available"
+            except Exception as exc:  # noqa: BLE001 - external setup boundary
+                from klaude_core.mcp_client import safe_mcp_error
+
+                error = safe_mcp_error(exc)
+            finally:
+                self._setup_cancel.set()
+                self._setup_job = None
+                self._setup_title = ""
+                if not self.shutting_down:
+                    try:
+                        finish(message)
+                    except Exception as exc:  # noqa: BLE001 - setup completion boundary
+                        from klaude_core.mcp_client import safe_mcp_error
+
+                        error = safe_mcp_error(exc)
+                    self.status_error = error
+                    self.application.invalidate()
+
+        self._setup_job = self.application.create_background_task(run())
+
+        def completed(task: asyncio.Task[None]) -> None:
+            # A task cancelled before its first await never enters run/finally.
+            if self._setup_job is task:
+                self._setup_job = None
+                self._setup_title = ""
+                if not self.shutting_down:
+                    finish(None)
+                    self.status_error = f"{title} cancelled"
+                    self.application.invalidate()
+
+        self._setup_job.add_done_callback(completed)
+
+    def _cancel_setup_job(self) -> None:
+        if self._setup_job is not None and not self._setup_cancel.is_set():
+            self._setup_cancel.set()
+            self._setup_job.cancel()
+            self.status_error = "Cancelling setup…"
+            self.application.invalidate()
+
+    def _activate_selected_model(self, info: ModelInfo) -> None:
+        """Validate cloud dependencies/auth off-thread; commit only a current result."""
+        if self._setup_job is not None:
+            self.status_error = "Finish or cancel the current operation before changing model"
+            return
+        defer_selection = self.running or self._watching_remote
+        origin = (self.session_id, _agent_model_ref(self.agent))
+        parent = self._model_parent if hasattr(self, "_model_parent") else "cloud"
+        provider = MODEL_PROVIDER_FOR_BACKEND.get(info.backend, "")
+        env_name, attribute = MODEL_API_KEY_PROVIDERS.get(provider, ("", ""))
+        key = str(getattr(self.cfg, attribute, "")) if attribute else ""
+
+        def commit() -> None:
+            if (
+                origin != (self.session_id, _agent_model_ref(self.agent))
+                or attribute and key != getattr(self.cfg, attribute, "")
+            ):
+                raise RuntimeError("Model selection changed during setup; choose the model again")
+            if defer_selection or self.running or self._watching_remote:
+                self._next_prompt_model = (self.session_id, info)
+                self._choice_kind = None
+                self._choice_values = []
+                self._model_flow_parent = ""
+                self._set_input("")
+                self._append(
+                    f"\n[session] {info.ref} selected for the next prompt · standard mode. "
+                    "Current work keeps its original model.\n"
+                )
+                self.status_error = ""
+                self.application.invalidate()
+                return
+            self._next_prompt_model = None
+            self._choice_prior_model = self.agent.model
+            self._choice_prior_model_info = getattr(self.agent, "model_info", None)
+            self._choice_prior_runtime_state = {
+                name: getattr(self.agent, name, None)
+                for name in (
+                    "runtime", "ollama", "reasoning_mode", "reasoning_effort",
+                    "ollama_think", "ollama_code_think",
+                )
+                if hasattr(self.agent, name)
+            }
+            try:
+                _set_agent_model(
+                    self.agent, self.cfg, _agent_local_ollama(self.agent), info, validated=True
+                )
+            except Exception:
+                self._restore_prior_model()
+                raise RuntimeError("Unable to activate model; previous model retained") from None
+            self._begin_choice("mode", [*REASONING_MODES, CANCEL_CHOICE], "standard")
+
+        if info.backend == "ollama":
+            commit()
+            return
+
+        async def operation(cancel: threading.Event) -> str:
+            future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+            self._model_activation_future = future
+            try:
+                revision = (
+                    provider_secret_revision(self.cfg.config_dir, env_name) if env_name else ""
+                )
+                self._model_activation_id = self._background_jobs.submit(
+                    "model-activation", {
+                        "kind": "model_activation", "backend": info.backend, "key": key,
+                        "config_dir": str(self.cfg.config_dir), "env_name": env_name,
+                        "revision": revision,
+                    }, timeout=20,
+                )
+                if not await future or cancel.is_set():
+                    raise RuntimeError(
+                        "Model unavailable; check sign-in and cloud SDK dependencies"
+                    )
+                return "ready"
+            finally:
+                self._background_jobs.cancel("model-activation")
+                if self._model_activation_future is future:
+                    self._model_activation_future = None
+                    self._model_activation_id = ""
+
+        def finish(message: str | None) -> None:
+            if origin != (self.session_id, _agent_model_ref(self.agent)):
+                if self._choice_kind == "setup job":
+                    self._choice_kind = None
+                    self._choice_values = []
+                    self._set_input("")
+                return  # never replace another session's picker or composer
+            if self._choice_kind != "setup job":
+                return  # another modal/navigation superseded this selection
+            if message is None:
+                self._open_model_backend(info.backend, parent)
+                return
+            try:
+                commit()
+            except Exception:
+                self._open_model_backend(info.backend, parent)
+                raise
+
+        self._start_setup_job(
+            f"Prepare {provider} model", operation, finish, timeout=25, allow_active=True
+        )
+
+    def _apply_next_prompt_model(self) -> bool:
+        selection = self._next_prompt_model
+        if selection is None:
+            return True
+        if selection[0] != self.session_id:
+            self._next_prompt_model = None
+            return True
+        if (self.running or self._watching_remote or self._setup_job is not None
+                or self._choice_kind is not None):
+            return False
+        info = selection[1]
+        try:
+            _set_agent_model(
+                self.agent, self.cfg, _agent_local_ollama(self.agent), info, validated=True
+            )
+            _apply_session_mode(self.agent, self.cfg, "standard")
+        except Exception:
+            self.status_error = "Selected model unavailable; choose a model before sending again"
+            return False
+        self._next_prompt_model = None
+        self._submit_preference_changes({("last_model",): info.ref})
+        self._model_save_state = "saving"
+        self.ui_state.update_from_agent(self.agent)
+        update = f"model {info.ref} · standard · conversation retained"
+        self._append(f"\n[session] {update}\n")
+        self._session_actions.submit(SessionSettingUpdate(
+            self.session_id, self.client_id, update
+        ))
+        return True
+
+    def _restore_prior_model(self) -> None:
+        if self._choice_prior_model is None:
+            return
+        self.agent.model = self._choice_prior_model
+        if self._choice_prior_model_info is not None:
+            self.agent.model_info = self._choice_prior_model_info
+        elif hasattr(self.agent, "model_info"):
+            delattr(self.agent, "model_info")
+        prior = self._choice_prior_runtime_state
+        if prior is not None:
+            for name in (
+                "runtime", "ollama", "reasoning_mode", "reasoning_effort",
+                "ollama_think", "ollama_code_think",
+            ):
+                if name in prior:
+                    setattr(self.agent, name, prior[name])
+                elif hasattr(self.agent, name):
+                    delattr(self.agent, name)
+            _set_agent_session_context(self.agent, self.session_id)
+        self._choice_prior_model = None
+        self._choice_prior_model_info = None
+        self._choice_prior_runtime_state = None
 
     def _finish_reasoning_selection(self) -> None:
         model_changed = self._choice_prior_model is not None
@@ -9570,12 +10794,12 @@ class PersistentChatTUI:
         self._choice_kind = None
         self._choice_values = []
         self._choice_prior_model = None
+        self._choice_prior_model_info = None
+        self._choice_prior_runtime_state = None
         self._model_flow_parent = ""
         if model_changed:
-            try:
-                _save_last_chat_model(self.chat_preferences_path, _agent_model_ref(self.agent))
-            except OSError as exc:
-                self.status_error = f"model preference was not saved: {exc}"
+            self._submit_preference_changes({("last_model",): _agent_model_ref(self.agent)})
+            self._model_save_state = "saving"
         self.ui_state.update_from_agent(self.agent)
         self._set_input("")
         self.activity = "ready" if not self.running else self.activity
@@ -9583,23 +10807,28 @@ class PersistentChatTUI:
         detail = mode if mode == "standard" else f"thinking · {_agent_effort_label(self.agent)}"
         update = f"model {_agent_model_ref(self.agent)} · {detail} · conversation retained"
         self._append(f"\n[session] {update}\n")
-        try:
-            self.memory.log_turn(
-                self.session_id,
-                "system",
-                {"event": "session_update", "detail": update},
-            )
-            self._publish_shared_event(
-                "session_update",
-                {"detail": update},
-                turn_id="",
-            )
-        except sqlite3.Error as exc:
-            self.status_error = f"session setting history unavailable: {exc}"
+        if model_changed:
+            self._append("\n[session] Model preference applied; saving for future chats.\n")
+        if not self._session_actions.submit(SessionSettingUpdate(
+            self.session_id, self.client_id, update
+        )):
+            self.status_error = "Session setting history unavailable; change active locally"
+            self._append(f"\n[warning] {self.status_error}.\n")
         if return_to_settings:
             self._begin_choice("settings", self._settings_categories(), "models")
 
     def _cancel_choice(self, *, resume_queue: bool = True) -> None:
+        self._sync_picker_selection()
+        self._cancel_inventory_job(self._choice_kind)
+        if self._setup_job is not None:
+            self._cancel_setup_job()
+            return
+        if self._mcp_catalog_query:
+            self._mcp_catalog_query = False
+            self.status_error = ""
+            self._set_input("")
+            self._open_settings_category("mcp servers")
+            return
         if self._runtime_edit:
             self._runtime_edit = None
             self.status_error = ""
@@ -9616,9 +10845,11 @@ class PersistentChatTUI:
             "model",
             "model source",
             "model cloud provider",
+            "model logout confirmation",
             "mode",
             "effort",
         }
+        choice_kind = self._choice_kind or ""
         parent = {
             "theme": "theme",
             "text theme": "theme",
@@ -9627,24 +10858,29 @@ class PersistentChatTUI:
             "memory settings": "settings",
             "skills settings": "settings",
             "providers settings": "settings",
-            "permission settings": "settings",
+            "provider key settings": "providers",
+            "mcp settings": "settings",
+            "mcp registry results": "mcp servers",
+            "mcp registry detail": "mcp registry results",
+            "mcp enable confirmation": "mcp servers",
+            "permission settings": (
+                "mcp servers" if self._permission_return_to_mcp else "settings"
+            ),
             "permission preset": "permissions",
+            "mcp permission tools": "permissions",
             "runtime settings": "settings",
             "runtime device": "runtime",
             "CPU threads": "runtime",
             "context size": "runtime",
             "input height": "input field",
-        }.get(self._choice_kind or "")
+            "model logout confirmation": "model",
+            "mcp review": "mcp servers",
+        }.get(choice_kind)
         self._height_edit = False
         self._runtime_edit = None
-        self._choice_click_index = None
+        self._choice_click_id = None
         self._end_choice_preview(restore=True)
-        if self._choice_prior_model is not None:
-            self.agent.model = self._choice_prior_model
-            prior_info = getattr(self, "_choice_prior_model_info", None)
-            if prior_info is not None:
-                _set_agent_model(self.agent, self.cfg, _agent_local_ollama(self.agent), prior_info)
-                self._choice_prior_model_info = None
+        self._restore_prior_model()
         self._choice_prior_model = None
         self._model_flow_parent = ""
         self._choice_kind = None
@@ -9652,11 +10888,17 @@ class PersistentChatTUI:
         self._set_input("")
         self.activity = "ready" if not self.running else self.activity
         if parent == "settings" or return_to_model_settings:
-            default = "models" if return_to_model_settings else "theme"
-            self._begin_choice("settings", self._settings_categories(), default)
+            settings_category = SETTINGS_CATEGORY_FOR_KIND.get(choice_kind, "theme")
+            default = "models" if return_to_model_settings else settings_category
+            self._begin_choice("settings", self._settings_categories(), default, restore=True)
             return
         if parent:
-            self._open_settings_category(parent)
+            parent_default = (
+                f"{self._provider_key_label}:"
+                if choice_kind == "provider key settings" and parent == "providers"
+                else None
+            )
+            self._open_settings_category(parent, parent_default, restore=True)
             return
         self.application.invalidate()
         if resume_queue:
@@ -9671,7 +10913,7 @@ class PersistentChatTUI:
         """
         if self._choice_kind and "back" in self._choice_values:
             self._choice_index = self._choice_values.index("back")
-            self._choice_click_index = None
+            self._choice_click_id = None
             self._set_input("")
             self.status_error = ""
             self._apply_choice_preview()
@@ -9685,6 +10927,16 @@ class PersistentChatTUI:
         if not response:
             self._accept_choice()
             return
+        if self._choice_filter_query and self._choice_values:
+            selected = self._choice_values[self._choice_index]
+            if _is_choice_nonselectable(selected):
+                self.status_error = "No matching options; edit the filter or press Escape"
+                self.application.invalidate()
+                return
+            if not _is_choice_section(selected) and not _is_choice_nonselectable(selected):
+                self.status_error = ""
+                self._accept_choice()
+                return
         exact = [
             index
             for index, value in enumerate(self._choice_values)
@@ -9708,22 +10960,27 @@ class PersistentChatTUI:
             self.application.invalidate()
             return
         self._choice_index = matches[0]
-        self._choice_click_index = None
+        self._choice_click_id = None
         self._set_input("")
         self.status_error = ""
         self._apply_choice_preview()
         self._accept_choice()
 
     def _accept_choice(self) -> None:
+        if self._choice_kind == "setup job":
+            self._cancel_setup_job()
+            return
         selected = self._choice_values[self._choice_index]
+        self._sync_picker_selection()
+        if _is_choice_nonselectable(selected):
+            return
         if _is_choice_section(selected):
             self._move_choice(1)
             return
         if _is_choice_unavailable(selected):
             # Keep unavailable options focusable so users can inspect the full
             # picker naturally. Confirmation intentionally leaves it open.
-            self._set_input("")
-            self.status_error = ""
+            self.status_error = str(selected)
             self.application.invalidate()
             return
         if self._choice_kind == "session":
@@ -9734,6 +10991,69 @@ class PersistentChatTUI:
             if session_id is not None:
                 self._resume_session(session_id)
             return
+        if self._choice_kind == "mcp registry results":
+            if selected == "back":
+                self._open_settings_category("mcp servers")
+                return
+            if selected == "search again":
+                self._begin_mcp_catalog_query()
+                return
+            server = self._mcp_catalog_results.get(selected)
+            if server is not None:
+                self._open_mcp_catalog_detail(server)
+            return
+        if self._choice_kind == "mcp registry detail":
+            if selected == "back":
+                self._open_mcp_catalog_results()
+                return
+            plan = self._mcp_catalog_install_choices.get(selected)
+            if plan is not None:
+                self._begin_mcp_catalog_plan(plan)
+            return
+        if self._choice_kind == "mcp transport":
+            if selected == "back":
+                self._open_settings_category("mcp servers")
+            else:
+                transport = "http" if selected.startswith("Remote") else "stdio"
+                self._mcp_setup = {"kind": "custom", "transport": transport}
+                self._begin_settings_input(
+                    "MCP server name",
+                    "Enter a short local name (letters, numbers, '.', '_' or '-').",
+                    ("mcp_custom_name",),
+                )
+            return
+        if self._choice_kind == "mcp remote authentication":
+            if selected == "back":
+                self._open_settings_category("mcp servers")
+            else:
+                self._finish_custom_mcp_remote(selected)
+            return
+        if self._choice_kind == "mcp enable confirmation":
+            name = self._mcp_enable_name
+            if selected == "back":
+                self._open_settings_category("mcp servers", f"{name}:")
+            else:
+                self._run_mcp_enable(name, expected_fingerprint=self._mcp_enable_fingerprint)
+            return
+        if self._choice_kind == "model logout confirmation":
+            backend = self._model_auth_backend
+            if selected == "back":
+                self._open_model_backend(backend, "cloud")
+                return
+            if selected == f"Confirm logout from {MODEL_PROVIDER_FOR_BACKEND.get(backend, '')}":
+                if backend == "openai_codex":
+                    self._run_codex_auth_action("Logout")
+                else:
+                    label = MODEL_PROVIDER_FOR_BACKEND[backend]
+                    env_name, attribute = MODEL_API_KEY_PROVIDERS[label]
+                    self._save_provider_key(
+                        label,
+                        env_name,
+                        attribute,
+                        "",
+                        return_model_backend=backend,
+                    )
+                return
         if selected == "back" and self._choice_kind in {"theme", "text theme"}:
             self._cancel_choice()
             return
@@ -9742,6 +11062,18 @@ class PersistentChatTUI:
                 self._open_cloud_provider()
             else:
                 self._open_model_source(self._model_flow_parent)
+            return
+        if self._choice_kind == "model" and selected in {"Login", "Logout"}:
+            backend = self._model_auth_backend
+            if selected == "Logout":
+                self._begin_model_logout_confirmation(backend)
+            elif backend == "openai_codex":
+                self._run_codex_auth_action("Login")
+            else:
+                self._begin_provider_key_input(
+                    MODEL_PROVIDER_FOR_BACKEND[backend],
+                    return_model_backend=backend,
+                )
             return
         if self._choice_kind == "model source":
             if selected == "Cloud":
@@ -9767,6 +11099,9 @@ class PersistentChatTUI:
                 self._open_model_backend("gemini_api", "cloud")
             return
         if self._choice_kind == "mode":
+            if selected == CANCEL_CHOICE:
+                self._cancel_choice()
+                return
             _apply_session_mode(self.agent, self.cfg, selected)
             if selected == "thinking":
                 self._begin_choice("effort", [*EFFORT_CHOICES, CANCEL_CHOICE], "medium")
@@ -9793,7 +11128,6 @@ class PersistentChatTUI:
                 self.agent.ollama_options.pop("num_gpu", None)
                 self._runtime_device_mode = "gpu-preferred"
             self._persist_runtime_preferences("num_gpu")
-            _save_runtime_device_mode(self.chat_preferences_path, self._runtime_device_mode)
             self._open_settings_category("runtime", "device:")
             return
         if self._choice_kind == "CPU threads":
@@ -9843,13 +11177,7 @@ class PersistentChatTUI:
             if selected == RESET_THEME_CHOICE:
                 self.agent.max_steps = self.cfg.max_agent_steps
                 self._runtime_preferences.pop("max_steps", None)
-                try:
-                    _save_runtime_preferences(
-                        self.chat_preferences_path,
-                        self._runtime_preferences,
-                    )
-                except OSError as exc:
-                    self.status_error = f"runtime settings were not saved: {exc}"
+                self._persist_runtime_preferences(remove=("max_steps",))
             else:
                 self.agent.max_steps = int(selected.rsplit("·", 1)[1].split()[0])
                 self._persist_runtime_preferences("max_steps")
@@ -9864,13 +11192,7 @@ class PersistentChatTUI:
                     self.cfg, "max_subagent_concurrency", 0
                 )
                 self._runtime_preferences.pop("max_subagent_concurrency", None)
-                try:
-                    _save_runtime_preferences(
-                        self.chat_preferences_path,
-                        self._runtime_preferences,
-                    )
-                except OSError as exc:
-                    self.status_error = f"runtime settings were not saved: {exc}"
+                self._persist_runtime_preferences(remove=("max_subagent_concurrency",))
             else:
                 self.agent.max_subagent_concurrency = (
                     0 if selected == "auto (provider-aware)" else int(selected)
@@ -9900,14 +11222,21 @@ class PersistentChatTUI:
             self._hide_permission_preview()
             self._save_permission_settings(policies)
             return
+        if self._choice_kind == "mcp permission tools":
+            if selected == "back":
+                self._open_settings_category("permissions", f"{self._permission_mcp_server}:")
+                return
+            self._change_mcp_server_permissions(selected)
+            return
         if selected == CANCEL_CHOICE:
             self._cancel_choice()
             return
         if self._choice_kind == "settings":
-            if selected == "models":
+            category = selected.split(":", 1)[0].casefold()
+            if category == "models":
                 self._open_model_source("settings")
             else:
-                self._open_settings_category(selected)
+                self._open_settings_category(category)
             return
         if self._choice_kind in {
             "theme settings",
@@ -9915,6 +11244,8 @@ class PersistentChatTUI:
             "memory settings",
             "skills settings",
             "providers settings",
+            "mcp settings",
+            "provider key settings",
             "tools settings",
             "permission settings",
             "runtime settings",
@@ -9924,7 +11255,12 @@ class PersistentChatTUI:
         if selected == RESET_THEME_CHOICE:
             if self._choice_kind == "model":
                 default_model = self.cfg.models.get("coder", "")
-                installed = set(_agent_local_ollama(self.agent).list_models())
+                if not self._local_models_loaded_at:
+                    self._refresh_local_models()
+                    self.status_error = "Checking default model; select reset again after discovery"
+                    self.application.invalidate()
+                    return
+                installed = {item.model_id for item in self._local_models}
                 if not default_model or default_model not in installed:
                     self.status_error = "configured default model is not installed"
                     self.application.invalidate()
@@ -9942,17 +11278,14 @@ class PersistentChatTUI:
             if info is None:
                 self.status_error = "select a model row"
                 return
-            self._choice_prior_model = self.agent.model
-            self._choice_prior_model_info = getattr(self.agent, "model_info", None)
             try:
-                _set_agent_model(self.agent, self.cfg, _agent_local_ollama(self.agent), info)
+                self._activate_selected_model(info)
             except (CodexAuthError, RuntimeError, ValueError) as exc:
                 self._choice_prior_model = None
                 self._choice_prior_model_info = None
                 self.status_error = str(exc)
                 self.application.invalidate()
                 return
-            self._begin_choice("mode", [*REASONING_MODES, CANCEL_CHOICE], "standard")
             return
         if self._choice_kind in {"theme", "text theme"}:
             self._apply_appearance_choice(self._choice_kind, selected)
@@ -9974,6 +11307,7 @@ class PersistentChatTUI:
             self._set_input("")
             self._commit_appearance(
                 f"input field height: {selected}",
+                fields=("input_height", "input_max_height"),
             )
             self._open_settings_category("input field", "height:")
             return
@@ -9992,35 +11326,142 @@ class PersistentChatTUI:
         self._choice_kind = None
         self._choice_values = []
         self._set_input("")
-        self._commit_appearance(f"{kind}: {label}", reset=reset)
+        self._commit_appearance(
+            f"{kind}: {label}", reset=reset,
+            fields=("theme",) if kind == "theme" else ("text_theme",),
+        )
 
-    def _commit_appearance(self, message: str, *, reset: bool = False) -> None:
+    def _commit_appearance(
+        self, message: str, *, reset: bool = False, fields: tuple[str, ...] | None = None
+    ) -> None:
         self.application.style = _tui_style(
             self.appearance.theme,
             self.appearance.text_theme,
         )
         self._apply_field_settings()
-        try:
-            _save_tui_appearance(self.appearance_path, self.appearance)
-        except OSError as exc:
-            self.status_error = f"appearance was not saved: {exc}"
-            self._append(f"\n[appearance] {message} applied for this session only.\n")
-        else:
-            reset_note = " (default restored)" if reset else ""
-            self._append(f"\n[appearance] {message}{reset_note}\n")
+        self._appearance_save_revision = self._appearance_writer.submit(
+            _appearance_changes(self.appearance, fields=fields)
+        )
+        self._appearance_save_state = "saving"
+        if self.status_error.startswith("Appearance save"):
+            self.status_error = ""
+        reset_note = " (default restored)" if reset else ""
+        self._append(f"\n[appearance] {message}{reset_note} · applied; saving.\n")
         self.activity = "ready" if not self.running else self.activity
         self.application.invalidate()
 
-    def _settings_categories(self) -> list[str]:
-        return list(SETTINGS_CATEGORIES)
+    def _settings_overview_paths(self) -> tuple[str, str]:
+        return str(getattr(self.memory, "sessions_db", "")), str(self.cfg.mcp_servers_file)
 
-    def _open_settings_category(self, category: str, default: str | None = None) -> None:
+    def _refresh_settings_overview(self) -> None:
+        if self.shutting_down:
+            return
+        scope = self._settings_overview_paths()
+        if scope != self._settings_overview_scope:
+            self._invalidate_settings_overview()
+            self._settings_overview = SettingsOverviewSnapshot()
+            self._settings_overview_scope = scope
+        if self._settings_overview_request is not None:
+            return
+        if self._settings_overview_checked_at and (
+            time.monotonic() - self._settings_overview_checked_at < 30
+        ):
+            return
+        identity = self._background_jobs.submit(
+            "settings-overview", {
+                "kind": "settings_overview", "sessions_db": scope[0], "mcp_file": scope[1]
+            }, timeout=8,
+        )
+        self._settings_overview_request = (identity, self.session_id, scope)
+
+    def _invalidate_settings_overview(self) -> None:
+        self._background_jobs.cancel("settings-overview")
+        self._settings_overview_request = None
+        self._settings_overview_checked_at = 0.0
+
+    def _settings_categories(self) -> list[str]:
+        snapshot = (
+            self._settings_overview
+            if self._settings_overview_scope == self._settings_overview_paths()
+            else SettingsOverviewSnapshot()
+        )
+        memory_state, mcp_detail = snapshot.labels(
+            loading=self._settings_overview_request is not None, now=time.monotonic()
+        )
+        if self._memory_save_state in {"saving", "failed"}:
+            memory_state += (
+                " · saving preference" if self._memory_save_state == "saving"
+                else " · preference save unconfirmed"
+            )
+        configured_providers = sum(
+            bool(getattr(self.cfg, attribute, ""))
+            for _env_name, attribute in PROVIDER_API_KEY_PROVIDERS.values()
+        )
+        provider_total = len(PROVIDER_API_KEY_PROVIDERS)
+        permission_names = _permission_tool_names(self.agent)
+        permission_preset = _permission_preset_name(
+            _effective_permission_policies(self.agent, self.cfg),
+            permission_names,
+        )
+        device = {
+            "auto": "auto",
+            "cpu-only": "CPU only",
+            "gpu-preferred": "GPU preferred",
+            "gpu-only": "GPU only",
+        }[self._runtime_device_mode]
+        mode = getattr(self.agent, "reasoning_mode", "standard")
+        model_detail = _agent_model_ref(self.agent)
+        if self._model_save_state:
+            model_detail += (
+                " · saving preference" if self._model_save_state == "saving"
+                else " · preference saved" if self._model_save_state == "saved"
+                else " · preference save unconfirmed"
+            )
+        if mode != "standard":
+            model_detail += f" · {mode} {_agent_effort_label(self.agent)}"
+        return [
+            _choice_section("APPEARANCE"),
+            f"Theme: {TUI_THEME_LABELS[self.appearance.theme]} · "
+            f"{TEXT_THEME_LABELS[self.appearance.text_theme]}",
+            f"Input field: {self.appearance.input_height}–"
+            f"{self.appearance.input_max_height} lines · "
+            f"border {'on' if self.appearance.input_border else 'off'}",
+            _choice_section("ASSISTANT"),
+            f"Models: {model_detail}",
+            f"Providers: {configured_providers}/{provider_total} API keys",
+            f"MCP servers: {mcp_detail}",
+            f"Memory: {memory_state}",
+            "Skills: installed inventory",
+            _choice_section("CAPABILITIES & SAFETY"),
+            "Tools: availability, providers, and validation",
+            f"Permissions: {permission_preset}",
+            _choice_section("ADVANCED"),
+            f"Runtime: {device} · {self.agent.max_steps} steps · "
+            f"{_subagent_parallelism_label(self.agent)} workers",
+            RESET_THEME_CHOICE,
+            CANCEL_CHOICE,
+        ]
+
+    def _open_settings_category(
+        self, category: str, default: str | None = None, *, restore: bool = False
+    ) -> None:
+        if category == "permissions" and self._choice_kind not in {
+            "mcp settings", "permission settings", "mcp permission tools", "permission preset"
+        }:
+            self._permission_return_to_mcp = False
+        begin_choice = partial(self._begin_choice, restore=restore, refresh=True)
         if category == "models":
             self._open_model_source("settings")
             return
+        if category in {"memory", "mcp servers"}:
+            self._invalidate_settings_overview()
         category_kind = (
             "permission settings" if category == "permissions" else f"{category} settings"
         )
+        if restore and default is not None:
+            saved = self._picker_states.get((category_kind, ""))
+            if saved is not None:
+                saved.focus(default.split(":", 1)[0].casefold())
         if (
             default is None
             and self._choice_kind == category_kind
@@ -10041,7 +11482,7 @@ class PersistentChatTUI:
                 RESET_THEME_CHOICE,
                 CANCEL_CHOICE,
             ]
-            self._begin_choice(
+            begin_choice(
                 "theme settings", choices, _settings_choice_default(choices, default)
             )
             return
@@ -10054,18 +11495,45 @@ class PersistentChatTUI:
                 RESET_THEME_CHOICE,
                 CANCEL_CHOICE,
             ]
-            self._begin_choice(
+            begin_choice(
                 "input field settings", choices, _settings_choice_default(choices, default)
             )
             return
         if category == "memory":
-            facts = self.memory.list_facts()
+            self._refresh_memory_inventory()
+            inventory = self._memory_inventory
+            enabled = self._status_memory_enabled
+            toggle = (
+                f"automatic memory: {'on' if enabled else 'off'} (toggle)"
+                if enabled is not None else _choice_unavailable(
+                    "automatic memory: unavailable" if self._memory_inventory_error
+                    else "automatic memory: loading"
+                )
+            )
             choices = [
                 _choice_section("MEMORY"),
-                f"automatic memory: {'on' if self.memory.auto_memory_enabled() else 'off'} "
-                "(toggle)",
-                _choice_info(f"Durable facts: {len(facts)}"),
+                toggle,
             ]
+            if self._memory_inventory_request:
+                choices.append(_choice_info("Loading memory inventory…"))
+            if self._memory_inventory_error:
+                choices.append(_choice_info(
+                    "Memory inventory unavailable; previous snapshot retained"
+                ))
+            facts = inventory.get("facts", []) if inventory else []
+            if inventory is not None:
+                age = max(0, int(time.monotonic() - self._memory_inventory_loaded_at))
+                choices.append(_choice_info(
+                    f"Durable facts: {inventory['count']} · snapshot {age}s old"
+                ))
+                if inventory.get("hidden"):
+                    choices.append(_choice_info(f"Sensitive facts hidden: {inventory['hidden']}"))
+            if self._memory_save_state:
+                choices.append(_choice_info(
+                    "Saving memory preference…" if self._memory_save_state == "saving"
+                    else "Memory preference saved" if self._memory_save_state == "saved"
+                    else "Memory preference save unconfirmed · active for this process"
+                ))
             if facts:
                 choices.extend(
                     [
@@ -10078,28 +11546,39 @@ class PersistentChatTUI:
                     ]
                 )
             choices.extend([RESET_THEME_CHOICE, "back", CANCEL_CHOICE])
-            self._begin_choice(
+            begin_choice(
                 "memory settings", choices, _settings_choice_default(choices, default)
             )
             return
         if category == "skills":
-            from klaude_knowledge import list_installed_skills
-
-            installed = list_installed_skills(self.cfg)
+            installed = self._skills_inventory
             choices = [
                 _choice_section("INSTALLED SKILLS"),
-                _choice_info(f"Installed: {len(installed)}"),
             ]
-            if installed:
-                choices.extend(
-                    _choice_info(
-                        f"{skill.get('name', '?')} · library {skill.get('library', '?')} · "
-                        f"{len(skill.get('indexed_files', []))} indexed files"
-                    )
-                    for skill in installed
-                )
+            if installed is None:
+                choices.append(_choice_info("Loading installed skills…"))
             else:
+                choices.append(_choice_info(f"Installed: {len(installed)}"))
+            if installed:
+                for skill in installed:
+                    indexed_files = skill.get("indexed_files", [])
+                    indexed_count = (
+                        len(indexed_files) if isinstance(indexed_files, list) else 0
+                    )
+                    file_count = skill.get("indexed_file_count")
+                    if type(file_count) is int:
+                        indexed_count = file_count
+                    choices.append(
+                        _choice_info(
+                            f"{skill.get('name', '?')} · "
+                            f"library {skill.get('library', '?')} · "
+                            f"{indexed_count} indexed files"
+                        )
+                    )
+            elif installed is not None:
                 choices.append(_choice_info("No skills installed"))
+            if self._skills_inventory_error:
+                choices.append(_choice_info(self._skills_inventory_error))
             choices.extend(
                 [
                     "",
@@ -10108,9 +11587,10 @@ class PersistentChatTUI:
                     CANCEL_CHOICE,
                 ]
             )
-            self._begin_choice(
+            begin_choice(
                 "skills settings", choices, _settings_choice_default(choices, default)
             )
+            self._refresh_skills_inventory()
             return
         if category == "providers":
             choices = []
@@ -10122,11 +11602,12 @@ class PersistentChatTUI:
                     _env_name, attribute = PROVIDER_API_KEY_PROVIDERS[label]
                     configured = bool(getattr(self.cfg, attribute, ""))
                     choices.append(f"{label}: {'configured' if configured else 'not configured'}")
-                    if configured:
-                        choices.append(f"remove {label} key")
             choices.extend(
                 [
                     "",
+                    _choice_info(
+                        "OpenAI Codex login: klaude auth login openai-codex"
+                    ),
                     _choice_info(
                         "Gemini API is shared by Gemini chat and Google web search"
                     ),
@@ -10135,10 +11616,72 @@ class PersistentChatTUI:
                     CANCEL_CHOICE,
                 ]
             )
-            self._begin_choice(
+            begin_choice(
                 "providers settings", choices, _settings_choice_default(choices, default)
             )
             return
+
+        if category == "mcp servers":
+            self._refresh_mcp_inventory()
+            choices = [
+                _choice_section("SET UP"),
+                "Add custom MCP server",
+                "Import MCP configuration",
+                _choice_section("DISCOVER"),
+                "Search official MCP Registry",
+                _choice_info("Registry entries are metadata, not security endorsements"),
+                _choice_section("CONFIGURED SERVERS"),
+                "MCP server permissions",
+                "Reload configured MCP tools",
+            ]
+            inventory = self._mcp_inventory
+            if self._mcp_mutation_pending:
+                choices.append(_choice_info(
+                    "Reloading configured tools…" if isinstance(
+                        self._mcp_mutation_pending[0], MCPReload
+                    ) else f"Saving {self._mcp_mutation_pending[0].name} — "
+                    "accepted write continues if you leave this page"
+                ))
+            if self._mcp_catalog_unconfirmed:
+                choices.append(_choice_info("Queued work paused; reload to verify current tools"))
+            if self._mcp_inventory_request:
+                choices.append(_choice_info("Loading configured MCP servers…"))
+            if self._mcp_inventory_error:
+                choices.append(_choice_info(
+                    "MCP inventory unavailable; previous snapshot retained"
+                ))
+            if inventory is not None:
+                age = max(0, int(time.monotonic() - self._mcp_inventory_loaded_at))
+                choices.append(_choice_info(f"Configuration snapshot {age}s old"))
+                for server in inventory["servers"]:
+                    auth = " · OAuth" if server["oauth"] else ""
+                    label = (
+                        f"{server['name']}: {'on' if server['enabled'] else 'off'} (toggle) · "
+                        f"{server['transport']}{auth} · {server['tool_count']} tools"
+                    )
+                    if not server["enabled"] and not server["tool_count"]:
+                        action = "sign in and enable" if server["oauth"] else "review and enable"
+                        label += f" — {action}"
+                    choices.append(label)
+                if not inventory["servers"]:
+                    choices.append(_choice_info("No MCP servers configured"))
+                if inventory["truncated"]:
+                    choices.append(_choice_info(
+                        "Showing first 1,000 servers; inventory incomplete"
+                    ))
+            choices.extend(
+                [
+                    _choice_info("New and imported servers are saved disabled for review"),
+                    _choice_info("External tools default to ASK permission"),
+                    "back",
+                    CANCEL_CHOICE,
+                ]
+            )
+            begin_choice(
+                "mcp settings", choices, _settings_choice_default(choices, default)
+            )
+            return
+
         if category == "runtime":
             device = {
                 "auto": "auto (Klaude decides)",
@@ -10149,6 +11692,13 @@ class PersistentChatTUI:
             threads = self.agent.ollama_options.get("num_thread")
             thread_label = str(threads) if threads else "auto (Klaude decides)"
             context = int(self.agent.ollama_options.get("num_ctx", 8192))
+            config_editor = "edit config.toml (nano)"
+            preferences_editor = "edit runtime preferences (nano)"
+            if shutil.which("nano") is None:
+                config_editor = _choice_unavailable(f"{config_editor} — nano unavailable")
+                preferences_editor = _choice_unavailable(
+                    f"{preferences_editor} — nano unavailable"
+                )
             choices = [
                 _choice_section("EXECUTION"),
                 f"turn limit: {self.agent.max_steps} steps",
@@ -10158,15 +11708,19 @@ class PersistentChatTUI:
                 _choice_section("PERFORMANCE"),
                 f"CPU threads: {thread_label}",
                 f"context size: {context:,}",
-                "auto calibrate",
+                "cancel calibration" if self._calibration_request else "auto calibrate",
+                *([_choice_info("Reading local hardware…")] if self._calibration_request else []),
                 _choice_section("FILES"),
-                "edit config.toml (nano)",
-                "edit runtime preferences (nano)",
+                *([_choice_info(
+                    self._preference_save_hint()
+                )] if self._runtime_save_state else []),
+                config_editor,
+                preferences_editor,
                 "back",
                 RESET_THEME_CHOICE,
                 CANCEL_CHOICE,
             ]
-            self._begin_choice(
+            begin_choice(
                 "runtime settings", choices, _settings_choice_default(choices, default)
             )
             return
@@ -10174,6 +11728,7 @@ class PersistentChatTUI:
             names = _permission_tool_names(self.agent)
             policies = _effective_permission_policies(self.agent, self.cfg)
             preset = _permission_preset_name(policies, names)
+            mcp_servers = _mcp_permission_server_rows(self.agent)
             choices = [
                 _choice_section("PRESET"),
                 f"Current configuration: {preset.upper()}",
@@ -10182,18 +11737,29 @@ class PersistentChatTUI:
                 if group_index or choices:
                     choices.append("")
                 choices.append(_choice_section(group_name))
-                choices.extend(f"{label}: {policies[name].upper()}" for name, label in rows)
+                if group_name == "MCP SERVERS":
+                    choices.extend(
+                        _mcp_server_permission_label(server, tools, policies)
+                        for server, tools in mcp_servers.items()
+                    )
+                else:
+                    choices.extend(f"{label}: {policies[name].upper()}" for name, label in rows)
+            if not mcp_servers:
+                choices.extend([
+                    "", _choice_section("MCP SERVERS"),
+                    _choice_info("Enable an MCP server to configure its tools"),
+                ])
             choices.extend([RESET_THEME_CHOICE, "back", CANCEL_CHOICE])
-            self._begin_choice(
+            begin_choice(
                 "permission settings",
                 choices,
                 _settings_choice_default(choices, default),
             )
             return
         if category == "tools":
-            values = _tool_validation_preferences(self.chat_preferences_path)
-            availability = _tool_availability_preferences(self.chat_preferences_path)
-            providers = _web_provider_preferences(self.chat_preferences_path, self.cfg)
+            values = self._tool_validation
+            availability = self._tool_availability
+            providers = self._web_provider_availability
             ordered_provider_names = [
                 name for name in self.cfg.web_search.provider_order if name in providers
             ]
@@ -10221,7 +11787,7 @@ class PersistentChatTUI:
                 RESET_THEME_CHOICE,
                 CANCEL_CHOICE,
             ]
-            self._begin_choice(
+            begin_choice(
                 "tools settings", choices, _settings_choice_default(choices, default)
             )
             return
@@ -10236,41 +11802,95 @@ class PersistentChatTUI:
         current = _effective_permission_policies(self.agent, self.cfg)
         preset = _permission_preset_name(current, names)
         self._permission_custom_snapshot = dict(current) if preset == "Custom" else None
+        custom: str = "Custom"
+        if self._permission_custom_snapshot is None:
+            custom = _choice_unavailable("Custom")
         self._begin_choice(
             "permission preset",
-            [*PERMISSION_PRESETS, "back", RESET_THEME_CHOICE, CANCEL_CHOICE],
+            [custom, *PERMISSION_PRESETS[1:], "back", RESET_THEME_CHOICE, CANCEL_CHOICE],
             preset,
         )
+
+    def _open_mcp_permission_server(self, server: str, default: str | None = None) -> None:
+        rows = _mcp_permission_server_rows(self.agent).get(server)
+        if not rows:
+            self._open_settings_category("permissions")
+            self.status_error = f"No active tools for MCP server {server}"
+            return
+        self._permission_mcp_server = server
+        policies = _effective_permission_policies(self.agent, self.cfg)
+        choices = [
+            _choice_section(f"MCP SERVER · {server.upper()}"),
+            _choice_info(f"Current: {_mcp_server_permission_state(rows, policies)}"),
+            "ALLOW ALL",
+            "ASK FOR EACH TOOL",
+            "DENY ALL",
+            _choice_section("INDIVIDUAL TOOLS"),
+            *(f"{label}: {policies[name].upper()}" for name, label in rows),
+            "back",
+        ]
+        self._begin_choice(
+            "mcp permission tools", choices, _settings_choice_default(choices, default)
+        )
+
+    def _change_mcp_server_permissions(self, selected: str) -> None:
+        server = self._permission_mcp_server
+        rows = _mcp_permission_server_rows(self.agent).get(server or "", [])
+        if not rows:
+            self._open_settings_category("permissions")
+            self.status_error = "MCP tools changed; reopen the server permissions"
+            return
+        policies = _effective_permission_policies(self.agent, self.cfg)
+        bulk = {
+            "ALLOW ALL": "allow",
+            "ASK FOR EACH TOOL": "ask",
+            "DENY ALL": "deny",
+        }
+        if selected in bulk:
+            changed = {name: bulk[selected] for name, _label in rows}
+        else:
+            matches = [
+                name for name, label in rows
+                if selected == f"{label}: {policies[name].upper()}"
+            ]
+            if len(matches) != 1:
+                self.status_error = "Select an MCP tool permission row"
+                return
+            name = matches[0]
+            changed = {name: {"ask": "allow", "allow": "deny", "deny": "ask"}[policies[name]]}
+        self._submit_preference_changes({
+            ("permissions", name): policy for name, policy in changed.items()
+        })
+        if not hasattr(self.agent.gate, "policies"):
+            self.agent.gate.policies = {}
+        self.agent.gate.policies.update(changed)
+        getattr(self.agent.gate, "process_grants", set()).clear()
+        self.status_error = ""
+        self._open_mcp_permission_server(server or "", selected)
 
     def _save_permission_settings(
         self,
         policies: dict[str, str],
         default: str = "Current configuration:",
+        *, tool: str | None = None,
     ) -> None:
-        preferences = _load_chat_preferences(self.chat_preferences_path)
-        preferences["permissions"] = dict(policies)
-        try:
-            _write_chat_preferences(self.chat_preferences_path, preferences)
-        except OSError as exc:
-            self._append(f"\n[error] permission settings were not saved: {exc}\n")
-            self._open_settings_category("permissions")
-            return
+        self._submit_preference_changes(
+            {("permissions", tool): policies[tool]} if tool is not None
+            else {("permissions",): dict(policies)}
+        )
         if not hasattr(self.agent.gate, "policies"):
             self.agent.gate.policies = {}
-        self.agent.gate.policies.update(policies)
+        self.agent.gate.policies.update({
+            name: policy for name, policy in policies.items()
+            if name in _permission_tool_names(self.agent) and policy in {"ask", "allow", "deny"}
+            and (tool is None or name == tool)
+        })
         getattr(self.agent.gate, "process_grants", set()).clear()
         self.status_error = ""
         self._open_settings_category("permissions", default)
 
     def _reset_permission_settings(self, default: str = RESET_THEME_CHOICE) -> None:
-        preferences = _load_chat_preferences(self.chat_preferences_path)
-        preferences.pop("permissions", None)
-        try:
-            _write_chat_preferences(self.chat_preferences_path, preferences)
-        except OSError as exc:
-            self._append(f"\n[error] permission settings were not reset: {exc}\n")
-            self._open_settings_category("permissions")
-            return
+        self._submit_preference_changes({("permissions",): DELETE})
         names = _permission_tool_names(self.agent)
         configured = {**DEFAULT_PERMISSIONS, **self.cfg.permissions}
         if not hasattr(self.agent.gate, "policies"):
@@ -10280,9 +11900,1100 @@ class PersistentChatTUI:
         self.status_error = ""
         self._open_settings_category("permissions", default)
 
+    def _refresh_skills_inventory(self) -> None:
+        """Load the optional knowledge package without blocking the TUI input thread."""
+        if self._skills_inventory_loading:
+            return
+        if (
+            self._skills_inventory_loaded_at
+            and time.monotonic() - self._skills_inventory_loaded_at
+            < self._SKILLS_INVENTORY_CACHE_SECONDS
+        ):
+            return
+        self._skills_inventory_loading = True
+
+        self._background_jobs.submit(
+            "skills", {"kind": "skills", "skills_dir": str(self.cfg.skills_dir)}, timeout=15
+        )
+
+    def _refresh_mcp_inventory(self) -> None:
+        scope = str(self.cfg.mcp_servers_file)
+        if scope != self._mcp_inventory_scope:
+            self._background_jobs.cancel("mcp-inventory")
+            self._mcp_inventory_scope = scope
+            self._mcp_inventory = None
+            self._mcp_inventory_request = None
+            self._mcp_inventory_loaded_at = 0
+            self._mcp_inventory_error = ""
+        if self._mcp_inventory_request or self._mcp_inventory_error or (
+            self._mcp_inventory_loaded_at
+            and time.monotonic() - self._mcp_inventory_loaded_at < 30
+        ):
+            return
+        identity = self._background_jobs.submit("mcp-inventory", {
+            "kind": "mcp_inventory", "mcp_file": scope,
+        }, timeout=8)
+        self._mcp_inventory_request = (identity, self.session_id, scope)
+
+    def _invalidate_mcp_inventory(self) -> None:
+        self._background_jobs.cancel("mcp-inventory")
+        self._mcp_inventory_request = None
+        self._mcp_inventory_loaded_at = 0
+        self._mcp_inventory_error = ""
+
+    def _review_mcp_server(self, name: str) -> None:
+        self._mcp_enable_fingerprint = ""
+        self._begin_choice("mcp review", [
+            _choice_info(f"Reviewing {name} configuration…"), CANCEL_CHOICE,
+        ], CANCEL_CHOICE)
+        path = str(self.cfg.mcp_servers_file)
+        identity = self._background_jobs.submit("mcp-review", {
+            "kind": "mcp_review", "mcp_file": path, "name": name,
+        }, timeout=8)
+        self._mcp_review_request = (identity, self.session_id, path, name)
+
+    def _memory_paths(self) -> tuple[str, str]:
+        return str(getattr(self.memory, "sessions_db", "")), str(
+            getattr(self.memory, "memory_file", "")
+        )
+
+    def _refresh_memory_inventory(self) -> None:
+        scope = self._memory_paths()
+        if scope != self._memory_inventory_scope:
+            self._background_jobs.cancel("memory-inventory")
+            self._memory_inventory_scope = scope
+            self._memory_inventory = None
+            self._memory_inventory_request = None
+            self._memory_inventory_loaded_at = 0
+            self._memory_inventory_error = ""
+        if self._memory_inventory_request or (
+            self._memory_inventory_loaded_at
+            and time.monotonic() - self._memory_inventory_loaded_at < 30
+        ):
+            return
+        if self._memory_inventory_error:
+            return  # navigation reopens a failed inventory explicitly below
+        identity = self._background_jobs.submit("memory-inventory", {
+            "kind": "memory_inventory", "sessions_db": scope[0], "memory_file": scope[1],
+        }, timeout=8)
+        self._memory_inventory_request = (
+            identity, self.session_id, scope, self._memory_save_revision
+        )
+
+    def _set_automatic_memory(self, enabled: bool) -> None:
+        self._background_jobs.cancel("memory-inventory")
+        self._memory_inventory_request = None
+        self._memory_save_revision += 1
+        self._memory_save_state = "saving"
+        self.memory.set_auto_memory_override(enabled)
+        self._status_memory_enabled = enabled
+        self._invalidate_status_metadata()
+        self._invalidate_settings_overview()
+        self._settings_overview = self._settings_overview.with_memory(enabled, time.monotonic())
+        if not self._session_actions.submit(AutomaticMemoryUpdate(
+            self.session_id, self.client_id, self._memory_save_revision, enabled
+        )):
+            self._memory_save_state = "failed"
+            self._append(
+                "\n[warning] Memory preference save rejected; active for this process only.\n"
+            )
+
+    def _cancel_inventory_job(self, kind: str | None) -> None:
+        if kind == "mcp review":
+            self._background_jobs.cancel("mcp-review")
+            self._mcp_review_request = None
+        if kind in {"mcp settings", "mcp registry detail"}:
+            self._background_jobs.cancel("mcp-inventory")
+            self._mcp_inventory_request = None
+            self._mcp_inventory_error = ""
+        if kind == "memory settings":
+            self._background_jobs.cancel("memory-inventory")
+            self._memory_inventory_request = None
+            self._memory_inventory_error = ""
+        if kind == "settings":
+            self._background_jobs.cancel("settings-overview")
+            self._settings_overview_request = None
+        if kind == "runtime settings":
+            self._cancel_runtime_calibration()
+        if kind == "model":
+            self._background_jobs.cancel("local-models")
+            self._local_models_loading = False
+        elif kind == "skills settings":
+            self._background_jobs.cancel("skills")
+            self._skills_inventory_loading = False
+        elif kind == "mcp registry results":
+            self._background_jobs.cancel("mcp-search")
+            self._mcp_catalog_request_id = ""
+
+    def _apply_background_result(self, payload: object) -> None:
+        key, identity, result, error = cast(tuple[str, str, Any, str], payload)
+        if self.shutting_down or not self._background_jobs.current(key, identity):
+            return
+        if key == "mcp-review":
+            review = self._mcp_review_request
+            if (
+                review is None or review[:3] != (
+                    identity, self.session_id, str(self.cfg.mcp_servers_file)
+                )
+                or self._choice_kind != "mcp review"
+            ):
+                return
+            self._mcp_review_request = None
+            if (
+                error or not isinstance(result, dict) or result.get("name") != review[3]
+                or not isinstance(result.get("fingerprint"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", result["fingerprint"])
+                or result.get("enabled") is not False or result.get("tool_count") != 0
+                or type(result.get("oauth")) is not bool
+                or not isinstance(result.get("endpoint"), str) or len(result["endpoint"]) > 512
+            ):
+                self._invalidate_mcp_inventory()
+                self._open_settings_category("mcp servers")
+                self.status_error = (
+                    "MCP definition unavailable or changed; refresh and review again"
+                )
+                return
+            self._mcp_enable_name = review[3]
+            self._mcp_enable_fingerprint = result["fingerprint"]
+            verb = "Sign in to and enable" if result.get("oauth") else "Connect to and enable"
+            self._begin_choice("mcp enable confirmation", [
+                f"{verb} {review[3]}", _choice_info(f"Endpoint: {result['endpoint']}"),
+                _choice_info(f"Review full definition in {self.cfg.mcp_servers_file}"),
+                _choice_info(
+                    "External tools default to ASK; confirmation binds this exact definition"
+                ),
+                "back",
+            ], f"{verb} {review[3]}")
+        elif key == "mcp-inventory":
+            expected_mcp = self._mcp_inventory_request
+            self._mcp_inventory_request = None
+            if expected_mcp != (identity, self.session_id, str(self.cfg.mcp_servers_file)):
+                return
+            valid_mcp = (
+                isinstance(result, dict) and type(result.get("truncated")) is bool
+                and isinstance(result.get("servers"), list) and len(result["servers"]) <= 1000
+                and all(
+                    isinstance(item, dict) and isinstance(item.get("name"), str)
+                    and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", item["name"])
+                    and type(item.get("enabled")) is bool and type(item.get("oauth")) is bool
+                    and item.get("transport") in {"http", "stdio"}
+                    and type(item.get("tool_count")) is int and 0 <= item["tool_count"] <= 100_000
+                    and ("fingerprint" not in item or isinstance(item["fingerprint"], str)
+                         and re.fullmatch(r"[a-f0-9]{64}", item["fingerprint"]))
+                    for item in result["servers"]
+                )
+            )
+            if error or not valid_mcp:
+                self._mcp_inventory_error = "unavailable"
+            else:
+                self._mcp_inventory = result
+                self._mcp_inventory_loaded_at = time.monotonic()
+                self._mcp_inventory_error = ""
+            status_error = self.status_error
+            if self._choice_kind == "mcp settings":
+                self._open_settings_category("mcp servers")
+            elif self._choice_kind == "mcp registry detail" and self._mcp_detail_server is not None:
+                self._open_mcp_catalog_detail(self._mcp_detail_server)
+            self.status_error = status_error
+        elif key == "memory-inventory":
+            expected = self._memory_inventory_request
+            self._memory_inventory_request = None
+            if expected != (
+                identity, self.session_id, self._memory_paths(), self._memory_save_revision
+            ):
+                return
+            valid = (
+                isinstance(result, dict) and isinstance(result.get("enabled"), bool)
+                and type(result.get("count")) is int and 0 <= result["count"] <= 1_048_576
+                and type(result.get("hidden")) is int and 0 <= result["hidden"] <= result["count"]
+                and isinstance(result.get("facts"), list) and len(result["facts"]) <= 8
+                and all(isinstance(fact, str) and len(fact) <= 120 for fact in result["facts"])
+            )
+            if error or not valid:
+                self._memory_inventory_error = "unavailable"
+            else:
+                self._memory_inventory = result
+                self._memory_inventory_loaded_at = time.monotonic()
+                self._memory_inventory_error = ""
+                if self._memory_save_state not in {"saving", "failed"}:
+                    self._status_memory_enabled = result["enabled"]
+            if self._choice_kind == "memory settings":
+                error_before = self.status_error
+                self._open_settings_category("memory")
+                self.status_error = error_before
+        elif key == "settings-overview":
+            overview_request = self._settings_overview_request
+            self._settings_overview_request = None
+            if overview_request != (identity, self.session_id, self._settings_overview_paths()):
+                return
+            self._settings_overview_checked_at = time.monotonic()
+            if isinstance(result, dict) and self._memory_save_state in {"saving", "failed"}:
+                result = {**result, "memory_enabled": self._status_memory_enabled}
+            self._settings_overview = self._settings_overview.refreshed(
+                None if error else result, self._settings_overview_checked_at
+            )
+            if (
+                isinstance(result, dict) and not error
+                and type(result.get("memory_enabled")) is bool
+                and self._memory_save_state not in {"saving", "failed"}
+            ):
+                self._status_memory_enabled = result["memory_enabled"]
+            if self._choice_kind == "settings":
+                selected = (
+                    self._choice_values[self._choice_index] if self._choice_values else "theme"
+                )
+                status_error = self.status_error
+                self._begin_choice("settings", self._settings_categories(), selected, refresh=True)
+                self.status_error = status_error
+        elif key == "runtime-calibration":
+            request, self._calibration_request = self._calibration_request, None
+            if request != (
+                identity, self.session_id, _agent_model_ref(self.agent), self._calibration_state()
+            ) or self._choice_kind != "runtime settings" or self.running or self._watching_remote:
+                if self._choice_kind == "runtime settings":
+                    self._refresh_runtime_calibration_picker()
+                return
+            if error or not isinstance(result, dict) or (
+                type(result.get("num_thread")) is not int or not 1 <= result["num_thread"] <= 16
+                or type(result.get("num_ctx")) is not int
+                or result["num_ctx"] not in {8192, 16384, 32768, 65536}
+            ):
+                self.status_error = "Hardware calibration unavailable; settings unchanged"
+                self._refresh_runtime_calibration_picker()
+                return
+            self.agent.ollama_options.pop("num_gpu", None)
+            self._runtime_device_mode = "auto"
+            self.agent.ollama_options.update({
+                key: result[key] for key in ("num_thread", "num_ctx")
+            })
+            self.status_error = ""
+            self._persist_runtime_preferences("num_gpu", "num_thread", "num_ctx")
+            self.ui_state.context_window = result["num_ctx"]
+            self._append(
+                f"\n[runtime] auto calibrated · device auto · {result['num_thread']} CPU threads · "
+                f"{result['num_ctx']:,} context (hardware heuristic, not a model-fit test)\n"
+            )
+            self._refresh_runtime_calibration_picker()
+        elif key == "status-metadata":
+            self._status_metadata_loading = False
+            if self._status_metadata_request != (
+                self.session_id, self._session_title_hint, identity
+            ):
+                return
+            self._status_metadata_loaded_at = time.monotonic()
+            self._status_metadata_session = self.session_id
+            if not isinstance(result, dict) or error:
+                self._append(
+                    "\n[status] Session metadata unavailable; previous snapshot retained.\n"
+                )
+                return
+            title = result.get("assigned_title")
+            if isinstance(title, str) and title:
+                self._session_title_hint = title
+            enabled = result.get("memory_enabled")
+            if type(enabled) is bool and self._memory_save_state not in {"saving", "failed"}:
+                self._status_memory_enabled = enabled
+            self._append("\n[status · metadata]\n" + _status_columns([
+                ("Session name", self._session_title_hint),
+                ("Memory", "on" if self._status_memory_enabled else "off"),
+            ]) + "\n")
+        elif key == "model-activation":
+            future = self._model_activation_future
+            if identity == self._model_activation_id and future is not None and not future.done():
+                future.set_result(
+                    not error and isinstance(result, dict) and result.get("ready") is True
+                )
+        elif key == "local-models":
+            self._local_models_loading = False
+            self._local_models_loaded_at = time.monotonic()
+            self._local_models_error = (
+                "Ollama catalog unavailable; showing previous models" if error else ""
+            )
+            if isinstance(result, dict) and isinstance(result.get("names"), list):
+                self._local_models = [ModelInfo("ollama", name, name) for name in result["names"]]
+                if result.get("truncated"):
+                    self._local_models_error = "Inventory limited to 1,000 models"
+            if self._choice_kind == "model" and self._model_auth_backend == "ollama":
+                self._open_model_backend("ollama", self._model_parent)
+        elif key == "codex-usage":
+            self._codex_usage_loading = False
+            self._codex_usage_checked_at = time.monotonic()
+            if isinstance(result, dict):
+                self._codex_usage_loaded_at = time.monotonic()
+                from types import SimpleNamespace
+
+                buckets = []
+                for item in result.get("buckets", []):
+                    windows = {
+                        name: SimpleNamespace(**item[name]) if item.get(name) else None
+                        for name in ("primary", "secondary")
+                    }
+                    buckets.append(SimpleNamespace(
+                        limit_id=item.get("limit_id", ""), limit_name=item.get("limit_name", ""),
+                        model=item.get("model", ""), **windows,
+                    ))
+                self._codex_usage_rows_cache = _codex_usage_snapshot_rows(
+                    SimpleNamespace(buckets=buckets)
+                )
+            elif self._codex_usage_rows_cache is None:
+                self._codex_usage_rows_cache = [
+                    ("Codex limits", "temporarily unavailable"),
+                    ("Usage details", "https://chatgpt.com/codex/settings/usage"),
+                ]
+            if (
+                self._codex_usage_request == (self.session_id, identity)
+                and getattr(getattr(self.agent, "model_info", None), "backend", "")
+                == "openai_codex"
+            ):
+                self._append(
+                    "\n[status · account limits]\n"
+                    + _status_columns(self._codex_usage_rows_cache) + "\n"
+                    + ("Limits refresh unavailable; previous snapshot retained.\n" if error else "")
+                )
+        elif key == "skills":
+            installed = result.get("skills") if isinstance(result, dict) else None
+            if isinstance(result, dict) and result.get("truncated"):
+                error = "Inventory limited to 1,000 manifests"
+            self._events.put(("skills_inventory", (installed, error)))
+        elif key == "codex-status":
+            self._events.put((
+                "codex_auth_status", (result if type(result) is bool else None, error)
+            ))
+        elif key == "mcp-suggestions":
+            if not self._mcp_catalog_query or self.input.text.strip() != self._mcp_suggestion_query:
+                return
+            if isinstance(result, dict):
+                self._mcp_suggestion_names = [
+                    item["name"] for item in result.get("servers", [])
+                    if isinstance(item, dict) and isinstance(item.get("name"), str)
+                ][:200]
+                document = self.input.buffer.document
+                completions = list(self.input.completer.get_completions(document, None))
+                self.input.buffer.complete_state = CompletionState(document, completions)
+                self.input.buffer.on_completions_changed.fire()
+        elif key == "mcp-search":
+            from klaude_core.mcp_catalog import MCPCatalogServer
+
+            results = (
+                [MCPCatalogServer(**item) for item in result.get("servers", [])]
+                if isinstance(result, dict) else []
+            )
+            self._events.put(("mcp_catalog_results", (
+                identity, results,
+                bool(result.get("cached")) if isinstance(result, dict) else False, error
+            )))
+        elif key.startswith("models:"):
+            backend = key.removeprefix("models:")
+            if isinstance(result, dict) and not result.get("updated"):
+                if result.get("reason") == "stale":
+                    return
+                error = "No models reported; previous catalog retained"
+            self._events.put(("model_catalog_refreshed", (backend, error)))
+
+    def _begin_mcp_catalog_query(self) -> None:
+        self._background_jobs.cancel("mcp-suggestions")
+        self._choice_kind = None
+        self._choice_values = []
+        self._mcp_catalog_query = True
+        self._mcp_suggestion_query = None
+        self._mcp_suggestion_due = time.monotonic() + 0.35
+        self.status_error = ""
+        self.activity = "search MCP registry"
+        self._set_input("")
+        document = self.input.buffer.document
+        completions = list(self.input.completer.get_completions(document, None))
+        self.input.buffer.complete_state = CompletionState(document, completions)
+        self.input.buffer.on_completions_changed.fire()
+        self.application.invalidate()
+
+    def _mcp_search_suggestions(self, query: str):
+        if not self._mcp_catalog_query:
+            return None
+        from .mcp_suggestions import search_suggestions
+
+        return search_suggestions(
+            query, [*self._mcp_suggestion_names,
+                    *(server.name for server in self._mcp_catalog_results.values())]
+        )
+
+    def _refresh_mcp_suggestions(self) -> None:
+        if not self._mcp_catalog_query:
+            if self._mcp_suggestion_query is not None:
+                self._background_jobs.cancel("mcp-suggestions")
+                self._mcp_suggestion_query = None
+            return
+        query = self.input.text.strip()
+        if (time.monotonic() < self._mcp_suggestion_due
+                or query == self._mcp_suggestion_query or not 1 <= len(query) <= 120):
+            return
+        self._mcp_suggestion_query = query
+        self._background_jobs.submit(
+            "mcp-suggestions", {"kind": "mcp_search", "query": query,
+                                "cache_file": str(self.cfg.mcp_registry_cache_file)}, timeout=20,
+        )
+
+    def _begin_settings_input(
+        self,
+        label: str,
+        prompt: str,
+        callback: tuple[object, ...],
+    ) -> None:
+        """Collect non-secret setup text without publishing it as chat input."""
+        self._choice_kind = None
+        self._choice_values = []
+        self._set_input("")
+        self._settings_input_request = {
+            "label": label,
+            "prompt": prompt,
+            "on_submit": callback,
+        }
+        self.activity = "waiting for setup input"
+        self.status_error = ""
+        self.application.invalidate()
+
+    def _submit_settings_input_response(self) -> None:
+        value = self.input.text.strip()
+        self._answer_settings_input(value)
+
+    def _answer_settings_input(self, value: str | None) -> None:
+        request = self._settings_input_request
+        if request is None:
+            return
+        callback = request.get("on_submit")
+        self._settings_input_request = None
+        self._set_input("")
+        if value is None:
+            self._mcp_setup = None
+            self.activity = "setup cancelled"
+            self.status_error = ""
+            self._open_settings_category("mcp servers")
+            return
+        if not isinstance(callback, tuple) or not callback:
+            self.status_error = "setup input could not be applied"
+            self._open_settings_category("mcp servers")
+            return
+        action = str(callback[0])
+        if action == "mcp_import":
+            self._import_mcp_configuration(value)
+        elif action == "mcp_custom_name":
+            self._continue_custom_mcp_name(value)
+        elif action == "mcp_custom_endpoint":
+            self._continue_custom_mcp_endpoint(value)
+        elif action == "mcp_plan_input":
+            self._accept_mcp_plan_input(value)
+
+    def _begin_custom_mcp(self) -> None:
+        self._mcp_setup = None
+        self._begin_choice(
+            "mcp transport",
+            ["Remote · Streamable HTTP", "Local · stdio command", "back"],
+            "Remote · Streamable HTTP",
+        )
+
+    def _continue_custom_mcp_name(self, value: str) -> None:
+        try:
+            name = _mcp_local_name(value)
+            if name != value:
+                raise ValueError("use only letters, numbers, '.', '_' or '-'")
+            if name in _mcp_registry().load():
+                raise ValueError(f"MCP server {name!r} already exists")
+        except (OSError, ValueError, typer.BadParameter) as exc:
+            self.status_error = str(exc)
+            self._begin_settings_input(
+                "MCP server name",
+                "Enter a unique name using letters, numbers, '.', '_' or '-'.",
+                ("mcp_custom_name",),
+            )
+            self.status_error = str(exc)
+            return
+        assert self._mcp_setup is not None
+        self._mcp_setup["name"] = name
+        transport = str(self._mcp_setup["transport"])
+        prompt = (
+            "Enter the HTTPS Streamable HTTP endpoint (localhost may use HTTP)."
+            if transport == "http"
+            else "Enter the local command and arguments, for example: npx -y @scope/server"
+        )
+        self._begin_settings_input(
+            "MCP endpoint" if transport == "http" else "MCP command",
+            prompt,
+            ("mcp_custom_endpoint",),
+        )
+
+    def _continue_custom_mcp_endpoint(self, value: str) -> None:
+        assert self._mcp_setup is not None
+        transport = str(self._mcp_setup["transport"])
+        self._mcp_setup["endpoint"] = value
+        if transport == "http":
+            self._begin_choice(
+                "mcp remote authentication",
+                ["No authentication", "OAuth", "Bearer token", "back"],
+                "No authentication",
+            )
+            return
+        try:
+            parts = shlex.split(value)
+            if not parts:
+                raise ValueError("MCP command cannot be empty")
+        except ValueError as exc:
+            self.status_error = f"invalid MCP command: {exc}"
+            self._begin_settings_input(
+                "MCP command",
+                "Enter a command and arguments; quoting follows shell-style syntax.",
+                ("mcp_custom_endpoint",),
+            )
+            self.status_error = f"invalid MCP command: {exc}"
+            return
+        self._save_custom_mcp(command=parts[0], args=parts[1:])
+
+    def _finish_custom_mcp_remote(self, authentication: str) -> None:
+        if authentication == "Bearer token":
+            assert self._mcp_setup is not None
+            name = str(self._mcp_setup["name"])
+            self._choice_kind = None
+            self._choice_values = []
+            self._set_input("")
+            self._secret_request = {
+                "label": f"{name} bearer token",
+                "prompt": "Paste the bearer token and press Enter. Escape cancels.",
+                "handler": "mcp_custom_bearer",
+            }
+            self.activity = "waiting for masked input"
+            self.application.invalidate()
+            return
+        self._save_custom_mcp(oauth=authentication == "OAuth")
+
+    def _save_custom_mcp(
+        self,
+        *,
+        command: str = "",
+        args: list[str] | None = None,
+        oauth: bool = False,
+        bearer_token: str = "",
+    ) -> None:
+        if self._mcp_mutation_pending:
+            self.status_error = "Wait for the accepted MCP save before adding a server"
+            return
+        from klaude_core.mcp_client import MCPServerConfig
+
+        setup = self._mcp_setup or {}
+        name = str(setup.get("name") or "")
+        transport = str(setup.get("transport") or "")
+        headers: dict[str, str] = {}
+        if bearer_token:
+            env_name = re.sub(r"[^A-Za-z0-9]+", "_", f"MCP_{name}_TOKEN").upper()
+            headers["Authorization"] = f"Bearer ${{env:{env_name}}}"
+        server = MCPServerConfig(
+            name=name,
+            transport=transport,
+            enabled=False,
+            command=command,
+            args=args or [],
+            url=str(setup.get("endpoint") or "") if transport == "http" else "",
+            headers=headers,
+            oauth=oauth,
+        )
+        try:
+            server.validate()
+            if not bearer_token:
+                if self._submit_disabled_mcp_server(server):
+                    self._mcp_setup = None
+                return
+            registry = _mcp_registry()
+            servers = registry.load()
+            if name in servers:
+                raise ValueError(f"MCP server {name!r} already exists")
+            if bearer_token:
+                save_provider_secret(self.cfg.config_dir, env_name, bearer_token)
+                os.environ[env_name] = bearer_token
+            servers[name] = server
+            registry.save(servers)
+        except (OSError, ValueError) as exc:
+            message = f"MCP server was not saved: {exc}"
+            self._begin_settings_input(
+                "MCP endpoint" if transport == "http" else "MCP command",
+                (
+                    "Enter the HTTPS Streamable HTTP endpoint (localhost may use HTTP)."
+                    if transport == "http"
+                    else "Enter the local command and arguments."
+                ),
+                ("mcp_custom_endpoint",),
+            )
+            self.status_error = message
+            return
+        self._mcp_setup = None
+        self._append(
+            f"\n[success] Added {name} as disabled. Review it before enabling.\n"
+        )
+        self._invalidate_mcp_inventory()
+        self._open_settings_category("mcp servers", f"{name}:")
+
+    def _submit_disabled_mcp_server(self, server: MCPServerConfig) -> bool:
+        if self.running or self._setup_job is not None or self._mcp_mutation_pending:
+            self.status_error = "Finish the active operation before adding an MCP server"
+            return False
+        if self._mcp_mutations.path != self.cfg.mcp_servers_file:
+            self.status_error = "MCP configuration path changed; restart before adding"
+            return False
+        request = MCPAddDisabled(
+            uuid.uuid4().hex, self.session_id, server.name, json.dumps(server.to_dict())
+        )
+        self._mcp_mutation_pending = (request, time.monotonic())
+        self._mcp_mutation_warned = False
+        if not self._mcp_mutations.submit(request):
+            self._mcp_mutation_pending = None
+            self.status_error = "MCP add was not accepted; no change saved"
+            self.application.invalidate()
+            return False
+        self._open_settings_category("mcp servers", f"{server.name}:")
+        return True
+
+    def _reload_mcp_tools(self) -> None:
+        # Prepare first: a malformed replacement must not remove working tools.
+        candidate_cfg = copy(self.cfg)
+        tools = _configured_mcp_tools(candidate_cfg, strict=True)
+        self._publish_mcp_tools(tools, getattr(candidate_cfg, "_mcp_client_manager", None))
+
+    def _prepare_mcp_catalog(self, servers) -> tuple[list[Tool], Any]:
+        candidate_cfg = copy(self.cfg)
+        tools = _configured_mcp_tools(candidate_cfg, servers=servers)
+        return tools, getattr(candidate_cfg, "_mcp_client_manager", None)
+
+    def _publish_mcp_tools(self, tools: list[Tool], manager: Any) -> None:
+        """Commit a fully prepared catalog on the UI thread, without local I/O."""
+        self._invalidate_mcp_inventory()
+        replacement = {
+            name: tool for name, tool in self.agent.tools.items() if not name.startswith("mcp__")
+        }
+        for tool in tools:
+            replacement[tool.name] = tool
+            self.agent.gate.policies.setdefault(tool.name, "ask")
+        self.agent.tools = replacement
+        self.cfg._mcp_client_manager = manager
+        self.agent.mcp_client_manager = manager
+        self._mcp_catalog_unconfirmed = False
+
+    def _run_mcp_enable(self, name: str, *, expected_fingerprint: str | None = None) -> None:
+        """Discover asynchronously and enable only after successful completion."""
+        from klaude_core.mcp_client import (
+            MCP_OAUTH_REDIRECT_URI,
+            MCPClient,
+            MCPTokenStorage,
+            mcp_auth_file,
+        )
+
+        from klaude_cli.setup_jobs import oauth_loopback
+
+        origin = (self.session_id, str(self.cfg.mcp_servers_file))
+
+        async def operation(cancel: threading.Event) -> str:
+            def read_definition():
+                from klaude_cli.mcp_inventory import definition_digest
+
+                registry = _mcp_registry()
+                server = registry.load()[name]
+                if expected_fingerprint is not None and (
+                    not expected_fingerprint or definition_digest(server) != expected_fingerprint
+                ):
+                    raise RuntimeError("MCP definition changed after review; review and retry")
+                return server, definition_digest(server)
+
+            server, fingerprint = await asyncio.to_thread(read_definition)
+            if cancel.is_set():
+                raise asyncio.CancelledError
+            if server.oauth:
+                storage = MCPTokenStorage(mcp_auth_file(self.cfg.mcp_auth_dir, name))
+                had_credentials = storage.status().configured
+
+                async def display(url: str) -> None:
+                    self._emit("setup_progress", (cancel, ["Visit to authorize:", url]))
+                    await asyncio.to_thread(webbrowser.open, url, new=2)
+
+                try:
+                    async with oauth_loopback(
+                        MCP_OAUTH_REDIRECT_URI, _mcp_oauth_callback
+                    ) as answer:
+                        async def callback() -> AuthorizationCodeResult:
+                            return await answer
+
+                        client = MCPClient(
+                            timeout_seconds=300,
+                            auth_dir=self.cfg.mcp_auth_dir,
+                            oauth_redirect_handler=display,
+                            oauth_callback_handler=callback,
+                        )
+                        tools = await client.discover_async(server)
+                except BaseException:
+                    if not had_credentials:
+                        storage.clear()
+                    raise
+            else:
+                tools = await MCPClient(auth_dir=self.cfg.mcp_auth_dir).discover_async(server)
+            if cancel.is_set():
+                raise asyncio.CancelledError
+
+            tools_json = await asyncio.to_thread(json.dumps, tools)
+            if cancel.is_set():
+                raise asyncio.CancelledError
+            if origin != (self.session_id, str(self.cfg.mcp_servers_file)) or (
+                self._mcp_mutations.path != self.cfg.mcp_servers_file
+            ):
+                raise RuntimeError("MCP setup scope changed; review and retry")
+            request = MCPEnable(uuid.uuid4().hex, origin[0], name, fingerprint, tools_json)
+            self._mcp_mutation_pending = (request, time.monotonic())
+            self._mcp_mutation_warned = False
+            if not self._mcp_mutations.submit(request):
+                self._mcp_mutation_pending = None
+                raise RuntimeError("MCP save was not accepted; review configuration and retry")
+            # No awaiting an accepted filesystem write: its daemon lane owns
+            # publication and emits the real outcome, including after UI exit.
+            return f"MCP discovery completed for {name}; enable save pending"
+
+        def finish(message: str | None) -> None:
+            if message is not None:
+                self._append(f"\n[mcp] {message}.\n")
+            if origin == (self.session_id, str(self.cfg.mcp_servers_file)):
+                self._open_settings_category("mcp servers", f"{name}:")
+
+        self._start_setup_job(f"MCP connection: {name}", operation, finish, timeout=300)
+
+    def _import_mcp_configuration(self, value: str) -> None:
+        if self.running or self._setup_job is not None or self._mcp_mutation_pending:
+            self.status_error = "Finish the active operation before importing"
+            return
+        if self._mcp_mutations.path != self.cfg.mcp_servers_file:
+            self.status_error = "MCP configuration path changed; restart before importing"
+            return
+        try:
+            source = str(Path(value).expanduser().absolute())
+        except (OSError, RuntimeError, ValueError):
+            self.status_error = "MCP import path could not be prepared"
+            return
+        request = MCPImport(uuid.uuid4().hex, self.session_id, source)
+        self._mcp_mutation_pending = (request, time.monotonic())
+        self._mcp_mutation_warned = False
+        if not self._mcp_mutations.submit(request):
+            self._mcp_mutation_pending = None
+            self.status_error = "MCP import was not accepted; no change saved"
+            self.application.invalidate()
+            return
+        self._open_settings_category("mcp servers")
+
+    def _begin_mcp_catalog_plan(self, plan: MCPInstallPlan) -> None:
+        local_name = _mcp_local_name(plan.source_name.rsplit("/", 1)[-1])
+        self._mcp_setup = {
+            "kind": "registry",
+            "plan": plan,
+            "name": local_name,
+            "inputs": list(plan.inputs),
+            "input_index": 0,
+            "answers": {},
+        }
+        self._prompt_next_mcp_plan_input()
+
+    def _prompt_next_mcp_plan_input(self) -> None:
+        setup = self._mcp_setup or {}
+        plan = cast("MCPInstallPlan", setup.get("plan"))
+        inputs = cast(list[Any], setup.get("inputs", []))
+        index = int(str(setup.get("input_index", 0)))
+        while index < len(inputs):
+            item = inputs[index]
+            setup["input_index"] = index
+            if not item.secret and item.default and not item.required:
+                index += 1
+                setup["input_index"] = index
+                continue
+            optional = " (optional; leave blank to skip)" if not item.required else ""
+            description = f" — {item.description}" if item.description else ""
+            prompt = f"{item.label}{description}{optional}"
+            if item.secret:
+                env_name = plan.secret_environment_name(str(setup["name"]), item)
+                if os.environ.get(env_name):
+                    index += 1
+                    setup["input_index"] = index
+                    continue
+                self._choice_kind = None
+                self._choice_values = []
+                self._set_input("")
+                self._secret_request = {
+                    "label": item.label,
+                    "prompt": prompt,
+                    "handler": "mcp_plan_input",
+                }
+                self.activity = "waiting for masked input"
+                self.application.invalidate()
+                return
+            self._begin_settings_input(item.label, prompt, ("mcp_plan_input",))
+            return
+        self._finish_mcp_catalog_plan()
+
+    def _accept_mcp_plan_input(self, value: str | None) -> None:
+        setup = self._mcp_setup or {}
+        inputs = cast(list[Any], setup.get("inputs", []))
+        index = int(str(setup.get("input_index", 0)))
+        if index >= len(inputs):
+            self._finish_mcp_catalog_plan()
+            return
+        item = inputs[index]
+        if not value and item.required and not item.default:
+            self.status_error = f"{item.label} is required"
+            self._prompt_next_mcp_plan_input()
+            self.status_error = f"{item.label} is required"
+            return
+        if value:
+            cast(dict[str, str], setup["answers"])[item.key] = value
+        setup["input_index"] = index + 1
+        self._prompt_next_mcp_plan_input()
+
+    def _finish_mcp_catalog_plan(self) -> None:
+        if self._mcp_mutation_pending:
+            self.status_error = "Wait for the accepted MCP save before installing"
+            return
+        from klaude_core.mcp_catalog import MCPCatalogError
+
+        setup = self._mcp_setup or {}
+        plan = cast("MCPInstallPlan", setup.get("plan"))
+        name = str(setup.get("name") or "")
+        answers = cast(dict[str, str], setup.get("answers", {}))
+        try:
+            server, secrets = plan.materialize(name, answers)
+            registry = _mcp_registry()
+            servers = registry.load()
+            if name in servers:
+                raise ValueError(f"MCP server {name!r} already exists")
+            for env_name, secret in secrets.items():
+                save_provider_secret(self.cfg.config_dir, env_name, secret)
+                os.environ[env_name] = secret
+            servers[name] = server
+            registry.save(servers)
+        except (MCPCatalogError, OSError, ValueError) as exc:
+            self.status_error = f"MCP server was not installed: {exc}"
+            self.application.invalidate()
+            return
+        self._mcp_setup = None
+        self._append(
+            f"\n[success] Installed {name} as disabled. Review it before enabling.\n"
+        )
+        self._invalidate_mcp_inventory()
+        self._open_settings_category("mcp servers", f"{name}:")
+
+    def _search_mcp_catalog(self, query: str) -> None:
+        self._background_jobs.cancel("mcp-suggestions")
+        request_id = uuid.uuid4().hex
+        self._mcp_catalog_request_id = request_id
+        self._mcp_catalog_query_text = query
+        self._mcp_catalog_query = False
+        self._begin_choice(
+            "mcp registry results",
+            [_choice_info(f"Searching the official registry for {query!r}…"), "back"],
+            "back",
+        )
+
+        self._mcp_catalog_request_id = self._background_jobs.submit(
+            "mcp-search", {"kind": "mcp_search", "query": query,
+                           "cache_file": str(self.cfg.mcp_registry_cache_file)}, timeout=20
+        )
+
+    def _open_mcp_catalog_results(self, *, new_results: bool = False) -> None:
+        choices = [_choice_section("OFFICIAL MCP REGISTRY")]
+        if self._mcp_catalog_cached:
+            choices.append(_choice_info("Showing cached registry results"))
+        choices.extend(self._mcp_catalog_results)
+        if not self._mcp_catalog_results:
+            choices.append(_choice_info("No supported active servers matched"))
+        choices.extend(["search again", "back"])
+        default = next(iter(self._mcp_catalog_results), "search again")
+        if new_results:
+            # Loading focuses Back; it must not become the results-page selection.
+            self._choice_values = []
+            self._picker_states.pop(("mcp registry results", ""), None)
+        self._begin_choice("mcp registry results", choices, default, refresh=not new_results)
+
+    @staticmethod
+    def _mcp_catalog_plan_needs_input(plan: MCPInstallPlan, local_name: str) -> bool:
+        inputs = getattr(plan, "inputs", ())
+        for item in inputs:
+            if not item.required or item.default:
+                continue
+            if item.secret:
+                variable = plan.secret_environment_name(local_name, item)
+                if os.environ.get(variable):
+                    continue
+            return True
+        return False
+
+    def _open_mcp_catalog_detail(self, server: MCPCatalogServer) -> None:
+        from klaude_core.mcp_catalog import install_plans
+
+        local_name = _mcp_local_name(str(getattr(server, "name", "")).rsplit("/", 1)[-1])
+        self._mcp_detail_server = server
+        self._refresh_mcp_inventory()
+        inventory = self._mcp_inventory
+        configured = {item["name"] for item in inventory["servers"]} if inventory else set()
+        unknown = inventory is None or bool(inventory["truncated"])
+        choices = [
+            _choice_section(str(getattr(server, "title", "MCP SERVER")).upper()),
+            _choice_info(str(getattr(server, "description", ""))),
+            _choice_info(f"Registry: {getattr(server, 'name', '')}"),
+            _choice_info(f"Version: {getattr(server, 'version', '')}"),
+        ]
+        repository = str(getattr(server, "repository_url", ""))
+        if repository:
+            choices.append(_choice_info(f"Source: {repository}"))
+        choices.extend(
+            [
+                _choice_info("Installs disabled; enabling is a separate trust decision"),
+                _choice_section("INSTALL OPTIONS"),
+            ]
+        )
+        self._mcp_catalog_install_choices = {}
+        if self._mcp_inventory_request:
+            choices.append(_choice_info("Checking configured servers…"))
+        if self._mcp_inventory_error:
+            choices.append(_choice_info("Configuration inventory unavailable; reopen to retry"))
+        if inventory is not None:
+            age = max(0, int(time.monotonic() - self._mcp_inventory_loaded_at))
+            choices.append(_choice_info(f"Configuration snapshot {age}s old"))
+            if inventory["truncated"]:
+                choices.append(_choice_info(
+                    "Configuration exceeds 1,000-server preview; use CLI to install"
+                ))
+        for plan in install_plans(server):
+            label = f"Install disabled · {plan.label}"
+            unavailable = unknown or local_name in configured
+            if unknown:
+                label += " — configuration inventory not ready"
+            if local_name in configured:
+                label += f" — {local_name} already configured"
+            choice = _choice_unavailable(label) if unavailable else label
+            choices.append(choice)
+            endpoint = plan.url if plan.transport == "http" else " ".join(
+                [plan.command, *plan.args]
+            )
+            choices.append(_choice_info(f"Endpoint: {endpoint}"))
+            if not unavailable:
+                self._mcp_catalog_install_choices[choice] = plan
+        if not install_plans(server):
+            choices.append(_choice_info("No supported Streamable HTTP, npm, or PyPI plan"))
+        choices.append("back")
+        self._begin_choice("mcp registry detail", choices, "back", refresh=True)
+
+    def _install_mcp_catalog_plan(self, plan: MCPInstallPlan) -> None:
+        if self.running or self._setup_job is not None or self._mcp_mutation_pending:
+            self.status_error = "Finish the active operation before installing"
+            return
+        if self._mcp_mutations.path != self.cfg.mcp_servers_file:
+            self.status_error = "MCP configuration path changed; restart before installing"
+            return
+        from klaude_core.mcp_catalog import MCPCatalogError
+
+        local_name = _mcp_local_name(
+            getattr(plan, "source_name", "").rsplit("/", 1)[-1]
+        )
+        try:
+            server, secrets = plan.materialize(local_name, {})
+            if secrets:
+                raise MCPCatalogError("secure input must be collected before installation")
+        except (MCPCatalogError, OSError, ValueError) as exc:
+            self.status_error = f"MCP server was not installed: {exc}"
+            self.application.invalidate()
+            return
+        self._submit_disabled_mcp_server(server)
+
     def _apply_settings_action(self, kind: str, selected: str) -> None:
+        if kind == "provider key settings":
+            label = self._provider_key_label
+            if selected == "back":
+                self._open_settings_category("providers", f"{label}:", restore=True)
+                return
+            if selected in {"Add API key", "Update API key"}:
+                self._begin_provider_key_input(label)
+                return
+            if selected == "Remove API key":
+                env_name, attribute = PROVIDER_API_KEY_PROVIDERS[label]
+                self._save_provider_key(label, env_name, attribute, "")
+                return
+            self.status_error = "Select a provider key action"
+            self.application.invalidate()
+            return
         if selected == "back":
-            self._begin_choice("settings", self._settings_categories(), "theme")
+            if kind == "permission settings" and self._permission_return_to_mcp:
+                self._permission_return_to_mcp = False
+                self._open_settings_category("mcp servers", "MCP server permissions")
+                return
+            category = SETTINGS_CATEGORY_FOR_KIND.get(kind, "theme")
+            self._begin_choice("settings", self._settings_categories(), category)
+            return
+        if kind == "mcp settings":
+            if selected == "MCP server permissions":
+                servers = _mcp_permission_server_rows(self.agent)
+                first = next(iter(servers), None)
+                self._permission_return_to_mcp = True
+                self._open_settings_category("permissions", f"{first}:" if first else None)
+                return
+            if selected == "Reload configured MCP tools":
+                if self.running or self._setup_job is not None or self._mcp_mutation_pending:
+                    self.status_error = "Finish the active operation before reloading MCP tools"
+                    return
+                if self._mcp_mutations.path != self.cfg.mcp_servers_file:
+                    self.status_error = "MCP configuration path changed; restart before reloading"
+                    return
+                reload_request = MCPReload(uuid.uuid4().hex, self.session_id)
+                self._mcp_mutation_pending = (reload_request, time.monotonic())
+                self._mcp_mutation_warned = False
+                if not self._mcp_mutations.submit(reload_request):
+                    self._mcp_mutation_pending = None
+                    self.status_error = "MCP reload was not accepted; previous tools retained"
+                else:
+                    self.status_error = "Reloading configured MCP tools…"
+                self.application.invalidate()
+                return
+            if selected == "Add custom MCP server":
+                self._begin_custom_mcp()
+                return
+            if selected == "Import MCP configuration":
+                self._begin_settings_input(
+                    "MCP configuration",
+                    "Enter a VS Code, OpenCode, or standard MCP JSON file path.",
+                    ("mcp_import",),
+                )
+                return
+            if selected == "Search official MCP Registry":
+                self._begin_mcp_catalog_query()
+                return
+            server_name = selected.split(":", 1)[0]
+            metadata = next((
+                item for item in (self._mcp_inventory or {}).get("servers", [])
+                if item["name"] == server_name
+            ), None)
+            if metadata is not None and not metadata["enabled"] and not metadata["tool_count"]:
+                self._review_mcp_server(server_name)
+                return
+            if self.running or self._setup_job is not None or self._mcp_mutation_pending:
+                self.status_error = "Finish the active operation before changing MCP tools"
+                self.application.invalidate()
+                return
+            if self._mcp_mutations.path != self.cfg.mcp_servers_file:
+                self.status_error = "MCP configuration path changed; restart before changing it"
+                return
+            fingerprint = metadata.get("fingerprint", "") if metadata else ""
+            if metadata is None or not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
+                self._invalidate_mcp_inventory()
+                self._open_settings_category("mcp servers", f"{server_name}:")
+                self.status_error = "Refreshing MCP definition; select it again when ready"
+                return
+            request = MCPToggle(
+                uuid.uuid4().hex, self.session_id, server_name, fingerprint,
+                not metadata["enabled"],
+            )
+            self._mcp_mutation_pending = (request, time.monotonic())
+            self._mcp_mutation_warned = False
+            if not self._mcp_mutations.submit(request):
+                self._mcp_mutation_pending = None
+                self.status_error = "MCP save lane unavailable; no change was accepted"
+            else:
+                self.status_error = f"Saving MCP setting for {server_name}…"
+            self.application.invalidate()
             return
         if kind == "theme settings":
             if selected.startswith("interface theme:"):
@@ -10301,13 +13012,17 @@ class PersistentChatTUI:
                 return
             self.appearance.theme = DEFAULT_TUI_THEME
             self.appearance.text_theme = DEFAULT_TEXT_THEME
-            self._commit_appearance("theme settings", reset=True)
+            self._commit_appearance("theme settings", reset=True, fields=("theme", "text_theme"))
             self._open_settings_category("theme", selected)
             return
         if kind == "runtime settings":
+            if selected == "cancel calibration":
+                self._cancel_runtime_calibration()
+                self._open_settings_category("runtime", "auto calibrate")
+                return
             if selected == "auto calibrate":
                 self._calibrate_runtime()
-                self._open_settings_category("runtime", selected)
+                self._refresh_runtime_calibration_picker()
                 return
             if selected == "edit config.toml (nano)":
                 self._open_runtime_config_editor("config")
@@ -10405,79 +13120,69 @@ class PersistentChatTUI:
             self._runtime_preferences.pop("max_steps", None)
             self._runtime_preferences.pop("max_subagent_concurrency", None)
             self._runtime_device_mode = "auto"
-            self._persist_runtime_preferences("num_gpu", "num_thread")
-            _save_runtime_device_mode(self.chat_preferences_path, self._runtime_device_mode)
+            self._persist_runtime_preferences(
+                "num_gpu", "num_thread", remove=("max_steps", "max_subagent_concurrency")
+            )
             self._open_settings_category("runtime", selected)
             return
         if kind == "tools settings":
-            values = _tool_validation_preferences(self.chat_preferences_path)
-            availability = _tool_availability_preferences(self.chat_preferences_path)
-            providers = _web_provider_preferences(self.chat_preferences_path, self.cfg)
-            saved = _load_chat_preferences(self.chat_preferences_path)
-            display = saved.get("display", {})
-            display = dict(display) if isinstance(display, dict) else {}
+            values = self._tool_validation
+            availability = self._tool_availability
+            providers = self._web_provider_availability
+            changes: dict[tuple[str, ...], object] = {}
             if selected.startswith("activity updates:"):
                 self.show_activity_updates = not self.show_activity_updates
-                display["activity_updates"] = self.show_activity_updates
-                display.pop("reasoning_activity", None)
+                changes[("display", "activity_updates")] = self.show_activity_updates
+                changes[("display", "reasoning_activity")] = DELETE
             elif selected.startswith("web search validation:"):
                 values["web_search"] = not values["web_search"]
+                changes[("tool_validation", "web_search")] = values["web_search"]
             elif selected.startswith("knowledge search validation:"):
                 values["knowledge_search"] = not values["knowledge_search"]
+                changes[("tool_validation", "knowledge_search")] = values["knowledge_search"]
             elif selected.endswith("(toggle)"):
                 if selected.startswith("provider "):
                     provider_name = selected.removeprefix("provider ").split(":", 1)[0]
                     if provider_name in providers:
                         providers[provider_name] = not providers[provider_name]
+                        changes[("web_provider_availability", provider_name)] = (
+                            providers[provider_name]
+                        )
                 else:
                     for name, label in TOOL_AVAILABILITY_LABELS.items():
                         if selected.startswith(f"{label}:"):
                             availability[name] = not availability[name]
+                            changes[("tool_availability", name)] = availability[name]
                             break
             else:
-                values = {"web_search": True, "knowledge_search": True}
-                availability = {name: True for name in TOOL_AVAILABILITY_LABELS}
-                providers = {name: True for name in self.cfg.web_providers}
+                changes = {
+                    ("tool_validation",): {"web_search": True, "knowledge_search": True},
+                    ("tool_availability",): {name: True for name in TOOL_AVAILABILITY_LABELS},
+                    ("web_provider_availability",): {name: True for name in self.cfg.web_providers},
+                    ("display", "activity_updates"): True,
+                    ("display", "reasoning_activity"): DELETE,
+                }
                 self.show_activity_updates = True
-                display["activity_updates"] = True
-                display.pop("reasoning_activity", None)
-            saved["tool_validation"] = values
-            saved["tool_availability"] = availability
-            saved["web_provider_availability"] = providers
-            saved["display"] = display
-            try:
-                _write_chat_preferences(self.chat_preferences_path, saved)
-            except OSError as exc:
-                self._append(f"\n[error] could not save tool settings: {exc}\n")
-                return
-            _apply_tool_validation_preferences(self.agent, self.chat_preferences_path)
-            _apply_tool_availability_preferences(self.agent, self.chat_preferences_path)
-            _apply_web_provider_preferences(self.agent, self.chat_preferences_path)
+                values.update(dict.fromkeys(values, True))
+                availability.update(dict.fromkeys(availability, True))
+                providers.update(dict.fromkeys(providers, True))
+            self._apply_live_tool_preferences()
+            self._submit_preference_changes(changes)
             self._open_settings_category("tools", selected)
             return
         if kind == "providers settings":
-            if selected.startswith("remove ") and selected.endswith(" key"):
-                label = selected.removeprefix("remove ").removesuffix(" key")
-                if label in PROVIDER_API_KEY_PROVIDERS:
-                    env_name, attribute = PROVIDER_API_KEY_PROVIDERS[label]
-                    self._save_provider_key(label, env_name, attribute, "")
-                return
             label = selected.split(":", 1)[0]
             if label in PROVIDER_API_KEY_PROVIDERS:
-                self._begin_provider_key_input(label)
+                self._open_provider_key_settings(label)
                 return
             self.status_error = "Select a provider API key"
             self.application.invalidate()
             return
         if kind == "memory settings":
-            enabled = (
-                True if selected == RESET_THEME_CHOICE else not self.memory.auto_memory_enabled()
-            )
-            try:
-                self.memory.set_auto_memory(enabled)
-            except sqlite3.Error as exc:
-                self._append(f"\n[error] could not save memory settings: {exc}\n")
+            if self._status_memory_enabled is None and selected != RESET_THEME_CHOICE:
                 return
+            enabled = True if selected == RESET_THEME_CHOICE else not self._status_memory_enabled
+            self._set_automatic_memory(enabled)
             self._open_settings_category("memory", "automatic memory:")
             return
         if kind == "permission settings":
@@ -10489,23 +13194,32 @@ class PersistentChatTUI:
                 return
             names = _permission_tool_names(self.agent)
             policies = _effective_permission_policies(self.agent, self.cfg)
+            mcp_servers = _mcp_permission_server_rows(self.agent)
+            server = selected.split(":", 1)[0]
+            if server in mcp_servers and selected.startswith(f"{server}: "):
+                self._open_mcp_permission_server(server)
+                return
             labels = {
                 label: name
                 for _group_name, rows in _permission_group_rows(names)
                 for name, label in rows
             }
-            tool_name = next(
+            permission_tool_name = next(
                 (name for label, name in labels.items() if selected.startswith(f"{label}: ")),
                 None,
             )
-            if tool_name is None:
+            if permission_tool_name is None:
                 self.status_error = "Select a permission row"
                 self.application.invalidate()
                 return
-            policies[tool_name] = {"ask": "allow", "allow": "deny", "deny": "ask"}[
-                policies[tool_name]
+            policies[permission_tool_name] = {
+                "ask": "allow",
+                "allow": "deny",
+                "deny": "ask",
+            }[
+                policies[permission_tool_name]
             ]
-            self._save_permission_settings(policies, selected)
+            self._save_permission_settings(policies, selected, tool=permission_tool_name)
             return
         if selected.startswith("height:"):
             current = (
@@ -10526,48 +13240,50 @@ class PersistentChatTUI:
             self.appearance.input_height = DEFAULT_INPUT_HEIGHT
             self.appearance.input_max_height = MAX_INPUT_HEIGHT
             message = "input field settings"
-        self._commit_appearance(message, reset=selected.startswith("reset"))
+        self._commit_appearance(
+            message, reset=selected.startswith("reset"),
+            fields=("input_border",) if selected.startswith("border:")
+            else ("input_border", "input_height", "input_max_height"),
+        )
         self._open_settings_category("input field", selected)
 
     def _calibrate_runtime(self) -> None:
-        """Choose conservative per-chat options from local CPU, RAM, and VRAM."""
-        workdir = Path(getattr(self.agent, "workdir", Path.cwd()))
-        try:
-            runtime = collect_runtime_context(self.cfg, workdir).context.system
-        except Exception as exc:
-            self.status_error = f"runtime calibration unavailable: {exc}"
+        """Read hardware in an owned process, never collect full runtime context."""
+        if self.running or self._watching_remote:
+            self.status_error = "Finish active work before calibrating runtime settings"
             return
-        logical_threads = next(
-            (cpu.logical_threads for cpu in runtime.cpu if cpu.logical_threads),
-            os.cpu_count() or 1,
+        identity = self._background_jobs.submit(
+            "runtime-calibration", {"kind": "runtime_calibration"}, timeout=8
         )
-        threads = max(1, min(16, max(1, logical_threads // 2)))
-        vram = max((gpu.memory_bytes or 0 for gpu in runtime.gpu), default=0)
-        memory = runtime.memory_total_bytes or 0
-        budget = vram or memory
-        context = (
-            65_536
-            if budget >= 24 * 1024**3
-            else 32_768
-            if budget >= 12 * 1024**3
-            else 16_384
-            if budget >= 8 * 1024**3
-            else 8_192
+        self._calibration_request = (
+            identity, self.session_id, _agent_model_ref(self.agent), self._calibration_state()
         )
-        # Leave placement to Ollama: it can select supported GPUs and choose a
-        # CPU/GPU split that fits the current model and available memory.
-        self.agent.ollama_options.pop("num_gpu", None)
-        self._runtime_device_mode = "auto"
-        self.agent.ollama_options["num_thread"] = threads
-        self.agent.ollama_options["num_ctx"] = context
-        self._persist_runtime_preferences("num_gpu", "num_thread", "num_ctx")
-        _save_runtime_device_mode(self.chat_preferences_path, self._runtime_device_mode)
-        self.ui_state.context_window = context
         self.status_error = ""
-        self._append(
-            f"\n[runtime] auto calibrated · device auto · {threads} CPU threads · "
-            f"{context:,} context\n"
+
+    def _calibration_state(self) -> tuple[object, ...]:
+        return (
+            self._runtime_device_mode,
+            *(self.agent.ollama_options.get(key) for key in ("num_gpu", "num_thread", "num_ctx")),
         )
+
+    def _cancel_runtime_calibration(self) -> None:
+        self._background_jobs.cancel("runtime-calibration")
+        self._calibration_request = None
+
+    def _preference_save_hint(self) -> str:
+        return (
+            "Saving preferences…" if self._runtime_save_state == "saving"
+            else "Preferences saved" if self._runtime_save_state == "saved"
+            else "Preferences save unconfirmed · active for this session"
+        )
+
+    def _refresh_runtime_calibration_picker(self) -> None:
+        error = self.status_error
+        selected = self._choice_values[self._choice_index] if self._choice_values else ""
+        self._open_settings_category(
+            "runtime", "auto calibrate" if selected == "cancel calibration" else selected
+        )
+        self.status_error = error
 
     def _append(self, text: str) -> None:
         if self._text_theme_preview_visible or self._permission_preview_visible:
@@ -10797,7 +13513,9 @@ class PersistentChatTUI:
         if self._permission_request is not None:
             self._answer_permission("n")
         if self._secret_request is not None:
-            self._answer_secret(None)
+            self._answer_secret(None, cancelled=True)
+        if self._settings_input_request is not None:
+            self._answer_settings_input(None)
         if self._user_input_request is not None:
             if bool(self._user_input_request.get("remote")):
                 # Detaching from an observed session must not answer its prompt
@@ -10809,7 +13527,12 @@ class PersistentChatTUI:
                 self._answer_user_input(None, "cancelled", publish=False)
         self.memory.clear_session_client(self.session_id, self.client_id)
         self.agent.restore_session(turns)
+        self._cancel_runtime_calibration()
+        self._invalidate_settings_overview()
         self.session_id = session_id
+        _set_agent_session_context(self.agent, session_id)
+        self._session_io.switch_scope(session_id, self.client_id)
+        self._last_session_io_submit = 0.0
         title_getter = getattr(self.memory, "session_title", None)
         self._session_title_hint = (
             title_getter(session_id) if callable(title_getter) else "Untitled session"
@@ -10877,33 +13600,37 @@ class PersistentChatTUI:
         values = list(self._resume_choices)
         self._begin_choice("session", values, values[0])
 
-    def _refresh_resume_choices(self) -> None:
+    def _refresh_resume_choices(self, sessions: list[dict] | None = None) -> None:
         """Refresh live lease badges without moving the selected session row."""
         if self._choice_kind != "session":
             return
-        selected = self._choice_values[self._choice_index]
-        selected_session = self._resume_choices.get(selected)
-        selecting_cancel = selected == CANCEL_CHOICE
-        sessions = self.memory.resumable_sessions()
+        self._sync_picker_selection()
+        if sessions is None:
+            sessions = self.memory.resumable_sessions()
         refreshed = {_session_choice_label(session): session["session_id"] for session in sessions}
         values = [*refreshed, CANCEL_CHOICE]
         self._resume_choices = refreshed
-        self._choice_values = values
-        if selecting_cancel:
-            self._choice_index = len(values) - 1
-        elif selected_session is not None:
-            self._choice_index = next(
-                (
-                    index
-                    for index, value in enumerate(values)
-                    if refreshed.get(value) == selected_session
-                ),
-                min(self._choice_index, len(values) - 1),
-            )
+        if self._picker is not None:
+            self._picker.replace(self._picker_rows("session", values))
+            self._apply_picker_state()
         else:
-            self._choice_index = min(self._choice_index, len(values) - 1)
+            self._begin_choice("session", values, CANCEL_CHOICE)
 
     def _submit_buffer(self, *, steer: bool) -> None:
+        if self._mcp_catalog_query:
+            query = self.input.text.strip()
+            if not query:
+                self.status_error = "Enter an MCP server name to search for"
+                self.application.invalidate()
+                return
+            if len(query) > 120:
+                self.status_error = "MCP Registry searches are limited to 120 characters"
+                self.application.invalidate()
+                return
+            self.input.buffer.cancel_completion()
+            self._set_input("")
+            self._search_mcp_catalog(query)
+            return
         if self._runtime_edit:
             value = self.input.text.strip()
             if value.lower() == CANCEL_CHOICE:
@@ -10954,7 +13681,9 @@ class PersistentChatTUI:
             self._height_edit = False
             self.status_error = ""
             self._set_input("")
-            self._commit_appearance(f"input height: {lower}–{upper} lines")
+            self._commit_appearance(
+                f"input height: {lower}–{upper} lines", fields=("input_height", "input_max_height")
+            )
             self._open_settings_category("input field", "height:")
             return
         if self._queue_edit_index is not None:
@@ -11033,14 +13762,21 @@ class PersistentChatTUI:
                 elif command == "/recap":
                     message = "[recap]\n" + _chat_recap(self.agent, self.session_id)
                 elif command == "/status":
+                    self._refresh_status_metadata()
                     message = "[status]\n" + _chat_status(
                         self.agent,
                         self.memory,
                         self.session_id,
                         title_hint=self._session_title_hint,
+                        usage_rows=self._status_usage_rows(),
+                        snapshot_only=True, memory_enabled=self._status_memory_enabled,
                     )
                 elif command == "/memory":
-                    message = "[memory]\n" + _chat_memory(self.memory, argument.strip())
+                    if argument.strip() in {"on", "off"}:
+                        self._set_automatic_memory(argument.strip() == "on")
+                        message = f"[memory] auto memory: {argument.strip()} · applied; saving"
+                    else:
+                        message = "[memory]\n" + _chat_memory(self.memory, argument.strip())
                 elif command == "/diff":
                     message = "[diff]\n" + _workspace_diff(self.agent)
                 else:
@@ -11115,6 +13851,11 @@ class PersistentChatTUI:
                         self._pending_attachments.clear()
                         self._clear_session_view()
                     self.session_id = target
+                    self._cancel_runtime_calibration()
+                    self._invalidate_settings_overview()
+                    self._session_io.switch_scope(target, self.client_id)
+                    self._last_session_io_submit = 0.0
+                    _set_agent_session_context(self.agent, target)
                     title_getter = getattr(self.memory, "session_title", None)
                     self._session_title_hint = (
                         title_getter(target)
@@ -11210,26 +13951,34 @@ class PersistentChatTUI:
         if text == "/model" or text.startswith("/model "):
             requested = text.removeprefix("/model").strip()
             if requested:
-                available = _available_chat_models(self.cfg, _agent_local_ollama(self.agent))
+                available = [
+                    *_available_chat_models(self.cfg, _agent_local_ollama(self.agent), False),
+                    *self._local_models,
+                ]
+                active = getattr(self.agent, "model_info", None)
+                if active is not None and active.backend == "ollama" and active not in available:
+                    available.append(active)
                 resolved = _resolve_chat_model(available, requested)
                 if resolved is None:
+                    if not self._local_models_loaded_at and (
+                        "/" not in requested or requested.startswith("ollama/")
+                    ):
+                        self._open_model_backend("ollama", "source")
+                        self._set_input(requested.removeprefix("ollama/"))
+                        self._refresh_choice_filter()
+                        return
                     self._append(
                         "\n[error] No unique Cloud or Local model match for "
                         f"{requested!r}. Use a canonical backend/model ID if ambiguous.\n"
                     )
                     return
-                self._choice_prior_model = self.agent.model
-                self._choice_prior_model_info = self.agent.model_info
                 try:
-                    _set_agent_model(
-                        self.agent, self.cfg, _agent_local_ollama(self.agent), resolved
-                    )
+                    self._activate_selected_model(resolved)
                 except (CodexAuthError, RuntimeError, ValueError) as exc:
                     self._choice_prior_model = None
                     self._choice_prior_model_info = None
                     self._append(f"\n[error] Model unavailable: {exc}\n")
                     return
-                self._begin_choice("mode", [*REASONING_MODES, CANCEL_CHOICE], "standard")
             else:
                 self._open_model_source()
             return
@@ -11275,6 +14024,8 @@ class PersistentChatTUI:
                 "models": "models",
                 "provider": "providers",
                 "providers": "providers",
+                "mcp": "mcp servers",
+                "mcp servers": "mcp servers",
                 "memory": "memory",
                 "skill": "skills",
                 "skills": "skills",
@@ -11288,7 +14039,7 @@ class PersistentChatTUI:
             if requested not in category_aliases:
                 self._append(
                     "\n[error] Settings category must be theme, input, models, providers, "
-                    "memory, skills, tools, permissions, runtime, or reset.\n"
+                    "memory, skills, MCP, tools, permissions, runtime, or reset.\n"
                 )
                 return
             category = category_aliases[requested]
@@ -11296,6 +14047,9 @@ class PersistentChatTUI:
                 self._open_settings_category(category)
             else:
                 self._begin_choice("settings", self._settings_categories(), "theme")
+            return
+        if text == "/mcp":
+            self._open_settings_category("mcp servers")
             return
         if text == "/permission" or text.startswith("/permission "):
             if text != "/permission":
@@ -11480,16 +14234,22 @@ class PersistentChatTUI:
             self._start_next()
 
     def _start_next(self) -> None:
+        if not self._apply_next_prompt_model():
+            return
         if (
             self.running
             or not self.pending
             or self.shutting_down
+            or self._setup_job is not None
+            or self._mcp_mutation_pending is not None
+            or self._mcp_catalog_unconfirmed
             or self._queue_edit_index is not None
             or self._choice_kind is not None
             or self._runtime_edit is not None
             or self._height_edit
             or self._permission_request is not None
             or self._secret_request is not None
+            or self._settings_input_request is not None
             or self._ollama_control_action is not None
         ):
             return
@@ -11749,7 +14509,16 @@ class PersistentChatTUI:
                             "assistant_delta", {"text": content}, turn_id=turn_id
                         )
                         assistant_started = True
-                    self.memory.log_turn(self.session_id, "assistant", content)
+                    model_message = payload.get("model_message")
+                    if model_message is None:
+                        self.memory.log_turn(self.session_id, "assistant", content)
+                    else:
+                        self.memory.log_turn(
+                            self.session_id,
+                            "assistant",
+                            content,
+                            model_content=model_message,
+                        )
                     assistant_saved = True
                 elif event.kind == "tool_start":
                     tool = payload["tool"]
@@ -11787,6 +14556,14 @@ class PersistentChatTUI:
                     }:
                         self._emit("append", f"\n-> {tool}\n")
                 elif event.kind == "tool_result":
+                    receipt = research_receipt(
+                        str(payload.get("tool") or ""),
+                        payload.get("args") or {},
+                        payload.get("metadata") or {},
+                        payload.get("result", ""),
+                    )
+                    if receipt is not None:
+                        self.memory.log_turn(self.session_id, "system", receipt)
                     if (payload.get("metadata") or {}).get("suppress_user_output"):
                         continue
                     tool = payload.get("tool")
@@ -11927,6 +14704,9 @@ class PersistentChatTUI:
             if partial and not assistant_saved:
                 self.memory.log_turn(self.session_id, "assistant", partial)
             if cancelled:
+                marker = getattr(self.agent, "mark_interrupted_turn", None)
+                if callable(marker):
+                    marker()
                 self.memory.log_turn(
                     self.session_id,
                     "system",
@@ -12169,7 +14949,12 @@ class PersistentChatTUI:
         value = request.pop("value", None)
         return str(value) if isinstance(value, str) and value else None
 
-    def _begin_provider_key_input(self, label: str) -> None:
+    def _begin_provider_key_input(
+        self,
+        label: str,
+        *,
+        return_model_backend: str = "",
+    ) -> None:
         env_name, attribute = PROVIDER_API_KEY_PROVIDERS[label]
         self._choice_kind = None
         self._choice_values = []
@@ -12178,6 +14963,7 @@ class PersistentChatTUI:
             "label": f"{label} API key",
             "prompt": f"Paste the {label} API key and press Enter. Escape cancels.",
             "on_submit": (label, env_name, attribute),
+            "return_model_backend": return_model_backend,
         }
         self.activity = "waiting for masked input"
         self._append(
@@ -12187,7 +14973,36 @@ class PersistentChatTUI:
         )
         self.application.invalidate()
 
-    def _save_provider_key(self, label: str, env_name: str, attribute: str, value: str) -> None:
+    def _open_provider_key_settings(self, label: str, default: str | None = None) -> None:
+        env_name, attribute = PROVIDER_API_KEY_PROVIDERS[label]
+        configured = bool(getattr(self.cfg, attribute, ""))
+        self._provider_key_label = label
+        choices = [
+            _choice_section(label.upper()),
+            _choice_info(f"Status: {'configured' if configured else 'not configured'}"),
+            _choice_info(PROVIDER_API_KEY_DESCRIPTIONS[label]),
+            _choice_info(f"Environment variable: {env_name}"),
+            "",
+            "Update API key" if configured else "Add API key",
+        ]
+        if configured:
+            choices.append("Remove API key")
+        choices.extend(["back", CANCEL_CHOICE])
+        self._begin_choice(
+            "provider key settings",
+            choices,
+            _settings_choice_default(choices, default),
+        )
+
+    def _save_provider_key(
+        self,
+        label: str,
+        env_name: str,
+        attribute: str,
+        value: str,
+        *,
+        return_model_backend: str = "",
+    ) -> None:
         try:
             save_provider_secret(self.cfg.config_dir, env_name, value)
         except (OSError, ValueError) as exc:
@@ -12196,45 +15011,64 @@ class PersistentChatTUI:
             setattr(self.cfg, attribute, value)
             backend = MODEL_BACKEND_FOR_API_KEY.get(env_name)
             if backend:
-                cached = [
-                    item
-                    for item in load_model_cache(self.cfg.data_dir / "model-cache.json")
-                    if item.backend != backend
-                ]
-                save_model_cache(self.cfg.data_dir / "model-cache.json", cached)
+                self._background_jobs.cancel(f"models:{backend}")
+                save_model_cache(
+                    self.cfg.data_dir / "model-cache.json", [], backend=backend, invalidate=True
+                )
                 if value:
-                    threading.Thread(
-                        target=_refresh_cloud_model_cache,
-                        args=(self.cfg,),
-                        name=f"klaude-{env_name.casefold()}-catalog-refresh",
-                        daemon=True,
-                    ).start()
+                    self._start_model_catalog_refresh(backend)
             action = "saved securely" if value else "removed"
             self._append(f"\n[success] {label} API key {action}.\n")
         self.status_error = ""
         self.activity = "ready" if not self.running else self.activity
-        self._open_settings_category("providers", f"{label}:")
+        if return_model_backend:
+            self._open_model_backend(return_model_backend, "cloud")
+        else:
+            self._open_provider_key_settings(label, "Update API key" if value else "Add API key")
 
     def _submit_secret_response(self) -> None:
         value = self.input.text.strip()
         self._set_input("")
         self._answer_secret(value or None)
 
-    def _answer_secret(self, value: str | None) -> None:
+    def _answer_secret(self, value: str | None, *, cancelled: bool = False) -> None:
         request = self._secret_request
         if request is None:
             return
         self._set_input("")
         self._secret_request = None
         callback = request.get("on_submit")
-        if isinstance(callback, tuple) and len(callback) == 3:
+        handler = str(request.get("handler") or "")
+        if handler == "mcp_plan_input":
+            if cancelled:
+                self._mcp_setup = None
+                self.activity = "secret entry cancelled"
+                self._open_settings_category("mcp servers")
+            else:
+                self._accept_mcp_plan_input(value)
+        elif handler == "mcp_custom_bearer":
+            if value:
+                self._save_custom_mcp(bearer_token=value)
+            else:
+                self._mcp_setup = None
+                self.activity = "secret entry cancelled"
+                self._open_settings_category("mcp servers")
+        elif isinstance(callback, tuple) and len(callback) == 3:
+            return_model_backend = str(request.get("return_model_backend") or "")
             if value:
                 self._save_provider_key(
-                    str(callback[0]), str(callback[1]), str(callback[2]), value
+                    str(callback[0]),
+                    str(callback[1]),
+                    str(callback[2]),
+                    value,
+                    return_model_backend=return_model_backend,
                 )
             else:
                 self.activity = "secret entry cancelled"
-                self._open_settings_category("providers")
+                if return_model_backend:
+                    self._open_model_backend(return_model_backend, "cloud")
+                else:
+                    self._open_provider_key_settings(str(callback[0]))
         else:
             request["value"] = value
             done = request.get("done")
@@ -12274,7 +15108,29 @@ class PersistentChatTUI:
         self.application.invalidate()
 
     def _before_render(self, application) -> None:
+        self._refresh_mcp_suggestions()
+        if self._choice_kind == "settings" and any(
+            row.startswith("MCP servers:") for row in self._choice_all_values
+        ):
+            previous_request = self._settings_overview_request
+            self._refresh_settings_overview()
+            if self._settings_overview_request != previous_request:
+                selected = (
+                    self._choice_values[self._choice_index] if self._choice_values else "theme"
+                )
+                error = self.status_error
+                self._begin_choice("settings", self._settings_categories(), selected, refresh=True)
+                self.status_error = error
         now = time.monotonic()
+        if self._mcp_mutation_pending and not self._mcp_mutation_warned and (
+            now - self._mcp_mutation_pending[1] >= 8
+        ):
+            self._mcp_mutation_warned = True
+            self.status_error = (
+                "MCP reload still pending; queued work paused"
+                if isinstance(self._mcp_mutation_pending[0], MCPReload) else
+                "MCP save still pending; outcome unknown, not rolled back"
+            )
         sync_due = (
             not self._choice_kind
             or not self._last_picker_session_sync
@@ -12282,8 +15138,7 @@ class PersistentChatTUI:
         )
         if sync_due:
             try:
-                self._sync_shared_session()
-                self._refresh_resume_choices()
+                self._request_session_sync()
             except sqlite3.Error as exc:
                 self.status_error = f"session sync unavailable: {exc}"
             if self._choice_kind:
@@ -12299,6 +15154,225 @@ class PersistentChatTUI:
                 break
             if kind == "append":
                 self._append(str(payload))
+            elif kind == "mcp_mutation_saved":
+                mcp_result = cast(MCPMutationResult, payload)
+                if not self._mcp_mutation_pending or (
+                    mcp_result.request != self._mcp_mutation_pending[0]
+                ):
+                    continue
+                self._mcp_mutation_pending = None
+                self._invalidate_mcp_inventory()
+                self._invalidate_settings_overview()
+                mcp_current = (
+                    mcp_result.request.session_id == self.session_id
+                    and mcp_result.path == str(self.cfg.mcp_servers_file)
+                )
+                if mcp_result.path == str(self.cfg.mcp_servers_file):
+                    if mcp_result.state == "unconfirmed" or (
+                        mcp_result.state in {"saved", "loaded"}
+                        and (mcp_result.catalog is None or not mcp_current)
+                    ):
+                        self._mcp_catalog_unconfirmed = True
+                if mcp_result.state in {"saved", "loaded"}:
+                    if mcp_current and mcp_result.catalog is not None:
+                        self._publish_mcp_tools(*mcp_result.catalog)
+                        self._mcp_catalog_unconfirmed = False
+                    message = (
+                        "Configured MCP tools reloaded and verified"
+                        if isinstance(mcp_result.request, MCPReload) else
+                        f"Imported {mcp_result.count} MCP server(s) as disabled"
+                        if isinstance(mcp_result.request, MCPImport) else
+                        f"Installed {mcp_result.request.name} as disabled; review before enabling"
+                        if isinstance(mcp_result.request, MCPAddDisabled) else
+                        f"Enabled MCP server {mcp_result.request.name}"
+                        if isinstance(mcp_result.request, MCPEnable) else
+                        f"MCP setting saved for {mcp_result.request.name}"
+                    )
+                    if mcp_result.catalog is None:
+                        message += "; live tools unchanged — restart before continuing queued work"
+                    self._append(f"\n[success] {message}.\n")
+                    self.status_error = (
+                        "MCP catalog unconfirmed; reload configured MCP tools to continue"
+                        if self._mcp_catalog_unconfirmed else ""
+                    )
+                else:
+                    self.status_error = (
+                        "MCP reload could not verify configuration; previous tools retained"
+                        if isinstance(mcp_result.request, MCPReload) else
+                        "MCP import rejected; invalid/unsafe file or duplicate definition"
+                        if isinstance(mcp_result.request, MCPImport)
+                        and mcp_result.state == "rejected" else
+                        "MCP install rejected; duplicate or invalid definition — "
+                        "review configuration"
+                        if isinstance(mcp_result.request, MCPAddDisabled)
+                        and mcp_result.state == "rejected" else
+                        "MCP definition changed or cannot be toggled; review and retry"
+                        if mcp_result.state == "rejected" else
+                        "MCP save unconfirmed; queued work paused — "
+                        "inspect configuration before retrying"
+                    )
+                    self._append(f"\n[warning] {self.status_error}.\n")
+                if mcp_current and self._choice_kind == "mcp settings":
+                    error = self.status_error
+                    fallback = (
+                        "Reload configured MCP tools" if isinstance(mcp_result.request, MCPReload)
+                        else f"{mcp_result.request.name}:"
+                    )
+                    selected_row = (
+                        self._choice_values[self._choice_index] if self._choice_values else fallback
+                    )
+                    self._open_settings_category("mcp servers", selected_row)
+                    self.status_error = error
+                self._start_next()
+            elif kind == "appearance_saved":
+                revision, saved = cast(tuple[int, bool], payload)
+                if revision != self._appearance_save_revision:
+                    continue
+                self._appearance_save_state = "saved" if saved else "failed"
+                if not saved:
+                    self.status_error = "Appearance save unconfirmed; active for this session"
+                    self._append(f"\n[error] {self.status_error}. Retry a change to save.\n")
+                if self._choice_kind in {"theme settings", "input field settings"}:
+                    selected = self._choice_values[self._choice_index]
+                    error = self.status_error
+                    category = "theme" if self._choice_kind == "theme settings" else "input field"
+                    self._open_settings_category(category, selected)
+                    self.status_error = error
+            elif kind == "memory_setting_saved":
+                memory_action, saved = cast(tuple[AutomaticMemoryUpdate, bool], payload)
+                if memory_action.revision != self._memory_save_revision:
+                    continue
+                # Reads launched before publication can return after this ack.
+                self._background_jobs.cancel("memory-inventory")
+                self._memory_inventory_request = None
+                self._invalidate_status_metadata()
+                self._invalidate_settings_overview()
+                self._memory_save_state = "saved" if saved else "failed"
+                if saved:
+                    self.memory.set_auto_memory_override(None)
+                else:
+                    self._append(
+                        "\n[warning] Memory preference save unconfirmed; active for this process.\n"
+                    )
+                if self._choice_kind == "memory settings":
+                    self._open_settings_category("memory")
+            elif kind == "session_setting_saved":
+                action, saved = cast(tuple[SessionSettingUpdate, bool], payload)
+                if not saved:
+                    message = (
+                        f"Session setting history/event save unconfirmed for {action.session_id}; "
+                        "the local model change was not rolled back"
+                    )
+                    self._append(f"\n[warning] {message}.\n")
+                    if action.session_id == self.session_id:
+                        self.status_error = message
+            elif kind == "settings_saved":
+                revision, saved = cast(tuple[int, bool], payload)
+                if revision != self._runtime_save_revision:
+                    continue
+                self._runtime_save_state = "saved" if saved else "failed"
+                if self._model_save_state in {"saving", "failed"}:
+                    self._model_save_state = "saved" if saved else "failed"
+                if not saved:
+                    self.status_error = (
+                        "Preferences save could not be confirmed; active for this session"
+                    )
+                    self._append(
+                        f"\n[error] {self.status_error}. Retry a settings change to save.\n"
+                    )
+                if self._choice_kind == "runtime settings":
+                    self._refresh_runtime_calibration_picker()
+                elif self._choice_kind == "settings" and self._model_save_state:
+                    error = self.status_error
+                    self._begin_choice(
+                        "settings", self._settings_categories(), "models", refresh=True
+                    )
+                    self.status_error = error
+                elif self._choice_kind in {
+                    "permission settings", "mcp permission tools", "tools settings"
+                }:
+                    selected = self._choice_values[self._choice_index]
+                    error = self.status_error
+                    if self._choice_kind == "mcp permission tools":
+                        self._open_mcp_permission_server(
+                            self._permission_mcp_server or "", selected
+                        )
+                    else:
+                        category = (
+                            "tools" if self._choice_kind == "tools settings" else "permissions"
+                        )
+                        self._open_settings_category(category, selected)
+                    self.status_error = error
+            elif kind == "settings_tools":
+                revision, values = cast(tuple[int, dict[str, dict[str, bool]]], payload)
+                if revision != self._runtime_save_revision:
+                    continue
+                for group, current in (
+                    ("tool_validation", self._tool_validation),
+                    ("tool_availability", self._tool_availability),
+                    ("web_provider_availability", self._web_provider_availability),
+                ):
+                    current.update({
+                        name: enabled for name, enabled in values.get(group, {}).items()
+                        if name in current and isinstance(enabled, bool)
+                    })
+                enabled = values.get("display", {}).get("activity_updates")
+                if isinstance(enabled, bool):
+                    self.show_activity_updates = enabled
+                self._apply_live_tool_preferences()
+                if self._choice_kind == "tools settings":
+                    selected = self._choice_values[self._choice_index]
+                    error = self.status_error
+                    self._open_settings_category("tools", selected)
+                    self.status_error = error
+            elif kind == "settings_permissions":
+                revision, policies = cast(tuple[int, dict[str, str]], payload)
+                if revision != self._runtime_save_revision:
+                    continue
+                if not hasattr(self.agent.gate, "policies"):
+                    self.agent.gate.policies = {}
+                names = _permission_tool_names(self.agent)
+                self.agent.gate.policies.update({
+                    name: policy for name, policy in policies.items()
+                    if name in names and policy in {"ask", "allow", "deny"}
+                })
+                if self._choice_kind in {"permission settings", "mcp permission tools"}:
+                    selected = self._choice_values[self._choice_index]
+                    error = self.status_error
+                    if self._choice_kind == "mcp permission tools":
+                        self._open_mcp_permission_server(
+                            self._permission_mcp_server or "", selected
+                        )
+                    else:
+                        self._open_settings_category("permissions", selected)
+                    self.status_error = error
+            elif kind == "session_io":
+                io_request, result, error = cast(
+                    tuple[SessionIORequest, SessionIOResult | None, str], payload
+                )
+                if io_request.session_id != self.session_id or io_request.turn_id != self._turn_id:
+                    continue
+                if result is not None:
+                    self._apply_session_io(io_request, result)
+                elif error:
+                    self.status_error = error
+            elif kind == "session_io_unavailable":
+                self.status_error = str(payload)
+            elif kind == "background_result":
+                self._apply_background_result(payload)
+            elif kind == "setup_progress":
+                cancel, rows = cast(tuple[threading.Event, list[str]], payload)
+                if (
+                    cancel is self._setup_cancel
+                    and not cancel.is_set()
+                    and self._choice_kind == "setup job"
+                ):
+                    self._begin_choice(
+                        "setup job",
+                        [_choice_info(self._setup_title), *(_choice_info(row) for row in rows),
+                         _choice_info("Waiting for authorization…"), CANCEL_CHOICE],
+                        CANCEL_CHOICE,
+                    )
             elif kind == "activity":
                 activity = str(payload)
                 was_running = _live_activity_label(self.activity) == "RUNNING"
@@ -12311,6 +15385,60 @@ class PersistentChatTUI:
             elif kind == "error":
                 self.status_error = str(payload)
                 self._append(f"\n[error] {payload}\n")
+            elif kind == "skills_inventory":
+                installed, error = cast(
+                    tuple[list[dict[str, object]] | None, str], payload
+                )
+                self._skills_inventory_loading = False
+                self._skills_inventory_loaded_at = now
+                if installed is not None:
+                    self._skills_inventory = installed
+                self._skills_inventory_error = (
+                    f"Inventory unavailable: {error}" if error else ""
+                )
+                if self._choice_kind == "skills settings":
+                    self._open_settings_category("skills")
+            elif kind == "mcp_catalog_results":
+                from klaude_core.mcp_catalog import install_plans
+
+                request_id, results, cached, error = cast(
+                    tuple[str, list[Any], bool, str], payload
+                )
+                if request_id != self._mcp_catalog_request_id:
+                    continue
+                self._mcp_catalog_results = {}
+                self._mcp_catalog_cached = cached
+                for server in results:
+                    plans = install_plans(server)
+                    transports = ", ".join(plan.label for plan in plans) or "unsupported"
+                    title = getattr(server, "title", getattr(server, "name", "MCP server"))
+                    label = (
+                        f"{title} · {getattr(server, 'version', '?')} · {transports}"
+                    )
+                    self._mcp_catalog_results[label] = server
+                if self._choice_kind == "mcp registry results":
+                    self._open_mcp_catalog_results(new_results=True)
+                    if error:
+                        self.status_error = f"MCP Registry search failed: {error}"
+            elif kind == "codex_auth_status":
+                authenticated, error = cast(tuple[bool | None, str], payload)
+                self._codex_auth_checking = False
+                if authenticated is not None:
+                    self._codex_auth_state = authenticated
+                if (
+                    not error
+                    and self._choice_kind == "model"
+                    and self._model_auth_backend == "openai_codex"
+                ):
+                    self._open_model_backend("openai_codex", "cloud")
+                elif error:
+                    self.status_error = f"OpenAI Codex status unavailable: {error}"
+            elif kind == "model_catalog_refreshed":
+                backend, error = cast(tuple[str, str], payload)
+                if self._choice_kind == "model" and self._model_auth_backend == backend:
+                    self._open_model_backend(backend, "cloud")
+                    if error:
+                        self.status_error = f"Model catalog refresh failed: {error}"
             elif kind == "permission" and isinstance(payload, dict):
                 if self.cancel_requested.is_set():
                     payload["answer"] = "n"
@@ -12379,6 +15507,13 @@ class PersistentChatTUI:
     def _exit(self) -> None:
         self._hide_text_theme_preview()
         self.shutting_down = True
+        self._background_jobs.close()
+        self._settings_writer.close()
+        self._appearance_writer.close()
+        self._session_io.close()
+        self._session_actions.close()
+        self._mcp_mutations.close()
+        self._cancel_setup_job()
         try:
             self.memory.clear_session_client(self.session_id, self.client_id)
         except sqlite3.Error:
@@ -12386,7 +15521,9 @@ class PersistentChatTUI:
         if self._permission_request:
             self._answer_permission("n")
         if self._secret_request:
-            self._answer_secret(None)
+            self._answer_secret(None, cancelled=True)
+        if self._settings_input_request:
+            self._answer_settings_input(None)
         if self._user_input_request:
             self._answer_user_input(None, "cancelled")
         self.cancel_requested.set()
@@ -12409,6 +15546,9 @@ class PersistentChatTUI:
         output = self.application.output
 
         def prepare_normal_screen() -> None:
+            for backend in MODEL_PROVIDER_FOR_BACKEND:
+                if backend != "ollama":
+                    self._start_model_catalog_refresh(backend)
             # Normal-screen applications otherwise begin rendering at whatever
             # row the shell left behind. Reserve a viewport so the first live
             # composer frame lands at the terminal bottom while the transcript
@@ -12429,6 +15569,22 @@ class PersistentChatTUI:
         try:
             self.application.run(pre_run=prepare_normal_screen)
         finally:
+            self._background_jobs.close(wait=True)
+            if not self._settings_writer.close(wait=True):
+                output.write_raw(
+                    "\r\n[warning] Preferences save unconfirmed; verify next launch.\r\n"
+                )
+            if not self._appearance_writer.close(wait=True):
+                output.write_raw(
+                    "\r\n[warning] Appearance save unconfirmed; verify next launch.\r\n"
+                )
+            self._session_io.close(wait=True)
+            if not self._session_actions.close(wait=True):
+                output.write_raw(
+                    "\r\n[warning] Session/settings saves unconfirmed.\r\n"
+                )
+            if not self._mcp_mutations.close(wait=True):
+                output.write_raw("\r\n[warning] MCP saves unconfirmed; inspect next launch.\r\n")
             output.write_raw(XTERM_MODIFY_OTHER_KEYS_OFF)
             output.write_raw(KITTY_KEYBOARD_PROTOCOL_OFF)
             output.flush()
@@ -12451,19 +15607,6 @@ def chat(
         # prior terminal content before configuration or agent setup can print.
         _clear_plain_session_view(force=True)
     cfg = load_config()
-    if (
-        cfg.openai_api_key
-        or cfg.openrouter_api_key
-        or cfg.gemini_api_key
-        or os.environ.get("KLAUDE_CODEX_BIN")
-        or shutil.which("codex")
-    ):
-        threading.Thread(
-            target=_refresh_cloud_model_cache,
-            args=(cfg,),
-            name="klaude-model-catalog-refresh",
-            daemon=True,
-        ).start()
     chat_preferences_path = cfg.data_dir / "chat-preferences.json"
     remembered_model = _load_last_chat_model(chat_preferences_path)
     requested_model = model or remembered_model or ""
@@ -12504,20 +15647,24 @@ def chat(
         except OSError as exc:
             console.print(f"[yellow]could not save chat model preference:[/] {exc}")
     session_id = uuid.uuid4().hex
+    _set_agent_session_context(agent, session_id)
     ui_state = ChatUIState(
         model=agent.model,
         effort=_agent_effort_label(agent),
         context_window=_agent_context_window(agent),
     )
     if interactive_tui:
-        PersistentChatTUI(
-            agent,
-            memory,
-            session_id,
-            cfg,
-            chat_preferences_path=chat_preferences_path,
-            character_stream=False,
-        ).run()
+        try:
+            PersistentChatTUI(
+                agent,
+                memory,
+                session_id,
+                cfg,
+                chat_preferences_path=chat_preferences_path,
+                character_stream=False,
+            ).run()
+        finally:
+            _close_agent_mcp(agent)
         console.print("[dim]bye[/]")
         return
     user_input_broker = getattr(agent, "user_input_broker", None)
@@ -12609,7 +15756,7 @@ def chat(
         if command == "/permission" and argument.strip():
             console.print(Text("/permission takes no arguments."))
             continue
-        if command in {"/settings", "/theme", "/permission"}:
+        if command in {"/settings", "/theme", "/permission", "/mcp"}:
             console.print(
                 Text(
                     f"{command} uses the interactive TUI picker. "
@@ -12626,7 +15773,9 @@ def chat(
                 "vim" if _composer_mode(chat_preferences_path) != "vim" else "standard"
             )
             try:
-                _write_chat_preferences(chat_preferences_path, preferences)
+                update_settings(
+                    chat_preferences_path, {("composer_mode",): preferences["composer_mode"]}
+                )
                 console.print(Text(f"Composer mode saved: {preferences['composer_mode']}."))
             except OSError as exc:
                 console.print(Text(f"Error: {exc}"))
@@ -12696,6 +15845,7 @@ def chat(
                         agent.restore_session([])
                         _clear_plain_session_view()
                     session_id = target
+                    _set_agent_session_context(agent, session_id)
                     ui_state.prompt_tokens = 0
                     ui_state.output_tokens = 0
                     console.print(Text(_session_divider(target, width=console.width - 1)))
@@ -12750,6 +15900,7 @@ def chat(
                 continue
             agent.restore_session(turns)
             session_id = target
+            _set_agent_session_context(agent, session_id)
             _clear_plain_session_view()
             console.print(Text(_restored_transcript(target, turns, console.width - 1)))
             continue
@@ -12849,6 +16000,7 @@ def chat(
         )
         for fact in memory.auto_remember_turn(user_msg):
             console.print(f"[dim]memory saved: {fact}[/]")
+    _close_agent_mcp(agent)
     console.print("[dim]bye[/]")
 
 
@@ -12869,6 +16021,7 @@ def ask(question: str, model: str = typer.Option("", help="override model")):
     if user_input_broker is not None and sys.stdin.isatty():
         user_input_broker.handler = _ask_line_user_input
     session_id = uuid.uuid4().hex
+    _set_agent_session_context(agent, session_id)
     if _handle_unknown_slash_command(
         question,
         agent=agent,
@@ -12878,10 +16031,13 @@ def ask(question: str, model: str = typer.Option("", help="override model")):
         return
     if _handle_command_reference_request(question, agent, memory, session_id):
         return
-    if not _handle_explicit_memory_request(question, agent, memory, session_id):
-        _render(agent, memory, session_id, question)
-        for fact in memory.auto_remember_turn(question):
-            console.print(f"[dim]memory saved: {fact}[/]")
+    try:
+        if not _handle_explicit_memory_request(question, agent, memory, session_id):
+            _render(agent, memory, session_id, question)
+            for fact in memory.auto_remember_turn(question):
+                console.print(f"[dim]memory saved: {fact}[/]")
+    finally:
+        _close_agent_mcp(agent)
 
 
 @app.command()
@@ -13598,7 +16754,11 @@ def auth_login(provider: str = typer.Argument(..., help="provider name: openai-c
         console.print(f"[red]Login failed:[/] {exc}")
         raise typer.Exit(1) from None
     cfg = load_config()
-    _refresh_cloud_model_cache(cfg)
+    cache = cfg.data_dir / "model-cache.json"
+    generation = model_cache_generation(cache, "openai_codex")
+    discovered = discover_codex_models()
+    if discovered:
+        save_model_cache(cache, discovered, backend="openai_codex", expected_generation=generation)
     detail = f" ({status.plan_type})" if status.plan_type else ""
     console.print(f"[green]✓ Signed in[/]{detail}")
 
@@ -13635,13 +16795,697 @@ def auth_logout(provider: str = typer.Argument(..., help="provider name: openai-
         console.print(f"[red]Logout failed:[/] {exc}")
         raise typer.Exit(1) from None
     cfg = load_config()
-    cached = [
-        item
-        for item in load_model_cache(cfg.data_dir / "model-cache.json")
-        if item.backend != "openai_codex"
-    ]
-    save_model_cache(cfg.data_dir / "model-cache.json", cached)
+    save_model_cache(
+        cfg.data_dir / "model-cache.json", [], backend="openai_codex", invalidate=True
+    )
     console.print("[green]✓ Signed out of OpenAI Codex[/]")
+
+
+def _mcp_assignments(values: list[str], option: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for value in values:
+        if "=" not in value:
+            raise typer.BadParameter(f"{option} requires NAME=VALUE")
+        key, item = value.split("=", 1)
+        if not key.strip():
+            raise typer.BadParameter(f"{option} name cannot be empty")
+        result[key.strip()] = item
+    return result
+
+
+def _mcp_registry():
+    from klaude_core.mcp_client import MCPRegistry
+
+    return MCPRegistry(load_config().mcp_servers_file)
+
+
+def _save_mcp_cli(registry, servers) -> None:
+    try:
+        registry.save(servers)
+    except (OSError, ValueError) as exc:
+        console.print(Text(f"MCP configuration was not saved: {exc}"))
+        raise typer.Exit(1) from None
+
+
+def _mcp_catalog():
+    from klaude_core.mcp_catalog import MCPCatalogClient
+
+    cfg = load_config()
+    return MCPCatalogClient(cfg.mcp_registry_cache_file)
+
+
+def _mcp_oauth_callback(value: str, redirect_uri: str) -> AuthorizationCodeResult:
+    """Validate a loopback OAuth callback without ever rendering its code."""
+    from mcp.shared.auth import AuthorizationCodeResult
+
+    if len(value) > 8_192:
+        raise ValueError("OAuth callback URL exceeded the safety limit")
+    callback = urlparse(value)
+    expected = urlparse(redirect_uri)
+    if (
+        callback.scheme != expected.scheme
+        or callback.hostname != expected.hostname
+        or callback.port != expected.port
+        or callback.path != expected.path
+    ):
+        raise ValueError("OAuth callback did not match Klaude's loopback redirect URL")
+    values = parse_qs(callback.query, keep_blank_values=True)
+    if values.get("error"):
+        raise ValueError("OAuth authorization was denied or cancelled")
+    code = next(iter(values.get("code", [])), "")
+    state = next(iter(values.get("state", [])), "")
+    if not code or not state or any(
+        len(values.get(key, [])) > 1 for key in ("code", "state", "iss")
+    ):
+        raise ValueError("OAuth callback did not contain the required code and state")
+    return AuthorizationCodeResult(
+        code=code, state=state, iss=next(iter(values.get("iss", [])), None)
+    )
+
+
+class _MCPLoopbackHandler(BaseHTTPRequestHandler):
+    callback_url = ""
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler protocol name
+        port = cast(HTTPServer, self.server).server_port
+        type(self).callback_url = f"http://127.0.0.1:{port}{self.path}"
+        body = b"Klaude received the MCP authorization. You may close this tab."
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format: str, *args: object) -> None:
+        # BaseHTTPRequestHandler otherwise logs the callback path, including
+        # its short-lived authorization code, to stderr.
+        return
+
+
+def _mcp_auth_server(name: str):
+    registry = _mcp_registry()
+    servers = registry.load()
+    if name not in servers:
+        raise typer.BadParameter(f"unknown MCP server: {name}")
+    server = servers[name]
+    if server.transport != "http":
+        raise typer.BadParameter("MCP OAuth is available only for remote HTTP servers")
+    return registry, servers, server
+
+
+@mcp_app.callback(invoke_without_command=True)
+def mcp_default(ctx: typer.Context) -> None:
+    """List configured MCP servers when no subcommand is supplied."""
+    if ctx.invoked_subcommand is None:
+        mcp_list()
+
+
+@mcp_auth_app.command("login")
+def mcp_auth_login(
+    name: str,
+    manual: bool = typer.Option(
+        False,
+        "--manual",
+        help="Paste the final callback URL (recommended over SSH/headless sessions)",
+    ),
+    open_browser: bool = typer.Option(
+        True,
+        "--open-browser/--no-open-browser",
+        help="Open the authorization URL in the default browser",
+    ),
+    scope: str = typer.Option("", help="Optional OAuth scopes requested from the server"),
+    client_metadata_url: str = typer.Option(
+        "",
+        help="Optional public HTTPS Client ID Metadata Document URL",
+    ),
+) -> None:
+    """Sign in to a protected remote MCP server using OAuth + PKCE."""
+    from klaude_core.mcp_client import (
+        MCP_OAUTH_REDIRECT_URI,
+        MCPClient,
+        MCPTokenStorage,
+        mcp_auth_file,
+    )
+
+    registry, servers, server = _mcp_auth_server(name)
+    server.oauth = True
+    if scope:
+        server.oauth_scope = scope
+    if client_metadata_url:
+        server.oauth_client_metadata_url = client_metadata_url
+    try:
+        server.validate()
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    cfg = load_config()
+    storage = MCPTokenStorage(mcp_auth_file(cfg.mcp_auth_dir, name))
+    had_credentials = storage.status().configured
+    httpd: HTTPServer | None = None
+    callback_url = MCP_OAUTH_REDIRECT_URI
+    if not manual:
+        try:
+            httpd = HTTPServer(("127.0.0.1", 8765), _MCPLoopbackHandler)
+            httpd.timeout = 300
+            _MCPLoopbackHandler.callback_url = ""
+        except OSError as exc:
+            raise typer.BadParameter(
+                f"could not reserve the loopback callback: {exc}; retry with --manual"
+            ) from None
+
+    async def redirect_handler(authorization_url: str) -> None:
+        console.print("\n[bold]MCP OAuth Login[/]")
+        console.print("Visit:")
+        console.print(Text(authorization_url))
+        if manual:
+            console.print(
+                "After authorization, copy the complete localhost callback URL from "
+                "the browser and paste it here."
+            )
+        elif open_browser and not webbrowser.open(authorization_url, new=2):
+            console.print("[dim]The browser did not open; visit the URL manually.[/]")
+        console.print("\nWaiting for authorization…")
+
+    async def callback_handler() -> AuthorizationCodeResult:
+        if manual:
+            value = typer.prompt("Callback URL", hide_input=True)
+        else:
+            assert httpd is not None
+            httpd.handle_request()
+            value = _MCPLoopbackHandler.callback_url
+            if not value:
+                raise RuntimeError("MCP OAuth callback timed out; retry with --manual")
+        return _mcp_oauth_callback(value, callback_url)
+
+    try:
+        client = MCPClient(
+            timeout_seconds=300,
+            auth_dir=cfg.mcp_auth_dir,
+            oauth_redirect_handler=redirect_handler,
+            oauth_callback_handler=callback_handler,
+            oauth_redirect_uri=callback_url,
+        )
+        server.tools = client.discover(server)
+        server.enabled = True
+        registry.save(servers)
+    except KeyboardInterrupt:
+        if not had_credentials:
+            storage.clear()
+        console.print("\n[yellow]MCP OAuth login cancelled.[/]")
+        raise typer.Exit(130) from None
+    except Exception as exc:
+        if not had_credentials:
+            storage.clear()
+        console.print(f"[red]MCP OAuth login failed:[/] {exc}")
+        raise typer.Exit(1) from None
+    finally:
+        if httpd is not None:
+            httpd.server_close()
+    console.print(f"[green]Signed in and enabled {name}[/] · {len(server.tools)} tools")
+
+
+@mcp_auth_app.command("status")
+def mcp_auth_status(name: str) -> None:
+    """Show non-secret OAuth state for one remote MCP server."""
+    from klaude_core.mcp_client import MCPTokenStorage, mcp_auth_file
+
+    _registry, _servers, server = _mcp_auth_server(name)
+    cfg = load_config()
+    status = MCPTokenStorage(mcp_auth_file(cfg.mcp_auth_dir, name)).status()
+    rows = [
+        ("Server", name),
+        ("OAuth", "configured" if server.oauth else "not configured"),
+        ("Access token", "saved" if status.access_token_present else "not saved"),
+        ("Refresh token", "available" if status.refresh_token_present else "not available"),
+        ("Client registration", "saved" if status.client_registered else "not saved"),
+    ]
+    if status.expires_at is not None:
+        state = "expired" if status.expires_at <= time.time() else "expires"
+        value = datetime.fromtimestamp(status.expires_at).astimezone().strftime("%Y-%m-%d %H:%M %Z")
+        rows.append(("Token expiry", f"{state} {value}"))
+    if status.scope:
+        rows.append(("Scope", status.scope))
+    console.print(Text(_status_columns(rows)))
+
+
+@mcp_auth_app.command("logout")
+def mcp_auth_logout(
+    name: str,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Remove local OAuth credentials"),
+) -> None:
+    """Remove local OAuth credentials and disable the server."""
+    from klaude_core.mcp_client import MCPTokenStorage, mcp_auth_file
+
+    registry, servers, server = _mcp_auth_server(name)
+    if not yes and not typer.confirm(f"Remove local MCP OAuth credentials for {name}?"):
+        raise typer.Abort()
+    cfg = load_config()
+    server.enabled = False
+    _save_mcp_cli(registry, servers)
+    removed = MCPTokenStorage(mcp_auth_file(cfg.mcp_auth_dir, name)).clear()
+    state = "removed" if removed else "not present"
+    console.print(f"[green]MCP OAuth credentials {state}; {name} is disabled.[/]")
+
+
+@mcp_app.command("list")
+def mcp_list() -> None:
+    """List configured MCP servers and cached tool counts."""
+    try:
+        servers = _mcp_registry().load()
+    except ValueError as exc:
+        console.print(f"[red]MCP configuration error:[/] {exc}")
+        raise typer.Exit(1) from None
+    if not servers:
+        console.print("[dim]No MCP servers configured.[/]")
+        console.print("Add one with `klaude mcp add NAME --url URL` or `--command COMMAND`.")
+        return
+    table = Table("Server", "Source", "Transport", "State", "Tools")
+    for server in servers.values():
+        endpoint = server.command if server.transport == "stdio" else server.url
+        source = (
+            f"official registry · {server.source.get('version', '?')}"
+            if server.source.get("registry") == "official"
+            else "manual/imported"
+        )
+        table.add_row(
+            Text(server.name),
+            Text(source),
+            Text("http + OAuth" if server.oauth else server.transport),
+            Text("enabled" if server.enabled else "disabled"),
+            Text(f"{len(server.tools)} · {endpoint}"),
+        )
+    console.print(table)
+
+
+@mcp_app.command("search")
+def mcp_search(
+    query: str,
+    limit: int = typer.Option(20, min=1, max=50, help="Maximum results"),
+    refresh: bool = typer.Option(False, "--refresh", help="Ignore the one-hour cache"),
+) -> None:
+    """Search the official public MCP Registry without installing anything."""
+    from klaude_core.mcp_catalog import MCPCatalogError, install_plans
+
+    try:
+        results, cached = _mcp_catalog().search(query, limit=limit, refresh=refresh)
+    except MCPCatalogError as exc:
+        console.print(f"[red]MCP Registry search failed:[/] {exc}")
+        raise typer.Exit(1) from None
+    if not results:
+        console.print("[yellow]No active MCP servers matched.[/]")
+        return
+    table = Table("Name", "Version", "Install", "Description")
+    for server in results:
+        options = ", ".join(plan.label for plan in install_plans(server)) or "unsupported"
+        table.add_row(
+            Text(server.name),
+            Text(server.version),
+            Text(options),
+            Text(textwrap.shorten(server.description, width=72, placeholder="…")),
+        )
+    console.print(table)
+    if cached:
+        console.print("[dim]Showing cached registry results.[/]")
+    console.print("Inspect one with `klaude mcp info REGISTRY_NAME`.")
+
+
+@mcp_app.command("info")
+def mcp_info(
+    name: str,
+    refresh: bool = typer.Option(False, "--refresh", help="Ignore the one-hour cache"),
+) -> None:
+    """Show registry provenance and supported installation choices."""
+    from klaude_core.mcp_catalog import MCPCatalogError, install_plans
+
+    try:
+        server = _mcp_catalog().get(name, refresh=refresh)
+    except MCPCatalogError as exc:
+        console.print(f"[red]MCP Registry lookup failed:[/] {exc}")
+        raise typer.Exit(1) from None
+    console.print(Text(server.title, style="bold"))
+    console.print(Text(server.description))
+    console.print(Text(f"Registry name: {server.name}"))
+    console.print(Text(f"Version: {server.version}"))
+    if server.repository_url:
+        console.print(Text(f"Repository: {server.repository_url}"))
+    if server.website_url:
+        console.print(Text(f"Website: {server.website_url}"))
+    plans = install_plans(server)
+    if not plans:
+        console.print("[yellow]No currently supported installation transport.[/]")
+        return
+    for index, plan in enumerate(plans, start=1):
+        console.print(Text(f"\nOption {index}", style="bold"))
+        console.print(Text(plan.preview()))
+
+
+def _mcp_local_name(value: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip(".-")[:64]
+    if not name or not name[0].isalnum():
+        raise typer.BadParameter("could not derive a valid local server name; use --name")
+    return name
+
+
+@mcp_app.command("install")
+def mcp_install(
+    registry_name: str,
+    name: str = typer.Option("", "--name", help="Local name used in Klaude"),
+    transport: str = typer.Option(
+        "", "--transport", help="Choose remote, npm, pypi, npx, or uvx"
+    ),
+    refresh: bool = typer.Option(False, "--refresh", help="Ignore the one-hour cache"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Accept the displayed plan"),
+) -> None:
+    """Save an exact-version registry server disabled; never execute it."""
+    from klaude_core.mcp_catalog import MCPCatalogError, install_plans
+
+    try:
+        catalog_server = _mcp_catalog().get(registry_name, refresh=refresh)
+        plans = install_plans(catalog_server)
+    except MCPCatalogError as exc:
+        console.print(f"[red]MCP Registry lookup failed:[/] {exc}")
+        raise typer.Exit(1) from None
+    if transport:
+        requested = transport.casefold()
+        plans = [plan for plan in plans if requested in plan.label.casefold()]
+    if not plans:
+        detail = f" for transport {transport!r}" if transport else ""
+        console.print(f"[red]No supported installation plan{detail}.[/]")
+        raise typer.Exit(1)
+    if len(plans) == 1 or yes or not sys.stdin.isatty():
+        plan = plans[0]
+    else:
+        console.print("Available installation transports:")
+        for index, candidate in enumerate(plans, start=1):
+            console.print(f"  {index}. {candidate.label}")
+        selection = typer.prompt("Choose", type=int, default=1)
+        if not 1 <= selection <= len(plans):
+            raise typer.BadParameter("installation choice is out of range")
+        plan = plans[selection - 1]
+    local_name = _mcp_local_name(name or registry_name.rsplit("/", 1)[-1])
+    registry = _mcp_registry()
+    servers = registry.load()
+    if local_name in servers:
+        raise typer.BadParameter(
+            f"MCP server {local_name!r} already exists; use another --name or remove it first"
+        )
+    console.print("\n[bold]MCP installation plan[/]")
+    console.print(Text(plan.preview()))
+    console.print(
+        "[yellow]Registry metadata is not a security endorsement. The definition will be "
+        "saved disabled and no package or server will run now.[/]"
+    )
+    if not yes and not typer.confirm("Save this disabled server definition?"):
+        raise typer.Abort()
+    answers: dict[str, str] = {}
+    for item in plan.inputs:
+        env_name = plan.secret_environment_name(local_name, item) if item.secret else ""
+        if item.secret and os.environ.get(env_name):
+            continue
+        if not item.required and item.default:
+            continue
+        if not sys.stdin.isatty():
+            if item.required:
+                raise typer.BadParameter(
+                    f"required input {item.label!r} needs an interactive terminal"
+                )
+            continue
+        prompt = item.label + (f" — {item.description}" if item.description else "")
+        answers[item.key] = typer.prompt(
+            prompt,
+            default=item.default,
+            show_default=bool(item.default),
+            hide_input=item.secret,
+            confirmation_prompt=item.secret,
+        )
+    try:
+        server, secrets = plan.materialize(local_name, answers)
+        for variable, value in secrets.items():
+            save_provider_secret(load_config().config_dir, variable, value)
+            os.environ[variable] = value
+        servers[local_name] = server
+        registry.save(servers)
+    except (MCPCatalogError, OSError, ValueError) as exc:
+        console.print(f"[red]MCP server was not installed:[/] {exc}")
+        raise typer.Exit(1) from None
+    console.print(f"[green]Installed {local_name} as disabled.[/]")
+    console.print(f"Review it, then run `klaude mcp enable {local_name}` to trust and connect.")
+
+
+@mcp_app.command("add")
+def mcp_add(
+    name: str,
+    url: str = typer.Option("", "--url", help="Streamable HTTP MCP endpoint"),
+    command: str = typer.Option("", "--command", help="Local stdio server executable"),
+    arg: list[str] | None = typer.Option(  # noqa: B008
+        None, "--arg", help="Repeat for each command argument"
+    ),
+    env: list[str] | None = typer.Option(  # noqa: B008
+        None, "--env", help="NAME=VALUE or NAME=${env:VARIABLE}"
+    ),
+    header: list[str] | None = typer.Option(  # noqa: B008
+        None, "--header", help="NAME=VALUE; secrets must use ${env:VARIABLE}"
+    ),
+    cwd: str = typer.Option("", "--cwd", help="Working directory for a stdio server"),
+    oauth: bool = typer.Option(False, "--oauth", help="Configure remote OAuth + PKCE"),
+    oauth_scope: str = typer.Option("", help="Optional OAuth scopes"),
+    client_metadata_url: str = typer.Option(
+        "", help="Optional public HTTPS Client ID Metadata Document URL"
+    ),
+    skip_test: bool = typer.Option(
+        False, "--skip-test", help="Save disabled without launching or connecting"
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Confirm this server definition"),
+) -> None:
+    """Add and verify one local or remote MCP server."""
+    from klaude_core.mcp_client import MCPClient, MCPServerConfig
+
+    arguments = list(arg or [])
+    if not url and not command and sys.stdin.isatty():
+        transport = typer.prompt("Transport", default="http (Streamable HTTP)").casefold()
+        if transport in {"http", "http (streamable http)", "streamable http"}:
+            url = typer.prompt("MCP endpoint URL").strip()
+        elif transport == "stdio":
+            command_line = typer.prompt("Local command and arguments").strip()
+            try:
+                command_parts = shlex.split(command_line)
+            except ValueError as exc:
+                raise typer.BadParameter(f"invalid command: {exc}") from None
+            if command_parts:
+                command, arguments = command_parts[0], command_parts[1:]
+        else:
+            raise typer.BadParameter("transport must be http or stdio")
+    if bool(url) == bool(command):
+        raise typer.BadParameter(
+            "provide exactly one of --url or --command (or run interactively for a wizard)"
+        )
+    server = MCPServerConfig(
+        name=name,
+        transport="http" if url else "stdio",
+        url=url,
+        command=command,
+        args=arguments,
+        env=_mcp_assignments(env or [], "--env"),
+        headers=_mcp_assignments(header or [], "--header"),
+        cwd=cwd,
+        enabled=not skip_test and not oauth,
+        oauth=oauth,
+        oauth_scope=oauth_scope,
+        oauth_client_metadata_url=client_metadata_url,
+    )
+    try:
+        server.validate()
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    endpoint = (
+        server.url
+        if server.transport == "http"
+        else " ".join([server.command, *server.args])
+    )
+    if not yes and not typer.confirm(
+        f"Trust MCP server '{name}' and allow it to expose tools?\n{endpoint}\nContinue?"
+    ):
+        raise typer.Abort()
+    if not skip_test and not oauth:
+        try:
+            server.tools = MCPClient(auth_dir=load_config().mcp_auth_dir).discover(server)
+        except Exception as exc:
+            console.print(f"[red]Could not initialize MCP server:[/] {exc}")
+            raise typer.Exit(1) from None
+    registry = _mcp_registry()
+    servers = registry.load()
+    servers[name] = server
+    _save_mcp_cli(registry, servers)
+    if oauth:
+        state = f"disabled; run `klaude mcp auth login {name}`"
+    elif skip_test:
+        state = "disabled; run `klaude mcp enable " + name + "`"
+    else:
+        state = "enabled"
+    console.print(f"[green]Added {name}[/] · {state} · {len(server.tools)} tools")
+
+
+@mcp_app.command("import")
+def mcp_import(path: Path, yes: bool = typer.Option(False, "--yes", "-y")) -> None:
+    """Import VS Code/OpenCode MCP JSON safely; imported servers start disabled."""
+    registry = _mcp_registry()
+    try:
+        imported = registry.import_file(path.expanduser())
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Could not import MCP configuration:[/] {exc}")
+        raise typer.Exit(1) from None
+    if not imported:
+        console.print("[yellow]No MCP servers found.[/]")
+        return
+    if not yes and not typer.confirm(
+        f"Import {len(imported)} server definitions as disabled? Review and enable each afterward."
+    ):
+        raise typer.Abort()
+    servers = registry.load()
+    for name, server in imported.items():
+        server.enabled = False
+        server.tools = []
+        servers[name] = server
+    _save_mcp_cli(registry, servers)
+    console.print(f"[green]Imported {len(imported)} MCP servers as disabled.[/]")
+    console.print("Run `klaude mcp enable NAME` to verify and enable one.")
+
+
+@mcp_app.command("enable")
+def mcp_enable(
+    name: str,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Trust and launch/connect"),
+) -> None:
+    """Connect, discover tools, and enable one configured server."""
+    from klaude_core.mcp_client import MCPClient
+
+    registry = _mcp_registry()
+    servers = registry.load()
+    if name not in servers:
+        raise typer.BadParameter(f"unknown MCP server: {name}")
+    server = servers[name]
+    if server.oauth:
+        from klaude_core.mcp_client import MCPTokenStorage, mcp_auth_file
+
+        cfg = load_config()
+        auth_status = MCPTokenStorage(mcp_auth_file(cfg.mcp_auth_dir, name)).status()
+        if not auth_status.access_token_present:
+            console.print(
+                f"[yellow]MCP OAuth sign-in is required. Run "
+                f"`klaude mcp auth login {name}`.[/]"
+            )
+            raise typer.Exit(1)
+    endpoint = server.url if server.transport == "http" else " ".join(
+        [server.command, *server.args]
+    )
+    provenance = ""
+    if server.source.get("registry") == "official":
+        provenance = (
+            f"\nRegistry: {server.source.get('name', '?')} "
+            f"v{server.source.get('version', '?')}"
+        )
+    if not yes and not typer.confirm(
+        f"Trust and initialize MCP server '{name}'?\n{endpoint}{provenance}\n"
+        "The server process or endpoint is third-party code and can act with its own "
+        "operating-system/network access. Continue?"
+    ):
+        raise typer.Abort()
+    try:
+        server.tools = MCPClient(auth_dir=load_config().mcp_auth_dir).discover(server)
+    except Exception as exc:
+        console.print(f"[red]Could not initialize MCP server:[/] {exc}")
+        raise typer.Exit(1) from None
+    server.enabled = True
+    _save_mcp_cli(registry, servers)
+    console.print(f"[green]Enabled {name}[/] · {len(server.tools)} tools")
+
+
+@mcp_app.command("disable")
+def mcp_disable(name: str) -> None:
+    """Disable a server without deleting its configuration."""
+    registry = _mcp_registry()
+    servers = registry.load()
+    if name not in servers:
+        raise typer.BadParameter(f"unknown MCP server: {name}")
+    servers[name].enabled = False
+    _save_mcp_cli(registry, servers)
+    console.print(f"[green]Disabled {name}[/]")
+
+
+@mcp_app.command("refresh")
+def mcp_refresh(name: str = typer.Argument("")) -> None:
+    """Refresh cached tool schemas for one or all enabled servers."""
+    from klaude_core.mcp_client import MCPClient
+
+    registry = _mcp_registry()
+    servers = registry.load()
+    targets = [servers[name]] if name in servers else [s for s in servers.values() if s.enabled]
+    if name and name not in servers:
+        raise typer.BadParameter(f"unknown MCP server: {name}")
+    failures = 0
+    for server in targets:
+        try:
+            server.tools = MCPClient(auth_dir=load_config().mcp_auth_dir).discover(server)
+            console.print(f"[green]{server.name}[/] · {len(server.tools)} tools")
+        except Exception as exc:
+            failures += 1
+            console.print(f"[red]{server.name}:[/] {exc}")
+    _save_mcp_cli(registry, servers)
+    if failures:
+        raise typer.Exit(1)
+
+
+@mcp_app.command("remove")
+def mcp_remove(
+    name: str,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+) -> None:
+    """Remove one MCP server and its dedicated OAuth file; shared env secrets remain."""
+    registry = _mcp_registry()
+    servers = registry.load()
+    if name not in servers:
+        raise typer.BadParameter(f"unknown MCP server: {name}")
+    if not yes and not typer.confirm(f"Remove MCP server '{name}'?"):
+        raise typer.Abort()
+    server = servers.pop(name)
+    _save_mcp_cli(registry, servers)
+    if server.oauth:
+        from klaude_core.mcp_client import MCPTokenStorage, mcp_auth_file
+
+        cfg = load_config()
+        MCPTokenStorage(mcp_auth_file(cfg.mcp_auth_dir, name)).clear()
+    console.print(f"[green]Removed {name}[/]")
+
+
+@mcp_app.command("secret")
+def mcp_secret(
+    variable: str,
+    remove: bool = typer.Option(False, "--remove", help="Remove this saved secret"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip removal confirmation"),
+) -> None:
+    """Securely add, update, or remove an environment variable used by MCP."""
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", variable):
+        raise typer.BadParameter("VARIABLE must use uppercase letters, numbers, and underscores")
+    cfg = load_config()
+    if remove:
+        if not yes and not typer.confirm(f"Remove saved MCP secret {variable}?"):
+            raise typer.Abort()
+        save_provider_secret(cfg.config_dir, variable, "")
+        os.environ.pop(variable, None)
+        console.print(f"[green]Removed MCP secret {variable}[/]")
+        return
+    try:
+        value = typer.prompt(
+            f"Value for {variable}",
+            hide_input=True,
+            confirmation_prompt=True,
+        )
+    except (EOFError, KeyboardInterrupt):
+        raise typer.Abort() from None
+    if not value:
+        raise typer.BadParameter("secret value cannot be empty")
+    save_provider_secret(cfg.config_dir, variable, value)
+    os.environ[variable] = value
+    console.print(f"[green]Saved MCP secret {variable} securely[/]")
 
 
 @app.command()
@@ -13706,6 +17550,16 @@ def status():
         + "; Gemini API="
         + ("configured" if cfg.gemini_api_key else "no key"),
     )
+    try:
+        mcp_servers = _mcp_registry().load()
+        enabled_mcp_servers = sum(server.enabled for server in mcp_servers.values())
+        modes.add_row(
+            "external MCP",
+            "on" if enabled_mcp_servers else "off",
+            f"{enabled_mcp_servers}/{len(mcp_servers)} servers enabled",
+        )
+    except ValueError as exc:
+        modes.add_row("external MCP", "invalid configuration", str(exc))
     modes.add_row(
         "search billing",
         "on",

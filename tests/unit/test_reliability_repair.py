@@ -10,6 +10,7 @@ from klaude_cli.main import (
 from klaude_core import Agent, AgentEvent, PermissionGate, Tool, TurnScope
 from klaude_core.memory import Memory
 from klaude_core.model_runtime import ModelCapabilities, ModelInfo
+from klaude_core.research_receipts import research_receipt
 from klaude_tools import Workspace, build_tools, classify_command
 
 
@@ -162,6 +163,314 @@ def test_tool_markup_recovers_without_leaking():
     assert any(e.kind == "retry" for e in events)
     assert any(e.kind == "tool_result" for e in events)
     assert all("<web_search" not in str(e.payload) for e in events)
+
+
+def test_provider_continuation_state_is_private_and_restorable():
+    provider_message = {
+        "role": "assistant",
+        "content": "Done.",
+        "openai_response_items": [
+            {
+                "id": "rs_123",
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": "opaque-state",
+            },
+            {
+                "id": "msg_123",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Done.", "annotations": []}
+                ],
+                "phase": "final_answer",
+            },
+        ],
+    }
+    agent = make_agent(Runtime([provider_message]), [])
+
+    events = list(agent.run("finish"))
+
+    text_event = next(event for event in events if event.kind == "text")
+    assert text_event.payload["content"] == "Done."
+    assert text_event.payload["model_message"] == provider_message
+
+    restored = make_agent(Runtime([]), [])
+    restored.restore_session(
+        [
+            {"role": "user", "content": "finish"},
+            {
+                "role": "assistant",
+                "content": "Done.",
+                "model_content": provider_message,
+            },
+        ]
+    )
+    assert restored.messages[-1] == provider_message
+
+
+def test_restored_interrupted_research_preserves_objective_without_inventing_results():
+    runtime = Runtime([{"role": "assistant", "content": "I need to re-check the sources."}])
+    agent = make_agent(runtime, [])
+    request = (
+        "Compare local knowledge, web search, and Context7 for Godot 2D "
+        "player code with melee and ranged weapon switching."
+    )
+    agent.restore_session(
+        [
+            {"role": "user", "content": request},
+            {"role": "system", "content": {
+                "event": "tool_audit", "tool": "web_search", "phase": "result",
+                "executed": True,
+            }},
+            {"role": "assistant", "content": "I found some sources but have not compared"},
+            {"role": "system", "content": {
+                "event": "interruption", "message": "Interrupted at a safe boundary.",
+            }},
+        ]
+    )
+
+    list(agent.run("continue where left off"))
+
+    prompt = runtime.requests[0][0]
+    assert prompt[-1]["role"] == "user"
+    assert request in prompt[-1]["content"]
+    assert "Prior tool audit entries are not their results" in prompt[-1]["content"]
+    assert "No durable research receipts are available" in prompt[-1]["content"]
+    assert agent.messages[-2]["content"] == "continue where left off"
+    assert agent._restored_unfinished_task == ""
+
+
+def test_restored_interruption_does_not_hijack_new_topic_or_completed_turn():
+    interrupted = [
+        {"role": "user", "content": "Research Godot code."},
+        {"role": "system", "content": {"event": "interruption"}},
+    ]
+    runtime = Runtime([{"role": "assistant", "content": "Hello."}])
+    agent = make_agent(runtime, [])
+    agent.restore_session(interrupted)
+    list(agent.run("Tell me about Python instead"))
+    assert "Research Godot code" not in runtime.requests[0][0][-1]["content"]
+
+    completed = make_agent(Runtime([]), [])
+    completed.restore_session([*interrupted, {"role": "assistant", "content": "Done."}])
+    assert completed._restored_unfinished_task == ""
+
+
+def test_same_process_interrupted_turn_survives_model_change():
+    runtime = Runtime([{"role": "assistant", "content": "Continuing the comparison."}])
+    agent = make_agent(runtime, [])
+    agent.messages.append({"role": "user", "content": "Compare Godot examples from each source."})
+    agent.mark_interrupted_turn()
+    agent.model = "replacement-model"
+
+    list(agent.run("continue where left off"))
+
+    assert "Compare Godot examples from each source" in runtime.requests[0][0][-1]["content"]
+    assert agent.messages[-2]["content"] == "continue where left off"
+
+
+def test_multi_source_followup_inherits_safe_retrieval_without_mcp_or_writes():
+    runtime = Runtime([{"role": "assistant", "content": "I will compare them."}])
+    names = (
+        "web_search", "fetch_url", "query_knowledge", "write_file", "run_shell",
+        "mcp__example__delete_records",
+    )
+    tools = [Tool(name, name, {}, lambda: "ok") for name in names]
+    agent = make_agent(runtime, tools, selector=_select_tool_names)
+    agent.messages.extend([
+        {"role": "user", "content": "Which knowledge sources did you use?"},
+        {"role": "assistant", "content": (
+            "I can use local knowledge (query_knowledge), web search "
+            "(web_search/fetch_url), or the example MCP source."
+        )},
+    ])
+
+    list(agent.run("Try getting from each sources, see if you like it"))
+
+    callable_names = {item["function"]["name"] for item in runtime.requests[0][1]}
+    assert {"query_knowledge", "web_search", "fetch_url"} <= callable_names
+    assert not callable_names & {"write_file", "run_shell", "mcp__example__delete_records"}
+
+
+@pytest.mark.parametrize("source_question", [
+    "Which source did you use for that answer?",
+    "Which knowledge sources did you use?",
+    "did u use your local knowledge library, did research, use context7, or "
+    "simply with general intelligence/knowledge",
+])
+def test_actual_source_use_question_differs_from_available_sources_after_restore(
+    source_question,
+):
+    request = "code a simple Godot 4.7 player character movement for a topdown 2d rpg game"
+    answer = "Here is a Godot movement example."
+    turns = [
+        {"role": "user", "content": request},
+        {"role": "assistant", "content": answer},
+    ]
+    runtime = Runtime([{"role": "assistant", "content": "I could use local knowledge or web."}])
+    agent = make_agent(runtime, [])
+    agent.restore_session([
+        *turns,
+        {"role": "system", "content": {"event": "session_update", "detail": "saved"}},
+    ])
+    agent.model = "replacement-model"
+
+    actual = list(agent.run(source_question))
+
+    assert not runtime.requests
+    assert actual[0].kind == "text"
+    assert "No retrieval tool was used" in actual[0].payload["content"]
+    assert "model's existing knowledge" in actual[0].payload["content"]
+    assert "local knowledge" not in actual[0].payload["content"]
+
+    agent.restore_session(turns)
+    list(agent.run("What sources could you use for this task?"))
+    assert len(runtime.requests) == 1
+
+
+def test_source_use_tracks_completed_results_not_started_calls_or_missing_evidence():
+    turns = [
+        {"role": "user", "content": "Compare Godot code from local, web, and Context7."},
+        {"role": "system", "content": {
+            "event": "tool_audit", "tool": "query_knowledge", "phase": "start",
+        }},
+        {"role": "system", "content": {
+            "event": "tool_audit", "tool": "web_search", "phase": "result",
+            "executed": True,
+        }},
+        {"role": "system", "content": {
+            "event": "tool_audit", "tool": "mcp__context7__get_docs", "phase": "result",
+            "executed": True,
+        }},
+        {"role": "assistant", "content": "The comparison is incomplete."},
+        {"role": "system", "content": {"event": "interruption"}},
+    ]
+    agent = make_agent(Runtime([]), [])
+    agent.restore_session([
+        *turns,
+        {"role": "system", "content": {"event": "session_update", "detail": "saved"}},
+    ])
+    result = list(agent.run("Which sources did you use?"))[0].payload["content"]
+    assert "interrupted" in result
+    assert "evidence returned" in result
+
+    completed = make_agent(Runtime([]), [])
+    completed.restore_session(turns[:-1])
+    result = list(completed.run("Which sources did you use?"))[0].payload["content"]
+    assert "web search" in result
+    assert "MCP tool mcp__context7__get_docs" in result
+    assert "local knowledge" not in result
+    assert "do not by themselves preserve" in result
+
+    workspace_answer = make_agent(Runtime([]), [])
+    workspace_answer.restore_session([
+        {"role": "user", "content": "What is in my file?"},
+        {"role": "system", "content": {
+            "event": "tool_audit", "tool": "read_file", "phase": "result",
+            "executed": True,
+        }},
+        {"role": "assistant", "content": "It contains a config."},
+    ])
+    result = list(workspace_answer.run("Which sources did you use?"))[0].payload["content"]
+    assert "read_file" in result
+    assert "No retrieval tool was used" not in result
+
+
+def test_research_receipt_is_bounded_metadata_and_recovery_requires_refetch():
+    receipt = research_receipt(
+        "fetch_url",
+        {"url": "https://example.com/private?token=secret"},
+        {
+            "executed": True,
+            "source_id": "src_42",
+            "canonical_url": "https://example.com/guide?token=secret#section",
+        },
+        "PRIVATE FULL TOOL RESULT",
+    )
+    assert receipt is not None
+    assert receipt["public_url"] == "https://example.com/guide"
+    assert receipt["result_replayable"] is False
+    assert "PRIVATE" not in str(receipt)
+    assert "secret" not in str(receipt)
+
+    runtime = Runtime([{"role": "assistant", "content": "I will fetch it again."}])
+    agent = make_agent(runtime, [])
+    agent.restore_session([
+        {"role": "user", "content": "Compare Godot examples from the web and Context7."},
+        {"role": "system", "content": receipt},
+        {"role": "system", "content": {
+            "event": "tool_audit", "tool": "mcp__context7__get_docs",
+            "phase": "result", "executed": True,
+        }},
+        {"role": "system", "content": {"event": "interruption"}},
+    ])
+    list(agent.run("continue where left off"))
+    prompt = runtime.requests[0][0][-1]["content"]
+    assert "fetch_url" in prompt
+    assert "https://example.com/guide" in prompt
+    assert "results must be fetched again" in prompt
+    assert "PRIVATE FULL TOOL RESULT" not in prompt
+    assert "mcp__context7__get_docs" not in prompt  # audit alone is not a receipt
+
+
+def test_line_chat_persists_research_receipt_separately_from_tool_audit(tmp_path):
+    runtime = Runtime([
+        call("query_knowledge", query="Godot movement", library="godot"),
+        {"role": "assistant", "content": "I found one relevant chunk."},
+    ])
+    tool = Tool(
+        "query_knowledge", "knowledge", {"type": "object", "properties": {
+            "query": {"type": "string"}, "library": {"type": "string"},
+        }},
+        lambda query, library: {
+            "content": "PRIVATE GODOT CHUNK",
+            "metadata": {"library": library, "found": True, "result_count": 1},
+        },
+    )
+    agent = make_agent(runtime, [tool])
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+
+    _render(agent, memory, "session-1", "Compare Godot knowledge", plain=True)
+
+    turns = memory.load_session("session-1")
+    receipts = [
+        turn["content"] for turn in turns
+        if turn["role"] == "system" and isinstance(turn["content"], dict)
+        and turn["content"].get("event") == "research_receipt"
+    ]
+    assert len(receipts) == 1
+    assert receipts[0]["tool"] == "query_knowledge"
+    assert receipts[0]["library"] == "godot"
+    assert receipts[0]["result_count"] == 1
+    assert "PRIVATE GODOT CHUNK" not in str(receipts[0])
+    source_answer = list(agent.run("Which sources did you use?"))[0].payload["content"]
+    assert "local knowledge" in source_answer
+    assert "No retrieval tool was used" not in source_answer
+
+
+def test_line_chat_persists_provider_state_only_as_model_content(tmp_path):
+    provider_message = {
+        "role": "assistant",
+        "content": "Done.",
+        "openai_response_items": [
+            {
+                "id": "rs_123",
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": "opaque-state",
+            }
+        ],
+    }
+    agent = make_agent(Runtime([provider_message]), [])
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+
+    assert _render(agent, memory, "session-1", "finish", plain=True) == "Done."
+
+    assistant = memory.load_session("session-1")[-1]
+    assert assistant["content"] == "Done."
+    assert assistant["model_content"] == provider_message
+    assert "opaque-state" not in str(assistant["content"])
 
 
 def test_unavailable_tool_recovery_bounded():
@@ -412,6 +721,38 @@ def test_followup_retains_research_capability():
     assert "web_search" in {t["function"]["name"] for t in runtime.requests[0][1]}
 
 
+def test_named_learning_source_gets_bounded_discovery_and_ingestion_capabilities():
+    runtime = Runtime([{"role": "assistant", "content": "I will verify the source first."}])
+    tools = [
+        Tool(name, name, {}, lambda: "ok")
+        for name in (
+            "web_search",
+            "fetch_url",
+            "learn_source",
+            "request_user_input",
+            "write_file",
+            "run_shell",
+            "git_commit",
+        )
+    ]
+    agent = make_agent(runtime, tools, selector=_select_tool_names)
+
+    list(agent.run("learn from Context7"))
+
+    assert {item["function"]["name"] for item in runtime.requests[0][1]} == {
+        "web_search",
+        "fetch_url",
+        "learn_source",
+        "request_user_input",
+    }
+    assert agent.last_turn_capabilities["callable_tools"] == [
+        "fetch_url",
+        "learn_source",
+        "request_user_input",
+        "web_search",
+    ]
+
+
 def test_continue_workspace_task_inherits_edits_but_not_git_mutation(tmp_path):
     runtime = Runtime([{"role": "assistant", "content": "Cleanup completed."}])
     agent = make_agent(runtime, build_tools(Workspace(tmp_path)), selector=_select_tool_names)
@@ -501,6 +842,10 @@ def test_explicit_workspace_inspection_preflights_bounded_evidence():
     assert events[1].payload["metadata"]["host_preflight"] is True
     assert runtime.requests[0][0][-1]["role"] == "tool"
     assert runtime.requests[0][0][-1]["content"] == "language: Python"
+    assert runtime.requests[0][1] == []
+    assert agent.last_turn_capabilities["unavailable_tools"]["workspace_info"] == (
+        "host preflight already completed"
+    )
 
 
 def test_contextual_storage_followup_retains_bounded_diagnostic_tool():
@@ -519,7 +864,7 @@ def test_contextual_storage_followup_retains_bounded_diagnostic_tool():
 
     events = list(agent.run("Run them"))
 
-    assert {item["function"]["name"] for item in runtime.requests[0][1]} == {"storage_usage"}
+    assert runtime.requests[0][1] == []
     assert [event.kind for event in events[:2]] == ["tool_start", "tool_result"]
     assert events[1].payload["metadata"]["host_preflight"] is True
 
@@ -532,6 +877,9 @@ def test_contextual_storage_followup_ignores_unavailable_shell_hint_in_scoped_tu
         Tool("run_shell", "run shell", {}, lambda: pytest.fail("shell unavailable")),
     ]
     agent = make_agent(runtime, tools, selector=_select_tool_names)
+    # Force user-boundary compaction to drop the earlier exchange. The routing
+    # decision and required host preflight must survive independently.
+    agent.messages[0]["content"] = "system " + ("x" * 20_000)
     agent.messages.extend(
         [
             {"role": "user", "content": "How can I inspect disk usage safely?"},
@@ -542,11 +890,42 @@ def test_contextual_storage_followup_ignores_unavailable_shell_hint_in_scoped_tu
         ]
     )
 
-    list(agent.run("Run them", scope=TurnScope.EVALUATION))
+    events = list(agent.run("Run them", scope=TurnScope.EVALUATION))
 
-    names = {item["function"]["name"] for item in runtime.requests[0][1]}
-    assert "storage_usage" in names
-    assert "run_shell" not in names
+    assert [event.kind for event in events[:2]] == ["tool_start", "tool_result"]
+    assert events[0].payload["tool"] == "storage_usage"
+    assert runtime.requests[0][1] == []
+
+
+def test_contextual_storage_followup_ignores_negated_mutation_clause():
+    runtime = Runtime([{"role": "assistant", "content": "Storage inspected."}])
+    tools = [
+        Tool("storage_usage", "inspect storage", {}, lambda: "root: 10G"),
+        Tool("workspace_info", "inspect workspace", {}, lambda: "workspace"),
+        Tool("run_shell", "run shell", {}, lambda: pytest.fail("shell unavailable")),
+        Tool("edit_file", "edit", {}, lambda: pytest.fail("editing unavailable")),
+    ]
+    agent = make_agent(runtime, tools, selector=_select_tool_names)
+    agent.messages.extend(
+        [
+            {"role": "user", "content": "How can I inspect disk usage safely?"},
+            {
+                "role": "assistant",
+                "content": "Use read-only storage diagnostics such as df and du.",
+            },
+        ]
+    )
+
+    events = list(
+        agent.run(
+            "Run them and summarize the evidence. Do not modify anything.",
+            scope=TurnScope.EVALUATION,
+        )
+    )
+
+    assert [event.kind for event in events[:2]] == ["tool_start", "tool_result"]
+    assert events[0].payload["tool"] == "storage_usage"
+    assert runtime.requests[0][1] == []
 
 
 def test_done_event_contains_same_sanitized_capability_snapshot():

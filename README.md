@@ -21,7 +21,9 @@ done — committed on branch klaude/20260712-1430
 - **Learns names locally**: RapidFuzz corrects conservative country, software, and entity-name typos against stable vocabulary and a compact local SQLite cache. An optional keyless Wikidata fallback can teach Klaude new canonical names and aliases without making search depend on Wikimedia.
 - **Git-native**: never touches your branch. Works on `klaude/<task>`, one commit per edit — review everything with `git diff`, or in VS Code's Source Control panel, and revert any single action.
 - **Remembers you**: `klaude remember "we use Tailwind"` — durable facts injected into every session.
-- **Plugs in anywhere**: the knowledge and web layers are also MCP servers, usable from OpenCode, Cline, Claude Code, or any MCP client.
+- **Connects to MCP**: use external MCP servers such as Context7, Playwright,
+  GitHub, Firecrawl, or MarkItDown inside Klaude. Its knowledge and web layers
+  are also MCP servers usable from other agents.
 
 ## Quickstart (Ubuntu/Debian)
 
@@ -61,6 +63,14 @@ uv run klaude       # or: uv tool install --editable apps/cli && klaude
 | `klaude auth login openai-codex` | sign in with a ChatGPT account using Codex device authentication |
 | `klaude auth status openai-codex` | inspect Codex account authentication without exposing credentials |
 | `klaude auth logout openai-codex` | sign out and remove credentials managed by official Codex |
+| `klaude mcp list` | list external MCP servers connected to Klaude |
+| `klaude mcp search QUERY` | search active entries in the official MCP Registry |
+| `klaude mcp info REGISTRY_NAME` | inspect registry provenance and supported transports |
+| `klaude mcp install REGISTRY_NAME` | save an exact-version registry definition as disabled |
+| `klaude mcp import PATH` | safely import VS Code/OpenCode MCP JSON as disabled definitions |
+| `klaude mcp auth login NAME` | sign in to a protected remote MCP server using OAuth + PKCE |
+| `klaude mcp auth status NAME` | inspect non-secret remote MCP OAuth state |
+| `klaude mcp auth logout NAME` | remove local OAuth credentials and disable the server |
 | `klaude session-search "DanTDM"` | search previous conversation sessions |
 | `klaude status` | show configured modes, storage, and tool permissions |
 | `klaude system-info --json` | inspect normalized runtime context given to the model |
@@ -80,12 +90,18 @@ uv run python scripts/evaluate_agent_behavior.py \
   --timeout 180 --yes
 ```
 
-Each scenario runs read-only in a separate process with a hard timeout. Reports
-record tool, retry, permission, token, timing, safety, finalization, and retrieval
-support metrics without saving answer text or raw provider errors. Web-retrieval
-evaluation is excluded by default and requires both `--scenario web-retrieval`
-and `--include-network`. Use `--output PATH` to write a new JSON report inside
-the evaluated workspace; existing files are never overwritten.
+Each scenario runs read-only in a separate process with a hard timeout and a
+private temporary Klaude data directory, so saved memory, sessions, and learned
+libraries cannot contaminate results. The non-network `learned-document` scenario
+seeds synthetic documentation in that directory and requires both the expected
+claim and its exact source URL. Reports record tool, retry, permission, token,
+timing, safety, finalization, retrieval, grounded-claim count, and grounding-score
+metrics without saving answer text or raw provider errors. Schema-versioned reports
+also aggregate pass rate, elapsed time, grounding, reported tokens, and unknown-token
+counts by model and scenario. Web-retrieval evaluation
+is excluded by default and requires both `--scenario web-retrieval` and
+`--include-network`. Use `--output PATH` to write a new JSON report inside the
+evaluated workspace; existing files are never overwritten.
 
 The interactive terminal writes its transcript into ordinary terminal
 scrollback, so normal wheel scrolling and drag-to-select work without Shift.
@@ -322,6 +338,88 @@ tools require `KLAUDE_MCP_ALLOW_WRITES=1`. Local file and skill paths are jailed
 
 And because klaude commits every edit on its own branch, VS Code's built-in diff/SCM views already show and review its work. A native extension (chat sidebar over `klaude serve`) is the phase-2 roadmap.
 
+## Connect external MCP servers to Klaude
+
+Klaude is both an MCP server and an MCP client. It supports local `stdio`
+servers and remote Streamable HTTP servers. Search the official public MCP
+Registry inside `/mcp` or **Settings → MCP Servers**. The in-chat page can also
+collect required registry inputs securely, add a custom remote/local server,
+import VS Code/OpenCode JSON, and review then enable it. The CLI remains useful
+for scripts:
+
+```bash
+klaude mcp search context7
+klaude mcp info io.github.upstash/context7
+klaude mcp install io.github.upstash/context7
+klaude mcp enable context7
+```
+
+Search is read-only and cached for one hour. Install accepts only supported
+HTTPS Streamable HTTP definitions or exact-version npm/PyPI package definitions,
+saves them disabled, and never connects to a server or downloads/executes a
+package. Registry publication is metadata, not a security endorsement; inspect
+the source and plan before separately enabling it. Registry definitions that
+need credentials use the same masked in-chat secret composer as provider keys.
+
+You can also add a known remote server or local command directly:
+
+```bash
+klaude mcp add context7  # guided transport/endpoint setup
+klaude mcp add context7 --url https://mcp.context7.com/mcp
+klaude mcp list
+```
+
+Existing VS Code and OpenCode JSON can be imported without executing anything:
+
+```bash
+klaude mcp import ~/.config/Code/User/mcp.json
+klaude mcp enable context7
+```
+
+Every imported server starts disabled. Enabling a server asks for trust,
+connects once to discover its tools, and caches only bounded public schemas so
+chat startup stays fast. Each external tool has its own `ASK` permission by
+default and keeps a persistent connection during the Klaude process so stateful
+browser sessions work. Local `stdio` servers execute the configured program on
+your machine; only enable software you trust.
+
+Never put tokens directly in MCP JSON, command arguments, or URLs. Save a token
+through the masked prompt and reference its environment variable:
+
+```bash
+klaude mcp secret CONTEXT7_API_KEY
+klaude mcp add context7-auth \
+  --url https://mcp.context7.com/mcp \
+  --header 'Authorization=Bearer ${env:CONTEXT7_API_KEY}'
+```
+
+The value is stored in the private, gitignored `config/.env` with mode `0600`;
+the MCP registry stores only `${env:...}` references.
+
+Protected remote servers can instead use MCP OAuth. Klaude delegates protected
+resource discovery, authorization-server discovery, PKCE, state validation,
+dynamic client registration, and refresh to the official MCP Python SDK. Tokens
+and issued client registration metadata are stored separately under the private
+`.klaude/data/mcp-auth/` directory; neither appears in MCP configuration,
+transcripts, logs, status output, or model context:
+
+```bash
+klaude mcp add github --url https://example.com/mcp --oauth --yes
+klaude mcp auth login github
+klaude mcp auth status github
+klaude mcp auth logout github
+```
+
+Normal desktop login listens only on a loopback callback and opens the default
+browser. Over SSH, WSL, or another headless environment, use
+`klaude mcp auth login NAME --manual`: authorize in any browser, then paste the
+complete final localhost callback URL into the masked prompt. If you publish a
+standards-compliant Client ID Metadata Document, pass its HTTPS URL with
+`--client-metadata-url`; otherwise the SDK falls back to dynamic registration
+where the authorization server supports it. Logout removes local credentials
+and disables the server; it does not claim to revoke an already issued token at
+the authorization server.
+
 ## Secrets
 
 All service secrets live in gitignored `config/.env` (generated by the installer from `config/examples/.env.example`, `chmod 600`). A root `.env` is still ignored as a legacy compatibility input, but new installs copy or generate secrets under `config/`. Tracked config files never contain credentials. Add future service tokens to `config/.env`, never to yaml/toml.
@@ -363,7 +461,10 @@ and never places them in transcript, session, input history, or preferences.
 SearXNG's deployment secret remains separately managed in `config/searxng.env`.
 In chat,
 `/model` groups OpenAI Codex, OpenAI API, OpenRouter, and Gemini API under Cloud,
-with Ollama under Local. `klaude models`
+with Ollama under Local. Every Cloud provider page starts with Login (or Logout
+when connected); API-key login is masked and Codex uses the official device
+flow. Typing in any picker filters and ranks the closest matching choices.
+`klaude models`
 remains the local Ollama diagnostic. Saved selections use canonical references
 such as `openai_codex/gpt-5.6-sol`, `openai_api/gpt-5`, or
 `openrouter/anthropic/claude-sonnet-4`; older saved bare model names continue to

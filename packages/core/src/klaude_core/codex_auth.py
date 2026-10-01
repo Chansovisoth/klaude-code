@@ -35,6 +35,10 @@ class CodexAuthError(RuntimeError):
     """A safe, user-displayable Codex authentication failure."""
 
 
+class CodexAuthCancelled(CodexAuthError):
+    """Cooperative cancellation of an owned authentication operation."""
+
+
 @dataclass(frozen=True)
 class CodexCredentials:
     access_token: str
@@ -120,6 +124,7 @@ class CodexAppServer:
         self._deferred: deque[dict[str, Any]] = deque()
         self._request_id = 0
         self.broker_version = ""
+        self.cancel_event: threading.Event | None = None
 
     def __enter__(self) -> CodexAppServer:
         self.start()
@@ -207,6 +212,8 @@ class CodexAppServer:
         skipped: list[dict[str, Any]] = []
         try:
             while True:
+                if time.monotonic() >= deadline:
+                    raise CodexAuthError("Timed out waiting for the official Codex app-server.")
                 message = self._next_message(max(0.01, deadline - time.monotonic()))
                 if message.get("id") != request_id:
                     skipped.append(message)
@@ -223,12 +230,22 @@ class CodexAppServer:
             self._deferred.extend(skipped)
 
     def _next_message(self, timeout: float) -> dict[str, Any]:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise CodexAuthCancelled("OpenAI Codex authentication cancelled")
         if self._deferred:
             return self._deferred.popleft()
-        try:
-            message = self._messages.get(timeout=timeout)
-        except queue.Empty as exc:
-            raise CodexAuthError("Timed out waiting for the official Codex app-server.") from exc
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                raise CodexAuthCancelled("OpenAI Codex authentication cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CodexAuthError("Timed out waiting for the official Codex app-server.")
+            try:
+                message = self._messages.get(timeout=min(remaining, 0.1))
+                break
+            except queue.Empty:
+                continue
         if message is None:
             raise CodexAuthError("The official Codex app-server stopped unexpectedly.")
         # Klaude uses managed Codex auth, so server-to-client token refresh
@@ -245,9 +262,10 @@ class CodexAppServer:
 
     def wait_for_login(self, login_id: str) -> None:
         skipped: list[dict[str, Any]] = []
+        deadline = time.monotonic() + 900.0
         try:
             while True:
-                message = self._next_message(900.0)
+                message = self._next_message(max(0.0, deadline - time.monotonic()))
                 if message.get("method") != "account/login/completed":
                     skipped.append(message)
                     continue
@@ -292,8 +310,15 @@ class CodexAuthManager:
                 return CodexAuthStatus(False, method)
             return CodexAuthStatus(True, "chatgpt", str(value.get("planType") or ""))
 
-    def login(self, display: Callable[[str, str], None]) -> CodexAuthStatus:
-        with self._client_factory() as client:
+    def login(
+        self,
+        display: Callable[[str, str], None],
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> CodexAuthStatus:
+        client_context = self._client_factory()
+        client_context.cancel_event = cancel_event
+        with client_context as client:
             result = client.request("account/login/start", {"type": "chatgptDeviceCode"})
             login_id = str(result.get("loginId") or "")
             code = str(result.get("userCode") or "")
@@ -303,8 +328,10 @@ class CodexAuthManager:
             display(url, code)
             try:
                 client.wait_for_login(login_id)
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, CodexAuthCancelled):
                 try:
+                    client.cancel_event = None
+                    client.timeout = min(getattr(client, "timeout", 2.0), 2.0)
                     client.request("account/login/cancel", {"loginId": login_id})
                 except CodexAuthError:
                     pass
@@ -314,8 +341,10 @@ class CodexAuthManager:
             self._rate_limit_cache = None
             return CodexAuthStatus(True, "chatgpt", plan)
 
-    def logout(self) -> None:
-        with self._client_factory() as client:
+    def logout(self, *, cancel_event: threading.Event | None = None) -> None:
+        client_context = self._client_factory()
+        client_context.cancel_event = cancel_event
+        with client_context as client:
             client.request("account/logout")
         self._rate_limit_cache = None
 

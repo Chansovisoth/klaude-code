@@ -340,6 +340,228 @@ def test_openai_responses_explicitly_disable_provider_storage(monkeypatch):
     runtime.chat("gpt-test", [{"role": "user", "content": "hello"}])
 
     assert captured["store"] is False
+    assert captured["include"] == ["reasoning.encrypted_content"]
+    assert captured["prompt_cache_key"].startswith("klaude-session-")
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [OpenAIRuntime("secret"), CodexRuntime(auth=object())],
+)
+def test_responses_continuity_uses_private_stable_session_cache_key(runtime):
+    runtime.set_session_context("session-user-visible-id", 128_000)
+    first = runtime._continuity_options()
+    runtime.set_session_context("session-user-visible-id", 128_000)
+    second = runtime._continuity_options()
+
+    assert first == second
+    assert "session-user-visible-id" not in first["prompt_cache_key"]
+    assert len(first["prompt_cache_key"]) <= 64
+    assert first["context_management"] == [
+        {"type": "compaction", "compact_threshold": 96_000}
+    ]
+
+    runtime.set_session_context("different-session", 128_000)
+    assert runtime._continuity_options()["prompt_cache_key"] != first["prompt_cache_key"]
+
+
+def test_responses_continuity_leaves_small_unknown_windows_to_local_compaction():
+    runtime = OpenAIRuntime("secret")
+    runtime.set_session_context("session", 16_000)
+
+    assert "context_management" not in runtime._continuity_options()
+
+
+def test_openai_stateless_replay_keeps_latest_compaction_and_current_instructions():
+    messages = [
+        {"role": "system", "content": "current permissions"},
+        {"role": "user", "content": "old request"},
+        {
+            "role": "assistant",
+            "content": "old answer",
+            "openai_response_items": [
+                {
+                    "id": "cmp_1",
+                    "type": "compaction",
+                    "encrypted_content": "opaque-summary",
+                },
+                {
+                    "id": "msg_2",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "continued"}],
+                },
+            ],
+        },
+        {"role": "user", "content": "new request"},
+    ]
+
+    assert OpenAIRuntime._input(messages) == [
+        {"role": "system", "content": "current permissions"},
+        {
+            "id": "cmp_1",
+            "type": "compaction",
+            "encrypted_content": "opaque-summary",
+        },
+        {
+            "id": "msg_2",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "continued"}],
+        },
+        {"role": "user", "content": "new request"},
+    ]
+
+
+def test_openai_response_keeps_only_complete_compaction_items():
+    valid = type(
+        "Compaction",
+        (),
+        {
+            "id": "cmp_1",
+            "type": "compaction",
+            "encrypted_content": "opaque-summary",
+            "agent": "agent-1",
+        },
+    )()
+    invalid = type(
+        "Compaction", (), {"id": "cmp_2", "type": "compaction", "encrypted_content": ""}
+    )()
+    response = type(
+        "Response", (), {"output": [valid, invalid], "output_text": "", "usage": None}
+    )()
+
+    message = OpenAIRuntime._message(response)
+
+    assert message["openai_response_items"] == [
+        {
+            "id": "cmp_1",
+            "type": "compaction",
+            "encrypted_content": "opaque-summary",
+            "agent": "agent-1",
+        }
+    ]
+
+
+def test_openai_stateless_replay_preserves_reasoning_phase_and_tool_identity():
+    reasoning = type(
+        "Reasoning",
+        (),
+        {
+            "id": "rs_123",
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "opaque-state",
+            "status": "completed",
+        },
+    )()
+    text = type(
+        "Text", (), {"type": "output_text", "text": "Checking.", "annotations": []}
+    )()
+    assistant = type(
+        "Message",
+        (),
+        {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "phase": "commentary",
+            "content": [text],
+        },
+    )()
+    call = type(
+        "Call",
+        (),
+        {
+            "id": "fc_123",
+            "type": "function_call",
+            "call_id": "call_123",
+            "name": "read_file",
+            "arguments": '{"path":"README.md"}',
+            "status": "completed",
+        },
+    )()
+    response = type(
+        "Response",
+        (),
+        {
+            "output": [reasoning, assistant, call],
+            "output_text": "Checking.",
+        },
+    )()
+
+    message = OpenAIRuntime._message(response)
+
+    assert [item["type"] for item in message["openai_response_items"]] == [
+        "reasoning",
+        "message",
+        "function_call",
+    ]
+    assert message["openai_response_items"][1]["phase"] == "commentary"
+    assert OpenAIRuntime._input(
+        [
+            message,
+            {
+                "role": "tool",
+                "tool_call_id": "call_123",
+                "content": "contents",
+            },
+        ]
+    ) == [
+        {
+            "id": "rs_123",
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "opaque-state",
+            "status": "completed",
+        },
+        {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "output_text", "text": "Checking.", "annotations": []}
+            ],
+            "status": "completed",
+            "phase": "commentary",
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_123",
+            "name": "read_file",
+            "arguments": '{"path":"README.md"}',
+            "id": "fc_123",
+            "status": "completed",
+        },
+        {"type": "function_call_output", "call_id": "call_123", "output": "contents"},
+    ]
+
+
+def test_openai_stateless_replay_drops_orphaned_provider_function_call():
+    message = {
+        "role": "assistant",
+        "content": "Checking.",
+        "openai_response_items": [
+            {
+                "id": "msg_123",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Checking.", "annotations": []}
+                ],
+                "phase": "commentary",
+            },
+            {
+                "type": "function_call",
+                "call_id": "orphan",
+                "name": "read_file",
+                "arguments": "{}",
+            },
+        ],
+    }
+
+    assert OpenAIRuntime._input([message]) == [message["openai_response_items"][0]]
 
 
 def test_openai_failed_response_surfaces_provider_message(monkeypatch):
@@ -854,6 +1076,7 @@ def test_codex_runtime_preserves_structured_tool_calls(monkeypatch):
     )()
     response = type("Response", (), {"output": [call], "output_text": "", "usage": None})()
     runtime = CodexRuntime(auth=object())
+    runtime.set_session_context("session-1", 128_000)
     captured = {}
 
     def create(**kwargs):
@@ -873,6 +1096,10 @@ def test_codex_runtime_preserves_structured_tool_calls(monkeypatch):
         {"id": "call-1", "function": {"name": "read_file", "arguments": "{}"}}
     ]
     assert captured["stream"] is True
+    assert captured["context_management"] == [
+        {"type": "compaction", "compact_threshold": 96_000}
+    ]
+    assert captured["prompt_cache_key"].startswith("klaude-session-")
 
 
 def test_codex_runtime_recovers_terminal_items_when_done_events_are_missing(monkeypatch):

@@ -28,6 +28,7 @@ from klaude_cli.main import (
     LIST_COMMANDS_TOOL_DESCRIPTION,
     MAX_INPUT_HEIGHT,
     MIN_INPUT_HEIGHT,
+    RESET_THEME_CHOICE,
     SHIFT_ENTER_SEQUENCES,
     TERMINAL_CLEAR_SEQUENCE,
     TEXT_THEME_PREVIEW_BLOCK,
@@ -103,6 +104,7 @@ from klaude_cli.main import (
     _plan_command,
     _print_assistant_text,
     _print_trace,
+    _prompt_cache_status,
     _public_model_metadata,
     _query_knowledge_display_lines,
     _read_chat_input,
@@ -143,7 +145,6 @@ from klaude_cli.main import (
 from klaude_core import (
     Agent,
     AgentEvent,
-    CodexAuthError,
     ModelCapabilities,
     ModelInfo,
     PermissionGate,
@@ -1557,6 +1558,36 @@ def test_run_turn_persists_real_tool_activity_milestones(tmp_path, monkeypatch):
     ) < kinds.index("turn_done")
 
 
+def test_run_turn_persists_bounded_research_receipt_without_result_text(tmp_path):
+    tui = _fake_persistent_tui()
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui.agent.run = lambda _message, *, scope=None: iter([
+        AgentEvent("tool_start", {
+            "tool": "query_knowledge", "args": {"query": "Godot movement"},
+            "execution_id": "research-1",
+        }),
+        AgentEvent("tool_result", {
+            "tool": "query_knowledge", "args": {"query": "Godot movement"},
+            "result": "PRIVATE GODOT CHUNK",
+            "metadata": {"execution_id": "research-1", "executed": True,
+                         "library": "godot", "found": True, "result_count": 1},
+        }),
+        AgentEvent("text", {"content": "Found a source."}),
+    ])
+
+    tui._run_turn("Find Godot movement", threading.Event(), turn_id="research-turn")
+
+    receipts = [
+        turn["content"] for turn in tui.memory.load_session(tui.session_id)
+        if turn["role"] == "system" and isinstance(turn["content"], dict)
+        and turn["content"].get("event") == "research_receipt"
+    ]
+    assert len(receipts) == 1
+    assert receipts[0]["query"] == "Godot movement"
+    assert receipts[0]["library"] == "godot"
+    assert "PRIVATE GODOT CHUNK" not in str(receipts[0])
+
+
 def test_run_turn_mirrors_live_capability_snapshots(tmp_path):
     tui = _fake_persistent_tui()
     tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
@@ -2302,7 +2333,7 @@ def _fake_persistent_tui(appearance_path=None, chat_preferences_path=None):
         def publish_session_event(self, *_args, **_kwargs):
             return 1
 
-    return PersistentChatTUI(
+    tui = PersistentChatTUI(
         FakeAgent(),
         FakeMemory(),
         "session-1",
@@ -2310,6 +2341,124 @@ def _fake_persistent_tui(appearance_path=None, chat_preferences_path=None):
         appearance_path=appearance_path,
         chat_preferences_path=chat_preferences_path,
     )
+
+    class FakeJobs:
+        def __init__(self):
+            self.latest = {}
+            self.requests = {}
+
+        def submit(self, key, request, *, timeout=30):
+            import uuid
+
+            identity = uuid.uuid4().hex
+            self.latest[key] = identity
+            self.requests[key] = request
+            return identity
+
+        def current(self, key, identity):
+            return self.latest.get(key) == identity
+
+        def cancel(self, key):
+            self.latest.pop(key, None)
+
+        def close(self, *, wait=False):
+            self.latest.clear()
+
+    tui._background_jobs = FakeJobs()
+    class FakeSessionIO:
+        def __init__(self):
+            self.requests = []
+
+        def submit(self, request):
+            self.requests.append(request)
+
+        def switch_scope(self, session_id, client_id):
+            self.requests.clear()
+
+        def close(self, *, wait=False):
+            pass
+
+    tui._session_io = FakeSessionIO()
+    class FakeSessionActions:
+        def __init__(self):
+            self.requests = []
+
+        def submit(self, action):
+            from klaude_cli.session_actions import AutomaticMemoryUpdate
+
+            self.requests.append(action)
+            if isinstance(action, AutomaticMemoryUpdate):
+                tui.memory.set_auto_memory(action.enabled)
+                tui._emit("memory_setting_saved", (action, True))
+                return True
+            tui.memory.log_turn(action.session_id, "system", {
+                "event": "session_update", "detail": action.detail,
+            })
+            tui._publish_shared_event("session_update", {"detail": action.detail}, turn_id="")
+            return True
+
+        def close(self, *, wait=False):
+            return True
+
+    tui._session_actions = FakeSessionActions()
+    class UnconfiguredMCPMutations:
+        """Never let a default fake TUI write real MCP configuration."""
+        path = tui.cfg.mcp_servers_file
+
+        def submit(self, request):
+            return False
+
+        def close(self, *, wait=False):
+            return True
+
+    tui._mcp_mutations.close()
+    tui._mcp_mutations = UnconfiguredMCPMutations()
+    class SynchronousSettingsWriter:
+        """Immediate test adapter; production uses the serialized worker."""
+
+        def __init__(self):
+            self.revision = 0
+
+        def submit(self, changes):
+            from klaude_cli.settings_writer import public_tool_settings
+            from klaude_core.settings_store import update_settings
+
+            self.revision += 1
+            try:
+                saved = update_settings(tui.chat_preferences_path, changes)
+            except OSError:
+                tui._emit("settings_saved", (self.revision, False))
+            else:
+                tui._emit("settings_saved", (self.revision, True))
+                tui._emit("settings_permissions", (self.revision, saved.get("permissions", {})))
+                tui._emit("settings_tools", (self.revision, public_tool_settings(saved)))
+            return self.revision
+
+        def close(self, *, wait=False):
+            return True
+
+    tui._settings_writer = SynchronousSettingsWriter()
+    class SynchronousAppearanceWriter:
+        revision = 0
+
+        def submit(self, changes):
+            from klaude_cli.main import _migrate_appearance
+            from klaude_core.settings_store import update_settings
+
+            self.revision += 1
+            try:
+                update_settings(tui.appearance_path, changes, prepare=_migrate_appearance)
+            except OSError:
+                tui._emit("appearance_saved", (self.revision, False))
+            else:
+                tui._emit("appearance_saved", (self.revision, True))
+            return self.revision
+
+        def close(self, *, wait=False):
+            return True
+
+    tui._appearance_writer = SynchronousAppearanceWriter()
+    return tui
 
 
 def test_tui_transport_cancellation_never_leaks_provider_close_errors():
@@ -2501,8 +2650,10 @@ def test_tools_settings_persist_independent_validation_toggles(tmp_path):
     tui._accept_choice()
 
     saved = json.loads(path.read_text())
-    assert saved["tool_validation"] == {"web_search": False, "knowledge_search": True}
-    assert all(saved["tool_availability"].values())
+    assert saved["tool_validation"] == {"web_search": False}
+    # Only the edited field is persisted; missing availability values retain
+    # their enabled defaults without replacing another client's choices.
+    assert "tool_availability" not in saved
     assert tui.agent.tool_config.web_search.result_validation_enabled is False
     assert tui.agent.tool_config.retrieval_validation_enabled is True
     assert tui._choice_values[tui._choice_index] == "web search validation: off (toggle)"
@@ -2545,6 +2696,92 @@ def test_permission_rows_cycle_persist_and_detect_custom_configuration(tmp_path)
     assert tui._choice_values[tui._choice_index] == "Write file: ALLOW"
 
 
+def test_mcp_permissions_group_by_server_and_offer_scoped_bulk_controls(tmp_path):
+    from klaude_core.mcp_client import namespaced_tool_name
+
+    path = tmp_path / "chat-preferences.json"
+    tui = _fake_persistent_tui(chat_preferences_path=path)
+    tools = {
+        namespaced_tool_name(server, remote): SimpleNamespace(
+            description=f"MCP server {server}: {remote}"
+        )
+        for server, remote in (
+            ("context7", "resolve_library"),
+            ("context7", "get_docs"),
+            ("firecrawl", "search"),
+        )
+    }
+    tui.agent.tools = tools
+    tui._open_settings_category("permissions")
+
+    assert "context7: ASK · 2 tools" in tui._choice_values
+    assert "firecrawl: ASK · 1 tool" in tui._choice_values
+    assert not any("resolve library:" in row for row in tui._choice_values)
+    tui._choice_index = tui._choice_values.index("context7: ASK · 2 tools")
+    tui._accept_choice()
+    assert tui._choice_kind == "mcp permission tools"
+    assert "resolve library: ASK" in tui._choice_values
+    assert {"ALLOW ALL", "ASK FOR EACH TOOL", "DENY ALL"}.issubset(tui._choice_values)
+
+    tui._choice_index = tui._choice_values.index("ALLOW ALL")
+    tui._accept_choice()
+    context_tools = [name for name in tools if "context7" in name]
+    firecrawl_tool = next(name for name in tools if "firecrawl" in name)
+    assert all(tui.agent.gate.policies[name] == "allow" for name in context_tools)
+    assert tui.agent.gate.policies.get(firecrawl_tool, "ask") == "ask"
+    saved = json.loads(path.read_text())["permissions"]
+    assert all(saved[name] == "allow" for name in context_tools)
+    assert firecrawl_tool not in saved
+
+    tui._choice_index = tui._choice_values.index("resolve library: ALLOW")
+    tui._accept_choice()
+    assert any("Current: CUSTOM" in row for row in tui._choice_values)
+    assert any(tui.agent.gate.policies[name] == "deny" for name in context_tools)
+    tui._choice_index = tui._choice_values.index("DENY ALL")
+    tui._accept_choice()
+    assert all(tui.agent.gate.policies[name] == "deny" for name in context_tools)
+    tui._choice_index = tui._choice_values.index("ASK FOR EACH TOOL")
+    tui._accept_choice()
+    assert all(tui.agent.gate.policies[name] == "ask" for name in context_tools)
+    assert tui.agent.gate.policies.get(firecrawl_tool, "ask") == "ask"
+    tui._choice_index = tui._choice_values.index("back")
+    tui._accept_choice()
+    assert tui._choice_kind == "permission settings"
+    assert "context7: ASK · 2 tools" in tui._choice_values
+
+
+def test_mcp_settings_shortcut_focuses_server_permissions(tmp_path):
+    from klaude_core.mcp_client import namespaced_tool_name
+
+    tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "chat-preferences.json")
+    name = namespaced_tool_name("firecrawl", "search")
+    tui.agent.tools = {name: SimpleNamespace(description="MCP server firecrawl: search")}
+    tui._open_settings_category("mcp servers")
+    tui._choice_index = tui._choice_values.index("MCP server permissions")
+    tui._accept_choice()
+    assert tui._choice_kind == "permission settings"
+    assert tui._choice_values[tui._choice_index] == "firecrawl: ASK · 1 tool"
+    tui._choice_index = tui._choice_values.index("back")
+    tui._accept_choice()
+    assert tui._choice_kind == "mcp settings"
+    assert tui._choice_values[tui._choice_index] == "MCP server permissions"
+
+
+def test_mcp_permission_groups_keep_original_server_identity(tmp_path):
+    from klaude_core.mcp_client import namespaced_tool_name
+
+    tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "chat-preferences.json")
+    servers = ("context7.prod", "context7_prod")
+    tui.agent.tools = {
+        namespaced_tool_name(server, "search"): SimpleNamespace(
+            description=f"MCP server {server}: search"
+        )
+        for server in servers
+    }
+    tui._open_settings_category("permissions")
+    assert all(f"{server}: ASK · 1 tool" in tui._choice_values for server in servers)
+
+
 def test_permission_preset_picker_previews_grouped_policies_and_applies_preset(tmp_path):
     path = tmp_path / "chat-preferences.json"
     tui = _fake_persistent_tui(chat_preferences_path=path)
@@ -2563,6 +2800,17 @@ def test_permission_preset_picker_previews_grouped_policies_and_applies_preset(t
     assert "Write file" in preview and "ASK" in preview
     assert "Web search" in preview and "ALLOW" in preview
     assert tui._choice_values.index("reset to default") < tui._choice_values.index("back")
+
+    tui._move_choice(-1)
+    assert tui._choice_values[tui._choice_index] == "Custom"
+    unavailable_fragments = tui._choice_fragments()
+    assert ("class:choice.disabled.selected", "  › Custom\n") in unavailable_fragments
+    tui._accept_choice()
+    assert tui._choice_kind == "permission preset"
+    assert tui._choice_values[tui._choice_index] == "Custom"
+
+    tui._choice_index = tui._choice_values.index("Balanced")
+    tui._apply_choice_preview()
 
     tui._choice_index = tui._choice_values.index("reset to default")
     tui._apply_choice_preview()
@@ -2644,9 +2892,169 @@ def test_settings_include_memory_skills_and_provider_categories():
 
     categories = tui._settings_categories()
 
-    assert "memory" in categories
-    assert "skills" in categories
-    assert "providers" in categories
+    assert "\0section:APPEARANCE" in categories
+    assert "\0section:ASSISTANT" in categories
+    assert "\0section:CAPABILITIES & SAFETY" in categories
+    assert "\0section:ADVANCED" in categories
+    assert any(value.startswith("Models:") for value in categories)
+    assert any(value.startswith("Providers:") for value in categories)
+    assert any(value.startswith("Memory:") for value in categories)
+    assert any(value.startswith("Skills:") for value in categories)
+    assert any(value.startswith("Permissions:") for value in categories)
+    assert any(value.startswith("Runtime:") for value in categories)
+    assert "" not in categories
+
+
+def test_settings_overview_opens_without_synchronous_memory_or_mcp_reads(monkeypatch):
+    tui = _fake_persistent_tui()
+    monkeypatch.setattr(
+        tui.memory, "auto_memory_enabled", lambda: pytest.fail("UI SQLite read"), raising=False
+    )
+    monkeypatch.setattr("klaude_cli.main._mcp_registry", lambda: pytest.fail("UI MCP read"))
+    tui._begin_choice("settings", tui._settings_categories(), "memory")
+    assert any(row == "Memory: loading…" for row in tui._choice_values)
+    assert any(row == "MCP servers: loading…" for row in tui._choice_values)
+    assert tui._background_jobs.requests["settings-overview"] == {
+        "kind": "settings_overview", "sessions_db": "",
+        "mcp_file": str(tui.cfg.mcp_servers_file),
+    }
+
+
+def test_settings_overview_refresh_preserves_selector_and_throttles_retries():
+    tui = _fake_persistent_tui()
+    tui._begin_choice("settings", tui._settings_categories(), "mcp servers")
+    identity = tui._background_jobs.latest["settings-overview"]
+    tui._apply_background_result((
+        "settings-overview", identity,
+        {"memory_enabled": True, "mcp_enabled": 2, "mcp_total": 3}, ""
+    ))
+    assert tui._choice_values[tui._choice_index] == "MCP servers: 2/3 enabled"
+    assert "Memory: on" in tui._choice_values
+    assert not tui._settings_overview_request
+    tui._begin_choice("settings", tui._settings_categories(), "memory")
+    assert tui._background_jobs.latest["settings-overview"] == identity
+    tui._settings_overview_checked_at -= 31
+    tui._begin_choice("settings", tui._settings_categories(), "memory")
+    newer = tui._background_jobs.latest["settings-overview"]
+    assert newer != identity
+    memory_time = tui._settings_overview.memory_loaded_at
+    tui._apply_background_result(("settings-overview", newer, None, "timed out"))
+    assert tui._settings_overview.memory_loaded_at == memory_time
+    assert any("Memory: on · cached" in row and "unavailable" in row for row in tui._choice_values)
+    tui._begin_choice("settings", tui._settings_categories(), "memory")
+    assert tui._background_jobs.latest["settings-overview"] == newer
+
+
+def test_open_settings_overview_refreshes_after_cache_expiry_without_losing_filter():
+    tui = _fake_persistent_tui()
+    tui._begin_choice("settings", tui._settings_categories(), "mcp servers")
+    identity = tui._background_jobs.latest["settings-overview"]
+    tui._apply_background_result((
+        "settings-overview", identity,
+        {"memory_enabled": True, "mcp_enabled": 1, "mcp_total": 3}, ""
+    ))
+    tui._set_input("mcp")
+    tui._refresh_choice_filter()
+    tui._settings_overview_checked_at -= 31
+    tui._before_render(None)
+    assert tui._background_jobs.latest["settings-overview"] != identity
+    assert tui._choice_filter_query == "mcp"
+    assert tui._choice_values[tui._choice_index].startswith("MCP servers: 1/3 enabled")
+    assert "refreshing" in tui._choice_values[tui._choice_index]
+
+
+def test_failed_overview_inventory_does_not_disable_category_navigation(monkeypatch):
+    tui = _fake_persistent_tui()
+    tui._begin_choice("settings", tui._settings_categories(), "mcp servers")
+    tui._apply_background_result((
+        "settings-overview", tui._background_jobs.latest["settings-overview"], None, "timed out"
+    ))
+    assert tui._choice_values[tui._choice_index] == "MCP servers: unavailable"
+    opened = []
+    monkeypatch.setattr(tui, "_open_settings_category", lambda category: opened.append(category))
+    tui._accept_choice()
+    assert opened == ["mcp servers"]
+
+
+@pytest.mark.parametrize("change", ["navigate", "cancel", "session", "storage", "memory"])
+def test_settings_overview_late_results_never_replace_newer_state(tmp_path, change):
+    tui = _fake_persistent_tui()
+    tui._begin_choice("settings", tui._settings_categories(), "memory")
+    identity = tui._background_jobs.latest["settings-overview"]
+    if change == "navigate":
+        tui._open_settings_category("runtime")
+    elif change == "cancel":
+        tui._cancel_choice()
+    elif change == "session":
+        tui.session_id = "another-session"
+    elif change == "storage":
+        tui.memory.sessions_db = tmp_path / "other.db"
+    else:
+        tui._invalidate_settings_overview()
+        tui._settings_overview = tui._settings_overview.with_memory(False, time.monotonic())
+    tui._apply_background_result((
+        "settings-overview", identity,
+        {"memory_enabled": True, "mcp_enabled": 5, "mcp_total": 5}, ""
+    ))
+    assert tui._settings_overview.memory_enabled is (False if change == "memory" else None)
+    assert tui._settings_overview.mcp_counts is None
+
+
+def test_live_settings_overview_is_filterable_during_background_read():
+    async def exercise():
+        tui = _fake_persistent_tui()
+        tui._begin_choice("settings", tui._settings_categories(), "mcp servers")
+        identity = tui._background_jobs.latest["settings-overview"]
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = DummyOutput()
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+                pipe.send_text("mcp")
+                await asyncio.sleep(0.15)
+                assert tui._choice_filter_query == "mcp"
+                assert tui._choice_values[tui._choice_index] == "MCP servers: loading…"
+                tui._emit("background_result", (
+                    "settings-overview", identity,
+                    {"memory_enabled": False, "mcp_enabled": 1, "mcp_total": 2}, ""
+                ))
+                await asyncio.sleep(0.15)
+                assert tui._choice_filter_query == "mcp"
+                assert tui._choice_values[tui._choice_index] == "MCP servers: 1/2 enabled"
+                assert tui.choice_window.render_info is not None
+            finally:
+                tui.application.exit()
+                await task
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("category", "summary_prefix"),
+    [
+        ("theme", "Theme:"),
+        ("input field", "Input field:"),
+        ("memory", "Memory:"),
+        ("skills", "Skills:"),
+        ("providers", "Providers:"),
+        ("tools", "Tools:"),
+        ("permissions", "Permissions:"),
+        ("runtime", "Runtime:"),
+    ],
+)
+def test_settings_back_returns_to_the_same_summary_row(
+    category, summary_prefix, tmp_path
+):
+    tui = _fake_persistent_tui()
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+
+    tui._open_settings_category(category)
+    tui._choice_index = tui._choice_values.index("back")
+    tui._accept_choice()
+
+    assert tui._choice_kind == "settings"
+    assert tui._choice_values[tui._choice_index].startswith(summary_prefix)
 
 
 def test_memory_settings_toggle_show_facts_and_reset_to_enabled(tmp_path):
@@ -2656,9 +3064,14 @@ def test_memory_settings_toggle_show_facts_and_reset_to_enabled(tmp_path):
 
     tui._open_settings_category("memory")
 
+    identity = tui._background_jobs.latest["memory-inventory"]
+    tui._apply_background_result(("memory-inventory", identity, {
+        "enabled": True, "count": 1, "facts": ["Prefer concise answers"], "hidden": 0,
+    }, ""))
+
     assert tui._choice_kind == "memory settings"
     assert "automatic memory: on (toggle)" in tui._choice_values
-    assert "\0info:Durable facts: 1" in tui._choice_values
+    assert any(value.startswith("\0info:Durable facts: 1") for value in tui._choice_values)
     assert any("Prefer concise answers" in value for value in tui._choice_values)
     tui._choice_index = tui._choice_values.index("automatic memory: on (toggle)")
     tui._accept_choice()
@@ -2670,22 +3083,105 @@ def test_memory_settings_toggle_show_facts_and_reset_to_enabled(tmp_path):
     assert tui.memory.auto_memory_enabled()
 
 
+def test_memory_picker_and_pending_toggles_use_snapshots_without_ui_io(tmp_path, monkeypatch):
+    tui = _fake_persistent_tui()
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    actions = []
+
+    class PendingActions:
+        def submit(self, action):
+            actions.append(action)
+            return True
+
+    tui._session_actions = PendingActions()
+    for method in ("list_facts", "auto_memory_enabled", "set_auto_memory"):
+        monkeypatch.setattr(tui.memory, method, lambda *args: pytest.fail("UI memory I/O"))
+    tui._open_settings_category("memory")
+    assert "\0info:Loading memory inventory…" in tui._choice_values
+    identity = tui._background_jobs.latest["memory-inventory"]
+    tui._apply_background_result(("memory-inventory", identity, {
+        "enabled": True, "count": 0, "facts": [], "hidden": 0,
+    }, ""))
+    for enabled in (False, True, False):
+        row = next(value for value in tui._choice_values if value.startswith("automatic memory:"))
+        tui._choice_index = tui._choice_values.index(row)
+        tui._accept_choice()
+        assert actions[-1].enabled is enabled
+        assert tui.memory._auto_memory_override is enabled
+        assert tui._choice_values[tui._choice_index].startswith("automatic memory:")
+    tui._emit("memory_setting_saved", (actions[0], True))
+    tui._before_render(None)
+    assert tui._memory_save_state == "saving" and tui.memory._auto_memory_override is False
+    tui._emit("memory_setting_saved", (actions[-1], False))
+    tui._before_render(None)
+    assert tui._memory_save_state == "failed" and tui.memory._auto_memory_override is False
+    assert any("save unconfirmed" in row for row in tui._choice_values)
+    tui._choice_index = tui._choice_values.index(RESET_THEME_CHOICE)
+    tui._accept_choice()
+    assert actions[-1].enabled is True
+    tui._memory_inventory_loaded_at = 0
+    tui._open_settings_category("memory")
+    old_read = tui._background_jobs.latest["memory-inventory"]
+    tui._emit("memory_setting_saved", (actions[-1], True))
+    tui._before_render(None)
+    assert tui._memory_save_state == "saved" and tui.memory._auto_memory_override is None
+    tui._apply_background_result(("memory-inventory", old_read, {
+        "enabled": False, "count": 0, "facts": [], "hidden": 0,
+    }, ""))
+    assert tui._status_memory_enabled is True
+    tui.memory.db.close()
+
+
+def test_memory_inventory_late_and_failed_results_preserve_scope_and_cache(tmp_path):
+    tui = _fake_persistent_tui()
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui._open_settings_category("memory")
+    identity = tui._background_jobs.latest["memory-inventory"]
+    tui._cancel_choice()
+    tui._apply_background_result(("memory-inventory", identity, {
+        "enabled": True, "count": 1, "facts": ["obsolete"], "hidden": 0,
+    }, ""))
+    assert tui._memory_inventory is None
+    tui._open_settings_category("memory")
+    identity = tui._background_jobs.latest["memory-inventory"]
+    tui._apply_background_result(("memory-inventory", identity, {
+        "enabled": False, "count": 1, "facts": ["cached"], "hidden": 0,
+    }, ""))
+    saved_time = tui._memory_inventory_loaded_at
+    tui._memory_inventory_loaded_at -= 31
+    tui._open_settings_category("memory")
+    identity = tui._background_jobs.latest["memory-inventory"]
+    tui._apply_background_result(("memory-inventory", identity, None, "private failure"))
+    assert tui._memory_inventory["facts"] == ["cached"]
+    assert tui._memory_inventory_loaded_at == saved_time - 31
+    assert "private failure" not in " ".join(tui._choice_values)
+    assert any("unavailable" in row for row in tui._choice_values)
+    tui.memory.db.close()
+
+
 def test_skills_settings_show_read_only_installed_inventory(monkeypatch):
     tui = _fake_persistent_tui()
-    monkeypatch.setattr(
-        "klaude_knowledge.list_installed_skills",
-        lambda _cfg: [
+    installed = [
             {
                 "name": "crawl4ai",
                 "library": "web-tools",
                 "indexed_files": ["SKILL.md", "reference.md"],
             }
-        ],
-    )
+    ]
 
+    opened_at = time.monotonic()
     tui._open_settings_category("skills")
 
+    assert time.monotonic() - opened_at < 0.25
     assert tui._choice_kind == "skills settings"
+    assert "\0info:Loading installed skills…" in tui._choice_values
+    identity = tui._background_jobs.latest["skills"]
+    tui._events.put(("background_result", (
+        "skills", identity, {"skills": installed, "truncated": False}, ""
+    )))
+    tui._before_render(tui.application)
+
+    assert not tui._skills_inventory_loading
     assert "\0info:Installed: 1" in tui._choice_values
     assert (
         "\0info:crawl4ai · library web-tools · 2 indexed files" in tui._choice_values
@@ -2746,6 +3242,17 @@ def test_settings_choice_sections_are_visible_and_not_selectable():
     tui._choice_index = tui._choice_values.index("\0section:WEB PROVIDERS")
     tui._accept_choice()
     assert not tui._choice_values[tui._choice_index].startswith("\0section:")
+
+
+def test_first_picker_option_reveals_its_section_heading():
+    tui = _fake_persistent_tui()
+    tui._open_settings_category("tools")
+    first = tui._choice_values.index("activity updates: on (toggle)")
+    tui._choice_index = first
+    assert tui._picker is not None
+    tui._picker.scroll_top = first
+    assert tui._choice_scroll(None) == 0
+    assert tui._choice_values[0] == "\0section:DISPLAY"
 
 
 def test_tools_settings_can_toggle_high_level_activity_updates(tmp_path):
@@ -3058,6 +3565,8 @@ def test_chat_status_reports_session_runtime_permissions_and_agents_file(tmp_pat
         },
         last_turn_capabilities={
             "scope": "review",
+            "injected_instructions": [str(root_instructions), str(nested_instructions)],
+            "instructions_truncated": False,
             "globally_enabled_tools": ["read_file", "run_shell", "write_file"],
             "callable_tools": ["read_file", "run_shell"],
             "budget": {
@@ -3070,6 +3579,19 @@ def test_chat_status_reports_session_runtime_permissions_and_agents_file(tmp_pat
         },
         workdir=workdir,
         workspace=SimpleNamespace(repo_root=repo),
+        ollama=SimpleNamespace(
+            last_chat_metadata={
+                "provider": "openai_api",
+                "usage": {
+                    "input_tokens": 1_000,
+                    "output_tokens": 100,
+                    "input_tokens_details": {
+                        "cached_tokens": 768,
+                        "cache_write_tokens": 232,
+                    },
+                },
+            }
+        ),
         gate=SimpleNamespace(
             policies={"read_file": "allow", "run_shell": "ask", "write_file": "deny"}
         ),
@@ -3094,6 +3616,7 @@ def test_chat_status_reports_session_runtime_permissions_and_agents_file(tmp_pat
     assert "Permissions   allow 1 · ask 1 · deny 1" in result
     assert "Memory        on" in result
     assert "Tools         3" in result
+    assert "Prompt cache  768/1,000 input tokens cached · 232 written" in result
 
 
 def test_status_columns_align_values():
@@ -3704,7 +4227,7 @@ def test_models_settings_uses_model_picker_flow_and_returns_to_settings():
     tui._choice_index = tui._choice_values.index("back")
     tui._accept_choice()
     assert tui._choice_kind == "settings"
-    assert tui._choice_values[tui._choice_index] == "models"
+    assert tui._choice_values[tui._choice_index].startswith("Models:")
 
 
 def test_settings_models_command_opens_same_source_picker():
@@ -3806,6 +4329,333 @@ def test_footer_separates_runtime_model_spacer_and_keybind_rows():
         text for _style, text in tui._footer_path_fragments()
     )
     assert "Enter to send/queue" in "".join(text for _style, text in tui._keybind_fragments())
+
+
+def test_runtime_calibration_submits_without_collecting_runtime_context(tmp_path, monkeypatch):
+    tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "preferences.json")
+    monkeypatch.setattr(
+        "klaude_cli.main.collect_runtime_context", lambda *args: pytest.fail("UI probe")
+    )
+    tui._open_settings_category("runtime", "auto calibrate")
+    previous = dict(tui.agent.ollama_options)
+    tui._apply_settings_action("runtime settings", "auto calibrate")
+    assert tui.agent.ollama_options == previous
+    assert tui._background_jobs.requests["runtime-calibration"] == {"kind": "runtime_calibration"}
+    assert tui._choice_values[tui._choice_index] == "cancel calibration"
+    tui._apply_background_result((
+        "runtime-calibration", tui._background_jobs.latest["runtime-calibration"],
+        {"num_thread": 4, "num_ctx": 16384, "num_gpu": "untrusted"}, ""
+    ))
+    assert tui.agent.ollama_options["num_ctx"] == 16384
+    assert "num_gpu" not in tui.agent.ollama_options
+    saved = json.loads((tmp_path / "preferences.json").read_text())
+    assert saved["runtime_options"]["num_thread"] == 4
+    assert tui._choice_values[tui._choice_index] == "auto calibrate"
+
+
+@pytest.mark.parametrize(
+    "action", ["cancel", "back", "settings", "runtime change", "session change"]
+)
+def test_runtime_calibration_late_results_do_not_overwrite_new_choices(tmp_path, action):
+    tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "preferences.json")
+    tui._open_settings_category("runtime")
+    tui._apply_settings_action("runtime settings", "auto calibrate")
+    identity = tui._background_jobs.latest["runtime-calibration"]
+    if action == "cancel":
+        tui._apply_settings_action("runtime settings", "cancel calibration")
+    elif action == "back":
+        tui._cancel_choice()
+    elif action == "settings":
+        tui._open_settings_category("theme")
+    elif action == "runtime change":
+        tui.agent.ollama_options["num_ctx"] = 4096
+        tui._persist_runtime_preferences("num_ctx")
+    else:
+        tui.session_id = "different"
+    before = dict(tui.agent.ollama_options)
+    tui._apply_background_result((
+        "runtime-calibration", identity, {"num_thread": 16, "num_ctx": 65536}, ""
+    ))
+    assert tui.agent.ollama_options == before
+    assert not tui._calibration_request
+
+
+@pytest.mark.parametrize(
+    "result,error", [(None, "timed out"), ({"num_thread": 0, "num_ctx": 42}, "")]
+)
+def test_runtime_calibration_failure_preserves_options_and_selection(result, error):
+    tui = _fake_persistent_tui()
+    tui._open_settings_category("runtime")
+    tui._apply_settings_action("runtime settings", "auto calibrate")
+    selected = next(row for row in tui._choice_values if row.startswith("context size:"))
+    tui._choice_index = tui._choice_values.index(selected)
+    before = dict(tui.agent.ollama_options)
+    tui._apply_background_result((
+        "runtime-calibration", tui._background_jobs.latest["runtime-calibration"], result, error
+    ))
+    assert tui.agent.ollama_options == before
+    assert "unchanged" in tui.status_error
+    assert tui._choice_values[tui._choice_index] == selected
+
+
+def test_runtime_calibration_does_not_start_during_active_work():
+    tui = _fake_persistent_tui()
+    tui.running = True
+    tui._calibrate_runtime()
+    assert not tui._calibration_request
+    assert "runtime-calibration" not in tui._background_jobs.latest
+
+
+def test_live_calibration_picker_remains_filterable_and_preserves_query(tmp_path):
+    async def exercise():
+        tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "preferences.json")
+        tui._open_settings_category("runtime", "auto calibrate")
+        tui._accept_choice()
+        identity = tui._background_jobs.latest["runtime-calibration"]
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = DummyOutput()
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+                pipe.send_text("cal")
+                await asyncio.sleep(0.15)
+                assert tui._choice_filter_query == "cal"
+                assert tui._choice_values[tui._choice_index] == "cancel calibration"
+                assert tui._calibration_request
+                tui._emit("background_result", (
+                    "runtime-calibration", identity, {"num_thread": 4, "num_ctx": 8192}, ""
+                ))
+                await asyncio.sleep(0.15)
+                assert tui._choice_filter_query == "cal"
+                assert tui._choice_values[tui._choice_index] == "auto calibrate"
+                assert not tui._calibration_request
+                assert tui.choice_window.render_info is not None
+            finally:
+                tui.application.exit()
+                await task
+
+    asyncio.run(exercise())
+
+
+def test_appearance_save_never_writes_on_ui_and_ignores_stale_acknowledgements(monkeypatch):
+    tui = _fake_persistent_tui()
+    requests = []
+
+    class PendingWriter:
+        def submit(self, changes):
+            requests.append(dict(changes))
+            return len(requests)
+
+    tui._appearance_writer = PendingWriter()
+    monkeypatch.setattr(
+        "klaude_cli.main.update_settings", lambda *args, **kwargs: pytest.fail("UI write")
+    )
+    tui.appearance.theme = "crimson-red"
+    tui._commit_appearance("theme", fields=("theme",))
+    tui.appearance.input_border = False
+    tui._commit_appearance("border", fields=("input_border",))
+    assert requests == [
+        {("theme", "interface"): "crimson-red"}, {("input_field", "border"): False},
+    ]
+    tui._emit("appearance_saved", (1, False))
+    tui._before_render(None)
+    assert tui._appearance_save_state == "saving"
+    tui._emit("appearance_saved", (2, False))
+    tui._before_render(None)
+    assert tui._appearance_save_state == "failed"
+    assert tui.appearance.theme == "crimson-red" and not tui.appearance.input_border
+    assert "Appearance save unconfirmed" in tui.output.text
+    tui._commit_appearance("theme", fields=("theme",))
+    assert tui.status_error == ""
+    tui._emit("appearance_saved", (3, True))
+    tui._before_render(None)
+    assert tui._appearance_save_state == "saved"
+    assert tui._runtime_save_state == ""
+
+
+def test_runtime_save_submits_without_ui_filesystem_access_and_scopes_acknowledgement(monkeypatch):
+    tui = _fake_persistent_tui()
+    requests = []
+    class PendingWriter:
+        def submit(self, changes):
+            requests.append(dict(changes))
+            return len(requests)
+    tui._settings_writer = PendingWriter()
+    monkeypatch.setattr("klaude_cli.main.update_settings", lambda *args: pytest.fail("UI write"))
+    tui.agent.max_steps = 40
+    tui._persist_runtime_preferences("max_steps")
+    tui._persist_runtime_preferences("num_ctx")
+    assert requests[0] == {("runtime_options", "max_steps"): 40}
+    assert tui.agent.max_steps == 40 and tui._runtime_save_state == "saving"
+    tui._emit("settings_saved", (1, False))
+    tui._before_render(None)
+    assert tui._runtime_save_state == "saving"
+    tui._emit("settings_saved", (2, False))
+    tui._before_render(None)
+    assert tui._runtime_save_state == "failed"
+    assert "could not be confirmed" in tui.output.text
+    assert tui.agent.max_steps == 40
+    tui._persist_runtime_preferences("max_steps")
+    assert tui.status_error == ""
+    tui._emit("settings_saved", (3, True))
+    tui._before_render(None)
+    assert tui._runtime_save_state == "saved"
+
+
+def test_runtime_preferences_editor_waits_for_pending_save():
+    tui = _fake_persistent_tui()
+    tui._runtime_save_state = "saving"
+    tui._open_runtime_config_editor("preferences")
+    assert "finish saving" in tui.status_error
+
+
+def test_pending_permission_toggles_use_live_gate_not_stale_disk(monkeypatch):
+    tui = _fake_persistent_tui()
+    requests = []
+    class PendingWriter:
+        def submit(self, changes):
+            requests.append(dict(changes))
+            return len(requests)
+    tui._settings_writer = PendingWriter()
+    monkeypatch.setattr("klaude_cli.main.update_settings", lambda *args: pytest.fail("UI write"))
+    tui._open_settings_category("permissions", "Write file:")
+    for policy in ("allow", "deny", "ask"):
+        selected = next(row for row in tui._choice_values if row.startswith("Write file:"))
+        tui._apply_settings_action("permission settings", selected)
+        assert tui.agent.gate.policies["write_file"] == policy
+        assert tui._choice_values[tui._choice_index] == f"Write file: {policy.upper()}"
+    assert requests == [
+        {("permissions", "write_file"): policy} for policy in ("allow", "deny", "ask")
+    ]
+    tui._emit("settings_saved", (3, False))
+    tui._before_render(None)
+    assert tui.agent.gate.policies["write_file"] == "ask"
+    assert tui._choice_values[tui._choice_index] == "Write file: ASK"
+    assert "could not be confirmed" in tui.output.text
+
+
+def test_permission_reset_and_composer_take_effect_before_save_finishes():
+    tui = _fake_persistent_tui()
+    requests = []
+    class PendingWriter:
+        def submit(self, changes):
+            requests.append(dict(changes))
+            return len(requests)
+    tui._settings_writer = PendingWriter()
+    tui._save_permission_settings({"write_file": "allow"}, tool="write_file")
+    tui._reset_permission_settings()
+    assert tui.agent.gate.policies["write_file"] == tui.cfg.permissions.get("write_file", "ask")
+    tui._set_composer_mode("vim")
+    assert tui.composer_mode == "vim"
+    assert tui.application.editing_mode == EditingMode.VI
+    assert tui._runtime_save_state == "saving"
+    tui._emit("settings_saved", (1, False))
+    tui._before_render(None)
+    assert tui._runtime_save_state == "saving"
+    tui._emit("settings_saved", (3, True))
+    tui._before_render(None)
+    assert tui._runtime_save_state == "saved"
+
+
+def test_permission_ack_ignores_old_revisions_and_preserves_process_grants():
+    tui = _fake_persistent_tui()
+    tui.agent.gate.policies = {"write_file": "ask"}
+    tui.agent.gate.process_grants = {"read_file"}
+    tui._runtime_save_revision = 3
+    tui._emit("settings_permissions", (2, {"write_file": "allow"}))
+    tui._before_render(None)
+    assert tui.agent.gate.policies["write_file"] == "ask"
+    tui._emit("settings_permissions", (3, {"write_file": "deny", "unknown": "allow"}))
+    tui._before_render(None)
+    assert tui.agent.gate.policies["write_file"] == "deny"
+    assert "unknown" not in tui.agent.gate.policies
+    assert tui.agent.gate.process_grants == {"read_file"}
+
+
+@pytest.mark.parametrize("category", ["runtime", "appearance", "tools", "model"])
+def test_live_picker_is_responsive_while_settings_writer_is_blocked(
+    tmp_path, monkeypatch, category
+):
+    import threading
+
+    import klaude_cli.settings_writer as module
+
+    async def exercise():
+        tui = _fake_persistent_tui(
+            chat_preferences_path=tmp_path / "preferences.json",
+            appearance_path=tmp_path / "appearance.json",
+        )
+        entered, release = threading.Event(), threading.Event()
+        original = module.update_settings
+        def slow(path, changes, **kwargs):
+            entered.set()
+            assert release.wait(3)
+            return original(path, changes, **kwargs)
+        monkeypatch.setattr(module, "update_settings", slow)
+        if category in {"runtime", "tools", "model"}:
+            writer = module.SettingsWriter(
+                tui.chat_preferences_path, tui._emit, publish_tools=True
+            )
+            tui._settings_writer = writer
+            if category == "runtime":
+                tui._persist_runtime_preferences("num_ctx")
+                tui._open_settings_category("runtime", "context size:")
+                query, prefix = "context", "context size:"
+            elif category == "tools":
+                tui._open_settings_category("tools", "web search validation:")
+                tui._apply_settings_action("tools settings", "web search validation: on (toggle)")
+                query, prefix = "validation", "web search validation:"
+            else:
+                tui._model_flow_parent = "settings"
+                tui._activate_selected_model(ModelInfo("ollama", "gpt-oss:20b", "gpt-oss:20b"))
+                tui._choice_index = tui._choice_values.index("standard")
+                tui._accept_choice()
+                query, prefix = "models", "Models:"
+            state = "_runtime_save_state"
+        else:
+            from klaude_cli.main import _migrate_appearance
+
+            writer = module.SettingsWriter(
+                tui.appearance_path,
+                lambda _kind, payload: tui._emit("appearance_saved", payload),
+                prepare=_migrate_appearance, publish_permissions=False,
+            )
+            tui._appearance_writer = writer
+            tui.appearance.input_border = False
+            tui._commit_appearance("border", fields=("input_border",))
+            tui._open_settings_category("input field", "border:")
+            query, prefix, state = "border", "border:", "_appearance_save_state"
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = DummyOutput()
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+                assert entered.is_set()
+                pipe.send_text(query)
+                for _ in range(40):
+                    if tui._choice_filter_query == query:
+                        break
+                    await asyncio.sleep(0.025)
+                assert tui._choice_filter_query == query
+                assert getattr(tui, state) == "saving"
+                assert tui.choice_window.render_info is not None
+                release.set()
+                for _ in range(40):
+                    if getattr(tui, state) == "saved":
+                        break
+                    await asyncio.sleep(0.025)
+                assert getattr(tui, state) == "saved"
+                assert tui._choice_filter_query == query
+                assert tui._choice_values[tui._choice_index].startswith(prefix)
+            finally:
+                release.set()
+                tui.application.exit()
+                await task
+                writer.close(wait=True)
+
+    asyncio.run(exercise())
 
 
 def test_runtime_settings_control_device_threads_and_context_persist(tmp_path):
@@ -3927,6 +4777,7 @@ def test_runtime_turn_limit_rejects_out_of_range_custom_value():
 def test_runtime_settings_offer_scoped_nano_editors(monkeypatch):
     tui = _fake_persistent_tui()
     opened: list[str] = []
+    monkeypatch.setattr("klaude_cli.main.shutil.which", lambda _name: "/usr/bin/nano")
     monkeypatch.setattr(
         tui,
         "_open_runtime_config_editor",
@@ -3941,6 +4792,22 @@ def test_runtime_settings_offer_scoped_nano_editors(monkeypatch):
     tui._apply_settings_action("runtime settings", "edit runtime preferences (nano)")
 
     assert opened == ["config", "preferences"]
+
+
+def test_runtime_settings_keep_unavailable_editors_highlightable(monkeypatch):
+    tui = _fake_persistent_tui()
+    monkeypatch.setattr("klaude_cli.main.shutil.which", lambda _name: None)
+
+    tui._open_settings_category("runtime")
+    unavailable = "edit config.toml (nano) — nano unavailable"
+    tui._choice_index = tui._choice_values.index(unavailable)
+
+    assert ("class:choice.disabled.selected", f"  › {unavailable}\n") in (
+        tui._choice_fragments()
+    )
+    tui._accept_choice()
+    assert tui._choice_kind == "runtime settings"
+    assert tui._choice_values[tui._choice_index] == unavailable
 
 
 def test_custom_setting_edit_cancel_returns_to_its_parent_category():
@@ -4101,97 +4968,241 @@ def test_model_picker_cancels_while_theme_picker_goes_back_to_settings(tmp_path)
     assert tui.appearance.theme == original_theme
 
 
-def test_cancel_during_effort_picker_restores_original_model():
-    tui = _fake_persistent_tui()
+@pytest.mark.parametrize("cancel_at", ["mode", "effort"])
+def test_cancel_during_reasoning_picker_restores_runtime_without_saving(tmp_path, cancel_at):
+    preferences = tmp_path / "preferences.json"
+    preferences.write_text('{"last_model": "ollama/qwen3.5:4b", "future": 1}')
+    tui = _fake_persistent_tui(chat_preferences_path=preferences)
+    original_runtime = tui.agent.ollama
+    tui.agent.history = ["existing conversation"]
     tui._set_input("/model")
     tui._submit_buffer(steer=False)
     tui._choice_index = tui._choice_values.index("Local")
     tui._accept_choice()
+    identity = tui._background_jobs.latest["local-models"]
+    tui._apply_background_result((
+        "local-models", identity, {"names": ["qwen3.5:4b", "gpt-oss:20b"]}, ""
+    ))
     tui._choice_index = tui._choice_values.index("gpt-oss:20b")
     tui._accept_choice()
 
     assert tui.agent.model == "gpt-oss:20b"
     assert tui._choice_kind == "mode"
-    tui._choice_index = tui._choice_values.index("thinking")
-    tui._accept_choice()
-    assert tui._choice_kind == "effort"
+    if cancel_at == "effort":
+        tui._choice_index = tui._choice_values.index("thinking")
+        tui._accept_choice()
+        assert tui._choice_kind == "effort"
     assert tui._choice_values[-1] == "cancel"
     tui._choice_index = len(tui._choice_values) - 1
     tui._accept_choice()
 
     assert tui._choice_kind is None
     assert tui.agent.model == "qwen3.5:4b"
+    assert tui.agent.ollama is original_runtime
+    assert tui.agent.history == ["existing conversation"]
+    assert tui._runtime_save_revision == 0 and tui._model_save_state == ""
+    assert json.loads(preferences.read_text()) == {"last_model": "ollama/qwen3.5:4b", "future": 1}
 
 
-def test_persistent_tui_renders_unavailable_picker_options_in_gray(monkeypatch):
+def test_confirmed_model_save_is_async_and_failures_keep_selected_runtime(monkeypatch):
+    tui = _fake_persistent_tui()
+    requests = []
+
+    class PendingWriter:
+        def submit(self, changes):
+            requests.append(dict(changes))
+            return len(requests)
+
+    tui._settings_writer = PendingWriter()
+    actions = []
+
+    class PendingActions:
+        def submit(self, action):
+            actions.append(action)
+            return True
+
+    tui._session_actions = PendingActions()
+    monkeypatch.setattr(tui.memory, "log_turn", lambda *args: pytest.fail("UI database write"))
+    monkeypatch.setattr(
+        tui.memory, "publish_session_event", lambda *args, **kwargs: pytest.fail("UI event write")
+    )
+    monkeypatch.setattr(
+        "klaude_cli.main.update_settings", lambda *args, **kwargs: pytest.fail("UI write")
+    )
+    tui.agent.history = ["existing conversation"]
+    tui._activate_selected_model(ModelInfo("ollama", "gpt-oss:20b", "gpt-oss:20b"))
+    selected_runtime = tui.agent.ollama
+    assert requests == [] and tui._choice_kind == "mode"
+    tui._choice_index = tui._choice_values.index("standard")
+    tui._accept_choice()
+    assert requests == [{("last_model",): "ollama/gpt-oss:20b"}]
+    assert len(actions) == 1 and actions[0].session_id == tui.session_id
+    assert tui._model_save_state == "saving"
+    assert tui.agent.history == ["existing conversation"]
+    # A later unrelated write shares the serialized revision boundary.
+    tui._persist_runtime_preferences("num_ctx")
+    tui._emit("settings_saved", (1, False))
+    tui._before_render(None)
+    assert tui._model_save_state == "saving"
+    tui._emit("settings_saved", (2, False))
+    tui._before_render(None)
+    assert tui._model_save_state == "failed"
+    assert tui.agent.model == "gpt-oss:20b" and tui.agent.ollama is selected_runtime
+    assert tui.agent.history == ["existing conversation"]
+    tui._persist_runtime_preferences("num_ctx")
+    tui._emit("settings_saved", (3, True))
+    tui._before_render(None)
+    assert tui._model_save_state == "saved"
+
+
+def test_session_setting_failures_report_original_scope_without_changing_runtime():
+    from klaude_cli.session_actions import SessionSettingUpdate
+
+    tui = _fake_persistent_tui()
+    original = tui.agent.ollama
+    tui._emit("session_setting_saved", (
+        SessionSettingUpdate("previous-session", tui.client_id, "model change"), False
+    ))
+    tui._before_render(None)
+    assert "save unconfirmed for previous-session" in tui.output.text
+    assert tui.status_error == ""
+    assert tui.agent.ollama is original
+
+
+@pytest.mark.parametrize("operation", ["model", "memory"])
+def test_settings_picker_responds_while_session_write_is_blocked(
+    tmp_path, monkeypatch, operation
+):
+    import threading
+
+    from klaude_cli.session_actions import SessionActionWriter
+
+    async def exercise():
+        tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "preferences.json")
+        memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+        entered, release = threading.Event(), threading.Event()
+        method = "record_session_update" if operation == "model" else "set_auto_memory"
+        original = getattr(Memory, method)
+
+        def blocked(connection, *args):
+            entered.set()
+            assert release.wait(3)
+            return original(connection, *args)
+
+        monkeypatch.setattr(Memory, method, blocked)
+        writer = SessionActionWriter(memory, tui._emit)
+        tui._session_actions = writer
+        if operation == "model":
+            tui._model_flow_parent = "settings"
+            tui._activate_selected_model(ModelInfo("ollama", "gpt-oss:20b", "gpt-oss:20b"))
+            tui._choice_index = tui._choice_values.index("standard")
+            tui._accept_choice()
+            query = "models"
+        else:
+            tui.memory = memory
+            tui._status_memory_enabled = True
+            tui._open_settings_category("memory")
+            tui._choice_index = tui._choice_values.index("automatic memory: on (toggle)")
+            tui._accept_choice()
+            query = "automatic"
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = DummyOutput()
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+                assert entered.is_set()
+                pipe.send_text(query)
+                for _ in range(40):
+                    if tui._choice_filter_query == query:
+                        break
+                    await asyncio.sleep(0.025)
+                assert tui._choice_filter_query == query
+                assert tui.choice_window.render_info is not None
+                assert memory.load_session(tui.session_id) == []
+            finally:
+                release.set()
+                tui.application.exit()
+                await task
+                assert writer.close(wait=True)
+                expected_turns = 1 if operation == "model" else 0
+                assert len(memory.load_session(tui.session_id)) == expected_turns
+                if operation == "memory":
+                    assert memory.db.execute(
+                        "SELECT value FROM settings WHERE key='auto_memory_enabled'"
+                    ).fetchone()[0] == "0"
+                memory.db.close()
+
+    asyncio.run(exercise())
+
+
+def test_mode_only_selection_does_not_change_remembered_model(tmp_path):
+    preferences = tmp_path / "preferences.json"
+    preferences.write_text('{"last_model": "ollama/another-model"}')
+    tui = _fake_persistent_tui(chat_preferences_path=preferences)
+    tui._begin_choice("mode", ["standard", "thinking", "cancel"], "standard")
+    tui._accept_choice()
+    assert tui._runtime_save_revision == 0 and tui._model_save_state == ""
+    assert json.loads(preferences.read_text()) == {"last_model": "ollama/another-model"}
+
+
+def test_cloud_providers_remain_available_for_in_picker_login(monkeypatch):
     monkeypatch.setattr("klaude_cli.main.load_model_cache", lambda _path: [])
     tui = _fake_persistent_tui()
     tui._open_cloud_provider()
 
     fragments = tui._choice_fragments()
 
-    assert tui._choice_values[tui._choice_index] == "OpenAI Codex — not signed in"
-    assert (
-        "class:choice.disabled.selected",
-        "  › OpenAI Codex — not signed in\n",
-    ) in fragments
+    assert tui._choice_values[tui._choice_index] == "OpenAI"
+    assert ("class:choice.selected", "  › OpenAI\n") in fragments
+    assert all("API key not configured" not in value for value in tui._choice_values)
     assert tui._choice_values[-3:] == [
         "back",
         "",
-        "Tip: use OpenAI Codex login, or configure API keys in Settings → Providers",
+        "Tip: open any cloud provider to sign in, sign out, or choose a model",
     ]
     assert ("class:choice.disabled", "\n") in fragments
     assert (
         "class:choice.disabled",
-        "    Tip: use OpenAI Codex login, or configure API keys in Settings → Providers",
+        "    Tip: open any cloud provider to sign in, sign out, or choose a model",
     ) in fragments
 
 
-def test_unavailable_picker_options_can_be_highlighted_but_not_accepted(monkeypatch):
+def test_unauthenticated_cloud_provider_opens_login_action(monkeypatch):
     monkeypatch.setattr("klaude_cli.main.load_model_cache", lambda _path: [])
     tui = _fake_persistent_tui()
     tui._open_cloud_provider()
 
-    codex = tui._choice_index
-    tui._move_choice(1)
-    openai = tui._choice_index
-    assert tui._choice_values[openai] == "OpenAI — API key not configured"
-    tui._move_choice(1)
-    openrouter = tui._choice_index
-    assert tui._choice_values[openrouter] == "OpenRouter — API key not configured"
-    tui._move_choice(1)
-    google = tui._choice_index
-    assert tui._choice_values[google] == "Google — API key not configured"
-
-    tui._accept_choice()
-    assert tui._choice_kind == "model cloud provider"
-    assert tui._choice_index == google
-
-    tui._move_choice(1)
-    assert tui._choice_values[tui._choice_index] == "back"
-    tui._click_choice(codex)
-    assert tui._choice_index == codex
-    tui._click_choice(codex)
-    assert tui._choice_kind == "model cloud provider"
-    assert tui._choice_index == codex
-
-
-def test_expired_codex_auth_keeps_model_picker_open(monkeypatch):
-    tui = _fake_persistent_tui()
-    tui._model_choices = {
-        "gpt-5.6-sol": ModelInfo("openai_codex", "gpt-5.6-sol", "GPT-5.6 Sol")
-    }
-    tui._begin_choice("model", ["gpt-5.6-sol", "back"], "gpt-5.6-sol")
-    monkeypatch.setattr(
-        "klaude_cli.main._set_agent_model",
-        lambda *_args: (_ for _ in ()).throw(CodexAuthError("sign in again")),
-    )
-
+    tui._choice_index = tui._choice_values.index("OpenRouter")
     tui._accept_choice()
 
     assert tui._choice_kind == "model"
-    assert tui.agent.model == "qwen3.5:4b"
-    assert tui.status_error == "sign in again"
+    assert tui._choice_values[tui._choice_index] == "Login"
+    assert "\0info:Status: not signed in" in tui._choice_values
+
+
+def test_expired_codex_auth_keeps_model_picker_open(monkeypatch):
+    async def exercise():
+        tui = _fake_persistent_tui()
+        tui._model_choices = {
+            "gpt-5.6-sol": ModelInfo("openai_codex", "gpt-5.6-sol", "GPT-5.6 Sol")
+        }
+        tui._begin_choice("model", ["gpt-5.6-sol", "back"], "gpt-5.6-sol")
+        tui._accept_choice()
+        task = tui._setup_job
+        for _ in range(5):
+            await asyncio.sleep(0)
+            if tui._model_activation_id:
+                break
+        tui._apply_background_result((
+            "model-activation", tui._model_activation_id, None, "expired authentication"
+        ))
+        await task
+        assert tui._choice_kind == "model"
+        assert tui.agent.model == "qwen3.5:4b"
+        assert "check sign-in" in tui.status_error
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize(
@@ -4227,6 +5238,32 @@ def test_live_picker_scrolls_selected_row_into_view(
                     assert info.vertical_scroll > 0
                 assert selected in info.displayed_lines
                 assert tui.application.layout.current_control is tui.choice_control
+            finally:
+                tui.application.exit()
+                await task
+
+    asyncio.run(exercise())
+
+
+def test_live_picker_keeps_heading_above_first_option_visible():
+    async def exercise():
+        tui = _fake_persistent_tui()
+        tui.appearance.input_height = 4
+        tui.appearance.input_max_height = 4
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = DummyOutput()
+            tui._open_settings_category("tools")
+            tui._choice_index = tui._choice_values.index("activity updates: on (toggle)")
+            assert tui._picker is not None
+            tui._picker.scroll_top = tui._choice_index
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                await asyncio.sleep(0.1)
+                info = tui.choice_window.render_info
+                assert info is not None
+                assert info.vertical_scroll == 0
+                assert 0 in info.displayed_lines
             finally:
                 tui.application.exit()
                 await task
@@ -4432,6 +5469,13 @@ def test_escape_follows_a_pickers_visible_back_or_cancel_action():
     tui._open_settings_category("tools")
     tui._dismiss_picker()
     assert tui._choice_kind == "settings"
+    assert tui._choice_values[tui._choice_index].startswith("Tools:")
+
+    tui._open_settings_category("providers")
+    tui._open_provider_key_settings("OpenRouter")
+    tui._dismiss_picker()
+    assert tui._choice_kind == "providers settings"
+    assert tui._choice_values[tui._choice_index].startswith("OpenRouter:")
 
     tui._begin_choice("input height", ["8 lines", "cancel"], "8 lines")
     tui._dismiss_picker()
@@ -4599,8 +5643,30 @@ def test_shared_model_metadata_is_secret_free_and_bounded():
         "provider": "openai_codex",
         "response_id": "resp_public",
         "status": "completed",
-        "usage": {"input_tokens": 12, "output_tokens": 4},
+        "usage": {
+            "input_tokens": 12,
+            "output_tokens": 4,
+            "input_tokens_details": {"cached_tokens": 7},
+        },
     }
+
+
+def test_prompt_cache_status_ignores_malformed_provider_counters():
+    agent = SimpleNamespace(
+        ollama=SimpleNamespace(
+            last_chat_metadata={
+                "usage": {
+                    "input_tokens": "unknown",
+                    "input_tokens_details": {
+                        "cached_tokens": {"unexpected": True},
+                        "cache_write_tokens": -1,
+                    },
+                }
+            }
+        )
+    )
+
+    assert _prompt_cache_status(agent) is None
 
 
 def test_persistent_tui_permission_answer_unblocks_worker_request():
@@ -4965,13 +6031,18 @@ def test_provider_settings_collect_and_save_api_key_through_masked_composer(monk
         "klaude_cli.main.save_provider_secret",
         lambda config_dir, name, value: saved.append((config_dir, name, value)),
     )
-    monkeypatch.setattr("klaude_cli.main._refresh_cloud_model_cache", lambda _cfg: None)
 
     tui._open_settings_category("providers")
     row = next(value for value in tui._choice_values if value.startswith("OpenRouter:"))
     tui._choice_index = tui._choice_values.index(row)
     tui._accept_choice()
 
+    assert tui._choice_kind == "provider key settings"
+    assert "\0info:Status: not configured" in tui._choice_values
+    assert "Add API key" in tui._choice_values
+    assert "Remove API key" not in tui._choice_values
+    tui._choice_index = tui._choice_values.index("Add API key")
+    tui._accept_choice()
     assert tui._secret_request is not None
     password_processor = next(
         processor
@@ -4985,12 +6056,20 @@ def test_provider_settings_collect_and_save_api_key_through_masked_composer(monk
     assert saved == [(tui.cfg.config_dir, "OPENROUTER_API_KEY", "sk-or-secret")]
     assert tui.cfg.openrouter_api_key == "sk-or-secret"
     assert "sk-or-secret" not in tui.output.text
-    assert tui._choice_kind == "providers settings"
+    assert tui._choice_kind == "provider key settings"
+    assert "\0info:Status: configured" in tui._choice_values
+    assert "Update API key" in tui._choice_values
+    assert "Remove API key" in tui._choice_values
+    assert tui._choice_values[tui._choice_index] == "Update API key"
     assert tui._secret_request is None
     assert not password_processor.filter()
 
     tui._open_settings_category("providers")
     assert "\0section:WEB SEARCH API KEYS" in tui._choice_values
+    assert (
+        "\0info:OpenAI Codex login: klaude auth login openai-codex"
+        in tui._choice_values
+    )
     assert "Brave Search: not configured" in tui._choice_values
     assert "Parallel: not configured" in tui._choice_values
     assert "Tavily: not configured" in tui._choice_values
@@ -5002,6 +6081,8 @@ def test_provider_settings_collect_and_save_api_key_through_masked_composer(monk
 
     tui._choice_index = tui._choice_values.index("Brave Search: not configured")
     tui._accept_choice()
+    tui._choice_index = tui._choice_values.index("Add API key")
+    tui._accept_choice()
     tui._set_input("brave-private-key")
     tui._submit_secret_response()
 
@@ -5012,7 +6093,17 @@ def test_provider_settings_collect_and_save_api_key_through_masked_composer(monk
     )
     assert tui.cfg.brave_search_api_key == "brave-private-key"
     assert "brave-private-key" not in tui.output.text
-    assert "remove Brave Search key" in tui._choice_values
+    assert "\0info:Status: configured" in tui._choice_values
+    assert "Remove API key" in tui._choice_values
+
+    tui._choice_index = tui._choice_values.index("Remove API key")
+    tui._accept_choice()
+
+    assert saved[-1] == (tui.cfg.config_dir, "BRAVE_SEARCH_API_KEY", "")
+    assert tui.cfg.brave_search_api_key == ""
+    assert "\0info:Status: not configured" in tui._choice_values
+    assert "Remove API key" not in tui._choice_values
+    assert tui._choice_values[tui._choice_index] == "Add API key"
 
     cancelled = threading.Event()
     tui._secret_request = {
@@ -5070,7 +6161,7 @@ def test_persistent_tui_refresh_erases_and_invalidates_current_frame(monkeypatch
 def test_picker_redraws_throttle_shared_session_polling(monkeypatch):
     tui = _fake_persistent_tui()
     calls = []
-    monkeypatch.setattr(tui, "_sync_shared_session", lambda: calls.append("sync"))
+    monkeypatch.setattr(tui, "_request_session_sync", lambda: calls.append("sync"))
     tui._begin_choice("settings", tui._settings_categories(), "models")
     tui._last_picker_session_sync = time.monotonic()
 
@@ -5080,6 +6171,91 @@ def test_picker_redraws_throttle_shared_session_polling(monkeypatch):
     tui._last_picker_session_sync = 0.0
     tui._before_render(None)
     assert calls == ["sync"]
+
+
+def test_render_submits_session_snapshot_without_database_calls(monkeypatch):
+    tui = _fake_persistent_tui()
+    def blocked(*args, **kwargs):
+        pytest.fail("SQLite must not run in render polling")
+    for name in (
+        "session_live_state", "session_client_states", "session_events_since",
+        "update_session_client", "renew_session_lease",
+    ):
+        monkeypatch.setattr(tui.memory, name, blocked)
+    tui._set_input("public draft")
+    tui._before_render(None)
+    assert tui._session_io.requests[-1].draft == "public draft"
+
+
+def test_session_snapshot_never_publishes_secret_composer():
+    tui = _fake_persistent_tui()
+    tui._secret_request = {"prompt": "API key"}
+    tui._set_input("private secret")
+    assert tui._session_io_request().draft is None
+
+
+def test_session_snapshot_rejects_late_previous_session_result():
+    from klaude_cli.session_io import SessionIORequest, SessionIOResult
+
+    tui = _fake_persistent_tui()
+    tui._apply_session_io(
+        SessionIORequest("previous", tui.client_id, "", 0),
+        SessionIOResult({}, [], [], renewed=False),
+    )
+    assert not tui.cancel_requested.is_set()
+
+
+def test_session_lease_timeout_requests_safe_interruption():
+    tui = _fake_persistent_tui()
+    tui.running = True
+    tui._turn_id = "turn"
+    tui._last_lease_renewal = time.monotonic() - 13
+    tui._request_session_sync()
+    assert tui.cancel_requested.is_set()
+    assert "could not be renewed" in tui.status_error
+
+
+def test_live_composer_accepts_input_while_session_io_is_blocked(tmp_path, monkeypatch):
+    import threading
+
+    import klaude_cli.session_io as module
+
+    async def exercise():
+        tui = _fake_persistent_tui()
+        tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+        entered, release = threading.Event(), threading.Event()
+        original = module.collect_session_io
+
+        def slow(connection, request):
+            entered.set()
+            assert release.wait(3)
+            return original(connection, request)
+
+        monkeypatch.setattr(module, "collect_session_io", slow)
+        tui._session_io = module.SessionIOCoordinator(tui.memory, tui._emit)
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = DummyOutput()
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                for _ in range(40):
+                    if entered.is_set():
+                        break
+                    await asyncio.sleep(0.025)
+                assert entered.is_set()
+                pipe.send_text("still responsive")
+                await asyncio.sleep(0.15)
+                assert tui.input.text == "still responsive"
+                assert tui.input.window.render_info is not None
+                assert not release.is_set()
+            finally:
+                release.set()
+                tui.application.exit()
+                await task
+                tui._session_io.close(wait=True)
+                tui.memory.db.close()
+
+    asyncio.run(exercise())
 
 
 def test_persistent_tui_permission_response_accepts_composer_input():
@@ -5342,6 +6518,274 @@ def test_persistent_tui_categorized_field_settings_toggle_and_reset(tmp_path):
     tui._submit_buffer(steer=False)
     assert _load_tui_appearance(path) == TUIAppearance()
     assert tui.output.window.right_margins == []
+
+
+def test_tui_mcp_search_suggestions_stay_private_and_submit_only_search(monkeypatch):
+    tui = _fake_persistent_tui()
+    tui._mcp_catalog_results = {"loaded": SimpleNamespace(name="io.example/context7")}
+    tui._mcp_catalog_query = True
+    tui._set_input("Context7")
+    assert tui._completion_menu_position() == 0
+    assert tui._session_io_request().draft is None
+    assert ("io.example/context7", "loaded registry result") in tui._mcp_search_suggestions("con")
+    calls = []
+    monkeypatch.setattr(tui, "_search_mcp_catalog", calls.append)
+    tui._submit_buffer(steer=False)
+    assert calls == ["Context7"]
+    assert tui.input.text == "" and tui.input.buffer.complete_state is None
+    assert not tui.pending
+
+
+def test_mcp_initial_search_hint_submits_registry_query(monkeypatch):
+    tui = _fake_persistent_tui()
+    tui._begin_mcp_catalog_query()
+    state = tui.input.buffer.complete_state
+    assert state is not None
+    tui.input.buffer.go_to_completion(0)
+    selected = tui.input.buffer.complete_state.current_completion
+    assert selected is not None and selected.text == "Context7"
+    tui.input.buffer.cancel_completion()
+    tui._set_input(selected.text)
+    assert tui._mcp_catalog_query is True and tui.input.text == "Context7"
+    calls = []
+    monkeypatch.setattr(tui, "_search_mcp_catalog", calls.append)
+    tui._submit_buffer(steer=False)
+    assert calls == ["Context7"]
+    assert not tui.pending
+
+
+def test_mcp_typeahead_debounces_discards_stale_results_and_cancels_on_exit():
+    tui = _fake_persistent_tui()
+    tui._begin_mcp_catalog_query()
+    initial = tui.input.buffer.complete_state
+    assert initial is not None
+    assert [(item.text, item.display_meta_text) for item in initial.completions][:2] == [
+        ("Context7", "suggested search"), ("GitHub", "suggested search")
+    ]
+    assert "mcp-suggestions" not in tui._background_jobs.latest
+    tui._set_input("context")
+    tui._refresh_mcp_suggestions()
+    assert "mcp-suggestions" not in tui._background_jobs.latest
+    tui._mcp_suggestion_due = 0
+    tui._refresh_mcp_suggestions()
+    identity = tui._background_jobs.latest["mcp-suggestions"]
+    assert tui._background_jobs.requests["mcp-suggestions"]["query"] == "context"
+    tui._apply_background_result(("mcp-suggestions", identity, {
+        "servers": [{"name": "io.example/context7"}],
+    }, ""))
+    assert tui._mcp_search_suggestions("context")[0][0] == "io.example/context7"
+    tui._set_input("github")
+    tui._apply_background_result(("mcp-suggestions", identity, {
+        "servers": [{"name": "stale"}],
+    }, ""))
+    assert "stale" not in tui._mcp_suggestion_names
+    tui._mcp_catalog_query = False
+    tui._refresh_mcp_suggestions()
+    assert "mcp-suggestions" not in tui._background_jobs.latest
+
+
+def test_tui_mcp_registry_search_installs_supported_plan_disabled(monkeypatch, tmp_path):
+    from klaude_core.mcp_catalog import _parse_servers
+    from klaude_core.mcp_client import MCPRegistry
+
+    registry = MCPRegistry(tmp_path / "mcp-servers.json")
+    monkeypatch.setattr("klaude_cli.main._mcp_registry", lambda: registry)
+    server = _parse_servers(
+        {
+            "servers": [
+                {
+                    "server": {
+                        "name": "io.github.example/browser",
+                        "title": "Example Browser",
+                        "description": "Accessible browser automation.",
+                        "version": "1.2.3",
+                        "remotes": [
+                            {
+                                "type": "streamable-http",
+                                "url": "https://mcp.example.com/mcp",
+                            }
+                        ],
+                    },
+                    "_meta": {
+                        "io.modelcontextprotocol.registry/official": {
+                            "status": "active",
+                            "isLatest": True,
+                        }
+                    },
+                }
+            ]
+        }
+    )[0]
+    tui = _fake_persistent_tui()
+    _configure_test_mcp_lane(tui, registry, monkeypatch)
+
+    tui._open_settings_category("mcp servers")
+    tui._choice_index = tui._choice_values.index("Search official MCP Registry")
+    tui._accept_choice()
+
+    assert tui._mcp_catalog_query is True
+    assert "official MCP Registry" in str(tui._input_title())
+    assert "official MCP Registry" in tui._composer_placeholder_text()
+
+    tui._mcp_catalog_results = {"Example Browser · 1.2.3 · remote": server}
+    tui._open_mcp_catalog_results()
+    tui._choice_index = tui._choice_values.index("Example Browser · 1.2.3 · remote")
+    tui._accept_choice()
+    blocked_choice = next(
+        value for value in tui._choice_values if value.startswith("Install disabled")
+    )
+    tui._choice_index = tui._choice_values.index(blocked_choice)
+    tui._accept_choice()
+    assert registry.load() == {} and tui._choice_kind == "mcp registry detail"
+    identity = tui._background_jobs.latest["mcp-inventory"]
+    tui._apply_background_result(("mcp-inventory", identity, {
+        "servers": [], "truncated": True,
+    }, ""))
+    assert tui._mcp_catalog_install_choices == {}
+    tui._invalidate_mcp_inventory()
+    tui._open_mcp_catalog_detail(server)
+    identity = tui._background_jobs.latest["mcp-inventory"]
+    tui._apply_background_result(("mcp-inventory", identity, {
+        "servers": [], "truncated": False,
+    }, ""))
+
+    install_choice = next(
+        value for value in tui._choice_values if value.startswith("Install disabled")
+    )
+    tui._choice_index = tui._choice_values.index(install_choice)
+    tui._accept_choice()
+
+    assert tui._mcp_mutations.close(wait=True)
+    tui._before_render(None)
+
+    installed = registry.load()["browser"]
+    assert installed.enabled is False
+    assert installed.url == "https://mcp.example.com/mcp"
+    assert installed.source["name"] == "io.github.example/browser"
+
+
+def test_tui_mcp_registry_result_event_is_runtime_safe(monkeypatch, tmp_path):
+    from klaude_core.mcp_catalog import _parse_servers
+
+    server = _parse_servers(
+        {
+            "servers": [
+                {
+                    "server": {
+                        "name": "io.github.example/runtime-safe",
+                        "title": "Runtime Safe",
+                        "description": "A runtime-safe test server.",
+                        "version": "1.0.0",
+                        "remotes": [
+                            {
+                                "type": "streamable-http",
+                                "url": "https://mcp.example.com/mcp",
+                            }
+                        ],
+                    },
+                    "_meta": {
+                        "io.modelcontextprotocol.registry/official": {
+                            "status": "active",
+                            "isLatest": True,
+                        }
+                    },
+                }
+            ]
+        }
+    )[0]
+    tui = _fake_persistent_tui()
+    tui._mcp_catalog_request_id = "request-1"
+    tui._begin_choice("mcp registry results", ["back"], "back")
+    tui._events.put(("mcp_catalog_results", ("request-1", [server], False, "")))
+
+    tui._before_render(None)
+
+    assert any("Runtime Safe" in label for label in tui._mcp_catalog_results)
+    assert "Runtime Safe" in tui._choice_values[tui._choice_index]
+
+
+def test_tui_registry_install_collects_required_secret_in_settings(monkeypatch, tmp_path):
+    from klaude_core.mcp_catalog import MCPCatalogInput, MCPInstallPlan
+    from klaude_core.mcp_client import MCPRegistry
+
+    registry = MCPRegistry(tmp_path / "mcp-servers.json")
+    saved = []
+    monkeypatch.setattr("klaude_cli.main._mcp_registry", lambda: registry)
+    monkeypatch.setattr(
+        "klaude_cli.main.save_provider_secret",
+        lambda config_dir, name, value: saved.append((config_dir, name, value)),
+    )
+    plan = MCPInstallPlan(
+        label="remote",
+        source_name="io.github.example/secure",
+        source_version="1.0.0",
+        transport="http",
+        url="https://mcp.example.com/mcp",
+        header_templates=(("Authorization", "Bearer {token}"),),
+        inputs=(
+            MCPCatalogInput(
+                key="token",
+                label="API token",
+                secret=True,
+                required=True,
+            ),
+        ),
+    )
+    tui = _fake_persistent_tui()
+
+    tui._begin_mcp_catalog_plan(plan)
+    assert tui._secret_request is not None
+    tui._set_input("top-secret-token")
+    tui._submit_secret_response()
+
+    server = registry.load()["secure"]
+    assert server.enabled is False
+    assert server.headers == {"Authorization": "Bearer ${env:MCP_SECURE_TOKEN}"}
+    assert saved[-1][1:] == ("MCP_SECURE_TOKEN", "top-secret-token")
+    assert "top-secret-token" not in tui.output.text
+
+
+def test_tui_custom_remote_mcp_setup_stays_inside_settings(monkeypatch, tmp_path):
+    from klaude_core.mcp_client import MCPRegistry
+
+    registry = MCPRegistry(tmp_path / "mcp-servers.json")
+    monkeypatch.setattr("klaude_cli.main._mcp_registry", lambda: registry)
+    tui = _fake_persistent_tui()
+    _configure_test_mcp_lane(tui, registry, monkeypatch)
+
+    tui._open_settings_category("mcp servers")
+    tui._choice_index = tui._choice_values.index("Add custom MCP server")
+    tui._accept_choice()
+    tui._choice_index = tui._choice_values.index("Remote · Streamable HTTP")
+    tui._accept_choice()
+    tui._set_input("context-docs")
+    tui._submit_settings_input_response()
+    tui._set_input("https://mcp.example.com/mcp")
+    tui._submit_settings_input_response()
+    tui._choice_index = tui._choice_values.index("No authentication")
+    tui._accept_choice()
+    assert tui._mcp_mutations.close(wait=True)
+    tui._before_render(None)
+
+    server = registry.load()["context-docs"]
+    assert server.url == "https://mcp.example.com/mcp"
+    assert server.enabled is False
+    assert tui._choice_kind == "mcp settings"
+
+
+def test_picker_text_fuzzy_filters_to_closest_option():
+    tui = _fake_persistent_tui()
+    tui._begin_choice(
+        "model cloud provider",
+        ["OpenAI Codex", "OpenAI", "OpenRouter", "Google", "back"],
+        "OpenAI",
+    )
+
+    tui._set_input("codx")
+    tui._refresh_choice_filter()
+
+    assert tui._choice_values[0] == "OpenAI Codex"
+    assert tui._choice_index == 0
 
 
 def test_persistent_tui_input_height_picker_persists_and_resets(tmp_path):
@@ -6043,6 +7487,31 @@ def test_tool_selector_direct_response_requests_do_not_call_tools():
         assert _select_tool_names(message, tools) == []
 
 
+def test_tool_selector_respects_negated_actions_and_preserves_positive_followups():
+    tools = {
+        name: Tool(name, name, {}, lambda: "")
+        for name in (
+            "workspace_info",
+            "list_dir",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "run_shell",
+            "storage_usage",
+        )
+    }
+
+    assert _select_tool_names(
+        "Explain why tests matter. Do not inspect the workspace or use tools.", tools
+    ) == []
+    selected = _select_tool_names(
+        "Run them and summarize the evidence. Do not modify anything.", tools
+    )
+    assert "run_shell" in selected
+    assert "write_file" not in selected
+    assert "edit_file" not in selected
+
+
 def test_tool_selector_uses_command_registry_for_named_slash_command_help():
     tool = Tool(
         "list_commands",
@@ -6098,6 +7567,10 @@ def test_list_commands_description_excludes_casual_identity_questions():
         "Save https://obsidian.md/help/ into my Obsidian knowledge library",
         "Index this documentation site in the obsidian library",
         "Please ingest the page into knowledge",
+        "learn context7 skill",
+        "learn from Context7",
+        "download the Context7 skill",
+        "install the official React documentation skill",
     ],
 )
 def test_knowledge_ingestion_intent_requires_explicit_persistence_language(message):
@@ -6111,6 +7584,7 @@ def test_knowledge_ingestion_intent_requires_explicit_persistence_language(messa
         "Read https://obsidian.md/help/ for this answer",
         "What does the Obsidian documentation say?",
         "Remember that I use Obsidian",
+        "Learn from this answer and explain it back to me",
     ],
 )
 def test_knowledge_ingestion_intent_rejects_temporary_or_personal_memory_requests(message):
@@ -6139,6 +7613,34 @@ def test_tool_selector_routes_explicit_learning_only_to_persistent_ingestion():
     assert _select_tool_names(
         "Learn and keep this documentation: https://obsidian.md/help/", tools
     ) == ["learn_source"]
+
+
+def test_tool_selector_discovers_named_learning_source_before_ingestion():
+    tools = {
+        name: Tool(
+            name,
+            f"{name}.",
+            {"type": "object", "properties": {}, "required": []},
+            lambda: "",
+        )
+        for name in (
+            "learn_source",
+            "query_knowledge",
+            "web_search",
+            "fetch_url",
+            "request_user_input",
+            "write_file",
+            "run_shell",
+            "git_commit",
+        )
+    }
+
+    assert _select_tool_names("learn context7 skill", tools) == [
+        "web_search",
+        "fetch_url",
+        "learn_source",
+        "request_user_input",
+    ]
 
 
 def test_inferred_knowledge_library_prefers_explicit_name_then_domain():
@@ -7558,3 +9060,1474 @@ def test_mcp_indexing_uses_shared_owner_snapshot_helper():
 
     assert "replace_owner_snapshot_atomic" in source
     assert "delete_sources" not in source
+
+
+def test_setup_job_is_responsive_cancellable_and_does_not_start_queued_work(monkeypatch):
+    import asyncio
+
+    async def scenario():
+        tui = _fake_persistent_tui()
+        started = asyncio.Event()
+        cleaned = asyncio.Event()
+        finished = []
+
+        async def operation(cancel):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+        tui._start_setup_job("Test login", operation, finished.append, timeout=30)
+        await started.wait()
+        tui.pending.append("queued input")
+        tui._start_next()
+        assert list(tui.pending) == ["queued input"]
+        assert "Esc / Ctrl+C cancel" in "".join(text for _, text in tui._status_fragments())
+        tui._dismiss_picker()
+        task = tui._setup_job
+        await task
+        assert cleaned.is_set()
+        assert finished == [None]
+        assert tui._setup_job is None
+        assert tui.status_error == "Test login cancelled"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("had_credentials", [True, False])
+def test_mcp_oauth_setup_cancellation_closes_listener_and_preserves_prior_credentials(
+    tmp_path, monkeypatch, had_credentials
+):
+    from contextlib import asynccontextmanager
+
+    import klaude_cli.main as cli_main
+    import klaude_cli.setup_jobs as setup_jobs
+    from klaude_core.mcp_client import MCPClient, MCPRegistry, MCPServerConfig, MCPTokenStorage
+
+    registry = MCPRegistry(tmp_path / "oauth.json")
+    registry.save({"test": MCPServerConfig(
+        name="test", transport="http", enabled=False, oauth=True, url="https://example.com/mcp"
+    )})
+    monkeypatch.setattr(cli_main, "_mcp_registry", lambda: registry)
+    monkeypatch.setattr(
+        MCPTokenStorage, "status", lambda _: SimpleNamespace(configured=had_credentials)
+    )
+    cleared = []
+    monkeypatch.setattr(MCPTokenStorage, "clear", lambda _: cleared.append(True))
+
+    async def inline_to_thread(function, /, *args, **kwargs):
+        # This test targets callback cancellation after definition loading.
+        # Keep its setup read deterministic across Python executor teardown races.
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", inline_to_thread)
+
+
+    async def scenario():
+        tui = _fake_persistent_tui()
+        entered = asyncio.Event()
+        closed = asyncio.Event()
+
+        @asynccontextmanager
+        async def loopback(*_args):
+            answer = asyncio.get_running_loop().create_future()
+            try:
+                yield answer
+            finally:
+                answer.cancel()
+                closed.set()
+
+        async def discover(client, server):
+            entered.set()
+            await client.oauth_callback_handler()
+
+        monkeypatch.setattr(setup_jobs, "oauth_loopback", loopback)
+        monkeypatch.setattr(MCPClient, "discover_async", discover)
+        monkeypatch.setattr(tui, "_open_settings_category", lambda *_: None)
+        tui._run_mcp_enable("test")
+        await asyncio.wait_for(entered.wait(), 1)
+        task = tui._setup_job
+        tui._cancel_setup_job()
+        await asyncio.wait_for(task, 2)
+        assert closed.is_set()
+        assert not registry.load()["test"].enabled
+        assert bool(cleared) is (not had_credentials)
+
+    asyncio.run(scenario())
+
+
+def test_setup_job_cancel_before_first_run_releases_ownership():
+    import asyncio
+
+    async def scenario():
+        tui = _fake_persistent_tui()
+        finished = []
+
+        async def operation(cancel):
+            raise AssertionError("cancelled job must not run")
+
+        tui._start_setup_job("Test", operation, finished.append, timeout=30)
+        task = tui._setup_job
+        tui._cancel_setup_job()
+        await asyncio.gather(task, return_exceptions=True)
+        assert tui._setup_job is None
+        assert finished == [None]
+
+    asyncio.run(scenario())
+
+
+def test_setup_job_timeout_is_visible_and_cleans_resources():
+    import asyncio
+
+    async def scenario():
+        tui = _fake_persistent_tui()
+        cleaned = asyncio.Event()
+
+        async def operation(cancel):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+        tui._start_setup_job("Slow MCP", operation, lambda _: None, timeout=0.01)
+        await tui._setup_job
+        assert cleaned.is_set()
+        assert "timed out" in tui.status_error
+        assert tui._setup_job is None
+
+    asyncio.run(scenario())
+
+
+def test_codex_setup_runs_off_ui_thread_and_drains_cancelled_broker(monkeypatch):
+    import asyncio
+
+    import klaude_cli.main as cli_main
+
+    entered = threading.Event()
+    stopped = threading.Event()
+
+    class Manager:
+        def login(self, display, *, cancel_event):
+            display("https://auth.openai.com/codex/device", "PRIVATE-CODE")
+            entered.set()
+            cancel_event.wait(2)
+            stopped.set()
+            raise cli_main.CodexAuthError("cancelled")
+
+    async def scenario():
+        tui = _fake_persistent_tui()
+        monkeypatch.setattr(cli_main, "CodexAuthManager", Manager)
+        monkeypatch.setattr(tui, "_open_model_backend", lambda *_: None)
+        monkeypatch.setattr(tui, "_flush_transcript", lambda: None)
+        tui._run_codex_auth_action("Login")
+        for _ in range(100):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert entered.is_set(), tui.status_error
+        assert not stopped.is_set()  # the UI loop is live while broker waits
+        tui._before_render(tui.application)
+        assert any("PRIVATE-CODE" in value for value in tui._choice_values)
+        assert "PRIVATE-CODE" not in tui.output.text
+        assert "PRIVATE-CODE" not in tui._history
+        task = tui._setup_job
+        tui._cancel_setup_job()
+        await task
+        assert stopped.is_set()
+        assert tui._setup_job is None
+        assert not tui._codex_auth_state
+
+    # Keep the real broker thread; debug mode avoids an observed Python 3.12
+    # default-executor shutdown wakeup race on this host.
+    asyncio.run(scenario(), debug=True)
+
+
+def _configure_test_mcp_lane(tui, registry, monkeypatch):
+    from klaude_cli.mcp_mutations import MCPMutationWriter
+
+    monkeypatch.setattr(type(tui.cfg), "mcp_servers_file", property(lambda _: registry.path))
+    if not hasattr(tui.agent, "tools"):
+        tui.agent.tools = {}
+    if not hasattr(tui.agent.gate, "policies"):
+        tui.agent.gate.policies = {}
+    tui._mcp_mutations.close()
+    tui._mcp_mutations = MCPMutationWriter(registry.path, tui._emit, tui._prepare_mcp_catalog)
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancel", "changed"])
+def test_mcp_setup_commits_enable_only_after_valid_discovery(tmp_path, monkeypatch, outcome):
+    import asyncio
+
+    import klaude_cli.main as cli_main
+    from klaude_core.mcp_client import MCPClient, MCPRegistry, MCPServerConfig
+
+    registry = MCPRegistry(tmp_path / "mcp.json")
+    server = MCPServerConfig(
+        name="test", transport="http", enabled=False, url="https://example.com/mcp"
+    )
+    registry.save({"test": server})
+    monkeypatch.setattr(cli_main, "_mcp_registry", lambda: registry)
+
+    async def inline_to_thread(function, /, *args, **kwargs):
+        # This test targets discovery/save ordering, not worker scheduling.
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", inline_to_thread)
+
+    async def discover(_client, _server):
+        await asyncio.sleep(0)
+        if outcome == "failure":
+            raise RuntimeError("unavailable")
+        if outcome == "cancel":
+            raise asyncio.CancelledError
+        if outcome == "changed":
+            changed = registry.load()
+            changed["test"].url = "https://other.example/mcp"
+            registry.save(changed)
+        return [{"name": "inspect", "inputSchema": {"type": "object"}}]
+
+    monkeypatch.setattr(MCPClient, "discover_async", discover)
+
+    async def scenario():
+        tui = _fake_persistent_tui()
+        _configure_test_mcp_lane(tui, registry, monkeypatch)
+        reloads = []
+        monkeypatch.setattr(tui, "_publish_mcp_tools", lambda *_: reloads.append(True))
+        monkeypatch.setattr(tui, "_open_settings_category", lambda *_: None)
+        tui._run_mcp_enable("test")
+        await tui._setup_job
+        tui._mcp_mutations.close(wait=True)
+        tui._before_render(None)
+        assert registry.load()["test"].enabled is (outcome == "success")
+        assert bool(reloads) is (outcome == "success")
+        assert ("Enabled MCP" in tui.output.text) is (outcome == "success")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("outcome", ["success", "save_failure", "session_changed"])
+def test_mcp_enable_save_does_not_hold_setup_and_late_result_reports_actual_outcome(
+    tmp_path, monkeypatch, outcome
+):
+    import asyncio
+
+    import klaude_cli.main as cli_main
+    from klaude_core.mcp_client import MCPClient, MCPRegistry, MCPServerConfig
+
+    registry = MCPRegistry(tmp_path / "mcp.json")
+    registry.save({"test": MCPServerConfig(
+        name="test", transport="http", enabled=False, url="https://example.com/mcp"
+    )})
+    monkeypatch.setattr(cli_main, "_mcp_registry", lambda: registry)
+    entered = threading.Event()
+    release = threading.Event()
+    ui_thread = threading.get_ident()
+    save = MCPRegistry.save
+
+    def slow_save(current_registry, servers):
+        assert threading.get_ident() != ui_thread
+        entered.set()
+        assert release.wait(2)
+        if outcome == "save_failure":
+            raise ValueError("configuration save rejected")
+        save(current_registry, servers)
+
+    async def discover(*_):
+        return [{"name": "inspect", "inputSchema": {"type": "object"}}]
+
+    monkeypatch.setattr(MCPRegistry, "save", slow_save)
+    monkeypatch.setattr(MCPClient, "discover_async", discover)
+
+    async def scenario():
+        tui = _fake_persistent_tui()
+        _configure_test_mcp_lane(tui, registry, monkeypatch)
+        published = []
+        opened = []
+        monkeypatch.setattr(tui, "_publish_mcp_tools", lambda *_: published.append(True))
+        monkeypatch.setattr(tui, "_open_settings_category", lambda *_: opened.append(True))
+        tui._run_mcp_enable("test")
+        task = tui._setup_job
+        try:
+            for _ in range(100):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert entered.is_set(), tui.status_error
+            await task
+            assert tui._setup_job is None
+            assert tui._mcp_mutation_pending is not None
+            assert "Enabled MCP" not in tui.output.text
+            opened_before = len(opened)
+            tui._cancel_setup_job()
+            await asyncio.sleep(0.01)
+            assert task.done()  # accepted filesystem write no longer holds setup
+            if outcome == "session_changed":
+                tui.session_id = "different-session"
+        finally:
+            release.set()
+        await asyncio.to_thread(tui._mcp_mutations.close, wait=True)
+        tui._before_render(None)
+        assert registry.load()["test"].enabled is (outcome != "save_failure")
+        assert bool(published) is (outcome == "success")
+        assert len(opened) == opened_before  # late ack cannot reopen unrelated modal
+        if outcome == "save_failure":
+            assert "Enabled MCP" not in tui.output.text
+            assert tui.status_error
+        else:
+            assert "Enabled MCP server" in tui.output.text
+            assert tui._mcp_catalog_unconfirmed is (outcome == "session_changed")
+
+    asyncio.run(scenario())
+
+
+def test_mcp_enable_saved_but_failed_catalog_keeps_old_tools(tmp_path, monkeypatch):
+    import asyncio
+
+    import klaude_cli.main as cli_main
+    from klaude_core.mcp_client import MCPClient, MCPRegistry, MCPServerConfig
+
+    registry = MCPRegistry(tmp_path / "mcp.json")
+    registry.save({"test": MCPServerConfig(
+        name="test", transport="http", enabled=False, url="https://example.com/mcp"
+    )})
+    monkeypatch.setattr(cli_main, "_mcp_registry", lambda: registry)
+
+    async def discover(*_):
+        return [{"name": "inspect", "inputSchema": {"type": "object"}}]
+
+    def failed_catalog(*_, **__):
+        raise ValueError("invalid replacement catalog")
+
+    monkeypatch.setattr(MCPClient, "discover_async", discover)
+    monkeypatch.setattr(cli_main, "_configured_mcp_tools", failed_catalog)
+
+    async def scenario():
+        tui = _fake_persistent_tui()
+        _configure_test_mcp_lane(tui, registry, monkeypatch)
+        old_tools = dict(getattr(tui.agent, "tools", {}))
+        old_tools["mcp__old"] = object()
+        tui.agent.tools = old_tools
+        monkeypatch.setattr(tui, "_open_settings_category", lambda *_: None)
+        tui._run_mcp_enable("test")
+        await tui._setup_job
+        await asyncio.to_thread(tui._mcp_mutations.close, wait=True)
+        tui._before_render(None)
+        assert registry.load()["test"].enabled
+        assert tui.agent.tools is old_tools
+        assert "Enabled MCP server" in tui.output.text
+        assert "live tools unchanged" in tui.output.text
+
+    asyncio.run(scenario())
+
+
+def test_mcp_reload_failure_does_not_remove_existing_tools(monkeypatch):
+    import klaude_cli.main as cli_main
+
+    tui = _fake_persistent_tui()
+    old_tools = dict(getattr(tui.agent, "tools", {}))
+    old_tools["mcp__old"] = object()
+    tui.agent.tools = old_tools
+
+    def fail(*_, **__):
+        raise ValueError("malformed MCP registry")
+
+    monkeypatch.setattr(cli_main, "_configured_mcp_tools", fail)
+    with pytest.raises(ValueError, match="malformed MCP registry"):
+        tui._reload_mcp_tools()
+    assert tui.agent.tools is old_tools
+
+
+def test_mcp_publication_keeps_local_tools_and_permission_overrides():
+    from types import SimpleNamespace
+
+    tui = _fake_persistent_tui()
+    local = object()
+    remote = SimpleNamespace(name="mcp__new")
+    tui.agent.tools = {"read_file": local, "mcp__old": object()}
+    tui.agent.gate.policies = {"mcp__new": "deny"}
+    manager = object()
+    tui._publish_mcp_tools([remote], manager)
+    assert tui.agent.tools == {"read_file": local, "mcp__new": remote}
+    assert tui.agent.gate.policies["mcp__new"] == "deny"
+    assert tui.agent.mcp_client_manager is manager
+    assert tui.cfg._mcp_client_manager is manager
+
+
+@pytest.mark.parametrize("outcome", ["saved", "rejected", "unconfirmed", "catalog_failed", "stale"])
+def test_mcp_cached_toggle_uses_owned_lane_and_scoped_ack(tmp_path, monkeypatch, outcome):
+    from types import SimpleNamespace
+
+    import klaude_cli.main as cli_main
+    from klaude_cli.mcp_mutations import MCPMutationResult
+
+    tui = _fake_persistent_tui()
+    monkeypatch.setattr(
+        type(tui.cfg), "mcp_servers_file", property(lambda _: tmp_path / "mcp.json")
+    )
+    submitted = []
+    tui._mcp_mutations = SimpleNamespace(path=tui.cfg.mcp_servers_file,
+                                       submit=lambda request: submitted.append(request) or True)
+    tui._mcp_inventory = {"servers": [{
+        "name": "docs", "enabled": True, "tool_count": 1, "fingerprint": "a" * 64,
+        "transport": "http", "oauth": False,
+    }], "truncated": False}
+    tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
+    tui._mcp_inventory_loaded_at = time.monotonic()
+    tui._begin_choice("mcp settings", ["docs: on (toggle)", "back"], "docs: on (toggle)")
+    publications = []
+    monkeypatch.setattr(tui, "_publish_mcp_tools", lambda *_: publications.append(True))
+    monkeypatch.setattr(cli_main, "_mcp_registry", lambda: (_ for _ in ()).throw(
+        AssertionError("UI must not read the MCP registry")
+    ))
+    tui._apply_settings_action("mcp settings", "docs: on (toggle)")
+    assert len(submitted) == 1 and not submitted[0].enabled
+    assert tui._mcp_mutation_pending is not None
+    tui._apply_settings_action("mcp settings", "docs: on (toggle)")
+    assert len(submitted) == 1  # duplicate input cannot flip stale snapshot intent
+    if outcome == "stale":
+        tui.session_id = "new-session"
+    state = "saved" if outcome in {"saved", "catalog_failed", "stale"} else outcome
+    catalog = None if outcome == "catalog_failed" else ([], None)
+    tui._emit("mcp_mutation_saved", MCPMutationResult(
+        submitted[0], str(tui.cfg.mcp_servers_file), state, catalog,
+    ))
+    tui._before_render(None)
+    assert tui._mcp_mutation_pending is None
+    assert bool(publications) is (outcome == "saved")
+    assert tui._mcp_catalog_unconfirmed is (outcome in {"unconfirmed", "catalog_failed", "stale"})
+    if outcome in {"saved", "catalog_failed", "stale"}:
+        assert "MCP setting saved" in tui.output.text
+    else:
+        assert "MCP setting saved" not in tui.output.text
+
+
+def test_mcp_pending_save_timeout_is_not_a_rollback_and_late_ack_is_processed(monkeypatch):
+    from klaude_cli.mcp_mutations import MCPMutationResult, MCPToggle
+
+    tui = _fake_persistent_tui()
+    request = MCPToggle("one", tui.session_id, "docs", "a" * 64, False)
+    tui._mcp_mutation_pending = (request, time.monotonic() - 9)
+    tui._before_render(None)
+    assert "outcome unknown, not rolled back" in tui.status_error
+    assert tui._mcp_mutation_pending is not None
+    published = []
+    monkeypatch.setattr(tui, "_publish_mcp_tools", lambda *_: published.append(True))
+    tui._emit("mcp_mutation_saved", MCPMutationResult(
+        request, str(tui.cfg.mcp_servers_file), "saved", ([], None),
+    ))
+    tui._before_render(None)
+    assert published == [True] and tui._mcp_mutation_pending is None
+
+
+@pytest.mark.parametrize("outcome", ["loaded", "rejected", "stale"])
+def test_mcp_reload_recovery_is_scoped_and_keeps_queue_safe(monkeypatch, outcome):
+    from types import SimpleNamespace
+
+    from klaude_cli.mcp_mutations import MCPMutationResult, MCPReload
+
+    tui = _fake_persistent_tui()
+    requests = []
+    tui._mcp_mutations = SimpleNamespace(
+        path=tui.cfg.mcp_servers_file, submit=lambda request: requests.append(request) or True,
+    )
+    tui._mcp_catalog_unconfirmed = True
+    tui._begin_choice("mcp settings", ["Reload configured MCP tools", "back"],
+                      "Reload configured MCP tools")
+    published = []
+    monkeypatch.setattr(tui, "_publish_mcp_tools", lambda *_: published.append(True))
+    tui._apply_settings_action("mcp settings", "Reload configured MCP tools")
+    assert isinstance(requests[0], MCPReload)
+    assert tui._mcp_mutation_pending is not None
+    if outcome == "stale":
+        tui.session_id = "new-session"
+    state = "rejected" if outcome == "rejected" else "loaded"
+    tui._emit("mcp_mutation_saved", MCPMutationResult(
+        requests[0], str(tui.cfg.mcp_servers_file), state,
+        None if state == "rejected" else ([], None),
+    ))
+    tui._before_render(None)
+    assert tui._mcp_catalog_unconfirmed is (outcome != "loaded")
+    assert bool(published) is (outcome == "loaded")
+    if outcome != "loaded":
+        tui._choice_kind = None
+        tui.pending.append("queued message")
+        tui._start_next()
+        assert list(tui.pending) == ["queued message"]
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_mcp_import_input_queues_scoped_batch_without_ui_registry_reads(
+    tmp_path, monkeypatch, duplicate
+):
+    import klaude_cli.main as cli_main
+    from klaude_core.mcp_client import MCPRegistry, MCPServerConfig
+
+    registry = MCPRegistry(tmp_path / "saved.json")
+    if duplicate:
+        registry.save({"new": MCPServerConfig(name="new", transport="stdio", command="original")})
+    source = tmp_path / "private-source.json"
+    source.write_text(json.dumps({"servers": {"new": {"command": "never-execute"}}}))
+    tui = _fake_persistent_tui()
+    _configure_test_mcp_lane(tui, registry, monkeypatch)
+    monkeypatch.setattr(cli_main, "_mcp_registry", lambda: (_ for _ in ()).throw(
+        AssertionError("UI import must not read registry")
+    ))
+    tui._import_mcp_configuration(str(source))
+    assert tui._mcp_mutation_pending is not None
+    assert "Imported" not in tui.output.text
+    assert tui._mcp_mutations.close(wait=True)
+    tui._before_render(None)
+    saved = registry.load()["new"]
+    assert saved.command == ("original" if duplicate else "never-execute")
+    assert not saved.enabled or duplicate
+    assert ("Imported 1 MCP server(s) as disabled" in tui.output.text) is (not duplicate)
+    assert "private-source" not in tui.output.text
+
+
+def test_picker_clearing_filter_restores_selection_and_no_match_enter_is_inert():
+    tui = _fake_persistent_tui()
+    tui._begin_choice("model cloud provider", ["OpenAI", "OpenRouter", "Google"], "Google")
+    tui._set_input("OpenRouter")
+    tui._refresh_choice_filter()
+    tui._set_input("")
+    tui._refresh_choice_filter()
+    assert tui._choice_values[tui._choice_index] == "Google"
+    tui._set_input("zzzzzzzzzz")
+    tui._refresh_choice_filter()
+    tui._submit_choice_response()
+    assert tui._choice_kind == "model cloud provider"
+    assert tui.input.text == "zzzzzzzzzz"
+    assert "No matching options" in tui.status_error
+
+
+def test_picker_permission_toggle_preserves_filter_and_logical_row(tmp_path):
+    tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "preferences.json")
+    tui._open_settings_category("permissions")
+    tui._set_input("Write file")
+    tui._refresh_choice_filter()
+    identity = tui._picker.selected_id
+    tui._submit_choice_response()
+    assert tui._choice_kind == "permission settings"
+    assert tui.input.text == "write file"
+    assert tui._picker.selected_id == identity
+    assert tui._choice_values[tui._choice_index] == "Write file: ALLOW"
+    assert not any(value.startswith("Current configuration:") for value in tui._choice_values)
+
+
+def test_picker_live_resume_refresh_preserves_filter_and_session_identity(monkeypatch):
+    tui = _fake_persistent_tui()
+    sessions = [
+        {"session_id": "one", "title": "Parser investigation", "ts": 1, "active": False},
+        {"session_id": "two", "title": "Other task", "ts": 1, "active": False},
+    ]
+    monkeypatch.setattr(tui.memory, "resumable_sessions", lambda: sessions, raising=False)
+    tui._open_resume()
+    tui._set_input("Parser")
+    tui._refresh_choice_filter()
+    sessions[0].update(title="Parser repaired", active=True)
+    sessions.reverse()
+    tui._refresh_resume_choices()
+    assert tui._picker.selected_id == "session:one"
+    assert tui.input.text == "Parser"
+    assert "Parser repaired" in tui._choice_values[tui._choice_index]
+    assert all("Other task" not in value for value in tui._choice_values)
+    tui._set_input("")
+    tui._refresh_choice_filter()
+    assert tui._picker.selected_id == "session:one"
+    assert any("Other task" in value for value in tui._choice_values)
+    assert all("Parser investigation" not in value for value in tui._choice_values)
+
+
+def test_picker_back_restores_parent_filter():
+    tui = _fake_persistent_tui()
+    tui._open_settings_category("providers")
+    tui._set_input("OpenRouter")
+    tui._refresh_choice_filter()
+    tui._accept_choice()
+    assert tui._choice_kind == "provider key settings"
+    tui._cancel_choice()
+    assert tui._choice_kind == "providers settings"
+    assert tui.input.text == "openrouter"
+    assert "OpenRouter" in tui._choice_values[tui._choice_index]
+
+
+def test_picker_unavailable_selection_preserves_search(tmp_path):
+    tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "preferences.json")
+    tui._open_settings_category("permissions")
+    tui._accept_choice()
+    tui._set_input("Custom")
+    tui._refresh_choice_filter()
+    tui._submit_choice_response()
+    assert tui._choice_kind == "permission preset"
+    assert tui.input.text == "Custom"
+    assert tui._choice_values[tui._choice_index] == "Custom"
+
+
+def test_picker_mouse_confirmation_uses_identity_not_screen_position(monkeypatch):
+    tui = _fake_persistent_tui()
+    tui._begin_choice("test", ["Alpha", "Beta"], "Alpha")
+    confirmed = []
+    monkeypatch.setattr(tui, "_accept_choice", lambda: confirmed.append(True))
+    tui._click_choice(0)
+    tui._begin_choice("test", ["Beta", "Alpha"], "Alpha", refresh=True)
+    tui._click_choice(0)
+    assert not confirmed  # same screen position now means a different option
+    tui._click_choice(0)
+    assert confirmed == [True]
+
+
+def test_picker_refresh_keeps_permission_preview_scroll_position(tmp_path):
+    tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "preferences.json")
+    tui._open_settings_category("permissions")
+    tui._accept_choice()
+    tui.text_theme_preview.buffer.cursor_position = len(tui.text_theme_preview.text) // 2
+    position = tui.text_theme_preview.buffer.cursor_position
+    tui._begin_choice(
+        "permission preset", list(tui._choice_all_values), "Balanced", refresh=True
+    )
+    assert tui.text_theme_preview.buffer.cursor_position == position
+
+
+def test_picker_model_refresh_uses_model_reference_and_auth_action_identity():
+    from klaude_core.model_runtime import ModelInfo
+
+    tui = _fake_persistent_tui()
+    tui._model_auth_backend = "openai_codex"
+    model = ModelInfo("openai_codex", "gpt-test", "GPT Test")
+    tui._model_choices = {"GPT Test": model}
+    tui._begin_choice("model", ["Login", "GPT Test", "back"], "GPT Test")
+    tui._set_input("GPT")
+    tui._refresh_choice_filter()
+    tui._model_choices = {"GPT Test updated": model}
+    tui._begin_choice("model", ["Logout", "GPT Test updated", "back"], "Logout", refresh=True)
+    assert tui._picker.selected_id == "model:openai_codex/gpt-test"
+    assert tui._choice_values[tui._choice_index] == "GPT Test updated"
+    assert tui.input.text == "gpt"
+    tui._set_input("")
+    tui._refresh_choice_filter()
+    tui._choice_index = tui._choice_values.index("Logout")
+    tui._begin_choice("model", ["Login", "GPT Test updated", "back"], "GPT Test updated",
+                      refresh=True)
+    assert tui._picker.selected_id == "account-auth"
+    assert tui._choice_values[tui._choice_index] == "Login"
+
+
+def test_stale_tui_clients_save_only_edited_runtime_and_appearance_fields(tmp_path):
+    preferences, appearance = tmp_path / "preferences.json", tmp_path / "appearance.json"
+    first = _fake_persistent_tui(appearance, preferences)
+    second = _fake_persistent_tui(appearance, preferences)
+    first.agent.ollama_options["num_ctx"] = 16384
+    first._persist_runtime_preferences("num_ctx")
+    second.agent.max_steps = 40
+    second._persist_runtime_preferences("max_steps")
+    assert _load_runtime_preferences(preferences) == {"num_ctx": 16384, "max_steps": 40}
+    first.appearance.theme = "crimson-red"
+    first._commit_appearance("theme", fields=("theme",))
+    second.appearance.input_border = False
+    second._commit_appearance("border", fields=("input_border",))
+    saved = json.loads(appearance.read_text())
+    assert saved["theme"]["interface"] == "crimson-red"
+    assert saved["input_field"]["border"] is False
+
+
+def test_stale_tui_permission_rows_do_not_overwrite_each_other(tmp_path):
+    preferences = tmp_path / "preferences.json"
+    first = _fake_persistent_tui(chat_preferences_path=preferences)
+    second = _fake_persistent_tui(chat_preferences_path=preferences)
+    first._open_settings_category("permissions")
+    second._open_settings_category("permissions")
+    first._choice_index = first._choice_values.index("Write file: ASK")
+    first._accept_choice()
+    second._choice_index = second._choice_values.index("Edit file: ASK")
+    second._accept_choice()
+    saved = json.loads(preferences.read_text())["permissions"]
+    assert saved == {"write_file": "allow", "edit_file": "allow"}
+    second._before_render(None)
+    assert second.agent.gate.policies["write_file"] == "allow"
+
+
+def test_tools_toggle_preserves_other_client_settings_and_unknown_fields(tmp_path):
+    from klaude_core.settings_store import update_settings
+
+    preferences = tmp_path / "preferences.json"
+    tui = _fake_persistent_tui(chat_preferences_path=preferences)
+    tui._open_settings_category("tools")
+    update_settings(preferences, {
+        ("last_model",): "new-model",
+        ("tool_availability", "fetch_url"): False,
+        ("display", "future_setting"): "preserved",
+    })
+    tui._choice_index = tui._choice_values.index("web search validation: on (toggle)")
+    tui._accept_choice()
+    saved = json.loads(preferences.read_text())
+    assert saved["last_model"] == "new-model"
+    assert saved["tool_availability"]["fetch_url"] is False
+    assert saved["display"]["future_setting"] == "preserved"
+    assert saved["tool_validation"]["web_search"] is False
+    tui._before_render(None)
+    assert tui._tool_availability["fetch_url"] is False
+    assert "fetch_url" in tui.agent.disabled_tool_names
+
+
+def test_pending_tool_toggles_and_reset_use_live_state_without_disk_reads(monkeypatch):
+    tui = _fake_persistent_tui()
+    requests = []
+
+    class PendingWriter:
+        def submit(self, changes):
+            from copy import deepcopy
+
+            requests.append(deepcopy(changes))
+            return len(requests)
+
+    tui._settings_writer = PendingWriter()
+    monkeypatch.setattr(
+        "klaude_cli.main._load_chat_preferences", lambda *_: pytest.fail("UI read")
+    )
+    monkeypatch.setattr(
+        "klaude_cli.main.update_settings", lambda *args, **kwargs: pytest.fail("UI write")
+    )
+    tui._open_settings_category("tools")
+    for prefix, expected_key in (
+        ("web search validation:", ("tool_validation", "web_search")),
+        ("knowledge library:", ("tool_availability", "query_knowledge")),
+        ("provider exa:", ("web_provider_availability", "exa")),
+        ("activity updates:", ("display", "activity_updates")),
+    ):
+        for enabled in (False, True, False):
+            row = next(value for value in tui._choice_values if value.startswith(prefix))
+            tui._choice_index = tui._choice_values.index(row)
+            tui._accept_choice()
+            assert requests[-1][expected_key] is enabled
+            assert tui._choice_values[tui._choice_index].startswith(prefix)
+    assert tui.agent.tool_config.web_search.result_validation_enabled is False
+    assert "query_knowledge" in tui.agent.disabled_tool_names
+    assert tui.agent.tool_config.web_providers["exa"].enabled is False
+    assert tui.show_activity_updates is False
+    tui._choice_index = tui._choice_values.index(RESET_THEME_CHOICE)
+    tui._accept_choice()
+    assert tui.agent.tool_config.web_search.result_validation_enabled is True
+    assert "query_knowledge" not in tui.agent.disabled_tool_names
+    assert tui.agent.tool_config.web_providers["exa"].enabled is True
+    assert tui.show_activity_updates is True
+    tui._choice_index = tui._choice_values.index("knowledge library: on (toggle)")
+    tui._accept_choice()
+    assert requests[-1] == {("tool_availability", "query_knowledge"): False}
+    assert "query_knowledge" in tui.agent.disabled_tool_names
+    tui._emit("settings_tools", (1, {"tool_availability": {"query_knowledge": True}}))
+    tui._emit("settings_saved", (1, True))
+    tui._before_render(None)
+    assert "query_knowledge" in tui.agent.disabled_tool_names
+    assert tui._runtime_save_state == "saving"
+    tui._emit("settings_saved", (len(requests), False))
+    tui._before_render(None)
+    assert tui._runtime_save_state == "failed"
+    assert "query_knowledge" in tui.agent.disabled_tool_names
+    assert "save unconfirmed" in " ".join(tui._choice_values).lower()
+
+
+def test_tool_ack_merges_only_registered_boolean_settings():
+    tui = _fake_persistent_tui()
+    tui._runtime_save_revision = 3
+    tui.agent.disabled_tool_names = {"external_tool"}
+    tui._emit("settings_tools", (3, {
+        "tool_availability": {"fetch_url": False, "unknown": False, "web_search": "secret"},
+        "tool_validation": {"web_search": False},
+        "web_provider_availability": {"exa": False, "unknown": False},
+        "display": {"activity_updates": False},
+    }))
+    tui._before_render(None)
+    assert tui.agent.disabled_tool_names == {"fetch_url", "external_tool"}
+    assert tui.agent.tool_config.web_search.result_validation_enabled is False
+    assert tui.agent.tool_config.web_providers["exa"].enabled is False
+    assert tui.show_activity_updates is False
+    assert "unknown" not in tui._web_provider_availability
+
+
+def test_scoped_appearance_save_preserves_legacy_theme_fields(tmp_path):
+    path = tmp_path / "appearance.json"
+    path.write_text('{"theme": "hacker-green", "text_theme": "monokai", "future": 1}')
+    _save_tui_appearance(path, TUIAppearance(theme="crimson-red"), fields=("theme",))
+    assert _load_tui_appearance(path).text_theme == "monokai"
+    assert json.loads(path.read_text())["future"] == 1
+
+
+def test_busy_composer_save_is_visible_and_keeps_live_mode(tmp_path):
+    from klaude_cli.settings_writer import SettingsWriter
+    from klaude_core.settings_store import settings_lock
+
+    path = tmp_path / "preferences.json"
+    tui = _fake_persistent_tui(chat_preferences_path=path)
+    tui._settings_writer = SettingsWriter(path, tui._emit)
+    try:
+        with settings_lock(path):
+            start = time.monotonic()
+            tui._set_composer_mode("vim")
+            assert time.monotonic() - start < 0.25
+            deadline = time.monotonic() + 2
+            while tui._runtime_save_state != "failed" and time.monotonic() < deadline:
+                tui._before_render(None)
+                time.sleep(0.01)
+        assert tui.composer_mode == "vim"
+        assert "could not be confirmed" in tui.output.text
+        assert not path.exists()
+    finally:
+        tui._settings_writer.close(wait=True)
+
+
+def test_mcp_cli_save_conflict_is_a_clean_failure(tmp_path, monkeypatch):
+    import typer
+    from klaude_cli.main import _save_mcp_cli
+    from klaude_core.mcp_client import MCPRegistry, MCPServerConfig
+
+    registry = MCPRegistry(tmp_path / "mcp.json")
+    initial = MCPServerConfig(name="test", transport="http", url="https://example.com/mcp")
+    registry.save({"test": initial})
+    stale = registry.load()
+    other = MCPRegistry(registry.path)
+    updated = other.load()
+    updated["test"].url = "https://other.example/mcp"
+    other.save(updated)
+    stale["test"].enabled = False
+    output = StringIO()
+    monkeypatch.setattr("klaude_cli.main.console", Console(file=output, force_terminal=False))
+    with pytest.raises(typer.Exit) as error:
+        _save_mcp_cli(registry, stale)
+    assert error.value.exit_code == 1
+    assert "reload and retry" in output.getvalue()
+
+
+def test_leaving_skills_cancels_job_and_drops_late_result():
+    tui = _fake_persistent_tui()
+    tui._open_settings_category("skills")
+    identity = tui._background_jobs.latest["skills"]
+    tui._cancel_choice()
+    tui._events.put(("background_result", (
+        "skills", identity, {"skills": [{"name": "late"}], "truncated": False}, ""
+    )))
+    tui._before_render(tui.application)
+    assert tui._choice_kind == "settings"
+    assert tui._skills_inventory is None
+    assert not tui._skills_inventory_loading
+    tui._open_settings_category("skills")
+    assert tui._background_jobs.latest["skills"] != identity
+
+
+def test_leaving_mcp_search_drops_late_catalog():
+    tui = _fake_persistent_tui()
+    tui._search_mcp_catalog("browser")
+    identity = tui._background_jobs.latest["mcp-search"]
+    tui._cancel_choice()
+    tui._events.put(("background_result", (
+        "mcp-search", identity, {"servers": [], "cached": False}, ""
+    )))
+    tui._before_render(tui.application)
+    assert tui._choice_kind == "mcp settings"
+    assert not tui._mcp_catalog_request_id
+
+
+def test_mcp_settings_navigation_never_loads_registry_and_retains_focus_filter(monkeypatch):
+    tui = _fake_persistent_tui()
+    monkeypatch.setattr("klaude_cli.main._mcp_registry", lambda: pytest.fail("UI registry read"))
+    tui._open_settings_category("mcp servers")
+    assert "\0info:Loading configured MCP servers…" in tui._choice_values
+    identity = tui._background_jobs.latest["mcp-inventory"]
+    result = {"servers": [{
+        "name": "browser", "enabled": False, "oauth": False,
+        "transport": "http", "tool_count": 0,
+    }], "truncated": False}
+    tui._set_input("custom")
+    tui._refresh_choice_filter()
+    tui._apply_background_result(("mcp-inventory", identity, result, ""))
+    assert tui._choice_filter_query == "custom"
+    assert tui._choice_values[tui._choice_index] == "Add custom MCP server"
+    tui._set_input("")
+    tui._refresh_choice_filter()
+    assert any(row.startswith("browser: off") for row in tui._choice_values)
+    tui._mcp_inventory_loaded_at -= 31
+    cached_time = tui._mcp_inventory_loaded_at
+    tui._open_settings_category("mcp servers")
+    identity = tui._background_jobs.latest["mcp-inventory"]
+    tui._apply_background_result(("mcp-inventory", identity, None, "private error"))
+    assert tui._mcp_inventory == result and tui._mcp_inventory_loaded_at == cached_time
+    assert "private error" not in " ".join(tui._choice_values)
+
+
+def test_leaving_mcp_inventory_drops_late_results_and_reopens_for_retry():
+    tui = _fake_persistent_tui()
+    tui._open_settings_category("mcp servers")
+    identity = tui._background_jobs.latest["mcp-inventory"]
+    tui._cancel_choice()
+    tui._apply_background_result(("mcp-inventory", identity, {
+        "servers": [], "truncated": False,
+    }, ""))
+    assert tui._mcp_inventory is None
+    tui._open_settings_category("mcp servers")
+    assert tui._background_jobs.latest["mcp-inventory"] != identity
+
+
+def test_live_mcp_picker_filters_while_inventory_is_pending():
+    async def exercise():
+        tui = _fake_persistent_tui()
+        tui._open_settings_category("mcp servers")
+        identity = tui._background_jobs.latest["mcp-inventory"]
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = DummyOutput()
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                pipe.send_text("custom")
+                for _ in range(40):
+                    if tui._choice_filter_query == "custom":
+                        break
+                    await asyncio.sleep(0.025)
+                assert tui._choice_filter_query == "custom"
+                assert tui._mcp_inventory_request
+                tui._emit("background_result", ("mcp-inventory", identity, {
+                    "servers": [], "truncated": False,
+                }, ""))
+                await asyncio.sleep(0.15)
+                assert tui._choice_filter_query == "custom"
+                assert tui._choice_values[tui._choice_index] == "Add custom MCP server"
+            finally:
+                tui.application.exit()
+                await task
+
+    asyncio.run(exercise())
+
+
+def test_mcp_disabled_server_review_has_no_ui_registry_read_and_binds_confirmation(monkeypatch):
+    tui = _fake_persistent_tui()
+    tui._mcp_inventory = {"servers": [{
+        "name": "docs", "enabled": False, "oauth": False,
+        "transport": "http", "tool_count": 0,
+    }], "truncated": False}
+    monkeypatch.setattr("klaude_cli.main._mcp_registry", lambda: pytest.fail("UI registry read"))
+    tui._apply_settings_action("mcp settings", "docs: off (toggle)")
+    assert tui._choice_kind == "mcp review"
+    identity = tui._background_jobs.latest["mcp-review"]
+    tui._apply_background_result(("mcp-review", identity, {
+        "name": "docs", "enabled": False, "tool_count": 0, "oauth": False,
+        "fingerprint": "a" * 64, "endpoint": "https://example.com",
+    }, ""))
+    assert tui._choice_kind == "mcp enable confirmation"
+    assert tui._mcp_enable_fingerprint == "a" * 64
+    assert "exact definition" in " ".join(tui._choice_values)
+
+
+def test_mcp_enable_rejects_definition_changed_after_review_before_discovery(tmp_path, monkeypatch):
+    from klaude_cli.mcp_inventory import definition_digest
+    from klaude_core.mcp_client import MCPClient, MCPRegistry, MCPServerConfig
+
+    registry = MCPRegistry(tmp_path / "mcp.json")
+    server = MCPServerConfig("docs", "stdio", enabled=False, command="original-command")
+    registry.save({"docs": server})
+    expected = definition_digest(server)
+    changed = registry.load()
+    changed["docs"].command = "different-command"
+    registry.save(changed)
+    monkeypatch.setattr("klaude_cli.main._mcp_registry", lambda: registry)
+    monkeypatch.setattr(
+        MCPClient, "discover_async", lambda *args: pytest.fail("Unreviewed server discovery")
+    )
+
+    async def exercise():
+        tui = _fake_persistent_tui()
+        tui._run_mcp_enable("docs", expected_fingerprint=expected)
+        await tui._setup_job
+        assert "changed after review" in tui.status_error
+        assert registry.load()["docs"].enabled is False
+
+    asyncio.run(exercise())
+
+
+def test_cancelled_mcp_review_cannot_open_confirmation_from_late_result():
+    tui = _fake_persistent_tui()
+    tui._review_mcp_server("docs")
+    identity = tui._background_jobs.latest["mcp-review"]
+    tui._cancel_choice()
+    assert tui._choice_kind == "mcp settings"
+    tui._apply_background_result(("mcp-review", identity, {
+        "name": "docs", "enabled": False, "tool_count": 0, "oauth": False,
+        "fingerprint": "a" * 64, "endpoint": "https://example.com",
+    }, ""))
+    assert tui._choice_kind == "mcp settings" and tui._mcp_enable_fingerprint == ""
+
+
+def test_background_job_completion_does_not_replace_secret_modal(monkeypatch):
+    tui = _fake_persistent_tui()
+    opened = []
+    monkeypatch.setattr(tui, "_open_model_backend", lambda *args: opened.append(args))
+    identity = tui._background_jobs.submit("models:openrouter", {})
+    tui._choice_kind = None
+    tui._secret_request = {"label": "API key"}
+    tui._set_input("private-unsent-text")
+    tui._events.put(("background_result", (
+        "models:openrouter", identity, {"updated": True}, ""
+    )))
+    tui._before_render(tui.application)
+    assert not opened
+    assert tui.input.text == "private-unsent-text"
+    assert tui._secret_request is not None
+
+
+def test_cloud_picker_never_waits_on_local_model_discovery(monkeypatch, tmp_path):
+    from klaude_cli.main import _model_picker_rows
+
+    monkeypatch.setattr("klaude_core.config.DATA_DIR", tmp_path)
+    cfg = Config()
+    cfg.openrouter_api_key = "test-key"
+
+    class ForbiddenLocal:
+        def list_models(self):
+            pytest.fail("A cloud picker queried the local daemon")
+
+    monkeypatch.setattr("klaude_cli.main.load_model_cache", lambda path: [
+        ModelInfo("openrouter", "openrouter/free", "Free")
+    ])
+    start = time.monotonic()
+    rows, choices = _model_picker_rows(cfg, ForbiddenLocal(), "openrouter")
+    assert time.monotonic() - start < 0.25
+    assert rows == ["openrouter/free"]
+    assert choices["openrouter/free"].backend == "openrouter"
+
+
+def test_exit_closes_background_job_owner(monkeypatch):
+    tui = _fake_persistent_tui()
+    tui._background_jobs.submit("skills", {})
+    monkeypatch.setattr(tui.application, "exit", lambda **kwargs: None)
+    monkeypatch.setattr(tui.memory, "clear_session_client", lambda *args: None, raising=False)
+    tui._exit()
+    assert not tui._background_jobs.latest
+    assert tui.shutting_down
+
+
+def test_local_picker_opens_without_network_and_discards_results_after_back(monkeypatch):
+    tui = _fake_persistent_tui()
+    monkeypatch.setattr(tui.agent.ollama, "list_models", lambda: pytest.fail("UI network I/O"))
+    tui.agent.model_info = ModelInfo("ollama", tui.agent.model, tui.agent.model)
+    started = time.monotonic()
+    tui._open_model_backend("ollama", "source")
+    assert time.monotonic() - started < 0.25
+    assert tui.agent.model in tui._model_choices
+    assert any("Loading Ollama" in row for row in tui._choice_values)
+    identity = tui._background_jobs.latest["local-models"]
+    tui._dismiss_picker()
+    tui._apply_background_result(("local-models", identity, {"names": ["late:1b"]}, ""))
+    assert not tui._local_models
+    assert not tui._local_models_loading
+    assert tui._choice_kind == "model source"
+
+
+def test_local_refresh_failure_keeps_previous_models_and_does_not_retry_loop():
+    tui = _fake_persistent_tui()
+    tui._local_models = [ModelInfo("ollama", "gemma4:e4b", "gemma4:e4b")]
+    tui._open_model_backend("ollama", "source")
+    identity = tui._background_jobs.latest["local-models"]
+    tui._apply_background_result(("local-models", identity, None, "timed out"))
+    assert "gemma4:e4b" in tui._model_choices
+    assert "previous models" in tui._local_models_error
+    assert tui._background_jobs.latest["local-models"] == identity
+    assert not tui._local_models_loading
+
+
+def test_live_local_picker_filters_while_catalog_is_pending(tmp_path, monkeypatch):
+    async def exercise():
+        tui = _fake_persistent_tui(tmp_path / "appearance.json")
+        monkeypatch.setattr(tui.agent.ollama, "list_models", lambda: pytest.fail("UI network I/O"))
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = DummyOutput()
+            tui._open_model_backend("ollama", "source")
+            identity = tui._background_jobs.latest["local-models"]
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+                pipe.send_text("gem")
+                await asyncio.sleep(0.15)
+                assert tui._choice_filter_query == "gem"
+                assert tui._local_models_loading
+                tui._emit("background_result", (
+                    "local-models", identity,
+                    {"names": ["gemma4:e4b", "qwen3.5:9b"]}, ""
+                ))
+                await asyncio.sleep(0.15)
+                assert tui._choice_filter_query == "gem"
+                assert tui._choice_values[tui._choice_index] == "gemma4:e4b"
+                assert tui.choice_window.render_info is not None
+                pipe.send_text("\x1b")
+                await asyncio.sleep(0.6)
+                assert tui._choice_kind == "model source"
+            finally:
+                tui.application.exit()
+                await task
+
+    asyncio.run(exercise())
+
+
+def test_codex_status_never_waits_for_limits_and_drops_cross_session_output(tmp_path, monkeypatch):
+    tui = _fake_persistent_tui()
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui.agent.model_info = ModelInfo("openai_codex", "gpt-test", "GPT")
+    monkeypatch.setattr(
+        "klaude_cli.main._codex_usage_rows", lambda agent: pytest.fail("UI quota I/O")
+    )
+    tui.running = True
+    tui._set_input("/status")
+    start = time.monotonic()
+    tui._submit_buffer(steer=False)
+    assert time.monotonic() - start < 0.25
+    assert "loading account limits" in tui.output.text
+    assert not tui.pending
+    identity = tui._background_jobs.latest["codex-usage"]
+    tui.session_id = "another-session"
+    before = tui.output.text
+    tui._apply_background_result((
+        "codex-usage", identity,
+        {"buckets": [{"limit_id": "codex", "primary": {
+            "used_percent": 25, "window_duration_minutes": 300, "resets_at": None,
+        }}]}, ""
+    ))
+    assert tui.output.text == before
+    assert "75% left" in dict(tui._status_usage_rows())["5h limit"]
+    assert not tui._codex_usage_loading
+
+
+def test_codex_quota_failure_is_visible_and_cached_without_retry_loop():
+    tui = _fake_persistent_tui()
+    tui.agent.model_info = ModelInfo("openai_codex", "gpt-test", "GPT")
+    tui._status_usage_rows()
+    identity = tui._background_jobs.latest["codex-usage"]
+    tui._apply_background_result(("codex-usage", identity, None, "private-provider-error"))
+    assert "temporarily unavailable" in tui.output.text
+    assert "private-provider-error" not in tui.output.text
+    tui._status_usage_rows()
+    assert tui._background_jobs.latest["codex-usage"] == identity
+
+
+def test_model_reset_waits_for_async_local_inventory_without_network(monkeypatch):
+    tui = _fake_persistent_tui()
+    monkeypatch.setattr(tui.agent.ollama, "list_models", lambda: pytest.fail("UI network I/O"))
+    tui.cfg.models["coder"] = "qwen3.5:4b"
+    tui._open_model_backend("ollama", "source")
+    tui._choice_index = tui._choice_values.index(RESET_THEME_CHOICE)
+    tui._accept_choice()
+    assert "after discovery" in tui.status_error
+    assert tui._choice_kind == "model"
+    identity = tui._background_jobs.latest["local-models"]
+    tui._apply_background_result((
+        "local-models", identity, {"names": ["qwen3.5:4b"]}, ""
+    ))
+    tui._choice_index = tui._choice_values.index(RESET_THEME_CHOICE)
+    tui._accept_choice()
+    assert tui._choice_kind == "mode"
+
+
+def test_unknown_local_model_command_opens_filtered_async_picker(monkeypatch):
+    tui = _fake_persistent_tui()
+    monkeypatch.setattr(tui.agent.ollama, "list_models", lambda: pytest.fail("UI network I/O"))
+    tui._set_input("/model ollama/gemma")
+    tui._submit_buffer(steer=False)
+    assert tui._choice_kind == "model"
+    assert tui._choice_filter_query == "gemma"
+    assert tui._local_models_loading
+    assert tui.agent.model == "qwen3.5:4b"
+
+
+def test_quota_refresh_failure_does_not_make_old_snapshot_appear_fresh():
+    tui = _fake_persistent_tui()
+    tui.agent.model_info = ModelInfo("openai_codex", "gpt-test", "GPT")
+    tui._codex_usage_rows_cache = [("5h limit", "75% left")]
+    old = tui._codex_usage_loaded_at = time.monotonic() - 90
+    tui._status_usage_rows()
+    identity = tui._background_jobs.latest["codex-usage"]
+    tui._apply_background_result(("codex-usage", identity, None, "timed out"))
+    assert tui._codex_usage_loaded_at == old
+    rows = dict(tui._status_usage_rows())
+    assert rows["5h limit"] == "75% left"
+    assert "90s old" in rows["Limits snapshot"]
+    assert "previous snapshot retained" in tui.output.text
+
+
+@pytest.mark.parametrize("remote", [False, True])
+def test_active_model_selection_applies_only_after_current_work(remote):
+    tui = _fake_persistent_tui()
+    original = tui.agent.ollama
+    history = list(tui.agent.messages)
+    tui.running = not remote
+    tui._watching_remote = remote
+    tui._activate_selected_model(ModelInfo("ollama", "gemma4:e2b", "Gemma"))
+    assert tui.agent.model == "qwen3.5:4b"
+    assert tui.agent.ollama is original
+    assert "next prompt" in tui.output.text
+    assert not tui._apply_next_prompt_model()
+    # Replacing a pending selection does not touch the active turn either.
+    tui._activate_selected_model(ModelInfo("ollama", "qwen3.5:9b", "Qwen"))
+    tui.running = False
+    tui._watching_remote = False
+    assert tui._apply_next_prompt_model()
+    assert tui.agent.model == "qwen3.5:9b"
+    assert tui.agent.messages == history
+    assert tui._next_prompt_model is None
+
+
+@pytest.mark.parametrize("prompt", [
+    "hi there where can i find a coffee shop near here?",
+    "Where can I find a bookstore nearby?",
+    "Recommend a local restaurant",
+    "Can you find them for me",
+])
+def test_public_discovery_exposes_read_only_web_tools(prompt):
+    tools = {name: SimpleNamespace(name=name) for name in (
+        "web_search", "fetch_url", "write_file", "edit_file", "git_commit", "run_shell",
+    )}
+    selected = _select_tool_names(prompt, tools)
+    assert "web_search" in selected and "fetch_url" in selected
+    assert not {"write_file", "edit_file", "git_commit", "run_shell"}.intersection(selected)
+
+
+def test_pending_model_does_not_leak_to_another_session():
+    tui = _fake_persistent_tui()
+    tui.running = True
+    tui._activate_selected_model(ModelInfo("ollama", "gemma4:e2b", "Gemma"))
+    tui.session_id = "different"
+    tui.running = False
+    assert tui._apply_next_prompt_model()
+    assert tui.agent.model == "qwen3.5:4b"
+    assert tui._next_prompt_model is None
+
+
+def test_unavailable_model_remains_inert_with_visible_reason():
+    from klaude_cli.main import _choice_unavailable
+
+    tui = _fake_persistent_tui()
+    label = _choice_unavailable("OpenRouter — API key not configured")
+    tui._begin_choice("model", [label, "back"], label)
+    tui._accept_choice()
+    assert tui._choice_kind == "model"
+    assert tui._choice_values[tui._choice_index] == label
+    assert tui.status_error == label
+
+
+@pytest.mark.parametrize(
+    "outcome", ["success", "cancel", "session", "key", "modal", "remote", "active"]
+)
+def test_cloud_activation_is_owned_and_commits_only_current_selection(monkeypatch, outcome):
+    from klaude_core.model_runtime import OpenRouterRuntime
+
+    async def exercise():
+        tui = _fake_persistent_tui()
+        original = tui.agent.ollama
+        tui.agent.reasoning_mode = "standard"
+        tui.agent.reasoning_effort = "low"
+        tui.agent.model_info = ModelInfo("ollama", tui.agent.model, tui.agent.model)
+        tui.cfg.openrouter_api_key = "private-test-key"
+        monkeypatch.setattr(OpenRouterRuntime, "_client", lambda self: pytest.fail("UI SDK work"))
+        info = ModelInfo("openrouter", "openrouter/free", "Free")
+        if outcome == "active":
+            tui.running = True
+        started = time.monotonic()
+        tui._activate_selected_model(info)
+        assert time.monotonic() - started < 0.25
+        task = tui._setup_job
+        assert tui.agent.ollama is original
+        for _ in range(5):
+            await asyncio.sleep(0)
+            if tui._model_activation_id:
+                break
+        identity = tui._model_activation_id
+        assert identity
+        tui.pending.append(PendingChatTurn("queued follow-up"))
+        tui._start_next()
+        assert tui.running == (outcome == "active") and len(tui.pending) == 1
+        if outcome == "cancel":
+            tui._cancel_setup_job()
+        else:
+            if outcome == "session":
+                tui.session_id = "another-session"
+            elif outcome == "key":
+                tui.cfg.openrouter_api_key = "replacement-key"
+            elif outcome == "modal":
+                tui._choice_kind = None
+                tui._secret_request = {"label": "unrelated secret"}
+                tui._set_input("private-modal-text")
+            elif outcome == "remote":
+                tui._watching_remote = True
+            tui._apply_background_result((
+                "model-activation", identity, {"ready": True}, ""
+            ))
+        await task
+        assert tui._setup_job is None
+        assert not tui._model_activation_id
+        assert "model-activation" not in tui._background_jobs.latest
+        if outcome == "success":
+            assert tui.agent.model_info == info
+            assert tui._choice_kind == "mode"
+            assert isinstance(tui.agent.ollama, OpenRouterRuntime)
+            # Cancelling the reasoning step restores the *same* prior runtime,
+            # with no second credential check or SDK initialization.
+            tui._choice_index = tui._choice_values.index("thinking")
+            tui._accept_choice()
+            tui._cancel_choice(resume_queue=False)
+            assert tui.agent.reasoning_mode == "standard"
+            assert tui.agent.reasoning_effort == "low"
+        assert tui.agent.ollama is original
+        assert tui.agent.model == "qwen3.5:4b"
+        assert len(tui.pending) == 1
+        if outcome == "modal":
+            assert tui.input.text == "private-modal-text"
+            assert tui._secret_request is not None
+        assert "private-test-key" not in tui.output.text
+        assert "replacement-key" not in tui.output.text
+        if outcome in {"active", "remote"}:
+            assert tui._next_prompt_model == (tui.session_id, info)
+            tui.running = False
+            tui._watching_remote = False
+            assert tui._apply_next_prompt_model()
+            assert tui.agent.model_info == info
+            assert isinstance(tui.agent.ollama, OpenRouterRuntime)
+
+    asyncio.run(exercise())
+
+
+def test_cloud_activation_timeout_cancels_worker_and_preserves_model(monkeypatch):
+    async def exercise():
+        tui = _fake_persistent_tui()
+        start = tui._start_setup_job
+        monkeypatch.setattr(tui, "_start_setup_job", lambda title, op, finish, **kwargs: start(
+            title, op, finish, timeout=0.01
+        ))
+        original = tui.agent.ollama
+        tui._activate_selected_model(ModelInfo("openai_codex", "gpt-test", "GPT"))
+        await tui._setup_job
+        assert tui.agent.ollama is original
+        assert tui.agent.model == "qwen3.5:4b"
+        assert "timed out" in tui.status_error
+        assert tui._model_activation_future is None
+        assert "model-activation" not in tui._background_jobs.latest
+        assert tui._choice_kind == "model"
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("cancel_key", ["\x1b", "\x03"])
+def test_live_cloud_activation_picker_accepts_escape_and_ctrl_c(tmp_path, cancel_key):
+    async def exercise():
+        tui = _fake_persistent_tui(tmp_path / "appearance.json")
+        original = tui.agent.ollama
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = DummyOutput()
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+                tui._activate_selected_model(ModelInfo("openai_codex", "gpt-test", "GPT"))
+                setup = tui._setup_job
+                await asyncio.sleep(0.1)
+                assert tui._model_activation_future is not None
+                assert tui.choice_window.render_info is not None
+                pipe.send_text(cancel_key)
+                await asyncio.sleep(0.6)
+                await setup
+                assert tui._setup_job is None
+                assert tui._model_activation_future is None
+                assert tui.agent.ollama is original
+                assert tui.agent.model == "qwen3.5:4b"
+                assert tui._choice_kind == "model"
+                assert "cancelled" in tui.status_error
+            finally:
+                tui.application.exit()
+                await task
+
+    asyncio.run(exercise())
+
+
+def test_tui_status_uses_snapshot_without_database_or_guidance_reads(monkeypatch, tmp_path):
+    tui = _fake_persistent_tui()
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui._session_title_hint = "Current title"
+    tui._status_memory_enabled = False
+    tui.agent.injected_instruction_paths = ("/already-injected/AGENTS.md",)
+    tui.agent.injected_instructions_truncated = True
+    tui.agent.last_turn_capabilities = {
+        "injected_instructions": ["/worker-snapshot/AGENTS.md"],
+        "instructions_truncated": False,
+    }
+    before = vars(tui.agent).copy()
+    def forbidden(*args, **kwargs):
+        pytest.fail("Status did blocking metadata I/O")
+
+    monkeypatch.setattr(tui.memory, "session_title", forbidden)
+    monkeypatch.setattr(tui.memory, "auto_memory_enabled", forbidden)
+    monkeypatch.setattr("klaude_cli.main._repository_instruction_context", forbidden)
+    tui.running = True
+    tui._set_input("/status")
+    started = time.monotonic()
+    tui._submit_buffer(steer=False)
+    assert time.monotonic() - started < 0.25
+    assert "Current title" in tui.output.text
+    assert "Memory        off" in tui.output.text
+    assert "/worker-snapshot/AGENTS.md" in tui.output.text
+    assert "/already-injected" not in tui.output.text
+    assert vars(tui.agent) == before
+    assert tui._status_metadata_loading
+    assert not tui.pending
+
+
+def test_status_does_not_claim_newly_created_guidance_is_injected(tmp_path):
+    tui = _fake_persistent_tui()
+    tui.agent.workdir = tmp_path
+    (tmp_path / "AGENTS.md").write_text("New guidance not loaded into any prompt")
+    result = _chat_status(
+        tui.agent, tui.memory, tui.session_id, snapshot_only=True,
+        title_hint="Snapshot title", memory_enabled=True, usage_rows=[],
+    )
+    assert "not injected (no prompt snapshot yet)" in result
+    assert str(tmp_path / "AGENTS.md") not in result
+    assert not hasattr(tui.agent, "injected_instruction_paths")
+
+
+@pytest.mark.parametrize("change", ["session", "title", "memory", "secret"])
+def test_status_metadata_rejects_stale_results_and_preserves_modals(tmp_path, change):
+    tui = _fake_persistent_tui()
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui._session_title_hint = "Original title"
+    tui._refresh_status_metadata()
+    identity = tui._background_jobs.latest["status-metadata"]
+    if change == "session":
+        tui.session_id = "another-session"
+    elif change == "title":
+        tui._session_title_hint = "Local rename"
+    elif change == "memory":
+        tui._invalidate_status_metadata()
+        tui._status_memory_enabled = False
+    else:
+        tui._secret_request = {"label": "masked secret"}
+        tui._set_input("unsent-secret")
+    before = tui.output.text
+    tui._apply_background_result((
+        "status-metadata", identity, {"assigned_title": "Saved title", "memory_enabled": True}, ""
+    ))
+    if change == "secret":
+        assert tui._session_title_hint == "Saved title"
+        assert tui._status_memory_enabled is True
+        assert tui.input.text == "unsent-secret"
+        assert tui._secret_request is not None
+    else:
+        assert tui.output.text == before
+        assert tui._session_title_hint != "Saved title"
+        assert tui._status_memory_enabled is not True
+    assert not tui._status_metadata_loading
+
+
+def test_status_metadata_failure_is_visible_without_retry_loop(tmp_path):
+    tui = _fake_persistent_tui()
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    tui._refresh_status_metadata()
+    identity = tui._background_jobs.latest["status-metadata"]
+    tui._apply_background_result(("status-metadata", identity, None, "private-database-error"))
+    assert "metadata unavailable" in tui.output.text
+    assert "private-database-error" not in tui.output.text
+    tui._refresh_status_metadata()
+    assert tui._background_jobs.latest["status-metadata"] == identity

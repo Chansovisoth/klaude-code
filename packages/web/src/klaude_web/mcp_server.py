@@ -39,11 +39,11 @@ def _search_execution_payload(response) -> dict:
 
 
 def main() -> None:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
     cfg = load_config()
     web = Web(cfg)
-    mcp = FastMCP("klaude-web")
+    mcp = MCPServer("klaude-web")
 
     @mcp.tool()
     def web_search(query: str, max_results: int = 8) -> str:

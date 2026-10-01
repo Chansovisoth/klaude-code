@@ -11,6 +11,9 @@ logs/
 /config/config.toml
 /config/env
 /config/.env
+/config/.env.*
+/config/..env.*
+/config/.*.lock
 /config/searxng.env
 /config/online-docs.txt
 deploy/searxng/*

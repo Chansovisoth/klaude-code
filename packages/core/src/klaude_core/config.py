@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import os
 import re
-import tempfile
 import tomllib
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from .settings_store import atomic_write_private, read_settings, settings_lock, update_settings
 
 
 def _discover_source_root() -> Path | None:
@@ -211,6 +213,38 @@ def save_provider_secret(config_dir: Path, name: str, value: str) -> Path:
         raise ValueError("provider secrets must be a single line")
     config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = config_dir / ".env"
+    with settings_lock(path):
+        # A random revision invalidates delayed work without storing a secret
+        # or a secret-derived fingerprint. Invalidate before publishing the key:
+        # a failed key write may cause a harmless retry, never stale publication.
+        update_settings(config_dir / ".env.revisions.json", {(name,): uuid.uuid4().hex})
+        _save_provider_secret_locked(path, name, value)
+    if value:
+        os.environ[name] = value
+    else:
+        os.environ.pop(name, None)
+    return path
+
+
+def provider_secret_revision(config_dir: Path, name: str) -> str:
+    return str(read_settings(config_dir / ".env.revisions.json").get(name, ""))
+
+
+def provider_credential_current(config_dir: Path, name: str, value: str, revision: str) -> bool:
+    """Check inside the dotenv lock; credentials never leave this comparison."""
+    if provider_secret_revision(config_dir, name) != revision:
+        return False
+    saved = _parse_env_file(config_dir / ".env")
+    if name in saved:
+        return saved[name] == value
+    # A revision with no assignment means a deliberate removal. Never revive
+    # it through another client's stale in-memory key. Unstored env keys work.
+    return not revision
+
+
+def _save_provider_secret_locked(path: Path, name: str, value: str) -> None:
+    if path.is_symlink():
+        raise PermissionError("Refusing symlinked provider settings")
     try:
         existing = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
@@ -231,35 +265,7 @@ def save_provider_secret(config_dir: Path, name: str, value: str) -> Path:
             updated.append("")
         updated.append(replacement)
     payload = "\n".join(updated) + ("\n" if updated else "")
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".env.", dir=config_dir)
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.replace(path)
-        path.chmod(0o600)
-        # Make the rename durable as well as the file contents. This matters
-        # for credentials because a power loss must not leave the UI claiming
-        # that a key was saved when only the directory entry was pending.
-        directory_descriptor = os.open(config_dir, os.O_RDONLY)
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
-    except Exception:
-        try:
-            temporary.unlink()
-        except OSError:
-            pass
-        raise
-    if value:
-        os.environ[name] = value
-    else:
-        os.environ.pop(name, None)
-    return path
+    atomic_write_private(path, payload)
 
 
 def _provider_config_from_dict(
@@ -531,6 +537,18 @@ class Config:
     @property
     def runtime_context_cache_file(self) -> Path:
         return self.data_dir / "runtime-context.json"
+
+    @property
+    def mcp_servers_file(self) -> Path:
+        return self.data_dir / "mcp-servers.json"
+
+    @property
+    def mcp_registry_cache_file(self) -> Path:
+        return self.data_dir / "mcp-registry-cache.json"
+
+    @property
+    def mcp_auth_dir(self) -> Path:
+        return self.data_dir / "mcp-auth"
 
     @property
     def ollama_options(self) -> dict[str, Any]:

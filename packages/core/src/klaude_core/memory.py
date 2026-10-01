@@ -168,8 +168,21 @@ def _parse_memory_line(line: str) -> MemoryEntry | None:
 
 
 class Memory:
+    def open_session_io(self) -> Memory:
+        """Independent existing-database connection for short UI I/O operations."""
+        clone = object.__new__(Memory)
+        clone.__dict__.update(self.__dict__)
+        clone.db = sqlite3.connect(
+            self.sessions_db.absolute().as_uri() + "?mode=rw", uri=True,
+            timeout=0.2, check_same_thread=False,
+        )
+        clone._db_lock = threading.RLock()
+        return clone
+
     def __init__(self, memory_file: Path, sessions_db: Path):
+        self._auto_memory_override: bool | None = None
         self.memory_file = memory_file
+        self.sessions_db = sessions_db
         self.memory_file.parent.mkdir(parents=True, exist_ok=True)
         sessions_db.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -418,6 +431,9 @@ class Memory:
 
     # --- memory settings ---------------------------------------------------
     def auto_memory_enabled(self) -> bool:
+        override = self._auto_memory_override
+        if override is not None:
+            return override
         with self._db_lock:
             row = self.db.execute(
                 "SELECT value FROM settings WHERE key='auto_memory_enabled'"
@@ -425,6 +441,10 @@ class Memory:
         if not row:
             return True
         return row[0] == "1"
+
+    def set_auto_memory_override(self, enabled: bool | None) -> None:
+        """Process-local intent while an asynchronous preference save is unconfirmed."""
+        self._auto_memory_override = enabled
 
     def set_auto_memory(self, enabled: bool) -> None:
         with self._db_lock, self.db:
@@ -468,6 +488,26 @@ class Memory:
                 ),
             )
             self.db.commit()
+
+    def record_session_update(self, session_id: str, client_id: str, detail: str) -> None:
+        """Publish setting history and observer event in one transaction."""
+        if not detail or len(detail) > 2048:
+            raise ValueError("Session setting detail must contain 1-2048 characters")
+        now = time.time()
+        with self._db_lock, self.db:
+            self.db.execute(
+                "INSERT INTO turns (session_id, ts, role, content, model_content) "
+                "VALUES (?,?,?,?,NULL)",
+                (session_id, now, "system", json.dumps(
+                    {"event": "session_update", "detail": detail}, ensure_ascii=False
+                )),
+            )
+            self.db.execute(
+                "INSERT INTO session_events "
+                "(session_id, turn_id, client_id, ts, kind, payload) VALUES (?,?,?,?,?,?)",
+                (session_id, "", client_id, now, "session_update",
+                 json.dumps({"detail": detail}, ensure_ascii=False)),
+            )
 
     def publish_session_event(
         self,

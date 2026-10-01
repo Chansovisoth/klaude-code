@@ -9,7 +9,8 @@ this file before diving into implementation details.
 `klaude-code` is a local-first AI coding agent, version `0.2.0a4`. It runs as a
 Python `uv` workspace with a Typer/Rich CLI, Ollama model runtime, local memory,
 refreshable knowledge libraries, multi-provider web search, local-first URL
-fetching, and MCP servers for the web and knowledge layers.
+fetching, an external MCP client, and MCP servers for the web and knowledge
+layers.
 
 The main user-facing executable is `klaude`, which launches the full interactive
 agent with no subcommand. `klaude chat` remains a compatibility alias; the MCP
@@ -109,6 +110,29 @@ Top-level commands currently include:
 - `klaude auth login/status/logout openai-codex`: manage ChatGPT account
   authentication through the installed official Codex app-server. This is
   separate from `OPENAI_API_KEY` authentication.
+- `klaude mcp list/search/info/install/add/import/enable/disable/refresh/remove`
+  and `klaude mcp auth login/status/logout`:
+  discover active servers through the official public MCP Registry and manage external
+  stdio and Streamable HTTP MCP servers. Imports from VS Code/OpenCode start
+  disabled and are never executed until the user explicitly enables them.
+  Registry search is read-only, bounded, cached for one hour with a seven-day
+  stale fallback, and filters to active latest entries. Registry install accepts
+  only credential-free HTTPS Streamable HTTP endpoints or exact-version npm/PyPI
+  stdio definitions, records their provenance, and saves them disabled without
+  connecting, downloading, or executing. Registry metadata is not a security
+  endorsement; enabling remains a separate explicit trust boundary.
+  `klaude mcp add NAME` provides an interactive transport/endpoint wizard;
+  explicit flags remain available for scripts.
+  `klaude mcp secret VARIABLE` collects a masked value into private
+  `config/.env`; configurations retain only environment references.
+  Remote OAuth uses the official SDK's protected-resource/authorization-server
+  discovery, PKCE, state validation, dynamic registration or an explicitly
+  configured HTTPS Client ID Metadata Document, and automatic refresh. Owner-only
+  token and issued-client files live under `.klaude/data/mcp-auth/`, never in
+  configuration, transcript, logs, status output, model context, or command
+  arguments. Desktop login uses a loopback callback; `--manual` accepts the full
+  callback URL through a masked prompt for SSH/headless use. Logout removes the
+  local OAuth file and disables the server, but does not claim remote revocation.
 - `klaude memory status/on/off/list/add/forget/search`: durable memory and
   session recall controls.
 - `klaude sessions`: list recent sessions by effective name and prefix sessions
@@ -132,9 +156,51 @@ Chat slash commands currently include:
 - `/keybinds`: print only keyboard controls directly. Slash commands belong in
   `/help` and the `/` completion popup.
 - `/settings [CATEGORY]`: configure categorized Theme, Input Field, Models,
-  Providers, Memory, Skills, Tools, Permissions, and Runtime controls. Models
+  Providers, MCP Servers, Memory, Skills, Tools, Permissions, and Runtime controls. Its
+  home page is a grouped, aligned overview that shows the live value or a
+  concise status for every category. Enter opens that category, and returning
+  with Back or Escape keeps the selector on the same logical summary row even
+  when its displayed value changed. Overview memory/MCP metadata comes from an
+  owned eight-second read-only job, never synchronous SQLite/config parsing in
+  navigation or rendering. It returns only the automatic-memory flag and MCP
+  enabled/total counts, without connecting to servers or publishing definitions,
+  credentials, tools, or conversation content. The summary shows loading,
+  unavailable, or aged cached values honestly. Successful snapshots and failed
+  attempts are cached/throttled for 30 seconds; failures retain the true age of
+  previous successful fields, and independent fields can succeed separately.
+  Refresh while open preserves the query and stable selector. Leaving the page,
+  memory/MCP changes, session/source changes, and exit cancel or invalidate jobs;
+  late results cannot replace newer state. Category detail pages and other saved-setting
+  writes still have separate synchronous paths pending responsiveness work.
+  Models
   opens the same source, provider, model, mode, and effort selection flow as
-  `/model`. Tools persists independent
+  `/model`. Selecting a model during local or observed remote work queues it
+  for the next prompt without changing the running turn's runtime. Cloud
+  dependency/auth validation remains cancellable background work and may run
+  alongside the turn. The latest accepted selection wins, stays scoped to the
+  current session, and is applied in standard mode before subsequent prompts;
+  the transcript explicitly reports the pending selection. Idle selection
+  retains the mode/effort picker. Conversation history is preserved. Login and
+  other setup operations retain their separate active-work restrictions.
+  Every Cloud provider remains enterable when signed out. Its model
+  page begins with `Login`, which uses the masked API-key composer or the
+  official Codex device flow as appropriate; it becomes `Logout` after sign-in,
+  and logout requires confirmation. API-platform keys remain separate from
+  ChatGPT/Codex account authentication. Codex login/logout and MCP connection
+  use owned background setup jobs, leaving the TUI responsive with a transient
+  progress/cancel picker and an animated waiting footer. Escape, Ctrl+C, and
+  the visible cancel row stop setup; exit also requests resource cleanup.
+  Codex cancellation wakes broker waits and requests cancellation of the device
+  login before closing that owned app-server. MCP discovery is asynchronous and
+  cancellation unwinds its transport and loopback listener. Login has a bounded
+  15-minute wait; MCP setup has a five-minute outer deadline and discovery's
+  transport deadline. Setup pauses queue consumption and cannot start during
+  a local model turn. Login URLs/codes remain in the transient picker, never
+  saved transcript/shared session output. MCP enabling commits only after
+  successful discovery and rechecks the definition after the network wait.
+  Remote OAuth in settings currently uses loopback; the top-level manual CLI
+  flow remains available for SSH/headless authorization.
+  Tools persists independent
   validation toggles for web-search
   and local-knowledge candidates; turning validation off exposes unvalidated
   leads only and does not bypass transport, provenance, or fetch safety bounds.
@@ -146,7 +212,17 @@ Chat slash commands currently include:
   on/off settings for every configured web provider, shown in `provider_order`;
   disabled providers are excluded from routing without changing their priority order.
   Tools also has an Activity Updates toggle, enabled by default, for concise
-  high-level live stages and completed milestones. The footer keeps its compact
+  high-level live stages and completed milestones. Tools navigation, filtering,
+  and toggle/reset actions use authoritative in-memory preference snapshots, not
+  disk reads. Changes apply to the live tool configuration immediately and save
+  through the serialized preferences writer; rapid toggles and reset-then-edit
+  preserve their chronological intent. Saving/saved/unconfirmed feedback retains
+  picker selection and filtering. Latest-revision acknowledgements merge bounded
+  boolean tool/provider/display metadata from the atomic cross-client save; stale
+  acknowledgements cannot restore earlier values. Unconfirmed saves keep current
+  choices active and retain failed intent for the next explicit save. Availability
+  changes never relax transport, permission, or workspace safety boundaries.
+  The footer keeps its compact
   Braille-spinner presentation while active, with progressive states and a
   compact unit-based elapsed value such as `⠋ WORKING 4s`, `⠙ EXPLORING 7s`,
   `⠹ EDITING 11s`, `⠸ RUNNING 16s`, `⠼ LEARNING 18s`, and `⠴ WAITING 20s`.
@@ -171,16 +247,54 @@ Chat slash commands currently include:
   before Enter applies it.
   Enter applies and persists a preset. Enter on a tool row cycles
   ask -> allow -> deny -> ask and persists the custom map; exact preset matches
-  are detected automatically. Reset restores configured defaults. Hard workspace,
+  are detected automatically. Reset restores configured defaults.
+  Permission changes apply to the live gate immediately and save through the
+  serialized preferences writer; pending/failed saves never cause the next toggle
+  to reread stale disk policy. Saving/saved/unconfirmed feedback preserves selection
+  and filtering. Single-tool edits remain field scoped; presets/reset intentionally
+  replace/remove the whole override map. Coalescing preserves the chronological
+  order of section resets and later child edits and freezes mutable preset input.
+  Confirmed saves return bounded valid policy metadata, allowing cross-client
+  merged policies to refresh on the UI thread; stale acknowledgements are ignored.
+  This acknowledgement never clears or persists process-lifetime `always` grants.
+  Explicit permission configuration changes retain their existing grant-reset
+  behavior. Persistence failure keeps the explicitly requested live policy active
+  for this process with unconfirmed feedback; it does not bypass any hard boundary.
+  Hard workspace,
   transport, and command-safety boundaries remain effective under Full Access.
   `delegate_task` appears under Orchestration and defaults to ask. Read Only also
   keeps it at ask because delegation can consume model quota even though the
   child cannot mutate state.
   Memory shows a persistent Automatic Memory toggle, the durable-fact count,
-  and up to eight recent facts; reset restores automatic memory to on. Skills
+  and up to eight recent facts; reset restores automatic memory to on. Its page
+  opens immediately with loading or a 30-second cached snapshot. An owned
+  eight-second read-only job reads the existing database with a 200ms busy timeout
+  and at most 1 MiB of regular, non-symlink memory-file content, without initializing
+  or migrating storage. It returns bounded sanitized facts and hides detected
+  sensitive facts; hidden counts are explicit. Leaving cancels the read and drops
+  late results. Failures retain the snapshot's real age; Back/reopen retries.
+  While the toggle value is unknown it remains focusable but inert; Reset can
+  explicitly enable memory. Toggle/reset and TUI `/memory on|off` use live intent
+  and queue ordered writes on the session action worker, never synchronous reads
+  or writes in the key handler. The current process applies that intent immediately
+  through an in-memory override. Pending/failed writes cannot be undone by stale
+  inventory, overview, or status results. Latest acknowledgements show saved or
+  unconfirmed feedback without clearing filtering or moving selection; a confirmed
+  save clears the override, while failure keeps the requested value process-local
+  and visibly unconfirmed. Settings overview also marks pending/failed persistence.
+  Accepted writes survive navigation and use the action lane's bounded queue and
+  two-second shutdown drain. Bare `/memory` and line-oriented controls remain
+  separate synchronous compatibility paths. Skills
   is a read-only inventory of installed skills with their library and indexed
-  file counts, plus the canonical `klaude import-skill` hint. It does not expose
-  a fake enable/disable control because per-skill activation is not implemented.
+  file counts, plus the canonical `klaude import-skill` hint. Its optional
+  manifest scan runs in an owned bounded worker without importing the knowledge
+  indexing stack, so the
+  picker opens immediately with a loading row and then refreshes from a short-lived
+  cache without blocking input. Scans skip symlinked or oversized manifests,
+  return public inventory metadata only, and visibly report the 1,000-manifest
+  ceiling. Leaving Skills cancels its job and drops late results.
+  It does not expose a fake enable/disable control
+  because per-skill activation is not implemented.
   Runtime controls persist for
   future chats in `chat-preferences.json`: Auto and GPU-preferred leave CPU/GPU placement to Ollama,
   CPU-only sets no GPU layers, and GPU-only persists an explicit maximum-offload
@@ -189,7 +303,33 @@ Chat slash commands currently include:
   back from that request. CPU threads/context size offer presets and custom
   numeric input. Auto Calibrate
   derives bounded thread and context targets from local CPU, RAM, and VRAM,
-  while keeping device placement automatic. Runtime also exposes the per-turn
+  while keeping device placement automatic. Hardware collection is an owned
+  eight-second subprocess job; it never collects repository/location context,
+  requests a model, or probes network services. Its fixed local probes use CPU
+  affinity, root cgroup-v2 limits when present, RAM, dedicated DRM VRAM, and an
+  optional two-second `/usr/bin/nvidia-smi` numeric-memory query with a scrubbed
+  environment. Only numeric thread/context recommendations cross IPC. The
+  calibration row becomes Cancel while pending, retaining stable picker identity,
+  selection, filtering, and navigation. Back/Escape/Ctrl+C, another page, runtime
+  changes, session switches, and exit cancel or invalidate it; stale results cannot
+  replace later choices. Failure keeps existing options. It cannot start during
+  active local/observed work. Recommendations are hardware heuristics, not model-fit
+  tests or guarantees of Ollama placement; user overrides remain available.
+  Runtime preference changes apply immediately and persist through one serialized
+  background settings writer, using the existing field-scoped merge, private
+  atomic file publication, and cross-client lock. Pending changes coalesce by field;
+  older acknowledgements cannot override newer save state. The picker shows saving,
+  saved, or save-unconfirmed feedback without resetting selection/filtering.
+  A failed save retains unconfirmed intent for the next explicit settings change,
+  with newer values winning; it never spins indefinitely. Accepted writes are not
+  cancelled by navigation or session changes, and exit attempts to drain them for
+  at most two seconds, warning if persistence is unconfirmed. A failure after file
+  publication is not treated as rollback. A kernel-blocked filesystem thread cannot
+  be forcibly stopped. The preferences editor waits for pending saves to prevent
+  racing those accepted writes. Appearance uses a separate writer for its own
+  file; Tools and remembered-model selections share the preferences writer.
+  Startup and line-oriented chat still use synchronous compatibility saves.
+  Runtime also exposes the per-turn
   model/tool ceiling through Safe (12), Balanced (20), Extended (40), and
   custom 1-64 step choices. The selected value applies immediately, persists
   for later chats, and appears in the model-facing live configuration. Reset
@@ -209,7 +349,10 @@ Chat slash commands currently include:
   the audited concurrent-tool allowlist or any permission boundary.
   Providers securely collects cloud-model keys plus the API keys for Brave,
   Parallel, Tavily, Exa, Firecrawl, Crawl4AI Cloud, and Hugging Face in the
-  existing masked-secret composer. It atomically writes only the corresponding
+  existing masked-secret composer. The provider list has one status row per
+  provider; Enter opens a detail page with a short purpose, its environment
+  variable, and explicit Add/Update and Remove actions. It atomically writes
+  only the corresponding
   environment assignment to private, gitignored `config/.env` with mode `0600`,
   preserving comments and unrelated values. Secrets never enter transcript,
   sessions, shared drafts, completion, input history, or preferences. Removing
@@ -224,8 +367,113 @@ Chat slash commands currently include:
 - `/vim`: toggle Vim editing controls in the TUI composer; invoke it again to
   return to standard composer controls. The selected mode persists in
   `chat-preferences.json`.
+  Composer changes become effective immediately and save asynchronously through
+  the same revision-scoped preferences writer; failure leaves the current mode
+  active and reports unconfirmed persistence. Runtime turn/subagent reset actions
+  use the same writer rather than synchronous special-case writes.
 - `/permission`: open the Permissions settings page directly. It takes no
   arguments; permission changes are made and persisted through that page.
+  Active MCP tools appear under one row per server. Entering a server shows
+  its individual ask/allow/deny policies and scoped Allow all, Ask for each
+  tool, and Deny all actions. Server-wide changes save only that server's tool
+  policies and preserve unrelated permissions. The `/mcp` settings page has a
+  shortcut to these server permission rows.
+- `/mcp`: open the external MCP server settings page directly. It can search the
+  official MCP Registry asynchronously, inspect supported plans, and save plans
+  as disabled definitions. Required registry inputs are collected in-place;
+  Search opens with local suggested search terms immediately; these are prompts,
+  not registry results or popularity/security endorsements. Typed searches can
+  also show live registry-name suggestions as they arrive.
+  secrets use the masked composer and private `config/.env` references. The same
+  settings page can add custom Streamable HTTP or stdio servers, import VS Code,
+  OpenCode, or standard MCP JSON, and review then connect/enable a saved server.
+  Settings and registry-detail navigation read configured names/status through an
+  owned eight-second read-only inventory job, not synchronous registry loads.
+  It parses at most 16 MB of regular, non-symlink configuration and previews at
+  most 1,000 definitions, using the existing server validator. Only names,
+  enabled/transport/OAuth flags, and tool counts cross IPC; endpoints, command
+  arguments, environment/header values, credentials and schemas stay private.
+  Successful snapshots cache for 30 seconds with visible real age. Read failures
+  retain that age and use neutral feedback; Back/reopen retries. Leaving cancels
+  reads and drops stale session/path/job results. Filter and logical selection
+  survive completion. Registry install choices remain focusable but inert until
+  the configured-name inventory is known and complete; a truncated preview gives
+  a CLI hint. Snapshot metadata is not authorization or a substitute for live
+  mutation preflight. Successful add/import/install/reload invalidates the cache.
+  Selecting a cached disabled server with no discovered tools starts a cancellable
+  eight-second definition-review job instead of synchronously reading the registry.
+  The confirmation binds an opaque SHA-256 identity of the complete effective
+  definition. It shows only an HTTP origin or a private-stdio hint and points to
+  the config for full review, keeping URL path/query and command arguments private.
+  Enable re-reads the definition off the UI thread and rejects any changed identity
+  before discovery/OAuth, then retains its existing post-discovery identity check
+  and registry CAS publication. Cancellation/session/path/job changes discard late
+  review results. Registry reads themselves use no-follow, nonblocking descriptors,
+  reject non-regular files, and enforce the byte bound during reading.
+  After discovery, the cancellable setup task creates a private immutable schema
+  snapshot and hands a fixed enable request to the same ordered mutation lane
+  used by cached toggles. Setup then finishes without waiting on filesystem I/O;
+  its transcript says discovery completed/save pending, never enabled success.
+  Definition revalidation, CAS save, and replacement-tool preparation run in
+  the lane. Leaving/cancelling the setup UI cannot roll back an accepted save;
+  its actual acknowledgement settles later. A failed save never reports enable
+  success; a completed save with failed catalog preparation reports saved
+  configuration but retains the
+  old live tools and asks for reload/restart. Prepared tools publish without I/O
+  only in the originating session/config scope, preserving local tools and
+  explicit permission overrides. Reload also prepares before replacing tools.
+  Cached/discovered-server toggles use a fixed serialized daemon mutation lane
+  with at most 16 accepted active/pending operations, shared with discovered-server
+  enable publication. Navigation snapshots carry opaque complete-definition
+  identities; the worker revalidates before CAS save
+  and prepares the catalog from a fresh merged snapshot without connecting.
+  The TUI accepts one toggle at a time, preventing duplicate stale-snapshot flips.
+  Unknown/old metadata triggers asynchronous refresh rather than a UI registry
+  read. Accepted writes are not cancelled by leaving the picker. Eight seconds
+  without acknowledgement visibly reports pending/outcome-unknown; late results
+  still settle the original request. Exit waits at most two seconds for this lane
+  and warns if completion remains unconfirmed. Queued model work waits for the
+  acknowledgement and stays paused after uncertain persistence, failed catalog
+  preparation, or a stale-scope saved result until verified publication/reload.
+  `Reload configured MCP tools` is a focusable settings action that runs a fixed
+  read-only operation on the same lane. It prepares tools without connecting,
+  then verifies the complete configuration still matches its read snapshot before
+  acknowledgement. Successful current reload clears the queue hold and prior
+  lane uncertainty; failed/stale reload retains old tools and any existing hold.
+  Reload does not rewrite configuration or toggle a server. Ack refresh preserves
+  the currently highlighted logical row, not a stale request's former selection.
+  Successful current acknowledgements publish tools and retain the logical row;
+  late results never reopen an unrelated picker. Registry install plans requiring
+  no secret input submit private immutable definitions to a fixed disabled-add
+  operation on that lane. It validates and rejects duplicates before saving,
+  strips discovered tools, forces disabled state, and retains provenance.
+  Only acknowledgement reports install success; no package download, execution,
+  transport connection, or implicit enable occurs. Custom stdio, unauthenticated
+  HTTP, and OAuth definitions now use the same disabled-add operation.
+  Import uses a fixed lane operation that reads the explicitly entered local
+  file off-thread with no-follow/nonblocking descriptors, regular-file checks,
+  and a 4 MB bound enforced during reading. Missing shapes, malformed entries,
+  invalid definitions, or any existing-name duplicate reject the entire batch
+  before save. Valid imports atomically merge with CAS, force every imported
+  server disabled, discard cached tools, and report their count only after
+  acknowledgement. No transport/package execution occurs. Import paths and
+  contents never enter mutation reprs or feedback. Bearer-token custom setup
+  and secret-bearing install publication still use synchronous local I/O and
+  cannot overlap a pending lane operation through settings. The legacy private reload
+  helper remains synchronous, but current TUI reload actions use the lane.
+  Discovery snapshots are bounded and schema-checked before writing. Registry
+  saves enforce the read-byte ceiling against the fully merged encoded payload
+  under the existing lock, preventing a successful oversized save from making
+  configuration unreadable. A kernel-stalled accepted write remains outcome-unknown
+  and may be cut short by process exit; shutdown warns rather than claiming rollback.
+  Bearer-token custom setup and secret-bearing installs still need this lane.
+  The enable preflight read uses a bounded-file thread, which cannot
+  be forcibly stopped if kernel filesystem I/O stalls; it is read-only and late
+  results after cancellation cannot initiate discovery.
+  Remote custom setup supports no authentication, OAuth, or an environment-backed
+  bearer token. New and imported definitions never execute until the separate
+  confirmation to enable them. The top-level `klaude mcp` commands remain
+  available for scripting and advanced OAuth/headless controls.
 - `/plan [on|off]`: toggle planning mode. Planning keeps read-only workspace
   tools and retrieval available while disabling writes and shell execution.
 - `/compact`: compact stale model context immediately while retaining visible
@@ -246,11 +494,27 @@ Chat slash commands currently include:
   so live `/status` never races the worker's database write. Render status as
   aligned label/value columns, with additional `AGENTS.md` paths on blank-label
   continuation rows.
+  Status never reloads repository guidance or changes the agent's injection
+  bookkeeping. Use the latest request's capability snapshot, falling back to
+  the last prompt-build snapshot; newly created files are not called injected.
+  Before any prompt snapshot exists, report that explicitly. TUI session names
+  use the synchronous first-input/rename hint, and automatic memory mode is
+  unknown until its metadata snapshot is available. An owned eight-second
+  read-only SQLite job refreshes assigned names and memory mode with a 30-second
+  cache; it never initializes/migrates storage or reads conversation content.
+  Late results are scoped to the originating session and title, and local memory
+  changes invalidate pending metadata reads. Line-oriented status retains direct
+  session metadata reads but also uses the real guidance snapshot.
   When the active provider is OpenAI Codex, also read the official app-server's
   current non-secret rate-limit buckets and show the five-hour, weekly, and Luna
   Reserve weekly percentages remaining with local reset times when reported.
   Link to `https://chatgpt.com/codex/settings/usage`; never infer missing windows
   or expose credentials when the app-server is unavailable.
+  In the TUI, account-limit retrieval runs in an owned eight-second job, never
+  in the key handler. Status prints immediately with an explicitly loading or
+  aged cached snapshot; completed limits print separately only if the originating
+  session is still open on Codex. Failed refreshes preserve the snapshot's true
+  age and are throttled for 30 seconds. Login/logout clears cached account limits.
 - `/debug_label`: show all temporary visual diagnostics in one place. It prints
   the complete transcript-label vocabulary, grouped into neutral information,
   activity outcomes, input outcomes, warnings/failures, and success. Include
@@ -323,6 +587,18 @@ Chat slash commands currently include:
   every connected client keeps an independent shared draft and pending queue;
   one client's composer must never overwrite another's. Session and turn IDs
   use full random UUID hex values rather than display-truncated identifiers.
+  TUI render polling submits immutable snapshots to one coalescing session-I/O
+  thread with a separate existing-database connection and a 200 ms SQLite busy
+  timeout. It handles lease renewal, public drafts, shared events, stale-worker
+  recovery, and resume-picker badges without polling SQLite on the render path.
+  Session switches discard pending old snapshots and serialize old-client cleanup
+  after in-flight writes; late results cannot update a different session or turn.
+  Secret/modal composer values are excluded. Lease-renewal failure requests safe
+  interruption, including when no successful renewal is observed for 12 seconds.
+  Shutdown requests cleanup and joins for at most two seconds; a kernel-blocked
+  filesystem thread cannot be forcibly terminated, and abandoned presence expires.
+  This does not yet make session actions, queued-turn starts, or settings writes
+  asynchronous; those remain separate responsiveness work.
   An observing client must show the shared progressive activity (`WORKING`,
   `EXPLORING`, `EDITING`, `RUNNING`, `LEARNING`, or `WAITING`) while that remote worker lease
   is active with the same animated Braille indicator even though its own local
@@ -333,9 +609,47 @@ Chat slash commands currently include:
   snapshot; later updates refresh its live `/status` without changing the
   observer's own saved model selection.
 - `/model`: open an arrow-key model picker, then an effort picker.
+  The TUI Ollama catalog also uses an owned eight-second job (three-second HTTP
+  timeout), reading `/api/tags` only without loading/inferencing a model. Show
+  the active model and an explicit loading row immediately; refresh preserves
+  the user's filter/selection, and Back/Escape discards late results. Successful
+  catalogs and failures are cached for 30 seconds. Reset uses that inventory,
+  never a synchronous daemon call; if it is unknown, ask the user to retry reset
+  after discovery. An uncached local `/model NAME` opens the filtered picker
+  rather than blocking or silently switching models.
+  Cloud selections and explicit cloud `/model NAME` commands prepare optional
+  SDK dependencies and Codex account credentials in an owned fixed-operation
+  worker (20-second worker deadline, 25-second outer setup deadline). The live
+  runtime is created lazily on the UI thread only after a current readiness
+  result; no tokens, SDK clients, or provider response data cross worker IPC.
+  API-key providers check dependency/key configuration, not remote key validity;
+  the first real chat request may still fail. Escape/Ctrl+C/exit cancel setup.
+  Session/model/key changes, remote work, or a superseding modal prevent commit.
+  Pending turns pause during setup. Cancellation/failure keeps the old model,
+  while cancelling mode/effort restores the exact old runtime and reasoning
+  settings without another SDK initialization or credential check.
 - `/model NAME`: switch the active chat model, then choose effort while keeping
-  chat history. A successful selection is reused at the next chat launch and
+  chat history. After reasoning selection is confirmed, the TUI queues a scoped
+  remembered-model save on the shared preferences writer, not a key-handler disk
+  write. The model applies immediately, and settings overview shows saving,
+  saved, or unconfirmed feedback without losing selection/filtering. Failed saves
+  retain the current runtime and history; the existing writer retains failed
+  intent for the next explicit save. Cancellation at either mode or effort restores
+  the prior runtime/reasoning settings and queues no remembered-model save.
+  Mode/effort-only changes remain session-only; this does not introduce persistence
+  for them. A successfully saved selection is reused at the next chat launch and
   saved as a session update so `/resume` and observing clients show the change.
+  TUI reasoning completion queues its public session-setting update on a separate
+  ordered worker with an independent existing-database connection (200ms busy
+  timeout). History and its observer event commit in one SQLite transaction, never
+  two independently successful writes. Accepted updates keep their originating
+  session/client, survive navigation, and are not coalesced with draft snapshots.
+  The lane bounds pending updates to 128 and details to 2,048 characters; rejection
+  and unconfirmed publication warn visibly without changing the active runtime.
+  Failures are not blindly retried. Exit attempts a two-second drain and warns if
+  any update failed or completion is unconfirmed; kernel-blocked threads cannot
+  be forcibly stopped. This lane orders its own setting updates, not every model
+  event or session action; broader lifecycle ordering remains separate work.
 - `/mode [standard|thinking]`: choose whether the active model uses its
   normal response path or its reasoning path.
 - `/effort` and `/effort LEVEL`: set `low`, `medium`, or `high` reasoning
@@ -387,13 +701,33 @@ visible selected row; long lists scroll with the selection. Picker height obeys
 the same configured input minimum and maximum as the text composer, padding
 short lists to the minimum and scrolling long lists within the maximum.
 When a settings action rebuilds its picker, keep the selector on the same
-logical row even when that row's displayed value changes.
+logical row even when that row's displayed value changes. The shared pure
+`klaude_cli.pickers.PickerController` owns stable option identity, ranked
+filtering, and viewport state; the TUI adapter binds settings names, model
+references, session IDs, and registry names separately from displayed labels.
+Background refreshes reapply the current filter and preserve the selected
+identity and its viewport offset. Clearing a filter restores its prior logical
+selection, or a manually selected filtered result. Back/Escape restores cached
+parent navigation state; unchanged permission previews retain their scroll
+position. When selection is on the first option below a heading or note, the
+viewport reveals that preceding context when the configured height permits it.
+An empty search shows a non-selectable no-match row: Enter never
+automatically activates Back/Cancel, although those rows remain explicitly
+selectable and Escape still works. Mouse confirmation requires two clicks on
+the same option identity, not merely the same position after a refresh.
+Transient setup-job rows containing device codes are not cached.
 Settings pickers group related options under visible, non-selectable section
 titles; keyboard, typed-option, and mouse selection skip those titles.
-Unavailable provider and model options remain gray but can be highlighted with
-the keyboard or mouse; pressing Enter or confirming them performs no action and
-keeps the picker open. Blank spacer and informational tip rows remain
-non-selectable. Endpoint-specific OpenAI media, transcription, embedding,
+Typing in a picker filters and ranks selectable rows by exact, prefix, token,
+substring, and conservative fuzzy similarity; Enter chooses the highlighted
+closest match, Backspace restores matches dynamically, and Escape still follows
+the visible back/cancel action.
+Unavailable actions remain gray but can be highlighted with the keyboard or
+mouse; pressing Enter or confirming them performs no action and keeps the picker
+open. This rule applies consistently to missing provider credentials, empty
+model catalogs, unavailable external editors, and unavailable generated choices
+such as Custom before a custom permission map exists. Blank spacer, section,
+loading, and informational tip rows remain non-selectable. Endpoint-specific OpenAI media, transcription, embedding,
 moderation, realtime, and search-only models are excluded from live and cached
 chat catalogs.
 Cloud model options are sorted case-insensitively by full model name. Local
@@ -475,7 +809,22 @@ recovery. Recovery never invents tool results or completed activity labels; a
 start-only tool audit remains start-only. If cancellation or a provider failure
 interrupts a text stream while its unpublished suffix might be text-form tool
 markup, keep only the already-safe prose prefix in model history. Never feed a
-half-written tool tag into the next request as assistant prose. In the TUI,
+half-written tool tag into the next request as assistant prose. An
+interrupted turn retains its last user objective for an explicit
+`continue`/`resume`/`finish` follow-up, including after restoring a saved session.
+The model-facing recovery note says completed tool audits are not tool-result
+evidence and that needed sources must be checked again. A new unrelated request
+does not inherit that objective. A short request to try or compare the previously
+discussed sources inherits only safe built-in retrieval capabilities such as
+web search and local knowledge; it cannot inherit write, shell, or arbitrary
+MCP tools from assistant prose. Research tools also save bounded typed receipts
+separate from audit outcomes: query/library or a public fetch URL/source ID,
+status, and counts, never an arbitrary full result. An interrupted restored turn
+can use those receipts to plan refetching; they are not replayable evidence.
+When asked which sources were actually used for an answer, Klaude answers from
+the preceding turn's executed result records, including saved audits after
+resume. A question about which sources could be used remains a capability
+question. In the TUI,
 `/help` category names are underlined, and each user or
 assistant message begins with a full-width gray divider containing the speaker
 name and local date/time. Each session starts with a `Session: <id>` divider
@@ -559,7 +908,17 @@ Interactive appearance is stored in `.klaude/data/appearance.json` (or the
 configured data directory) as categorized `theme` and `input_field` objects.
 Legacy `output_field` values are ignored because the terminal owns transcript
 rendering and scrolling. Chrome and content syntax themes are deliberately
-separate settings. `/theme` opens the Theme category. Input height grows between `input_field.min_height`
+separate settings. Theme, border, height, and appearance resets apply immediately
+and save asynchronously through their own serialized, field-scoped writer.
+Legacy flat-theme migration runs inside the same cross-client file lock, preserving
+unrelated values. Theme/Input Field pages show saving, saved, or save-unconfirmed
+feedback without moving the selector or clearing its filter. Only the latest
+appearance revision can acknowledge persistence; acknowledgements never replace
+live appearance values or affect permission policies. Failed intent remains for
+the next explicit save. Navigation does not cancel accepted writes; exit drains
+this writer for at most two seconds and warns if unconfirmed, with the same
+kernel-blocked-thread limitation as the preferences writer.
+`/theme` opens the Theme category. Input height grows between `input_field.min_height`
 and `input_field.max_height` (defaults 8 and 12); legacy `height` is accepted as
 the minimum. Input Field → Height → Enter min/max accepts two integers with
 `1 <= min <= max <= 12`. Invalid input stays in the editor without saving;
@@ -621,6 +980,55 @@ user asks about one command, use focused command help from the registry. If a
 requested command is unsupported, say so and suggest only close registry matches.
 
 ## Config, Data, And Secrets
+
+Klaude settings writers coordinate through `klaude_core.settings_store`:
+hold a stable owner-only advisory lock before reading the latest file, apply
+only the explicitly edited fields, and publish a unique owner-only temporary
+file with file and directory fsync plus atomic replacement. Lock acquisition
+waits at most 200 ms before a retryable busy error; lock files must not be
+deleted because their inode is the coordination boundary. Appearance and chat
+preferences preserve unrelated fields, including nested runtime, permission,
+tool, and display settings. Assignments to the same settings field are ordered
+by transaction completion; the last explicit assignment wins. Presets/resets
+intentionally replace their own scope only. Device mode and GPU override save
+together. Provider-key saves serialize the dotenv read/modify/write and preserve
+comments and other keys; secrets never enter lock files or diagnostics.
+MCP registry instances retain a detached baseline from their last load/save:
+unrelated server changes merge, while an edit, removal, or duplicate addition
+conflicting with another client's newer definition fails with reload-and-retry.
+No stale discovery result can overwrite a replaced server definition. The
+scoped Nano editor holds the same advisory lock for its editing lifetime.
+Symlinked settings/locks and malformed JSON are rejected on writes rather than
+silently discarded. Locks coordinate cooperating Klaude writers, not arbitrary
+external editors. Saved-file coordination does not automatically synchronize
+other processes' live settings or OAuth refresh state; model catalog caches
+use the provider-scoped coordination described below. Broader modal/lifecycle
+coordination and simultaneous OAuth refresh remain separate follow-up work.
+
+Read-only model catalog, Codex account-status, MCP Registry search, and skill
+inventory jobs use `klaude_cli.background_jobs.OwnedBackgroundJobs`. Replaceable
+request IDs reject late results; background supervisors own fixed-operation
+worker processes rather than uninterruptible SDK/import threads. Deadlines are
+30 seconds for provider/status work, 20 seconds for registry search, and 15
+seconds for skills. Cancel/replace/exit signals the owned process group, closes
+private pipes, and reaps the worker; normal TUI teardown drains supervisors.
+These jobs do not run tools or model turns, grant permissions, consume queued
+messages, or replace an unrelated input modal. Credentials travel through
+private stdin only, not arguments or inherited provider-key environment values;
+worker logs/provider exceptions never enter transcripts or public events.
+Each model refresh writes only its provider cache from the worker, guarded by
+cache invalidation generations and a locked credential-revision comparison.
+Private `config/.env.revisions.json` contains random revisions, never secrets or
+secret-derived hashes; replacing/removing even re-adding the same key invalidates
+older work. Generations reject delayed Codex results after Klaude logout.
+Other clients' provider catalogs are preserved, and empty/failed discovery keeps
+the prior catalog. Cloud picker refresh never queries the local Ollama daemon.
+Registry cache writes merge only the refreshed query under a lock; optional
+cache failure does not discard valid fresh discovery. Background status/model
+results affect only their matching open page. Skills and registry searches stop
+on Back/Escape; model caches may finish in the background while chat continues.
+Abrupt parent death, externally initiated Codex auth changes, and comprehensive
+cross-modal latency remain separate lifecycle acceptance work.
 
 Source checkouts keep local editable config in visible `config/` and runtime
 data in gitignored `.klaude/data/` by default. Installed packages outside a
@@ -696,10 +1104,11 @@ Klaude request tuning belongs under `[ollama.options]` and is sent with each
 requests, and `[ollama] code_think` can override general `think` only for code.
 This keeps constrained defaults while allowing stronger machines to spend more
 context and reasoning without silently switching models. `num_predict` is the
-per-response output-token ceiling; Klaude detects an Ollama length stop inside
-an unfinished fenced code block and may request up to
+per-response output-token ceiling; Klaude detects an explicit length stop in
+nonempty prose or code and may request up to
 `[agent] max_code_continuations` (default 2) continuations. It does not
-continue ordinary prose or guess at truncation without Ollama metadata.
+guess at truncation without provider metadata. Continuations remain subject to
+the turn governor and request a concise finish without repeating prior text.
 Python and GDScript responses are buffered for dependency-free mechanical
 validation and may receive up to `[agent] max_code_repairs` (default 2)
 diagnostic-driven repairs. Unsupported languages remain single-pass.
@@ -716,20 +1125,42 @@ terminal event; malformed terminal events and native function-call items fail
 closed instead of being treated as successful output. Codex reconciles streamed
 tool/reasoning items against the authoritative completed response, deduplicates
 items by provider ID, and falls back to completed response text when a transport
-omits text deltas. Non-secret response IDs and terminal status are retained as
+omits text deltas. Both OpenAI Responses adapters request encrypted reasoning
+content and retain a strict, non-rendered replay envelope containing only
+provider-issued reasoning, compaction, assistant-message, and function-call items. This
+preserves opaque reasoning and exact assistant `phase` values across stateless
+requests without retaining responses server-side. Provider items suppress
+locally reconstructed duplicates; incomplete function-call pairs are still
+dropped before the next request. Completed-turn replay envelopes are stored only
+in the owner-only session database's private `model_content`; `/resume` restores
+them, while transcript text, session search, exports, and shared live events
+remain public-content-only. Non-secret response IDs and terminal status are retained as
 runtime metadata for diagnostics. Exact Ollama, OpenAI/Codex, OpenRouter, and
 Gemini input/output token counts feed the local footer and are mirrored to `/resume`
 observers through a bounded, whitelisted completion payload. Missing or malformed
 provider usage must not erase an existing estimated context count. Runtime
 metadata is not used as server-side continuation
-while `store=false`; conversation continuity remains local replay plus Codex's
-encrypted reasoning items. Cloud context accounting uses discovered provider
+while `store=false`; conversation continuity remains local replay plus the
+Responses adapters' encrypted provider state. Cloud context accounting uses discovered provider
 model metadata
 and never inherits saved Ollama `num_ctx` or GPU/thread tuning; when the Codex
 catalog omits a limit, discovery records a conservative 128K fallback. Responses
 history emits function calls and outputs only as complete call-ID pairs so a
-cancelled or compacted turn cannot send an orphaned protocol item. Streaming
-runtimes detach an active transport before closing it;
+cancelled or compacted turn cannot send an orphaned protocol item. Responses
+runtimes bind a SHA-256-derived, non-identifying `prompt_cache_key` to the full
+Klaude session ID. The key remains stable across turns and `/resume`, changes for
+`/new` and `/fork`, stays below the provider's 64-character limit, and never
+contains the raw session ID, workspace, user input, or credentials. OpenAI API
+and Codex requests enable server-side compaction at 75 percent of a known cloud
+context window while retaining `store=false`. Provider-emitted encrypted
+compaction items are validated, kept private, replayed verbatim, and replace
+older dialogue items on later requests; the current generated system and
+capability contract is always re-sent. Unknown or small contexts retain Klaude's
+local extractive user-boundary compactor. Provider-reported cached and cache-write
+input-token counters are whitelisted for observers and shown by `/status`; missing
+counters remain absent rather than estimated. Do not request an extended cache
+retention policy implicitly: provider defaults preserve the conservative privacy
+boundary. Streaming runtimes detach an active transport before closing it;
 cancellation is thread-safe, idempotent, and best-effort, so an SDK/HTTP close
 failure cannot escape into a TUI key handler or session switch. The cooperative
 cancellation flag remains authoritative and is observed at the next safe
@@ -771,7 +1202,9 @@ The agent loop in `packages/core/src/klaude_core/agent.py` handles:
 - explicit workspace inspection requests receive a bounded host-side
   `workspace_info` preflight before the model answers, so weak local models
   cannot silently substitute a guess for real workspace evidence; the result
-  is persisted as an ordinary tool start/result pair;
+  is persisted as an ordinary tool start/result pair. A completed host preflight
+  is removed from the provider's callable schemas, and the model consumes the
+  attached result rather than repeating the same tool;
 - bounded hierarchical repository guidance. Applicable `AGENTS.md` files load
   root-to-leaf into the refreshed system prompt with a combined
   12,000-character budget. Every readable file receives a share and the closest
@@ -806,8 +1239,15 @@ The agent loop in `packages/core/src/klaude_core/agent.py` handles:
 - context-window protection at each user-turn boundary: stale dialogue is
   compacted in whole user-turn units so tool calls never separate from their
   outputs. A bounded extractive recap preserves public user/assistant context;
-  tool output, private metadata, and opaque reasoning are excluded. The
+  tool output, private metadata, and opaque reasoning are excluded. Bounded
+  tool names survive with an explicit warning that invocation does not prove
+  success; arguments and results are not copied into the recap. The
   canonical system prompt, newest turn, and separate entity state are retained.
+  Recap space is reserved before admitting bulky older tool exchanges, so
+  follow-ups retain the public task and corrections under context pressure.
+  Routing decisions that require recent context, such as a `run them` storage
+  follow-up, are captured before compaction and remain effective even when the
+  source exchange is reduced to the bounded recap.
 - if an Ollama CUDA runner aborts while placement is automatic, retry the
   request once with `num_gpu = 0` and emit only a high-level fallback activity.
   Never override an explicit CPU-only or GPU-only runtime choice.
@@ -815,6 +1255,12 @@ The agent loop in `packages/core/src/klaude_core/agent.py` handles:
 Do not use tools for greetings, thanks, introductions, ordinary casual
 conversation, or basic identity questions. Answer identity questions directly as
 Klaude, a local-first coding assistant.
+
+Treat explicit prohibitions as constraints, not positive intent. `Do not inspect`,
+`without editing`, and `do not modify` must not route inspection or mutation
+tools merely because the prohibited verb appears in the request. An explicit
+`do not use tools`, `without calling tools`, or `no tools` removes every model
+tool schema for that turn. Positive actions in separate clauses remain effective.
 
 Use tools when they materially improve correctness or perform a requested
 action. The model, not a keyword router, decides whether to call an exposed
@@ -838,6 +1284,12 @@ explicit clarifications such as entity type, location, official domain, and
 selected meaning. If the user changes the target entity or type, discard
 incompatible prior meanings. Never reuse "school" when the clarified target is
 "university", and never let an older acronym interpretation steer later queries.
+Local discovery/recommendation requests expose read-only web search and fetch
+even without literal search terminology; workspace subjects remain separately
+routed. Short location replies can inherit safe tools from preceding dialogue.
+The per-request search guidance treats explicit lookup requests as instructions
+to act, permits stated broad location assumptions, and avoids redundant approval
+questions without bypassing the host permission gate.
 
 ## Tool Safety And Git Discipline
 
@@ -1076,6 +1528,12 @@ the user explicitly asks for a documentation set, website crawl, or multiple
 pages. Site scope reuses the bounded same-domain crawler and, absent explicit
 include patterns, stays within the URL subtree supplied by the user. Persistent
 learning defaults to `ask`; approval is distinct from temporary web retrieval.
+When an explicit persistence request names a public product, project, skill, or
+documentation source without a URL, expose only the bounded discovery path:
+web search, URL fetch, persistent source learning, and structured user input.
+The model must locate and verify a canonical official URL before learning it;
+search snippets are never persisted as source content. A learned skill file is
+knowledge text, not an installed or executable third-party package.
 
 `klaude docs add` installs an `llms.txt` source by fetching the index plus
 same-domain Markdown/text links. `klaude docs update` refreshes `llms.txt` and
@@ -1294,11 +1752,65 @@ separate from native Klaude chat. Adding Klaude MCP servers to another agent
 gives that agent Klaude's web/knowledge tools, not Klaude's whole agent loop,
 permission model, or conversation state.
 
+Klaude chat is also an MCP client. The official public MCP Registry is the
+canonical discovery source; Klaude uses its versioned API rather than scraping
+vendor galleries. Search results are bounded, cached privately, sanitized for
+terminal display, and filtered to active latest records. Only supported HTTPS
+Streamable HTTP and exact-version npm/PyPI stdio plans can be saved, always
+disabled and with registry provenance. Discovery/install never implies trust or
+launches third-party code; enablement remains explicit. External server definitions live in the
+private `.klaude/data/mcp-servers.json` registry and support local stdio or
+remote Streamable HTTP. VS Code/OpenCode imports start disabled; explicit enable
+performs bounded tool discovery. Cached schemas avoid startup connections,
+namespaced tool identifiers prevent collisions, every external tool defaults to
+ASK, and enabled connections remain alive for the current Klaude process so
+stateful browser tools retain their session. Tokens are accepted only through
+environment references (including Bearer headers) and can be collected with the
+masked `klaude mcp secret` command into private `config/.env`. Server prompts and
+resources are not injected into the model. Tool descriptions and results are
+untrusted external content, remain output-bounded, and cannot override system,
+permission, workspace, or command-safety policy. OAuth-protected remotes use the
+official SDK flow with private per-server token/client storage and automatic
+refresh; they never reuse model-provider credentials.
+
+The MCP search composer offers at most eight locally ranked actual registry names.
+After a 350ms typing pause, an owned bounded background search updates suggestions;
+completion itself reads only memory. Stale results are discarded and leaving the
+composer cancels its search. Registry listing is not a trust endorsement.
+The popup sits two columns farther right in this composer. New search results
+select the first server instead of retaining the loading screen's Back selection.
+Arrow keys/Tab select or complete a name;
+Enter performs the existing bounded registry search. Queries do not enter shared
+drafts or chat-history autosuggestions, and secrets disable completion entirely.
+
+`scripts/compare_mcp_clients.py` is an opt-in synthetic reuse experiment, not a
+second production MCP stack. Run it in isolated, non-project uv environments;
+it uses only repository-owned local fixtures and synthetic in-memory auth.
+`docs/mcp-reuse.md` records measured SDK/FastMCP results and migration validation.
+Production uses official MCP SDK v2 through one shared high-level client factory
+for discovery and persistent connections. Handshake mode remains `legacy` to
+preserve existing session behavior. Web and knowledge servers use SDK `MCPServer`.
+Discovery follows at most 16 pages and retains at most 128 tools; repeated cursors
+fail visibly. Text and structured tool results share the existing bounded output
+budget; structured-only results remain available to the agent. Disabled servers cannot
+execute tools; explicit setup discovery
+remains available before enablement. A closed connection fails its current call
+without replay and is retired; a later request opens a fresh connection.
+The existing per-server worker bridge remains for the synchronous agent runtime.
+OAuth callbacks retain `iss` for SDK issuer checks and reject duplicate security
+parameters. Saved credentials are bound to the exact server URL; legacy records
+without matching resource discovery require login again. Expired stored tokens
+restore their remaining lifetime before the first request, with a narrow SDK 2.2
+initialization workaround. Credential reads reject symlinks, non-regular files
+and oversized content. The comparison script's synthetic refresh test is separate
+from production storage/refresh regression tests in `tests/unit/test_mcp_v2.py`.
+
 ## Current Boundaries
 
 - There is no native VS Code extension or `klaude serve` IDE backend yet.
 - The CLI/TUI is the full agent surface today.
-- MCP servers expose only web and knowledge capabilities.
+- Klaude's built-in MCP servers expose only web and knowledge capabilities;
+  external MCP client tools are individually permission-gated.
 - Optional hosted providers may send queries/URLs to third-party services.
 - Web search and URL fetch evidence are temporary; they are not written to
   memory or knowledge unless a learn/docs/crawl/import command explicitly does
@@ -1316,12 +1828,34 @@ Use focused checks after relevant changes:
 
 Live behavioral model comparisons are deliberately separate from deterministic
 CI. Run `uv run python scripts/evaluate_agent_behavior.py --model MODEL --yes`
-to evaluate direct response, workspace inspection, and contextual diagnostic
-behavior. Each model/scenario pair runs read-only in an isolated child process
-with a hard timeout. Raw answers, tool output, provider errors, and credentials
-are not written to the report. Network retrieval requires an explicit scenario
-plus `--include-network`; report paths must be new files inside the evaluated
-workspace.
+to evaluate direct response, workspace inspection, contextual diagnostics, and
+synthetic learned-document grounding. Additional `conversation-continuation` and
+network-opt-in `local-search-followup` scenarios exercise seeded conversational
+context. Optional answer/query term groups require at least one alternative in
+each group; query expectations must match one actual executed web-search query.
+Unrelated answers and wrong-city searches fail with bounded expectation categories.
+Raw queries remain local to scoring and are not included in reports. These lexical
+checks are not a complete semantic guarantee; inspect live answers and executed
+queries when assessing whether a model retained the intended task.
+Each model/scenario pair runs read-only in
+an isolated child process with a hard timeout and a private temporary Klaude data
+directory; real memory, sessions, and learned libraries are neither read nor
+modified. Only the public model-capability cache is copied into that directory so
+transient catalog discovery does not invalidate a configured model. The learned
+document scenario seeds synthetic text locally and passes only when the answer
+uses `query_knowledge`, states the expected claim, and includes its exact source
+URL. Reports include grounded/expected claim counts and a grounding score. Raw
+answers, tool output, provider errors, and credentials are not written to the
+report. Schema-versioned comparison sections aggregate pass rate, elapsed time,
+grounding, reported token totals, and unknown-token counts by model and scenario.
+Ask-policy tools are approved only when the
+scenario explicitly declares them as expected evidence; every other unattended
+prompt is denied, and evaluation scope remains read-only. Direct-answer scenarios
+can forbid all tool activity. A private atomic progress sidecar lets timeout and
+worker-failure reports retain bounded event counts, tool names, request counts,
+permission counts, and available token counters without retaining content.
+Network retrieval requires an explicit scenario plus `--include-network`; report
+schema version 2 paths must be new files inside the evaluated workspace.
 
 For secret-safe Compose validation:
 

@@ -14,15 +14,56 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from klaude_core import EvaluationScenario, evaluate_agent_turn, load_config
+from klaude_core import (
+    EvaluationScenario,
+    GroundingExpectation,
+    evaluate_agent_turn,
+    load_config,
+)
+from klaude_core.model_runtime import load_model_cache, save_model_cache
+
+_LEARNED_DOCUMENT_SOURCE = "https://docs.example.invalid/aerolith/cache-beacons"
+_LEARNED_DOCUMENT_LIBRARY = "evaluation-aerolith"
+_LEARNED_DOCUMENT_TEXT = """# Aerolith cache beacons
+
+Aerolith SDK cache beacons rotate every 17 minutes. Administrators can inspect
+the current beacon without changing it by running `aerolith cache inspect`.
+"""
 
 SCENARIOS = {
+    "conversation-continuation": EvaluationScenario(
+        name="conversation-continuation",
+        prior_messages=(
+            {"role": "user", "content": "Explain the difference between Context7 and web search."},
+            {"role": "assistant", "content": (
+                "Context7 retrieves library documentation and code examples. Web search "
+                "is useful for broader sources, including"
+            )},
+        ),
+        prompt="You didn't finish. Continue from where you stopped. Do not use tools.",
+        forbid_any_tool=True,
+        required_answer_terms=(("web", "search", "news", "sources"),),
+    ),
+    "local-search-followup": EvaluationScenario(
+        name="local-search-followup",
+        prior_messages=(
+            {"role": "user", "content": "Find a local coffee shop. Use Cambodia initially."},
+            {"role": "assistant", "content": "I'll use Cambodia as the approximate region."},
+        ),
+        prompt="I'm in Ta Khmau. Find coffee shops there and cite your sources.",
+        expected_any_tools=("web_search", "fetch_url"),
+        requires_retrieval_support=True,
+        network_required=True,
+        required_search_terms=(("coffee", "cafe", "café"), ("ta khmau", "takhmao", "takhmau")),
+        required_answer_terms=(("ta khmau", "takhmao", "takhmau"),),
+    ),
     "direct-answer": EvaluationScenario(
         name="direct-answer",
         prompt=(
             "In two concise sentences, explain why deterministic tests matter. "
             "Do not inspect the workspace or use tools."
         ),
+        forbid_any_tool=True,
     ),
     "workspace-inspection": EvaluationScenario(
         name="workspace-inspection",
@@ -43,6 +84,21 @@ SCENARIOS = {
         ),
         prompt="Run them and summarize the evidence. Do not modify anything.",
         expected_any_tools=("storage_usage",),
+    ),
+    "learned-document": EvaluationScenario(
+        name="learned-document",
+        prompt=(
+            "Using the learned evaluation-aerolith documentation, state how often Aerolith "
+            "SDK cache beacons rotate and cite the exact supporting source URL."
+        ),
+        expected_any_tools=("query_knowledge",),
+        requires_retrieval_support=True,
+        grounding_expectations=(
+            GroundingExpectation(
+                claim_terms=("17 minutes",),
+                source_references=(_LEARNED_DOCUMENT_SOURCE,),
+            ),
+        ),
     ),
     "web-retrieval": EvaluationScenario(
         name="web-retrieval",
@@ -79,10 +135,24 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--yes", action="store_true", help="confirm live provider usage")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--result-file", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--progress-file", type=Path, help=argparse.SUPPRESS)
     return parser
 
 
-def _worker(model_ref: str, scenario_name: str, workspace: Path, result_file: Path) -> int:
+def _write_progress(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically persist only the evaluator's sanitized in-flight counters."""
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _worker(
+    model_ref: str,
+    scenario_name: str,
+    workspace: Path,
+    result_file: Path,
+    progress_file: Path,
+) -> int:
     # Import CLI wiring only in the isolated worker. The evaluator deliberately
     # exercises the same model resolution, runtime, tools, and prompt as Klaude.
     from klaude_cli.main import (
@@ -98,15 +168,29 @@ def _worker(model_ref: str, scenario_name: str, workspace: Path, result_file: Pa
     if selected is None:
         raise ValueError(f"model is unavailable or ambiguous: {model_ref}")
     _set_agent_model(agent, cfg, _agent_local_ollama(agent), selected)
-    # A live evaluation must never block on an unattended approval modal. Keep
-    # the user's actual policies so prompts remain measurable, but deny every
-    # ask-policy invocation. Agent.run(read_only=True) independently removes
-    # mutation and arbitrary-shell schemas before the provider request.
-    agent.gate.set_ask_callback(lambda _tool, _detail: "n")
+    if scenario_name == "learned-document":
+        from klaude_knowledge import Knowledge
+
+        knowledge = Knowledge(cfg, _agent_local_ollama(agent))
+        knowledge.learn_text(
+            _LEARNED_DOCUMENT_LIBRARY,
+            _LEARNED_DOCUMENT_TEXT,
+            source=_LEARNED_DOCUMENT_SOURCE,
+            title="Aerolith cache beacons",
+        )
+    # A live evaluation must never block on an unattended approval modal.
+    # Approve only the scenario's declared evidence tools and deny every other
+    # ask-policy invocation. Evaluation scope independently removes mutation,
+    # arbitrary shell, persistent learning, delegation, and interactive input.
+    expected_tools = set(SCENARIOS[scenario_name].expected_any_tools)
+    agent.gate.set_ask_callback(
+        lambda tool, _detail: "y" if tool in expected_tools else "n"
+    )
     result = evaluate_agent_turn(
         agent,
         SCENARIOS[scenario_name],
         model_ref=selected.ref,
+        progress_observer=lambda payload: _write_progress(progress_file, payload),
     )
     result_file.write_text(json.dumps(result.to_dict(), sort_keys=True), encoding="utf-8")
     return 0
@@ -129,7 +213,7 @@ def _worker_error_category(error: Exception) -> str:
     return "harness"
 
 
-def _valid_worker_result_path(path: Path) -> bool:
+def _valid_worker_output_path(path: Path) -> bool:
     temporary_root = Path(tempfile.gettempdir()).resolve()
     resolved = path.resolve()
     return (
@@ -137,8 +221,6 @@ def _valid_worker_result_path(path: Path) -> bool:
         and resolved.parent.parent == temporary_root
         and resolved.parent.name.startswith("klaude-eval-")
     )
-
-
 def _stop_worker(process: subprocess.Popen[str]) -> None:
     try:
         if os.name == "posix":
@@ -158,6 +240,8 @@ def _stop_worker(process: subprocess.Popen[str]) -> None:
 
 
 def _failed_result(model: str, scenario: str, category: str, elapsed: float) -> dict[str, Any]:
+    configured = SCENARIOS.get(scenario, EvaluationScenario(scenario, ""))
+    expected_claims = len(configured.grounding_expectations)
     return {
         "scenario": scenario,
         "model_ref": model,
@@ -179,11 +263,113 @@ def _failed_result(model: str, scenario: str, category: str, elapsed: float) -> 
         "input_tokens": None,
         "output_tokens": None,
         "finalization_score": 0.0,
-        "retrieval_support": "not_applicable",
+        "retrieval_support": (
+            "unsupported" if configured.requires_retrieval_support else "not_applicable"
+        ),
         "source_references": 0,
+        "grounded_claims": 0,
+        "expected_claims": expected_claims,
+        "grounding_score": 0.0,
         "safety_violations": [],
         "error_categories": [category],
     }
+
+
+def _aggregate_results(
+    results: list[dict[str, Any]], group_key: str
+) -> dict[str, dict[str, int | float]]:
+    """Build deterministic, content-free comparison rows for reports."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for result in results:
+        label = str(result.get(group_key, "") or "unknown")[:256]
+        groups.setdefault(label, []).append(result)
+    aggregated: dict[str, dict[str, int | float]] = {}
+    for label in sorted(groups, key=str.casefold):
+        rows = groups[label]
+        elapsed = [
+            float(row["elapsed_seconds"])
+            for row in rows
+            if isinstance(row.get("elapsed_seconds"), (int, float))
+            and not isinstance(row.get("elapsed_seconds"), bool)
+        ]
+        grounding = [
+            float(row["grounding_score"])
+            for row in rows
+            if isinstance(row.get("grounding_score"), (int, float))
+            and not isinstance(row.get("grounding_score"), bool)
+        ]
+        input_tokens = [row.get("input_tokens") for row in rows]
+        output_tokens = [row.get("output_tokens") for row in rows]
+        passed = sum(bool(row.get("success")) for row in rows)
+        aggregated[label] = {
+            "total": len(rows),
+            "passed": passed,
+            "pass_rate": round(passed / len(rows), 3),
+            "mean_elapsed_seconds": round(sum(elapsed) / len(elapsed), 3) if elapsed else 0.0,
+            "mean_grounding_score": (
+                round(sum(grounding) / len(grounding), 3) if grounding else 0.0
+            ),
+            "reported_input_tokens": sum(
+                value
+                for value in input_tokens
+                if isinstance(value, int) and not isinstance(value, bool)
+            ),
+            "reported_output_tokens": sum(
+                value
+                for value in output_tokens
+                if isinstance(value, int) and not isinstance(value, bool)
+            ),
+            "unknown_token_results": sum(
+                input_value is None or output_value is None
+                for input_value, output_value in zip(input_tokens, output_tokens, strict=True)
+            ),
+        }
+    return aggregated
+
+
+def _read_progress(path: Path) -> dict[str, Any]:
+    """Read a bounded, secret-free evaluator progress snapshot."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    sanitized: dict[str, Any] = {}
+    for key in (
+        "model_requests",
+        "tool_failures",
+        "retries",
+        "invalid_tool_retries",
+        "permission_prompts",
+        "permission_denials",
+    ):
+        value = payload.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1_000_000:
+            sanitized[key] = value
+    for key in ("input_tokens", "output_tokens"):
+        value = payload.get(key)
+        sanitized[key] = (
+            value
+            if isinstance(value, int)
+            and not isinstance(value, bool)
+            and 0 <= value <= 2_000_000_000
+            else None
+        )
+    counts = payload.get("event_counts")
+    if isinstance(counts, dict):
+        sanitized["event_counts"] = {
+            str(key)[:64]: value
+            for key, value in list(counts.items())[:64]
+            if isinstance(value, int)
+            and not isinstance(value, bool)
+            and 0 <= value <= 1_000_000
+        }
+    for key in ("tools_started", "tools_completed", "tools_succeeded"):
+        values = payload.get(key)
+        if isinstance(values, list):
+            sanitized[key] = [str(value)[:128] for value in values[:256]]
+    return sanitized
 
 
 def _run_isolated(
@@ -195,6 +381,17 @@ def _run_isolated(
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="klaude-eval-") as temporary:
         result_file = Path(temporary) / "result.json"
+        progress_file = Path(temporary) / "progress.json"
+        isolated_data = Path(temporary) / "data"
+        # Model catalogs contain public capability metadata, not credentials or
+        # conversation content. Copy only that cache so transient discovery
+        # failures do not make an otherwise configured evaluation model vanish.
+        try:
+            source_cache = load_model_cache(load_config().data_dir / "model-cache.json")
+            if source_cache:
+                save_model_cache(isolated_data / "model-cache.json", source_cache)
+        except (OSError, ValueError):
+            pass
         command = [
             sys.executable,
             str(script),
@@ -207,6 +404,8 @@ def _run_isolated(
             str(workspace),
             "--result-file",
             str(result_file),
+            "--progress-file",
+            str(progress_file),
         ]
         started = datetime.now(UTC)
         process = subprocess.Popen(
@@ -215,19 +414,29 @@ def _run_isolated(
             stderr=subprocess.DEVNULL,
             text=True,
             start_new_session=os.name == "posix",
+            env={
+                **os.environ,
+                # Never let live evaluation fixtures, sessions, or memory read
+                # from or write to the user's real Klaude data directory.
+                "KLAUDE_DATA_DIR": str(isolated_data),
+            },
         )
         try:
             process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             _stop_worker(process)
             elapsed = (datetime.now(UTC) - started).total_seconds()
-            return _failed_result(model, scenario, "timeout", elapsed)
+            failed = _failed_result(model, scenario, "timeout", elapsed)
+            failed.update(_read_progress(progress_file))
+            return failed
         except KeyboardInterrupt:
             _stop_worker(process)
             raise
         elapsed = (datetime.now(UTC) - started).total_seconds()
         if process.returncode != 0 or not result_file.is_file():
-            return _failed_result(model, scenario, "harness", elapsed)
+            failed = _failed_result(model, scenario, "harness", elapsed)
+            failed.update(_read_progress(progress_file))
+            return failed
         try:
             payload = json.loads(result_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -252,9 +461,16 @@ def _confirm(args: argparse.Namespace, scenarios: list[str]) -> bool:
 def main() -> int:
     args = _parser().parse_args()
     if args.worker:
-        if len(args.model) != 1 or len(args.scenario) != 1 or args.result_file is None:
+        if (
+            len(args.model) != 1
+            or len(args.scenario) != 1
+            or args.result_file is None
+            or args.progress_file is None
+        ):
             return 2
-        if not _valid_worker_result_path(args.result_file):
+        if not _valid_worker_output_path(
+            args.result_file
+        ) or not _valid_worker_output_path(args.progress_file):
             return 2
         try:
             return _worker(
@@ -262,6 +478,7 @@ def main() -> int:
                 args.scenario[0],
                 args.workspace.resolve(),
                 args.result_file,
+                args.progress_file,
             )
         except Exception as exc:
             # The parent records a bounded category. Raw provider exceptions can
@@ -327,13 +544,17 @@ def main() -> int:
         return 130
 
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime.now(UTC).isoformat(),
         "results": results,
         "summary": {
             "total": len(results),
             "passed": sum(bool(item.get("success")) for item in results),
             "failed": sum(not bool(item.get("success")) for item in results),
+        },
+        "comparison": {
+            "by_model": _aggregate_results(results, "model_ref"),
+            "by_scenario": _aggregate_results(results, "scenario"),
         },
     }
     rendered = json.dumps(report, indent=2, sort_keys=True)

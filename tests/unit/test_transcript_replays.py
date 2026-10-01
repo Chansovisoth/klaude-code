@@ -112,10 +112,16 @@ def test_transcript_replay_keeps_schemas_prompt_and_completion_in_sync(case, pro
     events = list(agent.run(case["user"]))
 
     schemas = {item["function"]["name"] for item in runtime.requests[0][1]}
+    completed_evidence = {
+        str(event.payload.get("tool", ""))
+        for event in events
+        if event.kind == "tool_result"
+        and event.payload.get("metadata", {}).get("executed") is not False
+    }
     snapshot = agent.last_turn_capabilities
     assert schemas == set(snapshot["callable_tools"])
     if profile["supports_tools"]:
-        assert set(case["expected_tools"]) <= schemas
+        assert set(case["expected_tools"]) <= schemas | completed_evidence
     else:
         assert schemas == set()
         assert set(case["expected_tools"]) <= set(snapshot["unavailable_tools"])

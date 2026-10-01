@@ -2,13 +2,67 @@
 
 ## Unreleased
 
+- Add a native external MCP client with local stdio and remote Streamable HTTP
+  transports, safe VS Code/OpenCode JSON import, explicit trust before launch,
+  cached bounded tool discovery, collision-safe namespacing, per-tool ASK
+  permissions, persistent process-scoped sessions for browser/stateful servers,
+  bounded untrusted results, and masked environment-backed secret storage.
+  Expose management through `klaude mcp` and `/mcp` in Settings without slowing
+  chat startup or injecting remote prompts/resources into model context.
+  Add bounded asynchronous discovery through the official public MCP Registry
+  in `/mcp` and `klaude mcp search/info/install`. Filter to active latest
+  records, cache them privately with stale fallback, sanitize untrusted display
+  metadata, accept only HTTPS Streamable HTTP or exact-version npm/PyPI plans,
+  preserve provenance, and save every registry install disabled without
+  connecting, downloading, or executing third-party code.
+  Complete protected remote-server authentication with the official SDK's OAuth
+  discovery, PKCE/state validation, dynamic registration or optional Client ID
+  Metadata Documents, automatic refresh, private per-server token/client storage,
+  loopback and masked manual callbacks, and explicit auth status/logout commands.
+  Complete the in-chat MCP setup path: collect required registry values and
+  secrets, add custom HTTP/stdio definitions, import compatible JSON, and
+  confirm connection/enablement without leaving Settings. Fix a redraw crash
+  caused by evaluating a static-only registry type at runtime.
+- Preserve OpenAI Responses continuity without changing Klaude's local-first
+  privacy boundary: API and Codex requests continue to use `store=false`, request
+  encrypted reasoning state, and replay only validated provider-issued reasoning,
+  assistant-message, and function-call items. Assistant `phase` values survive
+  stateless continuation, while orphaned provider function calls remain excluded.
+  Store this opaque replay envelope only as private model context in the
+  owner-only session database so `/resume` can restore it without exposing it in
+  transcript text or shared session events. Bind a hashed, per-session prompt
+  cache routing key across turns and resume, rotate it for new/forked sessions,
+  and enable ZDR-friendly server-side compaction before Klaude's local fallback
+  threshold. Strictly retain and replay encrypted compaction items, prune older
+  provider dialogue before the latest item while re-sending Klaude's current
+  system/capability contract, and expose only exact provider-reported cache hit
+  and cache-write token counters in `/status` and shared completion metadata.
+- Make routing prohibition-aware so negated inspection, execution, and mutation
+  verbs do not expose unintended tools. Preserve contextual storage intent across
+  user-boundary compaction, prefer the bounded `storage_usage` capability over
+  generic shell/workspace hints, and retire completed host-preflight tools before
+  the provider request to prevent duplicate calls. Strengthen live evaluations
+  so direct scenarios can forbid every tool, expected read-only evidence can be
+  approved unattended, and timed-out workers retain only sanitized partial
+  counters and tool activity.
 - Add OpenRouter as a first-class Cloud model provider with authenticated live
   model discovery, truthful tool/context/reasoning capabilities, SSE streaming,
   native Klaude tool calls, usage accounting, cancellation, and private
   reasoning-continuation state. Add Settings > Providers for masked API-key
   entry/removal across cloud models and all configured web, hosted-fetch/crawl,
   and Hugging Face providers, with atomic owner-only `config/.env` persistence
-  that never exposes values in transcript or session state.
+  that never exposes values in transcript or session state. Rework Settings as
+  a grouped, aligned live overview; preserve logical selection across dynamic
+  updates and navigation; and give each provider a descriptive Add/Update/Remove
+  detail page instead of mixing key actions into the provider list. Load the
+  Skills inventory asynchronously with an immediate loading state and a
+  short-lived cache, avoiding the first-use knowledge-package import stall.
+  Standardize unavailable picker actions as gray but focusable rows whose Enter
+  and mouse confirmation are safe no-ops, including missing credentials, empty
+  model catalogs, absent Nano editors, and an unavailable Custom permission map.
+  Add ranked type-to-filter behavior to selection screens, and put Login/Logout
+  at the top of every Cloud model page with masked API-key entry, official Codex
+  device login, and confirmation before logout.
 - Fix explicit workspace-inspection routing for weak local models: recognize
   natural inspection/review wording, keep the selected schema read-only, and
   run one bounded `workspace_info` preflight before synthesis. Persist its
@@ -53,7 +107,13 @@
 - Add a privacy-bounded live behavioral evaluation harness with isolated
   read-only model/scenario workers, hard timeouts, explicit network opt-in,
   non-overwriting report paths, sanitized provider failure categories, and
-  comparable tool/retry/permission/token/finalization/retrieval metrics. Expand
+  comparable tool/retry/permission/token/finalization/retrieval metrics. Isolate
+  every worker from real saved memory, sessions, and knowledge, copying only the
+  public model catalog. Add an offline synthetic learned-document scenario and
+  deterministic claim-plus-source grounding expectations, counts, and scores so
+  retrieval is not credited merely because a tool ran. Add content-free per-model
+  and per-scenario comparison aggregates, and classify repeated required-retrieval
+  omissions separately from generic runtime failures. Expand
   deterministic transcript replays across local, cloud, Codex-authenticated,
   and tool-less capability profiles.
 - Make provider stream cancellation best-effort and idempotent across Ollama,

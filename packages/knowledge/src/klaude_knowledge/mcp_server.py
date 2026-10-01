@@ -38,11 +38,11 @@ def _mcp_workspace_path(value: str, workspace: Path) -> Path:
 
 
 def main() -> None:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
     cfg = load_config()
     kn = Knowledge(cfg)
-    mcp = FastMCP("klaude-knowledge")
+    mcp = MCPServer("klaude-knowledge")
     writes_allowed = _mcp_writes_enabled()
     workspace = Path(os.environ.get("KLAUDE_MCP_WORKSPACE", Path.cwd())).resolve()
 

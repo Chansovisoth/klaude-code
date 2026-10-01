@@ -106,6 +106,36 @@ def test_session_keeps_private_model_context_separate_from_visible_turn(tmp_path
     assert memory.search_sessions("private contents") == []
 
 
+def test_session_model_content_round_trips_provider_replay_state(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    provider_message = {
+        "role": "assistant",
+        "content": "Done.",
+        "openai_response_items": [
+            {
+                "id": "rs_123",
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": "opaque-state",
+            }
+        ],
+    }
+
+    memory.log_turn(
+        "session-1",
+        "assistant",
+        "Done.",
+        model_content=provider_message,
+    )
+
+    assert memory.load_session("session-1")[0] == {
+        "role": "assistant",
+        "content": "Done.",
+        "model_content": provider_message,
+    }
+    assert memory.search_sessions("opaque-state") == []
+
+
 def test_session_events_are_ordered_and_cursor_based(tmp_path):
     memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
     first = memory.publish_session_event("s1", "client-a", "activity", {"text": "thinking"})
