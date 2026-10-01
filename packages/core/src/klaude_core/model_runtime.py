@@ -357,6 +357,7 @@ class ModelRuntime(Protocol):
         self,
         model: str,
         messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
         options: dict[str, Any] | None = None,
         think: bool | str | None = None,
     ): ...
@@ -612,6 +613,7 @@ class OpenAIRuntime(_CancelableResponseRuntime):
         self,
         model: str,
         messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
         options: dict[str, Any] | None = None,
         think: bool | str | None = None,
     ):
@@ -623,16 +625,21 @@ class OpenAIRuntime(_CancelableResponseRuntime):
             "include": ["reasoning.encrypted_content"],
             **self._continuity_options(),
         }
+        if tools:
+            kwargs["tools"] = self._tools(tools)
         if think not in {None, False, "off", "auto"}:
             kwargs["reasoning"] = {"effort": str(think)}
         response_stream = self._track_active_response(self._response_create(**kwargs))
         completed = False
+        streamed_text = False
         try:
             for event in response_stream:
                 kind = getattr(event, "type", "")
                 if kind == "response.output_text.delta":
+                    streamed_text = True
                     yield {"role": "assistant", "content": getattr(event, "delta", "")}
                 elif kind == "response.refusal.delta":
+                    streamed_text = True
                     yield {"role": "assistant", "content": getattr(event, "delta", "")}
                 elif kind == "response.completed":
                     response = getattr(event, "response", None)
@@ -649,8 +656,11 @@ class OpenAIRuntime(_CancelableResponseRuntime):
                         for key, value in terminal.items()
                         if key not in {"role", "content"}
                     }
-                    if metadata:
-                        yield {"role": "assistant", "content": "", **metadata}
+                    yield {
+                        "role": "assistant",
+                        "content": "" if streamed_text else terminal.get("content", ""),
+                        **metadata,
+                    }
                 elif kind in {"response.failed", "response.incomplete"}:
                     response = getattr(event, "response", None)
                     self._record(response)
@@ -1074,15 +1084,17 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         self,
         model: str,
         messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
         options: dict[str, Any] | None = None,
         think: bool | str | None = None,
     ):
         response_stream = self._track_active_response(
-            self._stream(model, messages, None, think)
+            self._stream(model, messages, tools, think)
         )
         response_id = ""
         usage: Any = None
         reasoning_details: list[dict[str, Any]] = []
+        calls: dict[int, dict[str, Any]] = {}
         completed = False
         try:
             for chunk in response_stream:
@@ -1102,12 +1114,37 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
                     piece = self._attribute(delta, "content", "") or ""
                     if piece:
                         yield {"role": "assistant", "content": str(piece)}
+                    for fragment in self._attribute(delta, "tool_calls", []) or []:
+                        index = int(self._attribute(fragment, "index", 0) or 0)
+                        current = calls.setdefault(
+                            index,
+                            {"id": "", "function": {"name": "", "arguments": ""}},
+                        )
+                        if call_id := self._attribute(fragment, "id", ""):
+                            current["id"] = str(call_id)
+                        function = self._attribute(fragment, "function", {}) or {}
+                        if name := self._attribute(function, "name", ""):
+                            current["function"]["name"] += str(name)
+                        if arguments := self._attribute(function, "arguments", ""):
+                            current["function"]["arguments"] += str(arguments)
+            assembled_calls = [calls[index] for index in sorted(calls)]
+            for call in assembled_calls:
+                if not call["id"] or not call["function"]["name"]:
+                    raise RuntimeError("OpenRouter returned a malformed function call.")
+                try:
+                    arguments = json.loads(call["function"]["arguments"] or "{}")
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError("OpenRouter returned malformed function arguments.") from exc
+                if not isinstance(arguments, dict):
+                    raise RuntimeError("OpenRouter returned non-object function arguments.")
             if reasoning_details:
                 yield {
                     "role": "assistant",
                     "content": "",
                     "openrouter_reasoning_details": reasoning_details,
                 }
+            if assembled_calls:
+                yield {"role": "assistant", "content": "", "tool_calls": assembled_calls}
         finally:
             self._clear_active_response(response_stream)
             self.last_chat_metadata = {
@@ -1191,11 +1228,12 @@ class CodexRuntime(OpenAIRuntime):
         kwargs: dict[str, Any] = {
             "model": model,
             "input": self._input(messages),
-            "tools": self._tools(tools),
             "stream": True,
             "store": False,
             **self._continuity_options(),
         }
+        if tools:
+            kwargs["tools"] = self._tools(tools)
         if think not in {None, False, "off", "auto"}:
             kwargs["reasoning"] = {"effort": str(think)}
         response_stream = self._track_active_response(self._response_create(**kwargs))
@@ -1266,12 +1304,14 @@ class CodexRuntime(OpenAIRuntime):
         self,
         model: str,
         messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
         options: dict[str, Any] | None = None,
         think: bool | str | None = None,
     ):
         kwargs: dict[str, Any] = {
             "model": model,
             "input": self._input(messages),
+            "tools": self._tools(tools),
             "stream": True,
             "store": False,
             **self._continuity_options(),
@@ -1280,10 +1320,12 @@ class CodexRuntime(OpenAIRuntime):
             kwargs["reasoning"] = {"effort": str(think)}
         response_stream = self._track_active_response(self._response_create(**kwargs))
         completed = False
+        streamed_text = False
         try:
             for event in response_stream:
                 kind = getattr(event, "type", "")
                 if kind in {"response.output_text.delta", "response.refusal.delta"}:
+                    streamed_text = True
                     yield {"role": "assistant", "content": getattr(event, "delta", "") or ""}
                 elif kind == "response.completed":
                     response = getattr(event, "response", None)
@@ -1298,10 +1340,13 @@ class CodexRuntime(OpenAIRuntime):
                     metadata = {
                         key: value
                         for key, value in terminal.items()
-                        if key not in {"role", "content", "tool_calls"}
+                        if key not in {"role", "content"}
                     }
-                    if metadata:
-                        yield {"role": "assistant", "content": "", **metadata}
+                    yield {
+                        "role": "assistant",
+                        "content": "" if streamed_text else terminal.get("content", ""),
+                        **metadata,
+                    }
                 elif kind in {"response.failed", "response.incomplete"}:
                     response = getattr(event, "response", None)
                     self._record(response)
@@ -1551,19 +1596,42 @@ class GeminiRuntime(_CancelableResponseRuntime):
         self,
         model: str,
         messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
         options: dict[str, Any] | None = None,
         think: bool | str | None = None,
     ):
         response_stream = self._track_active_response(
-            self._request(model, messages, None, True, think)
+            self._request(model, messages, tools, True, think)
         )
+        calls: list[dict[str, Any]] = []
         try:
             for chunk in response_stream:
                 yield {"role": "assistant", "content": getattr(chunk, "text", "") or ""}
+                for candidate in getattr(chunk, "candidates", []) or []:
+                    for part in getattr(getattr(candidate, "content", None), "parts", []) or []:
+                        call = getattr(part, "function_call", None)
+                        if call is None:
+                            continue
+                        normalized: dict[str, Any] = {
+                            "id": getattr(call, "id", ""),
+                            "function": {
+                                "name": call.name,
+                                "arguments": json.dumps(dict(call.args or {})),
+                            },
+                        }
+                        signature = getattr(part, "thought_signature", None)
+                        if isinstance(signature, bytes) and signature:
+                            normalized["thought_signature"] = base64.b64encode(
+                                signature
+                            ).decode("ascii")
+                        if normalized not in calls:
+                            calls.append(normalized)
                 self.last_chat_metadata = {
                     "provider": "gemini_api",
                     "usage": getattr(chunk, "usage_metadata", None),
                 }
+            if calls:
+                yield {"role": "assistant", "content": "", "tool_calls": calls}
         finally:
             self._clear_active_response(response_stream)
 

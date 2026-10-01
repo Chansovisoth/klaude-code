@@ -926,6 +926,92 @@ def test_codex_runtime_streaming_preserves_deltas(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("runtime_factory", [
+    lambda: OpenAIRuntime("secret"), lambda: CodexRuntime(auth=object()),
+])
+def test_responses_tool_enabled_stream_exposes_deltas_and_terminal_call(
+    monkeypatch, runtime_factory
+):
+    runtime = runtime_factory()
+    captured = {}
+    call = type("Call", (), {
+        "type": "function_call", "call_id": "call-1", "name": "inspect",
+        "arguments": "{}", "id": "item-1",
+    })()
+    response = type("Response", (), {
+        "output": [call], "output_text": "Checking.", "usage": None,
+    })()
+    events = [
+        type("Event", (), {"type": "response.output_text.delta", "delta": "Checking."})(),
+        type("Event", (), {"type": "response.completed", "response": response})(),
+    ]
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return iter(events)
+
+    monkeypatch.setattr(runtime, "_response_create", create)
+    schema = {"function": {"name": "inspect", "description": "Inspect", "parameters": {}}}
+    chunks = list(runtime.chat_stream("gpt-test", [], tools=[schema]))
+
+    assert captured["tools"][0]["name"] == "inspect"
+    assert captured["store"] is False
+    assert [chunk["content"] for chunk in chunks] == ["Checking.", ""]
+    assert chunks[-1]["tool_calls"][0]["function"]["name"] == "inspect"
+
+
+def test_openrouter_tool_enabled_stream_keeps_tool_arguments_private(monkeypatch):
+    runtime = OpenRouterRuntime("secret")
+    seen_tools = []
+    chunks = [
+        {"choices": [{"delta": {"content": "Checking.", "tool_calls": [{
+            "index": 0, "id": "call-1",
+            "function": {"name": "inspect", "arguments": '{"pa'},
+        }]}}]},
+        {"choices": [{"finish_reason": "tool_calls", "delta": {"tool_calls": [{
+            "index": 0, "function": {"arguments": 'th":"README.md"}'},
+        }]}}]},
+    ]
+
+    def stream(_model, _messages, tools, _think):
+        seen_tools.extend(tools)
+        return iter(chunks)
+
+    monkeypatch.setattr(runtime, "_stream", stream)
+    schema = {"function": {"name": "inspect"}}
+    output = list(runtime.chat_stream("cloud-test", [], tools=[schema]))
+    assert seen_tools == [schema]
+    assert output[0]["content"] == "Checking."
+    assert all("README.md" not in str(chunk.get("content")) for chunk in output)
+    assert output[-1]["tool_calls"][0]["function"]["arguments"] == '{"path":"README.md"}'
+
+
+def test_gemini_tool_enabled_stream_preserves_function_call_signature(monkeypatch):
+    runtime = GeminiRuntime("secret")
+    requested = []
+    call = type("Call", (), {"id": "call-1", "name": "inspect", "args": {}})()
+    part = type("Part", (), {
+        "function_call": call, "thought_signature": b"private-signature",
+    })()
+    content = type("Content", (), {"parts": [part]})()
+    candidate = type("Candidate", (), {"content": content})()
+    chunk = type("Chunk", (), {
+        "text": "Checking.", "candidates": [candidate], "usage_metadata": None,
+    })()
+
+    def request(_model, _messages, tools, stream, _think):
+        requested.extend(tools)
+        assert stream is True
+        return iter([chunk])
+
+    monkeypatch.setattr(runtime, "_request", request)
+    schema = {"function": {"name": "inspect"}}
+    output = list(runtime.chat_stream("gemini-test", [], tools=[schema]))
+    assert requested == [schema]
+    assert output[0]["content"] == "Checking."
+    assert output[-1]["tool_calls"][0]["thought_signature"]
+
+
 def test_openai_stream_requires_terminal_completion_event(monkeypatch):
     runtime = OpenAIRuntime("secret")
     events = [type("Event", (), {"type": "response.output_text.delta", "delta": "partial"})()]

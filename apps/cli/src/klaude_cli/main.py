@@ -154,7 +154,7 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.menus import CompletionsMenu, CompletionsMenuControl
 from prompt_toolkit.layout.processors import ConditionalProcessor, Processor, Transformation
 from prompt_toolkit.layout.screen import Char
-from prompt_toolkit.lexers import Lexer, PygmentsLexer
+from prompt_toolkit.lexers import DynamicLexer, Lexer, PygmentsLexer
 from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.renderer import print_formatted_text
 from prompt_toolkit.shortcuts import CompleteStyle, radiolist_dialog
@@ -189,6 +189,16 @@ from .pickers import PickerController, PickerRow, match_score
 from .session_actions import AutomaticMemoryUpdate, SessionActionWriter, SessionSettingUpdate
 from .session_io import SessionIOCoordinator, SessionIORequest, SessionIOResult, collect_session_io
 from .settings_overview import SettingsOverviewSnapshot
+from .settings_panel import (
+    PanelAction,
+    PanelPage,
+    PanelRow,
+    PanelState,
+    RowKind,
+    render_body,
+    render_footer,
+    render_header,
+)
 from .settings_writer import SettingsWriter
 
 app = typer.Typer(
@@ -439,6 +449,20 @@ SETTINGS_CATEGORY_FOR_KIND = {
     "runtime settings": "runtime",
 }
 
+# These existing settings flows retain their action and background-job state
+# machines while using the shared panel presentation. Transient masked input
+# and setup-progress composers intentionally remain separate.
+PANEL_SETTINGS_KINDS = frozenset({
+    *SETTINGS_CATEGORY_FOR_KIND,
+    "provider key settings", "theme", "text theme", "input height",
+    "runtime device", "CPU threads", "context size", "turn limit",
+    "subagent workers", "permission preset", "model source",
+    "model cloud provider", "model", "model logout confirmation", "mode", "effort",
+    "mcp registry results",
+    "mcp registry detail", "mcp transport", "mcp remote authentication",
+    "mcp enable confirmation", "mcp review",
+})
+
 MODEL_BACKEND_FOR_API_KEY = {
     "OPENAI_API_KEY": "openai_api",
     "OPENROUTER_API_KEY": "openrouter",
@@ -516,6 +540,7 @@ PERMISSION_TOOL_LABELS = {
     for _group_name, group_tools in PERMISSION_TOOL_GROUPS
     for tool_name, label in group_tools
 }
+PERMISSION_VALUE_TONES = {"allow": "success", "ask": "warning", "deny": "error"}
 CAUTIOUS_ALLOWED_TOOLS = {
     "read_file",
     "list_dir",
@@ -916,6 +941,38 @@ HELP_CATEGORY_TITLES = frozenset(
 )
 
 
+class PermissionPreviewLexer(Lexer):
+    """Color policy values in the temporary preset preview."""
+
+    _policy = re.compile(r"\s+(ALLOW|ASK|DENY)$")
+
+    def lex_document(self, document):
+        def get_line(number: int):
+            line = document.lines[number]
+            match = self._policy.search(line)
+            if match is None:
+                return [("", line)]
+            policy = match.group(1)
+            return [
+                ("", line[:match.start(1)]),
+                (f"class:panel.value.{PERMISSION_VALUE_TONES[policy.casefold()]}", policy),
+            ]
+
+        return get_line
+
+
+_STATUS_CONTEXT_ROW = re.compile(r"^(Context\s+)(~[^\r\n]*? · (\d+)%$)")
+
+
+def _status_context_tone(percent: int) -> str:
+    """Map the displayed context usage to a warning level."""
+    if percent >= 90:
+        return "error"
+    if percent >= 70:
+        return "warning"
+    return "neutral"
+
+
 class TranscriptLexer(Lexer):
     """Markdown highlighting, fenced-code syntax, and transcript chrome."""
 
@@ -923,6 +980,9 @@ class TranscriptLexer(Lexer):
     _ACTIVITY_PREFIXES = ("-> ",)
     _WARNING_PREFIXES = ("Warnings:",)
     _STATUS_NOTICE = re.compile(r"^\[(?P<label>[^\]\r\n]+)\](?=\s|$)")
+    _STATUS_PERMISSIONS = re.compile(
+        r"^(Permissions\s+)(ALLOW)( \d+ · )(ASK)( \d+ · )(DENY)( \d+)$"
+    )
 
     @staticmethod
     def _is_logo_line(line: str) -> bool:
@@ -1060,6 +1120,25 @@ class TranscriptLexer(Lexer):
             status_notice = self._status_notice_fragments(line)
             if status_notice is not None:
                 return status_notice
+            status_permissions = self._STATUS_PERMISSIONS.fullmatch(line)
+            if status_permissions is not None:
+                return [
+                    ("", status_permissions.group(1)),
+                    ("class:panel.value.success", status_permissions.group(2)),
+                    ("", status_permissions.group(3)),
+                    ("class:panel.value.warning", status_permissions.group(4)),
+                    ("", status_permissions.group(5)),
+                    ("class:panel.value.error", status_permissions.group(6)),
+                    ("", status_permissions.group(7)),
+                ]
+            status_context = _STATUS_CONTEXT_ROW.fullmatch(line)
+            if status_context is not None:
+                tone = _status_context_tone(int(status_context.group(3)))
+                if tone != "neutral":
+                    return [
+                        ("", status_context.group(1)),
+                        (f"class:panel.value.{tone}", status_context.group(2)),
+                    ]
             if line.startswith(self._WARNING_PREFIXES):
                 return [("class:transcript.warning", line)]
             if line.startswith(self._ACTIVITY_PREFIXES):
@@ -1241,6 +1320,8 @@ def _tui_style(theme: str, text_theme: str):
     # second theme palette. Darkening the current input surface works for every
     # chrome theme, including the neutral Pastelle family.
     code_background = blend_hex(input_background, "#000000", 0.12)
+    panel_selection_background = blend_hex(input_background, output_foreground, 0.06)
+    completion_selection_background = blend_hex(input_background, output_foreground, 0.12)
     muted_runtime_text = blend_hex(
         input_background,
         output_foreground,
@@ -1309,10 +1390,19 @@ def _tui_style(theme: str, text_theme: str):
                     # gray background that nested fragment classes inherit.
                     "suggestion-match-text": foreground(chrome["input-field"]),
                     "suggestion-unmatched-text": muted_runtime_text,
-                    # Selection keeps the existing row surface and decoration,
-                    # but makes the whole candidate use the composer text color.
+                    # All completion sources share this menu. The popup is a
+                    # shade above the composer; its selected row is one shade
+                    # above the popup for commands, attachments, and mentions.
+                    "completion-menu.completion": (
+                        f"bg:{panel_selection_background} "
+                        f"{foreground(chrome['input-field'])}"
+                    ),
+                    "completion-menu.meta.completion": (
+                        f"bg:{panel_selection_background} "
+                        f"{foreground(chrome['completion-menu.meta.completion'])}"
+                    ),
                     "completion-menu.completion.current": (
-                        f"{chrome['completion-menu.completion']} "
+                        f"bg:{completion_selection_background} "
                         f"{foreground(chrome['input-field'])} "
                         "nobold nounderline noreverse"
                     ),
@@ -1323,7 +1413,9 @@ def _tui_style(theme: str, text_theme: str):
                         foreground(chrome["input-field"])
                     ),
                     "completion-menu.meta.completion.current": (
-                        f"{chrome['completion-menu.meta.completion']} nobold nounderline noreverse"
+                        f"bg:{completion_selection_background} "
+                        f"{foreground(chrome['completion-menu.meta.completion'])} "
+                        "nobold nounderline noreverse"
                     ),
                     "help.command": f"{foreground(chrome['frame.border'])} bold",
                     "transcript.logo": f"{foreground(chrome['frame.border'])} bold",
@@ -1332,6 +1424,25 @@ def _tui_style(theme: str, text_theme: str):
                     "footer.path": f"bg:{footer_path_background} {output_foreground}",
                     "footer.path.rail": f"bg:{footer_path_background} {input_background}",
                     "footer.keybinds": muted_runtime_text,
+                    "panel.header": f"{foreground(chrome['frame.border'])} bold",
+                    "panel.rule": muted_runtime_text,
+                    "panel.section": f"{foreground(chrome['frame.border'])} underline",
+                    "panel.heading-marker": foreground(chrome["frame.border"]),
+                    "panel.label": foreground(chrome["input-field"]),
+                    "panel.value": foreground(chrome["input-field"]),
+                    "panel.value.success": label_backgrounds["success"],
+                    "panel.value.warning": label_backgrounds["warning"],
+                    "panel.value.error": foreground(chrome["status.error"]),
+                    "panel.muted": muted_runtime_text,
+                    "panel.disabled": muted_runtime_text,
+                    "panel.focus": f"{foreground(chrome['frame.border'])} bold",
+                    "panel.selected": f"bg:{panel_selection_background}",
+                    "panel.saved": label_backgrounds["success"],
+                    "panel.warning": foreground(chrome["status.error"]),
+                    "panel.status.neutral": muted_runtime_text,
+                    "panel.status.success": label_backgrounds["success"],
+                    "panel.status.warning": label_backgrounds["warning"],
+                    "panel.status.error": foreground(chrome["status.error"]),
                 }
             ),
             TRANSCRIPT_STYLE,
@@ -1816,10 +1927,28 @@ def _status_effort(agent) -> str:
     return f"chat {chat_effort} · code {code_effort}"
 
 
-def _status_columns(rows: list[tuple[str, str]]) -> str:
+def _status_columns(rows: list[tuple[str, str]], *, label_width: int | None = None) -> str:
     """Render copyable status data as aligned label and value columns."""
-    label_width = max((len(label) for label, _value in rows), default=0)
+    if label_width is None:
+        label_width = max((len(label) for label, _value in rows), default=0)
     return "\n".join(f"{label:<{label_width}}  {value}" for label, value in rows)
+
+
+def _status_rich_text(status: str) -> Text:
+    """Color policy words and elevated context usage in line-oriented status."""
+    rendered = Text("[STATUS]\n" + status)
+    policy_line = re.compile(
+        r"(?m)^Permissions\s+(ALLOW) \d+ · (ASK) \d+ · (DENY) \d+$"
+    )
+    for match in policy_line.finditer(rendered.plain):
+        for group, color in ((1, "green"), (2, "yellow"), (3, "red")):
+            rendered.stylize(color, match.start(group), match.end(group))
+    for match in re.finditer(_STATUS_CONTEXT_ROW.pattern, rendered.plain, re.MULTILINE):
+        tone = _status_context_tone(int(match.group(3)))
+        if tone != "neutral":
+            rendered.stylize("yellow" if tone == "warning" else "red",
+                             match.start(2), match.end(2))
+    return rendered
 
 
 def _agent_context_window(agent) -> int:
@@ -1942,6 +2071,7 @@ def _chat_status(
     agent, memory, session_id: str, *, title_hint: str = "",
     usage_rows: list[tuple[str, str]] | None = None,
     snapshot_only: bool = False, memory_enabled: bool | None = None,
+    memory_state: str | None = None,
 ) -> str:
     context = _agent_context_window(agent)
     used = sum(len(str(m.get("content", ""))) for m in agent.messages) // 4
@@ -1983,14 +2113,28 @@ def _chat_status(
             else "not found at prompt build" if getattr(agent, "instruction_snapshot_ready", False)
             else "not injected (no prompt snapshot yet)"
         )
-    rows = [
+    session_rows = [
         ("Session ID", session_id),
         ("Session name", title),
+    ]
+    configured_workers = max(0, min(4, int(getattr(agent, "max_subagent_concurrency", 0))))
+    effective_workers = _subagent_parallelism(agent)
+    workers = (
+        f"{configured_workers} {'worker' if configured_workers == 1 else 'workers'}"
+        if configured_workers
+        else f"Auto · {effective_workers} effective "
+        f"{'worker' if effective_workers == 1 else 'workers'}"
+    )
+    effort = (
+        "—" if getattr(agent, "reasoning_mode", "standard") == "standard"
+        else _status_effort(agent).title()
+    )
+    context_percent = round(100 * used / context) if context else 0
+    runtime_rows = [
         ("Model", str(agent.model)),
-        ("Mode", str(getattr(agent, "reasoning_mode", "standard"))),
-        ("Effort", _status_effort(agent)),
-        ("Turn limit", f"{getattr(agent, 'max_steps', 20)} steps + finalization"),
-        ("Subagents", f"{_subagent_parallelism_label(agent)} worker(s)"),
+        ("Mode", str(getattr(agent, "reasoning_mode", "standard")).replace("_", " ").title()),
+        ("Effort", effort),
+        ("Plan mode", "On" if getattr(agent, "plan_mode", False) else "Off"),
         (
             "Turn scope",
             str(
@@ -1998,18 +2142,22 @@ def _chat_status(
                     "scope",
                     getattr(agent, "active_turn_scope", TurnScope.STANDARD),
                 )
-            ),
+            ).replace("_", " ").title(),
         ),
-        ("Plan mode", "on" if getattr(agent, "plan_mode", False) else "off"),
-        ("Context", f"~{used:,}/{context:,} tokens"),
+        ("Turn limit", f"{getattr(agent, 'max_steps', 20)} steps + 1 finalization"),
+        ("Subagents", workers),
+        ("Context", f"~{used:,} / {context:,} tokens · {context_percent}%"),
         ("Context left", f"~{max(0, context - used):,} tokens"),
+    ]
+    workspace_rows = [
         ("Workspace", str(getattr(agent, "workdir", Path.cwd()))),
     ]
+    activity_rows: list[tuple[str, str]] = []
     if isinstance(capabilities, dict) and capabilities:
         callable_tools = capabilities.get("callable_tools")
         enabled_tools = capabilities.get("globally_enabled_tools")
         if isinstance(callable_tools, list) and isinstance(enabled_tools, list):
-            rows.append(
+            activity_rows.append(
                 ("Callable now", f"{len(callable_tools)}/{len(enabled_tools)} enabled tools")
             )
     budget = (
@@ -2028,7 +2176,7 @@ def _chat_status(
             if type(max_model_steps) is int
             else getattr(agent, "max_steps", 20)
         )
-        rows.append(
+        activity_rows.append(
             (
                 "Turn budget",
                 f"models {model_steps_used if type(model_steps_used) is int else 0}/"
@@ -2039,34 +2187,42 @@ def _chat_status(
             )
         )
         if budget.get("stop_reason"):
-            rows.append(("Turn stopped", str(budget["stop_reason"])))
+            activity_rows.append(("Turn stopped", str(budget["stop_reason"])))
     if instruction_files:
         state = "injected (bounded)" if instructions_truncated else "injected"
-        rows.append(("AGENTS.md", state))
-        rows.extend(("", str(path)) for path in instruction_files)
+        workspace_rows.append(("AGENTS.md", state))
+        workspace_rows.extend(("", str(path)) for path in instruction_files)
     else:
-        rows.append(("AGENTS.md", guidance_state))
+        workspace_rows.append(("AGENTS.md", guidance_state))
     if not snapshot_only:
         memory_enabled = memory.auto_memory_enabled()
     memory_status = (
-        "on" if memory_enabled is True else "off" if memory_enabled is False
-        else "unknown"
+        "On" if memory_enabled is True else "Off" if memory_enabled is False
+        else memory_state or "Unknown"
     )
-    rows.extend(
-        [
-            (
-                "Permissions",
-                f"allow {permission_counts['allow']} · ask {permission_counts['ask']} · "
-                f"deny {permission_counts['deny']}",
-            ),
-            ("Memory", memory_status),
-            ("Tools", str(len(policies))),
-        ]
+    enabled_tools = (
+        capabilities.get("globally_enabled_tools")
+        if isinstance(capabilities, dict) else None
     )
+    tool_count = (
+        f"{len(enabled_tools)} available" if isinstance(enabled_tools, list)
+        else f"{len(policies)} in policy"
+    )
+    policy_rows = [
+        (
+            "Permissions",
+            f"ALLOW {permission_counts['allow']} · ASK {permission_counts['ask']} · "
+            f"DENY {permission_counts['deny']}",
+        ),
+        ("Memory", memory_status),
+        ("Tools", tool_count),
+    ]
     if prompt_cache := _prompt_cache_status(agent):
-        rows.append(prompt_cache)
-    rows.extend(_codex_usage_rows(agent) if usage_rows is None else usage_rows)
-    return _status_columns(rows)
+        activity_rows.append(prompt_cache)
+    activity_rows.extend(_codex_usage_rows(agent) if usage_rows is None else usage_rows)
+    groups = [session_rows, runtime_rows, workspace_rows, policy_rows, activity_rows]
+    label_width = max(len(label) for group in groups for label, _value in group)
+    return "\n\n".join(_status_columns(group, label_width=label_width) for group in groups if group)
 
 
 DEBUG_LABEL_EXAMPLES = (
@@ -2396,7 +2552,7 @@ def _read_chat_input(
         _chat_prompt_header(state),
         bottom_toolbar=lambda: _chat_toolbar(state),
         prompt_continuation=ANSI("\x1b[38;5;45m│\x1b[0m "),
-        rprompt=ANSI("\x1b[2mEnter send · Alt+Enter newline\x1b[0m"),
+        rprompt=ANSI("\x1b[2mENTER send · ALT+ENTER newline\x1b[0m"),
         wrap_lines=True,
     ).strip()
 
@@ -2900,13 +3056,13 @@ def _inline_attachment_completion_fragment(text: str) -> str | None:
 def _completion_display(text: str, match: str):
     """Light up the typed part of a completion without changing its value."""
     if not match:
-        return text
+        return [("class:suggestion-unmatched-text", text)]
     start = text.casefold().find(match.casefold())
     if start < 0:
-        return text
+        return [("class:suggestion-unmatched-text", text)]
     end = start + len(match)
     return [
-        ("", text[:start]),
+        ("class:suggestion-unmatched-text", text[:start]),
         ("class:suggestion-match-text", text[start:end]),
         ("class:suggestion-unmatched-text", text[end:]),
     ]
@@ -2943,17 +3099,36 @@ class ChatCommandCompleter(Completer):
         if attachment_fragment is not None:
             fragment = attachment_fragment.removeprefix('"')
             quoted = attachment_fragment.startswith('"')
+            if fragment == "~":
+                value = '~/' + ('"' if quoted else '')
+                yield Completion(
+                    value,
+                    start_position=-len(fragment),
+                    display=_completion_display(
+                        f"{_attachment_suggestion_icon(Path.home())} {value}", fragment
+                    ),
+                )
+                return
+            if fragment.startswith("~") and not fragment.startswith("~/"):
+                return
             try:
                 root = Path(self._workdir_provider()).resolve()
                 candidate = Path(fragment).expanduser()
-                parent = candidate.parent if candidate.is_absolute() else root / candidate.parent
+                parent = candidate if fragment.endswith("/") else candidate.parent
+                if not candidate.is_absolute():
+                    parent = root / parent
                 entries = sorted(
                     parent.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())
                 )
-            except OSError:
+            except (OSError, RuntimeError):
                 return
             for entry in entries[:100]:
-                value = str(entry) if Path(fragment).is_absolute() else str(entry.relative_to(root))
+                if fragment.startswith("~/"):
+                    value = "~/" + os.path.relpath(entry, Path.home())
+                elif candidate.is_absolute():
+                    value = str(entry)
+                else:
+                    value = os.path.relpath(entry, root)
                 if entry.is_dir():
                     value += "/"
                 if value.startswith(fragment):
@@ -3069,6 +3244,24 @@ class TwoClickChoiceControl(FormattedTextControl):
             self._tui._click_choice(index)
             return None
         return NotImplemented
+
+
+class TwoClickPanelControl(FormattedTextControl):
+    """Confirm only when the same typed row identity receives a second click."""
+
+    def __init__(self, tui) -> None:
+        super().__init__(
+            tui._panel_body_fragments,
+            focusable=True,
+            get_cursor_position=lambda: Point(x=0, y=tui._panel_selected_line()),
+        )
+        self._tui = tui
+
+    def mouse_handler(self, mouse_event):
+        if mouse_event.event_type != MouseEventType.MOUSE_UP:
+            return super().mouse_handler(mouse_event)
+        self._tui._click_panel_line(mouse_event.position.y)
+        return None
 
 
 class CursorOffsetFloatContainer(FloatContainer):
@@ -8148,6 +8341,10 @@ class PersistentChatTUI:
         self._picker: PickerController | None = None
         self._picker_context: tuple[str, str] | None = None
         self._picker_states: dict[tuple[str, str], PickerController] = {}
+        self._panel: PanelState | None = None
+        self._panel_states: dict[str, PanelState] = {}
+        self._panel_click_id: str | None = None
+        self._panel_composer_draft: tuple[str, list[ComposerPaste]] | None = None
         self._resume_choices: dict[str, str] = {}
         self._choice_index = 0
         self._choice_click_id: str | None = None
@@ -8296,7 +8493,7 @@ class PersistentChatTUI:
                 f"Path: {getattr(agent, 'workdir', Path.cwd())}\n"
                 f"Model: {agent.model}\n"
                 "Tips\n"
-                "  Enter to send/queue · Alt+\\ to steer · Alt+Enter newline · / commands\n\n"
+                "  ENTER send/queue · ALT+\\ steer · ALT+ENTER newline\n\n"
                 + _session_divider(
                     session_id,
                     width=max(32, shutil.get_terminal_size((100, 24)).columns),
@@ -8337,6 +8534,8 @@ class PersistentChatTUI:
             self.live_output,
             filter=Condition(lambda: bool(self.live_output.text)),
         )
+        self._text_preview_lexer = TranscriptLexer()
+        self._permission_preview_lexer = PermissionPreviewLexer()
         self.text_theme_preview = TextArea(
             read_only=True,
             focusable=False,
@@ -8344,7 +8543,10 @@ class PersistentChatTUI:
             wrap_lines=True,
             height=Dimension(min=10, preferred=16, max=22),
             scrollbar=True,
-            lexer=TranscriptLexer(),
+            lexer=DynamicLexer(
+                lambda: self._permission_preview_lexer
+                if self._permission_preview_visible else self._text_preview_lexer
+            ),
             style="class:output-field",
         )
         self.text_theme_preview_panel = ConditionalContainer(
@@ -8402,8 +8604,37 @@ class PersistentChatTUI:
             wrap_lines=False,
             style="class:input-field",
         )
+        self.panel_header_window = Window(
+            content=FormattedTextControl(self._panel_header_fragments),
+            height=2,
+            style="class:input-field",
+        )
+        self.panel_control = TwoClickPanelControl(self)
+        self.panel_body_window = Window(
+            content=self.panel_control,
+            height=Dimension(min=3, preferred=12, max=18),
+            get_vertical_scroll=self._panel_scroll,
+            always_hide_cursor=True,
+            wrap_lines=False,
+            style="class:input-field",
+        )
+        self.panel_footer_window = Window(
+            content=FormattedTextControl(self._panel_footer_fragments),
+            height=2,
+            style="class:input-field",
+        )
+        self.panel_container = HSplit([
+            self.panel_header_window,
+            self.panel_body_window,
+            self.panel_footer_window,
+        ])
+        self.panel_or_choice = ConditionalContainer(
+            content=self.panel_container,
+            filter=Condition(lambda: self._panel is not None),
+            alternative_content=self.choice_window,
+        )
         self.standard_composer = ConditionalContainer(
-            content=self.choice_window,
+            content=self.panel_or_choice,
             filter=Condition(lambda: self._choice_kind is not None),
             alternative_content=self.input,
         )
@@ -8804,6 +9035,323 @@ class PersistentChatTUI:
         maximum = max(0, len(self._choice_values) - visible)
         centered = self._choice_index - (visible // 2)
         return max(0, min(centered, maximum))
+
+    def _panel_width(self) -> int:
+        info = self.panel_body_window.render_info
+        return max(1, info.window_width if info else self._transcript_content_width() - 6)
+
+    def _panel_body(self):
+        assert self._panel is not None
+        encoding = getattr(self.application.output, "encoding", "utf-8")
+        if callable(encoding):
+            try:
+                encoding = encoding()
+            except (AttributeError, OSError):
+                encoding = "utf-8"
+        encoding = encoding if isinstance(encoding, str) and encoding else "utf-8"
+        try:
+            "■".encode(encoding)
+            unicode_blocks = True
+        except (UnicodeError, LookupError):
+            unicode_blocks = False
+        return render_body(self._panel, self._panel_width(), unicode_blocks=unicode_blocks)
+
+    def _panel_header_fragments(self):
+        if self._panel is None:
+            return []
+        return list(render_header(
+            self._panel.page, self._panel_width(), self._panel.picker.query
+        ))
+
+    def _panel_body_fragments(self):
+        if self._panel is None:
+            return []
+        body = self._panel_body()
+        fragments = []
+        for index, line in enumerate(body.lines):
+            fragments.extend(line)
+            if index < len(body.lines) - 1:
+                fragments.append(("", "\n"))
+        return fragments
+
+    def _panel_footer_fragments(self):
+        if self._panel is None:
+            return []
+        kind = self._choice_kind or ""
+        if kind in {"theme settings", "theme", "text theme", "input field settings",
+                    "input height"}:
+            save_state = self._appearance_save_state
+        elif kind == "memory settings":
+            save_state = self._memory_save_state
+        elif kind in {"tools settings", "permission settings", "permission preset",
+                      "mcp permission servers", "mcp permission tools", "runtime settings",
+                      "runtime device", "CPU threads", "context size", "turn limit",
+                      "subagent workers"}:
+            save_state = self._runtime_save_state
+        elif kind in {"model", "mode", "effort"}:
+            save_state = self._model_save_state
+        else:
+            save_state = ""
+        if save_state == "failed":
+            status, style = "Save unconfirmed", "class:panel.warning"
+        elif self.status_error:
+            status, style = self.status_error, "class:panel.warning"
+        elif save_state == "saving":
+            status, style = "Saving…", "class:panel.muted"
+        elif save_state == "saved":
+            status, style = "Saved", "class:panel.saved"
+        else:
+            status, style = "", ""
+        return list(render_footer(
+            self._panel_width(), search=self._panel.search_active,
+            query=self._panel.picker.query, status=status, status_style=style,
+        ))
+
+    def _panel_selected_line(self) -> int:
+        return self._panel_body().selected_line if self._panel is not None else 0
+
+    def _panel_scroll(self, window) -> int:
+        if self._panel is None:
+            return 0
+        info = window.render_info
+        height = info.window_height if info else 12
+        return self._panel.viewport(height, self._panel_body())
+
+    def _click_panel_line(self, line: int) -> None:
+        if self._panel is None:
+            return
+        body = self._panel_body()
+        if not 0 <= line < len(body.row_for_line):
+            return
+        identity = body.row_for_line[line]
+        row = self._panel.row(identity)
+        if row is None or not row.selectable:
+            return
+        self._panel.picker.select(next(
+            index for index, item in enumerate(self._panel.picker.visible)
+            if item.id == identity
+        ))
+        self._apply_picker_state()
+        if self._panel.page.legacy_actions:
+            self._apply_choice_preview()
+        if identity == self._panel_click_id:
+            self._panel_click_id = None
+            self._accept_choice()
+        else:
+            self._panel_click_id = identity
+            self.application.invalidate()
+
+    def _open_panel(self, page: PanelPage, kind: str, default_id: str = "") -> None:
+        previous = self._choice_kind
+        if previous is None and self._panel_composer_draft is None:
+            self._panel_composer_draft = (self.input.text, list(self._composer_pastes))
+        if previous != kind:
+            self._cancel_inventory_job(previous)
+        state = self._panel_states.get(page.id)
+        if state is None:
+            state = PanelState(page, default_id)
+            self._panel_states[page.id] = state
+        else:
+            if self._panel is state and previous == kind:
+                state.picker.select(self._choice_index)
+            state.replace(page)
+            if default_id and previous != kind:
+                state.picker.focus(default_id)
+        self._panel = state
+        self._panel_click_id = None
+        self._picker = state.picker
+        self._picker_context = (kind, page.id)
+        self._choice_kind = kind
+        self._apply_picker_state()
+        self._set_input(state.picker.query)
+        self.activity = f"select {kind}"
+        self.status_error = ""
+        self.application.layout.focus(self.panel_body_window)
+        self.application.invalidate()
+
+    def _refresh_permission_panel(self) -> None:
+        if self._panel is None:
+            return
+        page_id = self._panel.page.id
+        page: PanelPage | None
+        if page_id == "permissions":
+            page = self._permission_panel_page()
+        elif page_id == "mcp-permission-servers":
+            page = self._mcp_permission_servers_page()
+        elif page_id.startswith("mcp-permission:"):
+            page = self._mcp_permission_detail_page(page_id.removeprefix("mcp-permission:"))
+        else:
+            return
+        if page is None:
+            self._open_mcp_permission_servers()
+            return
+        self._panel.replace(page)
+        self._apply_picker_state()
+        self.application.invalidate()
+
+    def _restore_panel_composer_draft(self) -> None:
+        if self._panel_composer_draft is None:
+            return
+        draft, pastes = self._panel_composer_draft
+        self._panel_composer_draft = None
+        self._set_input(draft)
+        self._composer_pastes = pastes
+
+    def _legacy_panel_breadcrumb(self, kind: str) -> tuple[str, ...]:
+        category = SETTINGS_CATEGORY_FOR_KIND.get(kind)
+        if category:
+            titles = {"mcp servers": "MCP Servers", "input field": "Input Field"}
+            return ("Settings", titles.get(category, category.title()))
+        if kind == "provider key settings":
+            return ("Settings", "Providers", self._provider_key_label)
+        if kind in {"theme", "text theme"}:
+            return ("Settings", "Theme", "Interface" if kind == "theme" else "Text/code")
+        if kind == "input height":
+            return ("Settings", "Input Field", "Height")
+        if kind == "permission preset":
+            return ("Settings", "Permissions", "Current configuration")
+        if kind in {"runtime device", "CPU threads", "context size", "turn limit",
+                    "subagent workers"}:
+            return ("Settings", "Runtime", kind.title())
+        if kind in {"model source", "model cloud provider", "model",
+                    "model logout confirmation", "mode", "effort"}:
+            base = ("Settings", "Models") if self._model_flow_parent == "settings" else ("Models",)
+            if kind == "model source":
+                return base
+            if kind == "model cloud provider":
+                return (*base, "Cloud")
+            if kind == "model":
+                provider = MODEL_PROVIDER_FOR_BACKEND.get(self._model_auth_backend, "Ollama")
+                return (*base, provider)
+            if kind == "model logout confirmation":
+                return (*base, "Confirm logout")
+            return (*base, kind.title())
+        if kind.startswith("mcp "):
+            titles = {
+                "mcp registry results": "Registry results",
+                "mcp registry detail": getattr(self._mcp_detail_server, "name", "Registry detail"),
+                "mcp transport": "Add server",
+                "mcp remote authentication": "Authentication",
+                "mcp enable confirmation": self._mcp_enable_name or "Enable server",
+                "mcp review": "Review server",
+            }
+            return ("Settings", "MCP Servers", titles.get(kind, kind.title()))
+        return ("Settings", kind.title())
+
+    def _legacy_toggle_checked(self, kind: str, identity: str) -> bool | None:
+        if kind == "input field settings" and identity == "border":
+            return self.appearance.input_border
+        if kind == "memory settings" and identity == "automatic memory":
+            return self._status_memory_enabled
+        if kind != "tools settings":
+            return None
+        if identity == "activity updates":
+            return self.show_activity_updates
+        if identity == "web search validation":
+            return self._tool_validation["web_search"]
+        if identity == "knowledge search validation":
+            return self._tool_validation["knowledge_search"]
+        for name, label in TOOL_AVAILABILITY_LABELS.items():
+            if identity == label.casefold():
+                return self._tool_availability[name]
+        for name, enabled in self._web_provider_availability.items():
+            if identity == f"provider {name}".casefold():
+                return enabled
+        return None
+
+    def _legacy_panel_page(self, kind: str) -> PanelPage:
+        assert self._picker is not None
+        scope = self._picker_context[1] if self._picker_context else ""
+        if kind == "mcp registry detail":
+            scope = getattr(self._mcp_detail_server, "name", "")
+        page_id = f"legacy:{kind}:{scope}"
+        rows: list[PanelRow] = []
+        section_id = ""
+        for item in self._picker.rows:
+            original = item.label
+            if _is_choice_section(original):
+                section_id = item.id
+                rows.append(PanelRow(item.id, RowKind.SECTION,
+                                     _choice_section_title(original), legacy_label=original))
+                continue
+            if not item.selectable:
+                if not original:
+                    rows.append(PanelRow(item.id, RowKind.SEPARATOR, "", legacy_label=original))
+                else:
+                    label = original.removeprefix(CHOICE_INFO_PREFIX)
+                    rows.append(PanelRow(item.id, RowKind.INFO, label,
+                                         section_id=section_id, legacy_label=original))
+                continue
+            text = str(original)
+            row_kind = RowKind.CHOICE
+            value = ""
+            description = ""
+            checked = self._legacy_toggle_checked(kind, item.id)
+            if checked is not None:
+                row_kind = RowKind.TOGGLE
+            elif text in {"back", CANCEL_CHOICE}:
+                row_kind = RowKind.NAVIGATION
+            elif text == RESET_THEME_CHOICE:
+                row_kind = RowKind.ACTION
+            elif kind in {"theme settings", "input field settings", "runtime settings",
+                          "providers settings", "mcp settings", "provider key settings"}:
+                row_kind = RowKind.NAVIGATION if ": " in text else RowKind.ACTION
+            if kind in SETTINGS_CATEGORY_FOR_KIND or kind == "provider key settings":
+                if ": " in text:
+                    text, value = text.split(": ", 1)
+                    value = value.removesuffix(" (toggle)")
+                    text = text[:1].upper() + text[1:]
+            if kind == "mcp settings":
+                metadata = next((server for server in (self._mcp_inventory or {}).get(
+                    "servers", []) if server["name"].casefold() == item.id), None)
+                if metadata is not None:
+                    text = metadata["name"]
+                    value = ""
+                    checked = metadata["enabled"]
+                    description = (f"{metadata['transport']} · "
+                                   f"{metadata['tool_count']} tools")
+                    row_kind = RowKind.TOGGLE
+            if kind == "providers settings" and text in PROVIDER_API_KEY_PROVIDERS:
+                description = PROVIDER_API_KEY_DESCRIPTIONS[text]
+                value = value.upper()
+            if kind == "tools settings":
+                if item.id == "activity updates":
+                    description = "Show concise live agent milestones"
+                elif item.id == "web search validation":
+                    description = "Verify candidate web evidence"
+                elif item.id == "knowledge search validation":
+                    description = "Verify candidate local evidence"
+            if kind == "memory settings" and item.id == "automatic memory":
+                description = "Generate durable facts automatically"
+            if kind == "input field settings" and item.id == "border":
+                description = "Show the composer border"
+            if text == "back":
+                text = "Back"
+            elif text == CANCEL_CHOICE:
+                text = "Close"
+            elif text == RESET_THEME_CHOICE:
+                text = "Reset to default"
+            rows.append(PanelRow(
+                item.id, row_kind, text, value, description, enabled=item.enabled,
+                action=PanelAction("legacy-choice", item.id),
+                navigation_target="back" if item.exit else "",
+                section_id=section_id, legacy_label=original, checked=checked,
+            ))
+        return PanelPage(page_id, self._legacy_panel_breadcrumb(kind), tuple(rows),
+                         legacy_actions=True)
+
+    def _present_legacy_choice_as_panel(self, kind: str) -> None:
+        assert self._picker is not None
+        page = self._legacy_panel_page(kind)
+        self._picker.replace([row.picker_row() for row in page.rows])
+        state = self._panel_states.get(page.id)
+        if state is None:
+            state = PanelState(page)
+            self._panel_states[page.id] = state
+        state.bind_picker(page, self._picker)
+        state.search_active = bool(self._picker.query)
+        self._panel = state
+        self._apply_picker_state()
 
     def _choice_fragments(self):
         width = max(20, self._transcript_content_width() - 6)
@@ -9473,7 +10021,7 @@ class PersistentChatTUI:
                 ),
                 ("class:runtime_error", self.status_error),
             ]
-        if self._choice_kind:
+        if self._choice_kind and self._panel is None:
             typed = self.input.text.strip()
             typed_hint = (
                 f" · typed: {textwrap.shorten(typed, width=24, placeholder='…')}" if typed else ""
@@ -9578,7 +10126,7 @@ class PersistentChatTUI:
         return [
             (
                 "class:footer.keybinds",
-                f" {mode}Enter to send/queue · Alt+\\ to steer · Alt+Enter newline ",
+                f" {mode}ENTER send/queue · ALT+\\ steer · ALT+ENTER newline ",
             )
         ]
 
@@ -9605,6 +10153,18 @@ class PersistentChatTUI:
             label = str(path)
         else:
             label = "~" if not relative.parts else f"~/{relative}"
+        columns = self.application.output.get_size().columns
+        reserved = sum(get_cwidth(text) for _style, text in (
+            *self._footer_brand_fragments(), *self._keybind_fragments()
+        ))
+        # One cell for each separator and one spare cell avoid deferred wrap.
+        label_width = max(0, columns - reserved - 4)
+        if not label_width:
+            return []
+        if get_cwidth(label) > label_width:
+            while label and get_cwidth("…" + label) > label_width:
+                label = label[1:]
+            label = "…" + label if label else "…"
         return [
             ("class:footer.path", f" {label} "),
             ("class:footer.path.rail", "┃"),
@@ -9658,6 +10218,18 @@ class PersistentChatTUI:
         @bindings.add("<any>", filter=Condition(lambda: bool(self._choice_kind)))
         def type_picker_choice(event) -> None:
             if event.data:
+                if self._panel is not None and not self._panel.search_active:
+                    if event.data == "/":
+                        self._panel.search_active = True
+                        self._set_input("")
+                        self.application.invalidate()
+                    elif event.data == " ":
+                        self._activate_panel_toggle()
+                    elif self._panel.page.legacy_actions:
+                        self._panel.search_active = True
+                        self.input.buffer.insert_text(event.data)
+                        self._refresh_choice_filter()
+                    return
                 self.input.buffer.insert_text(event.data)
                 self._refresh_choice_filter()
                 self.application.invalidate()
@@ -9724,6 +10296,10 @@ class PersistentChatTUI:
 
             @bindings.add(key)
             def permission_answer(event, key=key) -> None:
+                if self._panel is not None and not self._panel.search_active:
+                    if not self._panel.page.legacy_actions:
+                        return
+                    self._panel.search_active = True
                 self.input.buffer.insert_text(key)
                 if self._choice_kind:
                     self._refresh_choice_filter()
@@ -9744,6 +10320,8 @@ class PersistentChatTUI:
         @bindings.add("backspace")
         @bindings.add("c-h")
         def delete_and_refresh_command_completion(event) -> None:
+            if self._panel is not None and not self._panel.search_active:
+                return
             buffer = self.input.buffer
             buffer.delete_before_cursor(count=1)
             if self._choice_kind:
@@ -10004,6 +10582,14 @@ class PersistentChatTUI:
         self.application.invalidate()
 
     def _move_choice(self, delta: int) -> None:
+        if self._panel is not None:
+            self._panel_click_id = None
+            self._panel.move(delta)
+            self._apply_picker_state()
+            if self._panel.page.legacy_actions:
+                self._apply_choice_preview()
+            self.application.invalidate()
+            return
         if not self._choice_values:
             return
         selectable = [
@@ -10076,6 +10662,14 @@ class PersistentChatTUI:
     def _refresh_choice_filter(self) -> None:
         """Filter any picker as text is entered while retaining its canonical rows."""
         if not self._choice_kind or self._picker is None:
+            return
+        if self._panel is not None:
+            if self._panel.search_active or self._panel.page.legacy_actions:
+                if self.input.text and self._panel.page.legacy_actions:
+                    self._panel.search_active = True
+                self._panel.filter(self.input.text)
+                self._apply_picker_state()
+                self.application.invalidate()
             return
         self._sync_picker_selection()
         if self.input.text != self._picker.query:
@@ -10234,6 +10828,15 @@ class PersistentChatTUI:
         restore: bool = False,
         refresh: bool = False,
     ) -> None:
+        if kind == "settings":
+            self._refresh_settings_overview()
+            page = self._settings_home_page()
+            default_id = next((row.id for row in page.rows if (
+                row.legacy_label == default or row.label.casefold() == default.casefold()
+            )), "")
+            self._open_panel(page, kind, default_id)
+            return
+        self._panel = None
         previous_kind = self._choice_kind
         mcp_inventory_modes = {"mcp settings", "mcp registry detail"}
         if previous_kind != kind and not (
@@ -10325,6 +10928,11 @@ class PersistentChatTUI:
         self._set_input(self._picker.query)
         self.activity = f"select {kind}"
         self.status_error = ""
+        if kind in PANEL_SETTINGS_KINDS:
+            self._present_legacy_choice_as_panel(kind)
+            self.application.layout.focus(self.panel_body_window)
+        else:
+            self.application.layout.focus(self.choice_window)
         self._apply_choice_preview()
         self.application.invalidate()
 
@@ -10818,6 +11426,24 @@ class PersistentChatTUI:
             self._begin_choice("settings", self._settings_categories(), "models")
 
     def _cancel_choice(self, *, resume_queue: bool = True) -> None:
+        if self._panel is not None:
+            if self._panel.search_active:
+                self._panel.search_active = False
+                self._set_input("")
+                self._panel.filter("")
+                self._apply_picker_state()
+                self.application.invalidate()
+                return
+            if self._panel.page.id.startswith("mcp-permission:"):
+                self._open_mcp_permission_servers()
+                return
+            if self._panel.page.id == "mcp-permission-servers":
+                if self._permission_return_to_mcp:
+                    self._permission_return_to_mcp = False
+                    self._open_settings_category("mcp servers", "MCP server permissions")
+                else:
+                    self._open_settings_category("permissions")
+                return
         self._sync_picker_selection()
         self._cancel_inventory_job(self._choice_kind)
         if self._setup_job is not None:
@@ -10884,6 +11510,7 @@ class PersistentChatTUI:
         self._choice_prior_model = None
         self._model_flow_parent = ""
         self._choice_kind = None
+        self._panel = None
         self._choice_values = []
         self._set_input("")
         self.activity = "ready" if not self.running else self.activity
@@ -10900,6 +11527,8 @@ class PersistentChatTUI:
             )
             self._open_settings_category(parent, parent_default, restore=True)
             return
+        self._restore_panel_composer_draft()
+        self.application.layout.focus(self.input)
         self.application.invalidate()
         if resume_queue:
             self._start_next()
@@ -10911,6 +11540,20 @@ class PersistentChatTUI:
         Pickers with only ``cancel`` have no parent to return to and retain the
         existing cancellation behavior.
         """
+        if self._panel is not None:
+            if self._panel.page.legacy_actions and not self._panel.search_active:
+                picker = self._picker
+                back = next((index for index, row in enumerate(picker.visible)
+                             if row.label == "back"), None) if picker else None
+                if back is not None and picker is not None:
+                    picker.select(back)
+                    self._apply_picker_state()
+                    self._apply_panel_action(
+                        PanelAction("legacy-choice", picker.visible[back].id)
+                    )
+                    return
+            self._cancel_choice()
+            return
         if self._choice_kind and "back" in self._choice_values:
             self._choice_index = self._choice_values.index("back")
             self._choice_click_id = None
@@ -10923,6 +11566,23 @@ class PersistentChatTUI:
 
     def _submit_choice_response(self) -> None:
         """Accept the highlighted row or a uniquely typed picker option."""
+        if self._panel is not None:
+            if self._panel.picker.no_matches:
+                self.status_error = "No matching options; edit the filter or press Escape"
+                self.application.invalidate()
+                return
+            if self._panel.page.legacy_actions and self.input.text.strip() and not (
+                self._panel.search_active
+            ):
+                panel, kind = self._panel, self._choice_kind
+                self._panel = None
+                self._submit_choice_response()
+                if self._panel is None and self._choice_kind == kind:
+                    self._panel = panel
+                    self.application.layout.focus(self.panel_body_window)
+                return
+            self._accept_choice()
+            return
         response = self.input.text.strip().casefold()
         if not response:
             self._accept_choice()
@@ -10969,6 +11629,16 @@ class PersistentChatTUI:
     def _accept_choice(self) -> None:
         if self._choice_kind == "setup job":
             self._cancel_setup_job()
+            return
+        if self._panel is not None:
+            self._sync_picker_selection()
+            row = self._panel.row()
+            if row is not None and row.selectable:
+                if not row.enabled:
+                    self.status_error = str(row.legacy_label or row.label)
+                    self.application.invalidate()
+                elif row.action is not None:
+                    self._apply_panel_action(row.action)
             return
         selected = self._choice_values[self._choice_index]
         self._sync_picker_selection()
@@ -11380,6 +12050,9 @@ class PersistentChatTUI:
         self._settings_overview_checked_at = 0.0
 
     def _settings_categories(self) -> list[str]:
+        return [row.legacy_label for row in self._settings_home_page().rows]
+
+    def _settings_home_page(self) -> PanelPage:
         snapshot = (
             self._settings_overview
             if self._settings_overview_scope == self._settings_overview_paths()
@@ -11419,28 +12092,63 @@ class PersistentChatTUI:
             )
         if mode != "standard":
             model_detail += f" · {mode} {_agent_effort_label(self.agent)}"
-        return [
-            _choice_section("APPEARANCE"),
-            f"Theme: {TUI_THEME_LABELS[self.appearance.theme]} · "
-            f"{TEXT_THEME_LABELS[self.appearance.text_theme]}",
-            f"Input field: {self.appearance.input_height}–"
-            f"{self.appearance.input_max_height} lines · "
-            f"border {'on' if self.appearance.input_border else 'off'}",
-            _choice_section("ASSISTANT"),
-            f"Models: {model_detail}",
-            f"Providers: {configured_providers}/{provider_total} API keys",
-            f"MCP servers: {mcp_detail}",
-            f"Memory: {memory_state}",
-            "Skills: installed inventory",
-            _choice_section("CAPABILITIES & SAFETY"),
-            "Tools: availability, providers, and validation",
-            f"Permissions: {permission_preset}",
-            _choice_section("ADVANCED"),
-            f"Runtime: {device} · {self.agent.max_steps} steps · "
-            f"{_subagent_parallelism_label(self.agent)} workers",
-            RESET_THEME_CHOICE,
-            CANCEL_CHOICE,
+        theme = TUI_THEME_LABELS[self.appearance.theme]
+        text_theme = TEXT_THEME_LABELS[self.appearance.text_theme]
+        height = f"{self.appearance.input_height}–{self.appearance.input_max_height} lines"
+        border = f"border {'on' if self.appearance.input_border else 'off'}"
+        providers = f"{configured_providers}/{provider_total} API keys"
+        runtime = (f"{device} · {self.agent.max_steps} steps · "
+                   f"{_subagent_parallelism_label(self.agent)} workers")
+        rows = [
+            PanelRow("section:appearance", RowKind.SECTION, "APPEARANCE",
+                     legacy_label=_choice_section("APPEARANCE")),
+            PanelRow("category:theme", RowKind.NAVIGATION, "Theme", theme,
+                     f"Text/code theme: {text_theme}", action=PanelAction("category", "theme"),
+                     section_id="section:appearance",
+                     legacy_label=f"Theme: {theme} · {text_theme}"),
+            PanelRow("category:input field", RowKind.NAVIGATION, "Input Field", height,
+                     border, action=PanelAction("category", "input field"),
+                     section_id="section:appearance",
+                     legacy_label=f"Input field: {height} · {border}"),
+            PanelRow("section:assistant", RowKind.SECTION, "ASSISTANT",
+                     legacy_label=_choice_section("ASSISTANT")),
+            PanelRow("category:models", RowKind.NAVIGATION, "Models", model_detail,
+                     action=PanelAction("category", "models"), section_id="section:assistant",
+                     legacy_label=f"Models: {model_detail}"),
+            PanelRow("category:providers", RowKind.NAVIGATION, "Providers", providers,
+                     action=PanelAction("category", "providers"), section_id="section:assistant",
+                     legacy_label=f"Providers: {providers}"),
+            PanelRow("category:mcp servers", RowKind.NAVIGATION, "MCP Servers", mcp_detail,
+                     action=PanelAction("category", "mcp servers"),
+                     section_id="section:assistant", legacy_label=f"MCP servers: {mcp_detail}"),
+            PanelRow("category:memory", RowKind.NAVIGATION, "Memory", memory_state,
+                     action=PanelAction("category", "memory"), section_id="section:assistant",
+                     legacy_label=f"Memory: {memory_state}"),
+            PanelRow("category:skills", RowKind.NAVIGATION, "Skills", "installed inventory",
+                     action=PanelAction("category", "skills"), section_id="section:assistant",
+                     legacy_label="Skills: installed inventory"),
+            PanelRow("section:capabilities", RowKind.SECTION, "CAPABILITIES & SAFETY",
+                     legacy_label=_choice_section("CAPABILITIES & SAFETY")),
+            PanelRow("category:tools", RowKind.NAVIGATION, "Tools", "Availability and validation",
+                     action=PanelAction("category", "tools"), section_id="section:capabilities",
+                     legacy_label="Tools: availability, providers, and validation"),
+            PanelRow("category:permissions", RowKind.NAVIGATION, "Permissions", permission_preset,
+                     action=PanelAction("category", "permissions"),
+                     section_id="section:capabilities",
+                     legacy_label=f"Permissions: {permission_preset}"),
+            PanelRow("section:advanced", RowKind.SECTION, "ADVANCED",
+                     legacy_label=_choice_section("ADVANCED")),
+            PanelRow("category:runtime", RowKind.NAVIGATION, "Runtime", device,
+                     f"{self.agent.max_steps} steps · "
+                     f"{_subagent_parallelism_label(self.agent)} workers",
+                     action=PanelAction("category", "runtime"), section_id="section:advanced",
+                     legacy_label=f"Runtime: {runtime}"),
+            PanelRow("reset-all", RowKind.ACTION, "Reset all settings",
+                     action=PanelAction("reset-all"), legacy_label=RESET_THEME_CHOICE),
+            PanelRow("close", RowKind.NAVIGATION, "Close", action=PanelAction("close"),
+                     legacy_label=CANCEL_CHOICE),
         ]
+        return PanelPage("settings", ("Settings",), tuple(rows))
 
     def _open_settings_category(
         self, category: str, default: str | None = None, *, restore: bool = False
@@ -11725,36 +12433,11 @@ class PersistentChatTUI:
             )
             return
         if category == "permissions":
-            names = _permission_tool_names(self.agent)
-            policies = _effective_permission_policies(self.agent, self.cfg)
-            preset = _permission_preset_name(policies, names)
-            mcp_servers = _mcp_permission_server_rows(self.agent)
-            choices = [
-                _choice_section("PRESET"),
-                f"Current configuration: {preset.upper()}",
-            ]
-            for group_index, (group_name, rows) in enumerate(_permission_group_rows(names)):
-                if group_index or choices:
-                    choices.append("")
-                choices.append(_choice_section(group_name))
-                if group_name == "MCP SERVERS":
-                    choices.extend(
-                        _mcp_server_permission_label(server, tools, policies)
-                        for server, tools in mcp_servers.items()
-                    )
-                else:
-                    choices.extend(f"{label}: {policies[name].upper()}" for name, label in rows)
-            if not mcp_servers:
-                choices.extend([
-                    "", _choice_section("MCP SERVERS"),
-                    _choice_info("Enable an MCP server to configure its tools"),
-                ])
-            choices.extend([RESET_THEME_CHOICE, "back", CANCEL_CHOICE])
-            begin_choice(
-                "permission settings",
-                choices,
-                _settings_choice_default(choices, default),
+            page = self._permission_panel_page()
+            default_id = next(
+                (row.id for row in page.rows if row.legacy_label == default), ""
             )
+            self._open_panel(page, "permission settings", default_id)
             return
         if category == "tools":
             values = self._tool_validation
@@ -11797,6 +12480,213 @@ class PersistentChatTUI:
         self._set_input("")
         self._commit_appearance("all settings", reset=True)
 
+    def _permission_panel_page(self) -> PanelPage:
+        names = _permission_tool_names(self.agent)
+        policies = _effective_permission_policies(self.agent, self.cfg)
+        preset = _permission_preset_name(policies, names)
+        rows = [
+            PanelRow("preset-heading", RowKind.SECTION, "PRESET",
+                     legacy_label=_choice_section("PRESET")),
+            PanelRow("preset", RowKind.NAVIGATION, "Current configuration",
+                     preset.upper(), "Choose a permission preset",
+                     action=PanelAction("preset"), section_id="preset-heading",
+                     legacy_label=f"Current configuration: {preset.upper()}"),
+        ]
+        grouped = _permission_group_rows(names)
+        for group, tools in grouped:
+            section_id = f"group:{group}"
+            rows.append(PanelRow(section_id, RowKind.SECTION, group,
+                                 legacy_label=_choice_section(group)))
+            if group == "MCP SERVERS":
+                servers = _mcp_permission_server_rows(self.agent)
+                rows.append(PanelRow(
+                    "mcp-servers", RowKind.NAVIGATION, "MCP Servers",
+                    f"{len(servers)} active", "Inspect each server's tool policies",
+                    action=PanelAction("mcp-servers"), section_id=section_id,
+                    legacy_label=f"MCP Servers: {len(servers)} active",
+                ))
+                continue
+            for name, label in tools:
+                rows.append(PanelRow(
+                    f"tool:{name}", RowKind.CHOICE, label, policies[name].upper(),
+                    action=PanelAction("tool-policy", name), section_id=section_id,
+                    legacy_label=f"{label}: {policies[name].upper()}",
+                    value_tone=PERMISSION_VALUE_TONES.get(policies[name], "neutral"),
+                ))
+        if not any(row.id == "mcp-servers" for row in rows):
+            rows.extend([
+                PanelRow("group:MCP SERVERS", RowKind.SECTION, "MCP SERVERS",
+                         legacy_label=_choice_section("MCP SERVERS")),
+                PanelRow("mcp-servers", RowKind.NAVIGATION, "MCP Servers", "0 active",
+                         "Enable an MCP server to configure its tools",
+                         action=PanelAction("mcp-servers"), section_id="group:MCP SERVERS",
+                         legacy_label="MCP Servers: 0 active"),
+            ])
+        rows.extend([
+            PanelRow("reset", RowKind.ACTION, "Reset to default",
+                     description="Restore configured permission defaults",
+                     action=PanelAction("reset"),
+                     legacy_label=RESET_THEME_CHOICE),
+            PanelRow("back", RowKind.NAVIGATION, "Back", action=PanelAction("back"),
+                     legacy_label="back"),
+        ])
+        return PanelPage("permissions", ("Settings", "Permissions"), tuple(rows))
+
+    def _mcp_permission_servers_page(self) -> PanelPage:
+        policies = _effective_permission_policies(self.agent, self.cfg)
+        servers = _mcp_permission_server_rows(self.agent)
+        rows = [PanelRow("servers-heading", RowKind.SECTION, "MCP SERVERS",
+                         legacy_label=_choice_section("MCP SERVERS"))]
+        for server, tools in servers.items():
+            count = len(tools)
+            rows.append(PanelRow(
+                f"server:{server}", RowKind.NAVIGATION, server,
+                _mcp_server_permission_state(tools, policies),
+                f"{count} {'tool' if count == 1 else 'tools'}",
+                action=PanelAction("mcp-server", server), section_id="servers-heading",
+                legacy_label=_mcp_server_permission_label(server, tools, policies),
+                value_tone=PERMISSION_VALUE_TONES.get(
+                    _mcp_server_permission_state(tools, policies).casefold(), "neutral"
+                ),
+            ))
+        if not servers:
+            rows.append(PanelRow("empty", RowKind.INFO,
+                                 "Enable an MCP server to configure its tools",
+                                 legacy_label=_choice_info(
+                                     "Enable an MCP server to configure its tools"
+                                 )))
+        rows.append(PanelRow("back", RowKind.NAVIGATION, "Back",
+                             action=PanelAction("back"), legacy_label="back"))
+        return PanelPage("mcp-permission-servers",
+                         ("Settings", "Permissions", "MCP Servers"), tuple(rows))
+
+    def _open_mcp_permission_servers(self, default: str = "") -> None:
+        self._open_panel(self._mcp_permission_servers_page(),
+                         "mcp permission servers", f"server:{default}" if default else "")
+
+    def _activate_panel_toggle(self) -> None:
+        if self._panel is None:
+            return
+        row = self._panel.row()
+        if row is not None and row.kind == RowKind.TOGGLE and row.enabled and row.action:
+            self._apply_panel_action(row.action)
+
+    def _apply_panel_action(self, action: PanelAction) -> None:
+        if action.kind == "legacy-choice":
+            panel = self._panel
+            kind = self._choice_kind
+            if panel is None or panel.picker.selected_id != action.target:
+                return
+            self._panel = None
+            self._accept_choice()
+            if self._panel is None and self._choice_kind == kind:
+                self._panel = panel
+                self.application.layout.focus(self.panel_body_window)
+                self.application.invalidate()
+        elif action.kind == "back":
+            self._cancel_choice()
+        elif action.kind == "close":
+            self._cancel_choice()
+        elif action.kind == "category":
+            if action.target == "models":
+                self._open_model_source("settings")
+            else:
+                self._open_settings_category(action.target)
+        elif action.kind == "reset-all":
+            self._open_settings_category("reset all")
+        elif action.kind == "preset":
+            self._open_permission_presets()
+        elif action.kind == "mcp-servers":
+            self._open_mcp_permission_servers()
+        elif action.kind == "mcp-server":
+            self._open_mcp_permission_server(action.target)
+        elif action.kind == "reset":
+            self._reset_permission_settings()
+        elif action.kind == "tool-policy":
+            policies = _effective_permission_policies(self.agent, self.cfg)
+            name = action.target
+            if name not in policies:
+                return
+            policies[name] = {"ask": "allow", "allow": "deny", "deny": "ask"}[policies[name]]
+            self._save_permission_settings(policies, tool=name)
+            if self._panel is not None:
+                self._panel.picker.focus(f"tool:{name}")
+                self._apply_picker_state()
+        elif action.kind in {"mcp-bulk", "mcp-tool"}:
+            server = self._permission_mcp_server or ""
+            rows = _mcp_permission_server_rows(self.agent).get(server, [])
+            if not rows:
+                self._open_mcp_permission_servers()
+                self.status_error = "MCP tools changed; reopen the server permissions"
+                return
+            policies = _effective_permission_policies(self.agent, self.cfg)
+            if action.kind == "mcp-bulk":
+                changed = {name: action.target for name, _ in rows}
+                focus_id = {
+                    "allow": "allow-all", "ask": "ask-all", "deny": "deny-all"
+                }[action.target]
+            else:
+                name = action.target
+                if name not in {tool for tool, _ in rows}:
+                    return
+                changed = {name: {"ask": "allow", "allow": "deny", "deny": "ask"}[policies[name]]}
+                focus_id = f"mcp-tool:{name}"
+            self._submit_preference_changes({
+                ("permissions", name): policy for name, policy in changed.items()
+            })
+            if not hasattr(self.agent.gate, "policies"):
+                self.agent.gate.policies = {}
+            self.agent.gate.policies.update(changed)
+            getattr(self.agent.gate, "process_grants", set()).clear()
+            self.status_error = ""
+            self._open_mcp_permission_server(server)
+            if self._panel is not None:
+                self._panel.picker.focus(focus_id)
+                self._apply_picker_state()
+
+    def _mcp_permission_detail_page(self, server: str) -> PanelPage | None:
+        tools = _mcp_permission_server_rows(self.agent).get(server)
+        if not tools:
+            return None
+        policies = _effective_permission_policies(self.agent, self.cfg)
+        rows = [
+            PanelRow("server-heading", RowKind.SECTION, "SERVER",
+                     legacy_label=_choice_section("SERVER")),
+            PanelRow("current-policy", RowKind.STATUS, "Current policy",
+                     _mcp_server_permission_state(tools, policies),
+                     legacy_label=_choice_info(
+                         f"Current: {_mcp_server_permission_state(tools, policies)}"
+                     ),
+                     value_tone=PERMISSION_VALUE_TONES.get(
+                         _mcp_server_permission_state(tools, policies).casefold(), "neutral"
+                     )),
+            PanelRow("allow-all", RowKind.ACTION, "Allow all",
+                     description="Set every tool to ALLOW",
+                     action=PanelAction("mcp-bulk", "allow"),
+                     section_id="server-heading", legacy_label="ALLOW ALL"),
+            PanelRow("ask-all", RowKind.ACTION, "Ask for each tool",
+                     description="Set every tool to ASK",
+                     action=PanelAction("mcp-bulk", "ask"),
+                     section_id="server-heading", legacy_label="ASK FOR EACH TOOL"),
+            PanelRow("deny-all", RowKind.ACTION, "Deny all",
+                     description="Set every tool to DENY",
+                     action=PanelAction("mcp-bulk", "deny"),
+                     section_id="server-heading", legacy_label="DENY ALL"),
+            PanelRow("tools-heading", RowKind.SECTION, "TOOLS",
+                     legacy_label=_choice_section("INDIVIDUAL TOOLS")),
+        ]
+        for name, label in tools:
+            rows.append(PanelRow(
+                f"mcp-tool:{name}", RowKind.CHOICE, label, policies[name].upper(),
+                action=PanelAction("mcp-tool", name), section_id="tools-heading",
+                legacy_label=f"{label}: {policies[name].upper()}",
+                value_tone=PERMISSION_VALUE_TONES.get(policies[name], "neutral"),
+            ))
+        rows.append(PanelRow("back", RowKind.NAVIGATION, "Back",
+                             action=PanelAction("back"), legacy_label="back"))
+        return PanelPage(f"mcp-permission:{server}",
+                         ("Settings", "Permissions", "MCP Servers", server), tuple(rows))
+
     def _open_permission_presets(self) -> None:
         names = _permission_tool_names(self.agent)
         current = _effective_permission_policies(self.agent, self.cfg)
@@ -11812,26 +12702,14 @@ class PersistentChatTUI:
         )
 
     def _open_mcp_permission_server(self, server: str, default: str | None = None) -> None:
-        rows = _mcp_permission_server_rows(self.agent).get(server)
-        if not rows:
-            self._open_settings_category("permissions")
+        page = self._mcp_permission_detail_page(server)
+        if page is None:
+            self._open_mcp_permission_servers()
             self.status_error = f"No active tools for MCP server {server}"
             return
         self._permission_mcp_server = server
-        policies = _effective_permission_policies(self.agent, self.cfg)
-        choices = [
-            _choice_section(f"MCP SERVER · {server.upper()}"),
-            _choice_info(f"Current: {_mcp_server_permission_state(rows, policies)}"),
-            "ALLOW ALL",
-            "ASK FOR EACH TOOL",
-            "DENY ALL",
-            _choice_section("INDIVIDUAL TOOLS"),
-            *(f"{label}: {policies[name].upper()}" for name, label in rows),
-            "back",
-        ]
-        self._begin_choice(
-            "mcp permission tools", choices, _settings_choice_default(choices, default)
-        )
+        default_id = next((row.id for row in page.rows if row.legacy_label == default), "")
+        self._open_panel(page, "mcp permission tools", default_id)
 
     def _change_mcp_server_permissions(self, selected: str) -> None:
         server = self._permission_mcp_server
@@ -12193,10 +13071,6 @@ class PersistentChatTUI:
             enabled = result.get("memory_enabled")
             if type(enabled) is bool and self._memory_save_state not in {"saving", "failed"}:
                 self._status_memory_enabled = enabled
-            self._append("\n[status · metadata]\n" + _status_columns([
-                ("Session name", self._session_title_hint),
-                ("Memory", "on" if self._status_memory_enabled else "off"),
-            ]) + "\n")
         elif key == "model-activation":
             future = self._model_activation_future
             if identity == self._model_activation_id and future is not None and not future.done():
@@ -12926,10 +13800,8 @@ class PersistentChatTUI:
             return
         if kind == "mcp settings":
             if selected == "MCP server permissions":
-                servers = _mcp_permission_server_rows(self.agent)
-                first = next(iter(servers), None)
                 self._permission_return_to_mcp = True
-                self._open_settings_category("permissions", f"{first}:" if first else None)
+                self._open_mcp_permission_servers()
                 return
             if selected == "Reload configured MCP tools":
                 if self.running or self._setup_job is not None or self._mcp_mutation_pending:
@@ -13763,6 +14635,11 @@ class PersistentChatTUI:
                     message = "[recap]\n" + _chat_recap(self.agent, self.session_id)
                 elif command == "/status":
                     self._refresh_status_metadata()
+                    memory_state = (
+                        "Loading…" if self._status_metadata_loading
+                        else "Unavailable" if self._status_metadata_loaded_at
+                        else None
+                    )
                     message = "[status]\n" + _chat_status(
                         self.agent,
                         self.memory,
@@ -13770,6 +14647,7 @@ class PersistentChatTUI:
                         title_hint=self._session_title_hint,
                         usage_rows=self._status_usage_rows(),
                         snapshot_only=True, memory_enabled=self._status_memory_enabled,
+                        memory_state=memory_state,
                     )
                 elif command == "/memory":
                     if argument.strip() in {"on", "off"}:
@@ -15146,7 +16024,22 @@ class PersistentChatTUI:
             else:
                 self._last_picker_session_sync = 0.0
         self._refresh_transcript_dividers()
-        self.application.layout.focus(self.choice_control if self._choice_kind else self.input)
+        if (
+            self._panel_composer_draft is not None
+            and self._choice_kind is None
+            and self._setup_job is None
+            and self._secret_request is None
+            and self._settings_input_request is None
+            and self._user_input_request is None
+            and not self._height_edit
+            and not self._runtime_edit
+            and not self._mcp_catalog_query
+        ):
+            self._restore_panel_composer_draft()
+        self.application.layout.focus(
+            self.panel_control if self._panel is not None else
+            self.choice_control if self._choice_kind else self.input
+        )
         while True:
             try:
                 kind, payload = self._events.get_nowait()
@@ -15291,6 +16184,9 @@ class PersistentChatTUI:
                 elif self._choice_kind in {
                     "permission settings", "mcp permission tools", "tools settings"
                 }:
+                    if self._panel is not None and not self._panel.page.legacy_actions:
+                        self._refresh_permission_panel()
+                        continue
                     selected = self._choice_values[self._choice_index]
                     error = self.status_error
                     if self._choice_kind == "mcp permission tools":
@@ -15337,6 +16233,9 @@ class PersistentChatTUI:
                     if name in names and policy in {"ask", "allow", "deny"}
                 })
                 if self._choice_kind in {"permission settings", "mcp permission tools"}:
+                    if self._panel is not None:
+                        self._refresh_permission_panel()
+                        continue
                     selected = self._choice_values[self._choice_index]
                     error = self.status_error
                     if self._choice_kind == "mcp permission tools":
@@ -15546,6 +16445,9 @@ class PersistentChatTUI:
         output = self.application.output
 
         def prepare_normal_screen() -> None:
+            # Prime session name and memory mode before the first /status.
+            # The owned read stays off the UI thread and never initializes storage.
+            self._refresh_status_metadata()
             for backend in MODEL_PROVIDER_FOR_BACKEND:
                 if backend != "ollama":
                     self._start_model_catalog_refresh(backend)
@@ -15789,7 +16691,7 @@ def chat(
                 elif command == "/recap":
                     console.print(Text(_chat_recap(agent, session_id)))
                 elif command == "/status":
-                    console.print(Text(_chat_status(agent, memory, session_id)))
+                    console.print(_status_rich_text(_chat_status(agent, memory, session_id)))
                 elif command == "/memory":
                     console.print(Text(_chat_memory(memory, argument.strip())))
                 else:

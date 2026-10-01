@@ -160,8 +160,29 @@ Chat slash commands currently include:
   home page is a grouped, aligned overview that shows the live value or a
   concise status for every category. Enter opens that category, and returning
   with Back or Escape keeps the selector on the same logical summary row even
-  when its displayed value changed. Overview memory/MCP metadata comes from an
-  owned eight-second read-only job, never synchronous SQLite/config parsing in
+  when its displayed value changed. Every Settings category and its selection
+  subpages use a Prompt Toolkit panel with a fixed breadcrumb/header and
+  help/status footer around a scrolling body. The Settings home and Permissions
+  MCP server/detail pages have typed actions; other Settings pages adapt their
+  existing picker identities and action handlers into typed presentation rows.
+  Row IDs, values, and descriptions are separate from rendered labels in the
+  panel. Category headings start with `▪` before an underlined title, without a
+  separate rule row, and remain non-selectable. Enabled panel toggles color only
+  their square with the active theme's primary accent; brackets and value text
+  retain normal value styling. Reset and MCP bulk-policy actions use plain
+  labels without bracketed controls. The focused selectable row uses a subtle theme
+  background across wrapped lines without recoloring labels, values, or muted
+  descriptions. Permission policy values use semantic green ALLOW, yellow ASK,
+  and red DENY text without recoloring the rest of the row. Slash activates
+  page-local search; Escape clears search before
+  navigating back. The live row below Settings keeps the ordinary ready/activity,
+  queue, context, and token counters; panel titles and navigation hints stay in
+  the panel. Transient masked input
+  and setup-progress screens retain their specialized composers. The panel
+  preserves an unsent composer draft when it closes and leaves the transcript
+  in ordinary terminal scrollback.
+  Overview memory/MCP metadata comes from an owned eight-second read-only job,
+  never synchronous SQLite/config parsing in
   navigation or rendering. It returns only the automatic-memory flag and MCP
   enabled/total counts, without connecting to servers or publishing definitions,
   credentials, tools, or conversation content. The summary shows loading,
@@ -373,7 +394,8 @@ Chat slash commands currently include:
   use the same writer rather than synchronous special-case writes.
 - `/permission`: open the Permissions settings page directly. It takes no
   arguments; permission changes are made and persisted through that page.
-  Active MCP tools appear under one row per server. Entering a server shows
+  The MCP Servers row opens a server list; active MCP tools appear under one
+  row per server there. Entering a server shows
   its individual ask/allow/deny policies and scoped Allow all, Ask for each
   tool, and Deny all actions. Server-wide changes save only that server's tool
   policies and preserve unrelated permissions. The `/mcp` settings page has a
@@ -393,6 +415,8 @@ Chat slash commands currently include:
   most 1,000 definitions, using the existing server validator. Only names,
   enabled/transport/OAuth flags, and tool counts cross IPC; endpoints, command
   arguments, environment/header values, credentials and schemas stay private.
+  Configured server rows show the same boolean ON/OFF switch as other Settings
+  toggles; Space and Enter use the existing server change or review flow.
   Successful snapshots cache for 30 seconds with visible real age. Read failures
   retain that age and use neutral feedback; Back/reopen retries. Leaving cancels
   reads and drops stale session/path/job results. Filter and logical selection
@@ -492,15 +516,21 @@ Chat slash commands currently include:
   when one exists, otherwise the normalized first user input (up to 160
   characters). Capture that fallback synchronously when the first turn starts
   so live `/status` never races the worker's database write. Render status as
-  aligned label/value columns, with additional `AGENTS.md` paths on blank-label
-  continuation rows.
+  grouped aligned label/value columns, with the session, model/runtime,
+  workspace/guidance, and permission/memory/tool sections separated by blank
+  lines. The TUI badge renders as `[STATUS]`; line-oriented output prints that
+  header. Policy words ALLOW, ASK, and DENY receive semantic colors without
+  coloring their counts. The estimated Context value turns yellow from 70%
+  usage and red from 90%; its label and Context left row keep normal styling.
+  Additional `AGENTS.md` paths use blank-label continuation rows.
   Status never reloads repository guidance or changes the agent's injection
   bookkeeping. Use the latest request's capability snapshot, falling back to
   the last prompt-build snapshot; newly created files are not called injected.
   Before any prompt snapshot exists, report that explicitly. TUI session names
-  use the synchronous first-input/rename hint, and automatic memory mode is
-  unknown until its metadata snapshot is available. An owned eight-second
-  read-only SQLite job refreshes assigned names and memory mode with a 30-second
+  use the synchronous first-input/rename hint. Automatic memory mode shows
+  Loading until its snapshot arrives, or Unavailable after a failed read; it
+  never guesses On or Off. An owned eight-second read-only SQLite job starts
+  when the TUI opens and refreshes assigned names and memory mode with a 30-second
   cache; it never initializes/migrates storage or reads conversation content.
   Late results are scoped to the originating session and title, and local memory
   changes invalidate pending metadata reads. Line-oriented status retains direct
@@ -681,7 +711,10 @@ Chat slash commands currently include:
   workspace (for example, `/ls -lha`); positional paths remain jailed there.
 - `/attach PATH`: attach a file or folder as bounded context for the next
   message. Typing `/attach ` offers paths from the current agent workspace;
-  absolute paths are also accepted. Inline `@PATH` mentions work anywhere in a
+  absolute paths are also accepted. Typing `~` offers `~/`, and `~/` searches
+  the user's home without converting it to a workspace-relative path. Parent
+  directory and trailing-slash path suggestions retain their typed path form.
+  Inline `@PATH` mentions work anywhere in a
   TUI message and offer the same suggestions; quote paths containing spaces,
   such as `@"project notes/brief.md"`.
 - `/theme [NAME]`: open Theme settings for interface and text/code colors;
@@ -794,9 +827,11 @@ a different session safely interrupts local work before switching. Up/down
 navigate input history, Tab completes slash commands,
 and the live status line shows activity,
 queue depth, model, effort, context-window use, and last input/output token
-counts. The TUI renders actual fragments emitted by Ollama as they arrive; it
-must not simulate streaming character by character. Tool-enabled responses may
-still need to assemble before their structured calls are resolved. Non-interactive stdin retains line-oriented compatibility and plain
+counts. The TUI renders actual provider fragments as they arrive; it must not
+simulate streaming character by character. Cloud requests stream public text
+even when tools are available, while structured calls assemble and validate
+before execution. Ollama requests with tool schemas still assemble before
+structured calls are resolved. Non-interactive stdin retains line-oriented compatibility and plain
 output. Line-oriented and one-shot turns use the same renewable session lease,
 durable start/result/completion events, partial-output preservation, and
 failed/interrupted finalization as TUI turns. If a process disappears before
@@ -880,7 +915,11 @@ Escape closes the completion popup without altering the current input.
 An exact slash-command match stays visible after its final character is typed.
 Completion rows change only the text color of characters matching the typed
 command or path prefix. Unmatched characters use the muted status-row text
-color. Selection adds no background, font weight, or underline.
+color; when no path fragment is typed, the entire unselected `/attach` or `@`
+candidate uses that muted color. Matched characters get no separate background,
+font weight, or underline. The shared command, `/attach`, and `@`
+completion popup uses a background slightly lighter than the composer; its
+selected row and metadata are slightly lighter than the popup.
 The currently selected suggestion displays its entire candidate text using the
 normal composer input text color; it does not recolor the composer text itself.
 Inline attachment completion stays anchored at its original `@` position while

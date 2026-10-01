@@ -5267,6 +5267,7 @@ class Agent:
                 }
             )
         for _step in range(self.max_steps):
+            streamed_this_response = False
             governor_reason = governor.begin_model_step()
             self.last_turn_budget = governor.snapshot().to_dict()
             if governor_reason and not governor_stop_instruction_sent:
@@ -5290,10 +5291,11 @@ class Agent:
                         # never prevent the provider request from running.
                         pass
                 stream_chat = getattr(self.ollama, "chat_stream", None)
-                # With no tool schema, Ollama can yield response fragments as
-                # they are generated. Tool-enabled requests stay assembled so
-                # structured calls remain reliable.
-                if not schemas and callable(stream_chat):
+                # Ollama's tool stream is assembled by its adapter. Cloud
+                # adapters can stream public text while assembling structured
+                # calls from the same response.
+                stream_with_tools = bool(schemas) and self.model_info.backend != "ollama"
+                if callable(stream_chat) and (not schemas or stream_with_tools):
                     streamed_parts: list[str] = []
                     streamed_metadata: dict[str, Any] = {}
                     validation_language = (
@@ -5304,12 +5306,15 @@ class Agent:
                     stream_completed = False
                     held_parts: list[str] = []
                     holding_markup = False
+                    held_was_flushed = False
                     try:
+                        stream_kwargs: dict[str, Any] = {
+                            "options": request_options, "think": request_think,
+                        }
+                        if stream_with_tools:
+                            stream_kwargs["tools"] = schemas
                         for fragment in stream_chat(
-                            self.model,
-                            request_messages,
-                            options=request_options,
-                            think=request_think,
+                            self.model, request_messages, **stream_kwargs
                         ):
                             streamed_metadata.update(
                                 {
@@ -5338,6 +5343,7 @@ class Agent:
                                 held_parts.append(piece)
                             elif not validation_language:
                                 streamed_any = True
+                                streamed_this_response = True
                                 yield AgentEvent("text_delta", {"content": piece})
                         stream_completed = True
                     finally:
@@ -5365,6 +5371,8 @@ class Agent:
                         and not _parse_text_tool_calls(msg["content"], set(self.tools))
                     ):
                         streamed_any = True
+                        streamed_this_response = True
+                        held_was_flushed = True
                         yield AgentEvent("text_delta", {"content": "".join(held_parts)})
                 elif request_options or request_think is not None:
                     chat_kwargs: dict[str, Any] = {
@@ -5468,6 +5476,23 @@ class Agent:
                 )
                 yield AgentEvent("retry", {"reason": "invalid or unavailable tool call"})
                 continue
+
+            if (
+                tool_calls and isinstance(raw_tool_calls, list) and raw_tool_calls
+                and streamed_this_response and content.strip()
+            ):
+                # Public preamble was already shown before the provider's
+                # structured call arrived. Persist it once before tool work.
+                public_preamble = _interrupted_stream_content(
+                    content, holding_markup=holding_markup and not held_was_flushed
+                )
+                if public_preamble:
+                    yield AgentEvent(
+                        "text", {
+                            "content": public_preamble,
+                            "metadata": {"streamed": True},
+                        }
+                    )
 
             if not tool_calls:
                 if not content.strip() and not empty_response_retried:

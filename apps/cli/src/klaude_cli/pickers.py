@@ -14,6 +14,8 @@ class PickerRow:
     selectable: bool = True
     exit: bool = False
     enabled: bool = True
+    search_text: str = ""
+    section_id: str | None = None
 
 
 def match_score(value: str, query: str) -> float:
@@ -81,13 +83,21 @@ class PickerController:
             self.no_matches = False
             return
         ranked = [
-            (match_score(row.label, self.query), index, row)
+            (match_score(row.search_text or row.label, self.query), index, row)
             for index, row in enumerate(self.rows)
             if row.selectable and not row.exit
         ]
         ranked = [item for item in ranked if item[0] >= 0.45]
         ranked.sort(key=lambda item: (-item[0], item[1]))
         matches = [row for _, _, row in ranked[:50]]
+        sections = {row.id: row for row in self.rows if not row.selectable}
+        contextual: list[PickerRow] = []
+        last_section: str | None = None
+        for row in matches:
+            if row.section_id and row.section_id in sections and row.section_id != last_section:
+                contextual.append(sections[row.section_id])
+            contextual.append(row)
+            last_section = row.section_id
         exits = [row for row in self.rows if row.exit]
         if explicit := [row for row in exits if row.label.casefold() == self.query]:
             self.no_matches = False
@@ -95,7 +105,7 @@ class PickerController:
             return
         self.no_matches = not matches
         self.visible = (
-            [*matches, *exits]
+            [*contextual, *exits]
             if matches
             else [PickerRow("no-matches", "\0info:No matching options", selectable=False), *exits]
         )
@@ -142,8 +152,6 @@ class PickerController:
             while section_start > 0 and not self.visible[section_start - 1].selectable:
                 section_start -= 1
             if section_start < self.index:
-                self.scroll_top = min(
-                    self.scroll_top, max(section_start, self.index - height + 1)
-                )
+                self.scroll_top = min(self.scroll_top, max(section_start, self.index - height + 1))
         self.scroll_top = min(self.scroll_top, max(0, len(self.visible) - height))
         return self.scroll_top

@@ -5,6 +5,7 @@ from copy import deepcopy
 import pytest
 from klaude_core import Agent, PermissionGate, Tool, TurnScope, WebResearchBudget
 from klaude_core.agent import ConversationEntity
+from klaude_core.model_runtime import ModelInfo
 
 
 def tool_call(name: str, **arguments):
@@ -33,6 +34,117 @@ class ScriptedOllama:
             raise AssertionError("unexpected model call")
         response = self.responses.pop(0)
         return response() if callable(response) else deepcopy(response)
+
+
+def test_cloud_tool_enabled_answer_streams_before_response_completes():
+    class CloudRuntime:
+        backend = "openai_api"
+        last_chat_metadata = {}
+        completed = False
+
+        def chat(self, *_args, **_kwargs):
+            raise AssertionError("tool-enabled cloud response must stream")
+
+        def chat_stream(self, _model, _messages, *, tools=None, **_kwargs):
+            assert [tool["function"]["name"] for tool in tools] == ["inspect"]
+            yield {"role": "assistant", "content": "Hello "}
+            yield {"role": "assistant", "content": "there."}
+            self.completed = True
+
+    runtime = CloudRuntime()
+    agent = Agent(
+        runtime, "cloud-test",
+        [Tool("inspect", "Inspect", {"type": "object"}, lambda: "ok")],
+        PermissionGate({"inspect": "allow"}, lambda *_args: "n"),
+        "system", model_info=ModelInfo("openai_api", "cloud-test", "cloud-test"),
+        tool_selector=lambda _message, available: list(available),
+    )
+    events = agent.run("Say hello")
+    first = next(event for event in events if event.kind == "text_delta")
+    assert first.payload == {"content": "Hello "}
+    assert runtime.completed is False
+    remaining = list(events)
+    assert [event.payload["content"] for event in remaining if event.kind == "text_delta"] == [
+        "there."
+    ]
+    assert next(event for event in remaining if event.kind == "text").payload == {
+        "content": "Hello there.", "metadata": {"streamed": True},
+    }
+
+
+def test_cloud_stream_preserves_structured_tool_call_and_public_preamble():
+    class CloudRuntime:
+        backend = "openai_api"
+        last_chat_metadata = {}
+        calls = 0
+
+        def chat(self, *_args, **_kwargs):
+            raise AssertionError("tool-enabled cloud response must stream")
+
+        def chat_stream(self, _model, _messages, *, tools=None, **_kwargs):
+            self.calls += 1
+            assert tools
+            if self.calls == 1:
+                yield {"role": "assistant", "content": "Checking. "}
+                yield {
+                    "role": "assistant", "content": "",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "function": {"name": "inspect", "arguments": "{}"},
+                    }],
+                }
+            else:
+                yield {"role": "assistant", "content": "Done."}
+
+    executed = []
+    runtime = CloudRuntime()
+    agent = Agent(
+        runtime, "cloud-test",
+        [Tool("inspect", "Inspect", {"type": "object"},
+              lambda: executed.append(True) or "ok")],
+        PermissionGate({"inspect": "allow"}, lambda *_args: "n"),
+        "system", model_info=ModelInfo("openai_api", "cloud-test", "cloud-test"),
+        tool_selector=lambda _message, available: list(available),
+    )
+    events = list(agent.run("Inspect then answer"))
+    assert executed == [True]
+    assert runtime.calls == 2
+    visible_kinds = [
+        event.kind for event in events if event.kind in {"text_delta", "text", "tool_start"}
+    ]
+    assert visible_kinds == [
+        "text_delta", "text", "tool_start", "text_delta", "text",
+    ]
+    assert [event.payload["content"] for event in events if event.kind == "text"] == [
+        "Checking. ", "Done.",
+    ]
+
+
+def test_closing_tool_enabled_cloud_stream_keeps_only_public_partial_text():
+    class CloudRuntime:
+        backend = "openai_api"
+        last_chat_metadata = {}
+
+        def chat_stream(self, _model, _messages, *, tools=None, **_kwargs):
+            assert tools
+            yield {"role": "assistant", "content": "Visible prefix. "}
+            yield {"role": "assistant", "content": "Never consumed."}
+
+    agent = Agent(
+        CloudRuntime(), "cloud-test",
+        [Tool("inspect", "Inspect", {"type": "object"}, lambda: "ok")],
+        PermissionGate({"inspect": "allow"}, lambda *_args: "n"),
+        "system", model_info=ModelInfo("openai_api", "cloud-test", "cloud-test"),
+        tool_selector=lambda _message, available: list(available),
+    )
+    events = agent.run("Inspect if needed")
+    assert next(event for event in events if event.kind == "text_delta").payload == {
+        "content": "Visible prefix. "
+    }
+    events.close()
+    assert agent.messages[-1] == {
+        "role": "assistant", "content": "Visible prefix. ", "interrupted": True,
+    }
 
 
 def test_parallel_tool_response_stops_at_the_nonexpandable_call_budget():
