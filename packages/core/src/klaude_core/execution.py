@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -13,6 +14,10 @@ FAILED_RESULT_PREFIXES = (
     "error:",
     "blocked ",
     "skipped ",
+)
+NO_EVIDENCE_RE = re.compile(
+    r"(?i)\b(?:no (?:relevant |matching |usable )?(?:results?|documents?|sources?|"
+    r"knowledge)|nothing (?:found|relevant)|could(?: not|n't) find|not found)\b"
 )
 
 
@@ -120,11 +125,19 @@ class TurnGovernor:
         self.tool_calls_used += 1
         normalized = " ".join(result.casefold().split())[:2_000]
         failed = normalized.startswith(FAILED_RESULT_PREFIXES)
+        no_evidence = (
+            metadata is not None
+            and (
+                metadata.get("found") is False
+                or metadata.get("status") in {"failed", "skipped", "no_results"}
+                or (metadata.get("result_count") == 0 and tool in {"web_search", "query_knowledge"})
+            )
+        ) or bool(NO_EVIDENCE_RE.match(normalized))
         outcome = f"{tool}:{normalized}"
         duplicate_outcome = outcome in self._successful_outcomes
         executed = (metadata or {}).get("executed") is not False
 
-        if failed or duplicate_outcome or not executed:
+        if failed or no_evidence or duplicate_outcome or not executed:
             self.no_progress_streak += 1
         else:
             self.no_progress_streak = 0

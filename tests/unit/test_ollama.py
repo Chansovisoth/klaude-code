@@ -42,6 +42,33 @@ def test_chat_assembles_streamed_transport_for_tool_compatible_response():
     assert ollama.last_chat_metadata["eval_count"] == 2
 
 
+def test_tool_chat_reports_reasoning_only_output_limit():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=(
+                '{"message":{"role":"assistant","thinking":"plan"},"done":false}\n'
+                '{"message":{"role":"assistant","thinking":"more"},'
+                '"done":true,"done_reason":"length","eval_count":4096}\n'
+            ),
+        )
+
+    ollama = Ollama("http://ollama.test")
+    ollama._chat_client_factory = lambda: httpx.Client(
+        base_url="http://ollama.test", transport=httpx.MockTransport(handler)
+    )
+
+    message = ollama.chat(
+        "qwen3.5:4b", [{"role": "user", "content": "repair this file"}],
+        tools=[{"type": "function", "function": {"name": "read_file"}}],
+        think=False,
+    )
+
+    assert message["content"] == ""
+    assert ollama.last_chat_metadata["done_reason"] == "length"
+    assert ollama.last_chat_metadata["thinking_characters"] == 8
+
+
 def test_cancel_active_closes_request_client():
     class FakeClient:
         closed = False

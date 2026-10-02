@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -162,3 +164,74 @@ class SessionIOCoordinator:
             self._condition.notify()
         if wait and self._thread is not None:
             self._thread.join(2)
+
+
+class SessionLeaseKeeper:
+    """Renew a line-oriented turn lease while its synchronous model loop runs."""
+
+    def __init__(
+        self,
+        memory,
+        session_id: str,
+        client_id: str,
+        turn_id: str,
+        *,
+        interval: float = 5.0,
+        ttl: float = 60.0,
+        on_lost: Callable[[], None] | None = None,
+    ) -> None:
+        self.memory = memory
+        self.session_id = session_id
+        self.client_id = client_id
+        self.turn_id = turn_id
+        self.interval = max(0.1, float(interval))
+        self.ttl = max(self.interval * 2, float(ttl))
+        self.on_lost = on_lost
+        self.lost = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="klaude-session-lease"
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        connection = self.memory
+        open_connection = getattr(self.memory, "open_session_io", None)
+        if callable(open_connection):
+            try:
+                connection = open_connection()
+            except sqlite3.Error:
+                connection = self.memory
+        try:
+            while not self._stop.wait(self.interval):
+                try:
+                    renewed = connection.renew_session_lease(
+                        self.session_id,
+                        self.client_id,
+                        self.turn_id,
+                        ttl=self.ttl,
+                    )
+                except sqlite3.Error:
+                    continue
+                if renewed:
+                    continue
+                self.lost.set()
+                if self.on_lost is not None:
+                    try:
+                        self.on_lost()
+                    except Exception:
+                        pass
+                return
+        finally:
+            if connection is not self.memory:
+                try:
+                    connection.db.close()
+                except sqlite3.Error:
+                    pass

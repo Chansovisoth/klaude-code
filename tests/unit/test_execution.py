@@ -44,6 +44,26 @@ def test_turn_governor_resets_no_progress_after_new_evidence():
     assert governor.snapshot().no_progress_streak == 0
 
 
+def test_different_queries_with_no_evidence_are_one_nonprogress_strategy():
+    governor = TurnGovernor(20, max_tool_calls=20, max_no_progress=3)
+    for query in ("Godot movement", "Godot player control", "Godot movement code"):
+        reason = governor.observe_tool_result(
+            "query_knowledge", f"No relevant local knowledge found for {query}.",
+            {"found": False, "result_count": 0, "query": query},
+        )
+    assert reason == "tool activity stopped making progress"
+    assert governor.snapshot().no_progress_streak == 3
+
+
+def test_different_mcp_queries_with_no_documentation_stop_before_loop():
+    governor = TurnGovernor(20, max_tool_calls=20, max_no_progress=3)
+    for subject in ("news", "Facebook", "GitHub"):
+        reason = governor.observe_tool_result(
+            "mcp__context7__query_docs", f"No relevant documents for {subject}."
+        )
+    assert reason == "tool activity stopped making progress"
+
+
 def test_turn_governor_stops_at_safe_boundary_after_wall_time():
     now = [10.0]
     governor = TurnGovernor(20, max_elapsed_seconds=5, clock=lambda: now[0])

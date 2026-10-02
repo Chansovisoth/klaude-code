@@ -109,6 +109,8 @@ class Ollama:
         if think is not None:
             payload["think"] = think
         assembled: dict[str, Any] = {"role": "assistant", "content": ""}
+        thinking_characters = 0
+        self.last_chat_metadata = {}
         request_client = self._chat_client_factory()
         self._track_request(request_client)
         try:
@@ -130,6 +132,7 @@ class Ollama:
                         for field in ("content", "thinking"):
                             if message.get(field):
                                 assembled[field] = assembled.get(field, "") + str(message[field])
+                        thinking_characters += len(str(message.get("thinking", "")))
                         if isinstance(message.get("tool_calls"), list):
                             assembled.setdefault("tool_calls", []).extend(message["tool_calls"])
                     if event.get("done"):
@@ -145,6 +148,8 @@ class Ollama:
                             )
                             if key in event
                         }
+                        if thinking_characters:
+                            self.last_chat_metadata["thinking_characters"] = thinking_characters
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
             raise OllamaError(f"ollama chat request interrupted or invalid: {exc}") from exc
         finally:
@@ -172,6 +177,7 @@ class Ollama:
         if think is not None:
             payload["think"] = think
         thinking_characters = 0
+        self.last_chat_metadata = {}
         request_client = self._chat_client_factory()
         self._track_request(request_client)
         try:

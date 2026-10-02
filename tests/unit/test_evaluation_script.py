@@ -1,7 +1,11 @@
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 SCRIPT = Path(__file__).parents[2] / "scripts" / "evaluate_agent_behavior.py"
 SPEC = importlib.util.spec_from_file_location("klaude_evaluation_script", SCRIPT)
@@ -12,6 +16,160 @@ _run_isolated = MODULE._run_isolated
 _aggregate_results = MODULE._aggregate_results
 _valid_worker_output_path = MODULE._valid_worker_output_path
 _worker_error_category = MODULE._worker_error_category
+
+
+def test_interface_variant_is_forwarded_to_isolated_worker(tmp_path):
+    script = tmp_path / "report_variant.py"
+    script.write_text(
+        "import json, sys\n"
+        "variant = sys.argv[sys.argv.index('--knowledge-interface') + 1]\n"
+        "path = sys.argv[sys.argv.index('--result-file') + 1]\n"
+        "open(path, 'w').write(json.dumps({'variant': variant}))\n",
+        encoding="utf-8",
+    )
+    result = _run_isolated(
+        script,
+        "test/model",
+        "learned-document",
+        tmp_path,
+        timeout=2,
+        knowledge_interface="name",
+    )
+    assert result == {"variant": "name"}
+
+
+def test_repeated_interface_comparison_reports_each_run_and_aggregate(tmp_path, monkeypatch):
+    output = tmp_path / "report.json"
+    variants = ["baseline", "description", "schema", "name"]
+    arguments = [
+        str(SCRIPT),
+        "--model",
+        "test/model",
+        "--scenario",
+        "learned-document",
+        "--workspace",
+        str(tmp_path),
+        "--output",
+        str(output),
+        "--repetitions",
+        "2",
+    ]
+    for variant in variants:
+        arguments.extend(["--knowledge-interface", variant])
+    monkeypatch.setattr(sys, "argv", arguments)
+    monkeypatch.setattr(MODULE, "_confirm", lambda *_: True)
+    observed = []
+
+    def run(_script, model, scenario, _workspace, _timeout, variant):
+        observed.append(variant)
+        return {"success": True, "model_ref": model, "scenario": scenario}
+
+    monkeypatch.setattr(MODULE, "_run_isolated", run)
+    assert MODULE.main() == 0
+    report = json.loads(output.read_text())
+    assert observed == variants * 2
+    assert report["summary"] == {"total": 8, "passed": 8, "failed": 0}
+    assert [row["repetition"] for row in report["results"]] == [1] * 4 + [2] * 4
+    assert set(report["comparison"]["by_knowledge_interface"]) == set(variants)
+    assert all(
+        group["total"] == 2 for group in report["comparison"]["by_knowledge_interface"].values()
+    )
+
+
+def test_live_worker_uses_standard_mode_after_switching_from_initial_model(tmp_path, monkeypatch):
+    import klaude_cli.main as cli
+
+    agent = SimpleNamespace(
+        ollama_think="high",
+        ollama_code_think="high",
+        gate=SimpleNamespace(set_ask_callback=lambda _callback: None),
+    )
+    selected = SimpleNamespace(ref="ollama/small")
+    monkeypatch.setattr(MODULE, "load_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(cli, "_build_agent", lambda _workspace: (agent, None))
+    monkeypatch.setattr(cli, "_agent_local_ollama", lambda _agent: object())
+    monkeypatch.setattr(cli, "_resolve_requested_chat_model", lambda *_: selected)
+    monkeypatch.setattr(cli, "_set_agent_model", lambda *_: None)
+    monkeypatch.setattr(MODULE, "configure_knowledge_interface", lambda *_: None)
+
+    def evaluate(actual, scenario, **kwargs):
+        assert actual.reasoning_mode == "standard"
+        assert actual.ollama_think is False
+        assert actual.ollama_code_think is False
+        return SimpleNamespace(to_dict=lambda: {"success": True})
+
+    monkeypatch.setattr(MODULE, "evaluate_agent_turn", evaluate)
+    assert (
+        MODULE._worker(
+            selected.ref,
+            "direct-answer",
+            tmp_path,
+            tmp_path / "result.json",
+            tmp_path / "progress.json",
+        )
+        == 0
+    )
+
+
+def test_cancelled_comparison_preserves_completed_results(tmp_path, monkeypatch):
+    output = tmp_path / "partial.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--model",
+            "fake",
+            "--scenario",
+            "direct-answer",
+            "--workspace",
+            str(tmp_path),
+            "--output",
+            str(output),
+            "--repetitions",
+            "2",
+            "--yes",
+        ],
+    )
+    calls = []
+
+    def run(*_args):
+        calls.append(True)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return {"success": True, "model_ref": "fake", "scenario": "direct-answer"}
+
+    monkeypatch.setattr(MODULE, "_run_isolated", run)
+    assert MODULE.main() == 130
+    report = json.loads(output.read_text())
+    assert report["cancelled"] is True
+    assert report["summary"] == {"total": 1, "passed": 1, "failed": 0}
+    assert report["results"][0]["repetition"] == 1
+
+
+def test_worker_rejects_multiple_interfaces_before_running(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--worker",
+            "--model",
+            "fake",
+            "--scenario",
+            "direct-answer",
+            "--result-file",
+            str(tmp_path / "result.json"),
+            "--progress-file",
+            str(tmp_path / "progress.json"),
+            "--knowledge-interface",
+            "schema",
+            "--knowledge-interface",
+            "name",
+        ],
+    )
+    monkeypatch.setattr(MODULE, "_worker", lambda *_: pytest.fail("Ambiguous worker ran"))
+    assert MODULE.main() == 2
 
 
 def test_live_evaluation_worker_has_a_hard_process_timeout(tmp_path):

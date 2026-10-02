@@ -10,8 +10,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from klaude_core import Config, Ollama
+from klaude_core.research_receipts import evidence_excerpt
 
 from .indexing import IndexDocument, KnowledgeIndexer, text_checksum, write_text_atomic
 from .store import KnowledgeStore
@@ -25,10 +27,16 @@ CANDIDATE_OVERSAMPLE = 4
 
 
 def _terms(text: str) -> set[str]:
-    return {term for term in re.findall(r"[a-z0-9]+", text.lower()) if len(term) > 1}
+    return {term for term in _normalized(text).split() if len(term) > 1}
 
 
 def _normalized(text: str) -> str:
+    # Preserve language names whose punctuation is part of the name. Without
+    # this, C# becomes the discarded one-letter term "c", so a local `csharp`
+    # library cannot be routed even when it is indexed.
+    text = re.sub(r"(?i)(?<![a-z0-9])c\+\+(?![a-z0-9])", "cpp", text)
+    text = re.sub(r"(?i)(?<![a-z0-9])c#(?![a-z0-9])", "csharp", text)
+    text = re.sub(r"(?i)(?<![a-z0-9])f#(?![a-z0-9])", "fsharp", text)
     return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
 
 
@@ -336,10 +344,20 @@ class Knowledge:
         return _exact_lexical_fallback(question, route, merged, k)
 
     def query_as_context(self, question: str, collection: str = "", k: int = 6) -> str:
+        return self.query_with_evidence(question, collection, k)[0]
+
+    def query_with_evidence(
+        self,
+        question: str,
+        collection: str = "",
+        k: int = 6,
+    ) -> tuple[str, list[dict]]:
+        """Return model context and bounded public-source durability metadata."""
         hits = self.query(question, collection, k)
         if not hits:
-            return "No relevant local knowledge found."
+            return "No relevant local knowledge found.", []
         parts = []
+        evidence: list[dict[str, Any]] = []
         for h in hits:
             src = h.get("source") or h.get("collection", "")
             library = h.get("collection", "")
@@ -347,4 +365,13 @@ class Knowledge:
             parts.append(
                 f"--- library: {library}; source: {src}; relevance: {score} ---\n{h['text']}"
             )
-        return "\n\n".join(parts)
+            if len(evidence) < 3:
+                entry = evidence_excerpt(
+                    str(src),
+                    str(h["text"]),
+                    source_id=str(h.get("id", "")),
+                    query=question,
+                )
+                if entry is not None:
+                    evidence.append(entry)
+        return "\n\n".join(parts), evidence

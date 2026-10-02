@@ -1519,6 +1519,35 @@ def test_reasoning_only_length_stop_does_not_trigger_blind_retry():
     assert "exhausted its output budget while reasoning" in events[-1].payload["message"]
 
 
+def test_empty_length_stop_with_tool_schema_does_not_trigger_blind_retry():
+    class EmptyLengthOllama:
+        def __init__(self):
+            self.calls = 0
+            self.last_chat_metadata = {}
+
+        def chat(self, model, messages, tools=None, **kwargs):
+            self.calls += 1
+            self.last_chat_metadata = {"done": True, "done_reason": "length", "eval_count": 4096}
+            return {"role": "assistant", "content": ""}
+
+    ollama = EmptyLengthOllama()
+    agent = Agent(
+        ollama,
+        "fake-model",
+        [Tool("read_file", "Read a file", {"type": "object", "properties": {}}, lambda: "")],
+        PermissionGate({}, lambda _tool, _detail: "y"),
+        "system",
+        tool_selector=lambda _message, _tools: ["read_file"],
+    )
+
+    events = list(agent.run("Inspect and repair the JavaScript project file."))
+
+    assert ollama.calls == 1
+    assert events[-1].kind == "error"
+    assert "exhausted its output budget" in events[-1].payload["message"]
+    assert "[ollama.code_options] num_predict" in events[-1].payload["message"]
+
+
 def test_gdscript_validation_derives_constraints_from_the_request():
     from klaude_core.agent import _code_validation_diagnostics
 

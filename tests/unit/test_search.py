@@ -14,6 +14,7 @@ from klaude_web.providers import (
     ExaProvider,
     FirecrawlProvider,
     LocationMode,
+    ParallelProvider,
     ProviderCapabilities,
     ProviderRegistry,
     ProviderSearchError,
@@ -3635,3 +3636,44 @@ def test_web_mcp_numeric_inputs_are_bounded():
 
     assert _bounded_mcp_int(-100, minimum=1, maximum=20) == 1
     assert _bounded_mcp_int(10_000, minimum=1, maximum=20) == 20
+
+
+@pytest.mark.parametrize("response_key", ["results", "search_results"])
+def test_parallel_uses_documented_request_and_preserves_bounded_excerpts(monkeypatch, response_key):
+    cfg = Config()
+    cfg.parallel_api_key = "test-parallel-key"
+    query = SearchQuery("Python release dates", SearchIntent.CURRENT_FACT, result_limit=2)
+    requests = []
+
+    def fake_post(url, headers, json, timeout):
+        requests.append((url, headers, json))
+        return httpx.Response(
+            200,
+            json={response_key: [{
+                "url": "https://www.python.org/downloads/",
+                "title": "Python releases",
+                "publish_date": "2026-10-01",
+                "excerpts": ["First evidence", "x" * 6000, None],
+            }]},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("klaude_web.providers.httpx.post", fake_post)
+    response = ParallelProvider(cfg).search(query)
+    url, headers, body = requests[0]
+    assert url == "https://api.parallel.ai/v1beta/search"
+    assert headers["x-api-key"] == "test-parallel-key"
+    assert "Authorization" not in headers
+    assert body == {
+        "objective": "Python release dates",
+        "search_queries": ["Python release dates"],
+        "max_results": 2,
+        "excerpt_settings": {"max_chars_per_result": 5000},
+    }
+    result = response.results[0]
+    assert result["snippet"].startswith("First evidence\n")
+    assert len(result["snippet"]) == 5000
+    assert result["published_at"]
+    assert result["provider"] == "parallel"
+    assert result["metadata"]["untrusted_web_evidence"] is True
+    assert response.providers_succeeded == ["parallel"]

@@ -48,8 +48,30 @@ def explicitly_disallows_tools(text: str) -> bool:
     return bool(_NO_TOOLS.search(text))
 
 
+def without_tool_use_prohibition(text: str) -> str:
+    """Remove a usage constraint when deciding the subject of a request."""
+    return _NO_TOOLS.sub(" ", text)
+
+
+def explicit_only_tool_names(text: str, available_names: set[str]) -> list[str] | None:
+    """Resolve an explicit ``use only NAME`` boundary against callable names."""
+    match = re.search(r"(?i)\b(?:use|call|invoke)\s+only\s+(.{1,160})", text)
+    if match is None:
+        return None
+    clause = re.split(
+        r"(?i)\b(?:to|for|then|when|because|but|not|no)\b|[.!?;\n]",
+        match.group(1),
+        maxsplit=1,
+    )[0]
+    positions = [
+        (found.start(), name)
+        for name in available_names
+        if (found := re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", clause, re.IGNORECASE))
+        is not None
+    ]
+    return [name for _position, name in sorted(positions)]
+
+
 def explicit_workspace_inspection(text: str) -> bool:
     """Recognize a positive request to inspect the active workspace."""
-    return bool(_WORKSPACE_SUBJECT.search(text)) and has_nonnegated_action(
-        text, _WORKSPACE_ACTION
-    )
+    return bool(_WORKSPACE_SUBJECT.search(text)) and has_nonnegated_action(text, _WORKSPACE_ACTION)

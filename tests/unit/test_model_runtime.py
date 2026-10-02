@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 from klaude_core.model_runtime import (
     CodexRuntime,
@@ -16,6 +18,138 @@ from klaude_core.model_runtime import (
     save_model_cache,
 )
 from klaude_core.ollama import Ollama
+
+
+@pytest.mark.parametrize(
+    "factory", [lambda: OpenAIRuntime("secret"), lambda: CodexRuntime(auth=object())]
+)
+@pytest.mark.parametrize("terminal_has_items", [False, True])
+def test_responses_stream_retains_completed_calls_when_terminal_output_is_empty(
+    monkeypatch, factory, terminal_has_items
+):
+    runtime = factory()
+    call = SimpleNamespace(
+        type="function_call",
+        id="fc-1",
+        call_id="call-1",
+        name="read_file",
+        arguments='{"path":"README.md"}',
+        content=[],
+    )
+    reasoning = SimpleNamespace(
+        type="reasoning", id="rs-1", encrypted_content="opaque", summary=[], content=[]
+    )
+    response = SimpleNamespace(
+        status="completed",
+        output=[reasoning, call] if terminal_has_items else [],
+        output_text="",
+        usage=None,
+    )
+    events = [
+        SimpleNamespace(type="response.output_item.done", item=reasoning),
+        SimpleNamespace(type="response.output_item.done", item=call),
+        SimpleNamespace(type="response.completed", response=response),
+    ]
+    monkeypatch.setattr(runtime, "_response_create", lambda **_: iter(events))
+    chunks = list(runtime.chat_stream("fake", []))
+    assert chunks[-1]["tool_calls"] == [
+        {"id": "call-1", "function": {"name": "read_file", "arguments": call.arguments}}
+    ]
+    assert len(chunks[-1]["openai_response_items"]) == 2
+    assert chunks[-1]["content"] == ""
+    if isinstance(runtime, CodexRuntime):
+        assert chunks[-1]["codex_reasoning_items"][0]["id"] == "rs-1"
+    replay = runtime._input(
+        [
+            chunks[-1],
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "tool_name": "read_file",
+                "content": "file evidence",
+            },
+        ]
+    )
+    assert any(
+        item.get("type") == "function_call" and item.get("call_id") == "call-1" for item in replay
+    )
+
+
+@pytest.mark.parametrize(
+    "factory", [lambda: OpenAIRuntime("secret"), lambda: CodexRuntime(auth=object())]
+)
+def test_responses_stream_does_not_execute_partial_calls_before_completion(monkeypatch, factory):
+    runtime = factory()
+    events = [
+        SimpleNamespace(
+            type="response.output_item.added",
+            item=SimpleNamespace(
+                type="function_call", call_id="partial", name="read_file", arguments="{"
+            ),
+        )
+    ]
+    monkeypatch.setattr(runtime, "_response_create", lambda **_: iter(events))
+    with pytest.raises(RuntimeError, match="without a completed response"):
+        list(runtime.chat_stream("fake", []))
+
+
+def test_completed_message_text_is_retained_without_terminal_convenience_field(monkeypatch):
+    runtime = CodexRuntime(auth=object())
+    item = SimpleNamespace(
+        type="message",
+        id="msg-1",
+        role="assistant",
+        content=[SimpleNamespace(type="output_text", text="verified answer")],
+    )
+    response = SimpleNamespace(status="completed", output=[], output_text="", usage=None)
+    events = [
+        SimpleNamespace(type="response.output_item.done", item=item),
+        SimpleNamespace(type="response.completed", response=response),
+    ]
+    monkeypatch.setattr(runtime, "_response_create", lambda **_: iter(events))
+    assert runtime.chat("fake", [])["content"] == "verified answer"
+    assert list(runtime.chat_stream("fake", []))[-1]["content"] == "verified answer"
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("limit,expected", [(None, 2048), (512, 512), (-1, 2048), (False, 2048)])
+def test_openrouter_respects_a_bounded_output_budget(monkeypatch, streaming, limit, expected):
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return iter([{"choices": [{"finish_reason": "stop", "delta": {"content": "done"}}]}])
+
+    runtime = OpenRouterRuntime("test")
+    monkeypatch.setattr(
+        runtime,
+        "_client",
+        lambda: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
+    )
+    method = runtime.chat_stream if streaming else runtime.chat
+    result = method("fake", [], options={} if limit is None else {"num_predict": limit})
+    if streaming:
+        list(result)
+    assert captured["max_tokens"] == expected
+
+
+def test_openrouter_credit_rejection_does_not_expose_provider_account_body(monkeypatch):
+    runtime = OpenRouterRuntime("test")
+
+    def create(**_kwargs):
+        error = RuntimeError("private user_id and provider response body")
+        error.status_code = 402
+        raise error
+
+    monkeypatch.setattr(
+        runtime,
+        "_client",
+        lambda: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
+    )
+    with pytest.raises(RuntimeError, match="available credits") as raised:
+        runtime.chat("fake", [])
+    assert "user_id" not in str(raised.value)
+    assert "provider response body" not in str(raised.value)
 
 
 def test_model_info_has_stable_canonical_ref_and_derived_metadata():
@@ -194,7 +328,7 @@ def test_openrouter_stream_fails_closed_without_terminal_reason(monkeypatch):
     monkeypatch.setattr(
         runtime,
         "_stream",
-        lambda *_args: iter([{"choices": [{"delta": {"content": "partial"}}]}]),
+        lambda *_args, **_kwargs: iter([{"choices": [{"delta": {"content": "partial"}}]}]),
     )
 
     with pytest.raises(RuntimeError, match="without a completion reason"):
@@ -206,7 +340,7 @@ def test_openrouter_stream_surfaces_in_band_error(monkeypatch):
     monkeypatch.setattr(
         runtime,
         "_stream",
-        lambda *_args: iter([{"error": {"message": "provider unavailable"}}]),
+        lambda *_args, **_kwargs: iter([{"error": {"message": "provider unavailable"}}]),
     )
 
     with pytest.raises(RuntimeError, match="provider unavailable"):
@@ -973,7 +1107,7 @@ def test_openrouter_tool_enabled_stream_keeps_tool_arguments_private(monkeypatch
         }]}}]},
     ]
 
-    def stream(_model, _messages, tools, _think):
+    def stream(_model, _messages, tools, _think, options=None):
         seen_tools.extend(tools)
         return iter(chunks)
 

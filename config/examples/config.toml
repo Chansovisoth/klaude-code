@@ -23,7 +23,7 @@
 # num_ctx = 8192
 # num_thread = 8
 # num_gpu = 999
-# num_predict = 2048  # default output-token ceiling; raise for deliberately long code
+# num_predict = 2048  # default ordinary-chat ceiling; code defaults to at least 4096
 # temperature = 0.2
 # top_p = 0.9
 # min_p = 0.0
@@ -36,7 +36,7 @@
 # increasing the cost of ordinary chat and retrieval turns.
 [ollama.code_options]
 # num_ctx = 16384
-# num_predict = 4096
+# num_predict = 4096  # bounded code-generation default; raise only when needed
 # temperature = 0.15
 # top_p = 0.85
 # presence_penalty = 0.0

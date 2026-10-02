@@ -255,8 +255,10 @@ num_predict = 4096
 temperature = 0.15
 ```
 
-Leave those overrides unset for the bounded defaults. Klaude never silently
-switches the selected model based on hardware.
+Leave those overrides unset for bounded defaults: ordinary chat uses 2,048
+output tokens, and code turns use at least 4,096 while honoring an explicitly
+higher general limit. Klaude never silently switches the selected model based
+on hardware.
 
 Imported documentation and assistant skills are permanent user data, not repo
 files:

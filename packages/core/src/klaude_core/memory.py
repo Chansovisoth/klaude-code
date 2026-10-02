@@ -168,6 +168,8 @@ def _parse_memory_line(line: str) -> MemoryEntry | None:
 
 
 class Memory:
+    SESSION_LEASE_TTL_SECONDS = 60.0
+
     def open_session_io(self) -> Memory:
         """Independent existing-database connection for short UI I/O operations."""
         clone = object.__new__(Memory)
@@ -954,7 +956,7 @@ class Memory:
         client_id: str,
         turn_id: str,
         *,
-        ttl: float = 15.0,
+        ttl: float = SESSION_LEASE_TTL_SECONDS,
     ) -> bool:
         """Claim the single active model worker for a session, with crash expiry."""
         now = time.time()
@@ -1011,7 +1013,7 @@ class Memory:
         client_id: str,
         turn_id: str,
         *,
-        ttl: float = 15.0,
+        ttl: float = SESSION_LEASE_TTL_SECONDS,
     ) -> bool:
         with self._db_lock, self.db:
             cursor = self.db.execute(

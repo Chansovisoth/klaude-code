@@ -1,6 +1,7 @@
 import random
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import lancedb
 import pytest
@@ -8,6 +9,29 @@ from klaude_knowledge.chunker import chunk_markdown
 from klaude_knowledge.hybrid import _rrf
 from klaude_knowledge.indexing import IndexDocument, KnowledgeIndexer
 from klaude_knowledge.store import KnowledgeStore
+
+
+@pytest.mark.parametrize("question,library", [
+    ("Do we have C# locally?", "csharp"),
+    ("Find C++ documentation", "cpp"),
+    ("Find F# examples", "fsharp"),
+])
+def test_punctuated_language_names_route_to_local_libraries_without_lancedb(
+    question, library
+):
+    from klaude_knowledge.hybrid import Knowledge
+
+    knowledge = object.__new__(Knowledge)
+    knowledge.cfg = SimpleNamespace(retrieval_validation_enabled=True)
+    knowledge.store = SimpleNamespace(
+        collections=lambda: ["csharp", "cpp", "fsharp", "dotnet-bcl"],
+        library_sources=lambda _library: [],
+    )
+
+    route = knowledge.route_libraries(question)
+
+    assert route.libraries == [library]
+    assert route.confidence >= 0.9
 
 MD = """# Routing
 

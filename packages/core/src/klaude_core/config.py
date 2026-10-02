@@ -561,7 +561,15 @@ class Config:
 
     @property
     def ollama_code_options(self) -> dict[str, Any]:
-        return dict(self.ollama.code_options)
+        options = dict(self.ollama.code_options)
+        # Code turns commonly need more output than chat while remaining
+        # bounded on small local models. Respect either explicit code tuning
+        # or a larger general output budget.
+        options.setdefault(
+            "num_predict",
+            max(4_096, int(self.ollama_options.get("num_predict", 2_048))),
+        )
+        return options
 
     def ollama_think_for_model(self, model: str) -> bool | str | None:
         if self.ollama.think is not None:

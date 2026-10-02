@@ -36,6 +36,442 @@ def make_agent(runtime, tools, ask=lambda *_: "y", selector=None):
     return Agent(runtime, "fake", tools, PermissionGate({}, ask), "system", tool_selector=selector)
 
 
+def test_context7_library_resolution_does_not_force_local_knowledge_after_good_answer():
+    mcp_name = "mcp__context7__query_docs"
+    runtime = Runtime(
+        [
+            call(mcp_name),
+            {
+                "role": "assistant",
+                "content": "Godot velocity is pixels per second. Source: https://docs.godotengine.org/en/stable/",
+            },
+        ]
+    )
+    tools = [
+        Tool(
+            mcp_name,
+            "Context7 developer documentation",
+            {},
+            lambda: "velocity is pixels per second",
+        ),
+        Tool(
+            "query_knowledge",
+            "Search local knowledge",
+            {},
+            lambda: pytest.fail("Unrequested local lookup"),
+        ),
+    ]
+    agent = make_agent(runtime, tools)
+    events = list(
+        agent.run(
+            "Use Context7 MCP to look up Godot movement. Resolve the library, then retrieve "
+            "documentation for velocity. Explain the result using that documentation."
+        )
+    )
+    assert any(
+        event.kind == "text" and "pixels per second" in event.payload["content"] for event in events
+    )
+    assert not any(event.kind in {"error", "retry"} for event in events)
+    assert len(runtime.requests) == 2
+
+
+def test_named_learned_document_still_requires_actual_local_retrieval():
+    runtime = Runtime(
+        [
+            {"role": "assistant", "content": "Beacons rotate every 17 minutes."},
+            call("query_knowledge", query="beacon rotation", library="evaluation-aerolith"),
+            {"role": "assistant", "content": "The learned document says 17 minutes."},
+        ]
+    )
+    called = []
+    tool = Tool(
+        "query_knowledge",
+        "Search local knowledge",
+        {
+            "type": "object",
+            "properties": {"query": {"type": "string"}, "library": {"type": "string"}},
+        },
+        lambda **args: called.append(args) or "17 minutes",
+    )
+    agent = make_agent(runtime, [tool])
+    events = list(
+        agent.run("Using the learned evaluation-aerolith documentation, state the beacon interval.")
+    )
+    assert called == [{"query": "beacon rotation", "library": "evaluation-aerolith"}]
+    assert any(
+        event.kind == "retry" and "query_knowledge" in event.payload["reason"] for event in events
+    )
+
+
+def test_callable_mcp_false_unavailable_claim_gets_one_correction():
+    name = "mcp__context7__query_docs"
+    runtime = Runtime(
+        [
+            {"role": "assistant", "content": "Context7 MCP tools aren’t available to me."},
+            call(name),
+            {"role": "assistant", "content": "The retrieved documentation explains velocity."},
+        ]
+    )
+    called = []
+    agent = make_agent(
+        runtime, [Tool(name, "Context7 docs", {}, lambda: called.append(True) or "velocity")]
+    )
+    events = list(agent.run("Use Context7 to retrieve Godot documentation."))
+    assert called == [True]
+    assert any(
+        event.kind == "retry" and "availability" in event.payload["reason"] for event in events
+    )
+    assert not any(event.kind == "error" for event in events)
+
+
+def test_export_public_lookup_uses_web_not_documentation_mcp():
+    tools = {
+        name: Tool(
+            name,
+            (
+                "Search developer documentation and code examples"
+                if "context7" in name else "Search the web"
+            ),
+            {"type": "object", "properties": {}},
+            lambda: "",
+        )
+        for name in (
+            "web_search", "fetch_url", "query_knowledge", "current_time",
+            "mcp__context7__query_docs", "mcp__context7__resolve_library_id",
+            "mcp__firecrawl__search",
+        )
+    }
+    for prompt in (
+        "whats the news today",
+        "find Chansovisoth on Facebook",
+        "show GitHub repositories for Chansovisoth",
+    ):
+        selected = _select_tool_names(prompt, tools)
+        assert "web_search" in selected
+        assert not any("context7" in name for name in selected)
+        assert not any(name.startswith("mcp__") for name in selected)
+    assert "query_knowledge" in _select_tool_names(
+        "can you find anything about godot 4.7 locally?", tools
+    )
+    assert "mcp__context7__query_docs" in _select_tool_names(
+        "find Godot API docs on Context7", tools
+    )
+    workspace_tools = {
+        name: Tool(name, name, {"type": "object", "properties": {}}, lambda: "")
+        for name in (
+            "read_file", "list_dir", "grep", "workspace_info", "write_file",
+            "edit_file", "run_shell", "git_commit",
+        )
+    }
+    for prompt in (
+        "show GitHub repositories for Chansovisoth",
+        "find Facebook profile of Chansovisoth",
+        "review public GitHub repositories of Chansovisoth",
+    ):
+        selected = _select_tool_names(prompt, tools | workspace_tools)
+        assert "web_search" in selected
+        assert not set(selected) & set(workspace_tools)
+    assert "write_file" in _select_tool_names(
+        "fix the GitHub Actions workflow in this repo", tools | workspace_tools
+    )
+    assert "read_file" in _select_tool_names(
+        "read the file in this repo", tools | workspace_tools
+    )
+    assert "current_time" not in _select_tool_names(
+        "explain the runtime configuration", tools | workspace_tools
+    )
+
+
+def test_code_turn_uses_and_reserves_its_effective_ollama_output_budget():
+    class OptionsRuntime(Runtime):
+        def __init__(self, responses):
+            super().__init__(responses)
+            self.request_options = []
+
+        def chat(self, model, messages, tools=None, **kwargs):
+            self.request_options.append(kwargs.get("options"))
+            return super().chat(model, messages, tools, **kwargs)
+
+    runtime = OptionsRuntime([
+        {"role": "assistant", "content": "```javascript\nconst answer = true;\n```"},
+    ])
+    agent = Agent(
+        runtime,
+        "fake",
+        [],
+        PermissionGate({}, lambda *_: "y"),
+        "system",
+        ollama_options={"num_ctx": 8192, "num_predict": 2048},
+        ollama_code_options={"num_predict": 4096},
+    )
+    compaction_options = []
+    compact = agent._compact_history
+
+    def capture_compaction(tool_schemas, **kwargs):
+        compaction_options.append(kwargs.get("ollama_options"))
+        return compact(tool_schemas, **kwargs)
+
+    agent._compact_history = capture_compaction
+    events = list(agent.run("Write a JavaScript function that returns true."))
+
+    assert events[-1].kind == "done"
+    assert runtime.request_options[0]["num_predict"] == 4096
+    assert compaction_options[0]["num_predict"] == 4096
+
+
+def test_read_only_code_question_uses_ordinary_output_budget():
+    class OptionsRuntime(Runtime):
+        def __init__(self, responses):
+            super().__init__(responses)
+            self.request_options = []
+
+        def chat(self, model, messages, tools=None, **kwargs):
+            self.request_options.append(kwargs.get("options"))
+            return super().chat(model, messages, tools, **kwargs)
+
+    runtime = OptionsRuntime([
+        call("read_file", path="furmeet-2026-test-2/script.js"),
+        {"role": "assistant", "content": "Yes, reset restores the full list."},
+    ])
+    tool = Tool(
+        "read_file", "Read a file",
+        {"type": "object", "properties": {"path": {"type": "string"}}},
+        lambda **_: "visible = query ? profiles.filter(...) : profiles",
+    )
+    agent = Agent(
+        runtime, "fake", [tool], PermissionGate({}, lambda *_: "y"), "system",
+        tool_selector=lambda _message, _tools: ["read_file"],
+        ollama_options={"num_ctx": 8192, "num_predict": 2048},
+        ollama_code_options={"num_predict": 4096},
+    )
+
+    events = list(agent.run(
+        "Read only furmeet-2026-test-2/script.js. Does applyFilter restore profiles?"
+    ))
+
+    assert events[-1].kind == "done"
+    assert len(runtime.request_options) == 2
+    assert all(options["num_predict"] == 2048 for options in runtime.request_options)
+
+
+def test_explicit_only_tool_scope_excludes_other_retrieval_sources():
+    tools = {
+        name: Tool(name, name, {"type": "object", "properties": {}}, lambda: "")
+        for name in (
+            "query_knowledge", "web_search", "fetch_url", "code_search",
+            "mcp__context7__query-docs_a95010f0", "read_file",
+        )
+    }
+    request = (
+        "Use only query_knowledge to find an indexed Godot GDScript code example. "
+        "No web or Context7."
+    )
+
+    assert _select_tool_names(request, tools) == ["query_knowledge"]
+    assert _select_tool_names(
+        "Use only read_file and query_knowledge to inspect the example.", tools
+    ) == ["read_file", "query_knowledge"]
+    assert _select_tool_names("Use only unavailable_tool to inspect this.", tools) == []
+
+
+def test_explicit_only_scope_does_not_add_control_or_other_tools():
+    tools = [
+        Tool(name, name, {"type": "object", "properties": {}}, lambda: "")
+        for name in ("query_knowledge", "web_search", "request_user_input")
+    ]
+    runtime = Runtime([{"role": "assistant", "content": "No result was requested."}])
+    agent = make_agent(runtime, tools, selector=lambda *_: [
+        "query_knowledge", "web_search"
+    ])
+
+    list(agent.run("Use only query_knowledge to inspect the local library."))
+
+    schemas = {schema["function"]["name"] for schema in runtime.requests[0][1]}
+    assert schemas == {"query_knowledge"}
+
+    unavailable_runtime = Runtime([{"role": "assistant", "content": "Unavailable."}])
+    unavailable_agent = make_agent(unavailable_runtime, tools, selector=lambda *_: [
+        "query_knowledge", "web_search"
+    ])
+    list(unavailable_agent.run("Use only unavailable_tool to inspect the library."))
+    assert unavailable_runtime.requests[0][1] == []
+
+
+def test_export_web_provider_claim_corrected_from_execution_metadata():
+    runtime = Runtime([
+        call("web_search", query="coffee Phnom Penh"),
+        {"role": "assistant", "content": "I used web_search with the Google provider."},
+    ])
+    tool = Tool(
+        "web_search", "Search web", {
+            "type": "object", "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+        lambda **_: {
+            "content": "Coffee search results",
+            "metadata": {
+                "successful_providers": ["ddgs", "exa"],
+                "search_results": [{"result_id": "r1"}],
+            },
+        },
+    )
+    events = list(make_agent(runtime, [tool], selector=_select_tool_names).run("search coffee"))
+    tool_content = next(
+        message["content"] for message in runtime.requests[1][0]
+        if message.get("role") == "tool"
+    )
+    assert "through ddgs, exa" in tool_content
+    assert "Correction from execution metadata" in events[-2].payload["content"]
+    assert "ddgs + exa" in events[-2].payload["content"]
+    assert "google did not return those results" in events[-2].payload["content"]
+
+
+@pytest.mark.parametrize("name,claim", [
+    ("web_search", "The live web-search tool is not available to me right now."),
+    ("query_knowledge", "Local knowledge search is unavailable right now."),
+])
+def test_callable_retrieval_tool_cannot_be_falsely_declared_unavailable(name, claim):
+    runtime = Runtime([
+        {"role": "assistant", "content": claim},
+        {"role": "assistant", "content": "I have not run a search yet."},
+    ])
+    tool = Tool(name, "Search", {"type": "object", "properties": {}}, lambda: "")
+    events = list(make_agent(runtime, [tool], selector=lambda *_: [name]).run("find sources"))
+    assert len(runtime.requests) == 2
+    assert any(event.kind == "retry" for event in events)
+    assert events[-2].payload["content"] == "I have not run a search yet."
+
+
+def test_export_mcp_activity_uses_completed_public_vocabulary():
+    assert _completed_tool_activity(
+        "mcp__context7__query_docs", {"query": "Godot"}, "docs", {}
+    )[0] == "explored"
+    assert _completed_tool_activity(
+        "mcp__firecrawl__crawl", {"url": "https://example.com"}, "done", {}
+    )[0] == "ran"
+
+
+def test_cloud_self_description_prompt_does_not_equate_local_first_with_all_local():
+    runtime = Runtime([{"role": "assistant", "content": "I am Klaude."}])
+    agent = Agent(
+        runtime, "cloud-model", [], PermissionGate({}, lambda *_: "y"),
+        "system", tool_selector=_select_tool_names,
+        model_info=ModelInfo("openrouter", "cloud-model", "Cloud model"),
+    )
+    list(agent.run("who are you?"))
+    prompt = runtime.requests[0][0][0]["content"]
+    assert "Local-first does not mean every model and tool request stays on the machine" in prompt
+    assert "openrouter/cloud-model" in prompt
+
+
+@pytest.mark.parametrize("message", [
+    "what does it have? does it have exmaple code snippets?",
+    "what does it have? does it have example code snippets?",
+])
+def test_session_a27b_code_snippet_question_keeps_local_retrieval(message):
+    tools = {
+        name: Tool(name, name, {"type": "object", "properties": {}}, lambda: "")
+        for name in (
+            "query_knowledge", "code_search", "web_search", "list_commands", "workspace_info"
+        )
+    }
+    selected = _select_tool_names(message, tools)
+    assert "query_knowledge" in selected
+    assert "list_commands" not in selected
+    assert "workspace_info" not in selected
+    assert _select_tool_names("code a Python calculator", tools) == []
+
+
+@pytest.mark.parametrize("followup,prior_user", [
+    ("what does it have?", "do we have C# locally?"),
+    ("try again", "what does it have? does it have exmaple code snippets?"),
+])
+def test_session_a27b_followup_uses_user_local_knowledge_intent(followup, prior_user):
+    runtime = Runtime([
+        call("query_knowledge", query="C# examples", library="dotnet-bcl"),
+        {"role": "assistant", "content": "The local source has no example code snippets."},
+    ])
+    knowledge_tool = Tool(
+        "query_knowledge", "Search local knowledge", {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"}, "library": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+        lambda **_: {
+            "content": "No code examples in the dotnet-bcl overview.",
+            "metadata": {"found": True, "result_count": 1, "library": "dotnet-bcl"},
+        },
+    )
+    other_tools = [
+        Tool(name, name, {"type": "object", "properties": {}}, lambda: "")
+        for name in (
+            "list_commands", "workspace_info", "request_user_input",
+            "web_search", "fetch_url", "code_search",
+        )
+    ]
+    agent = make_agent(runtime, [knowledge_tool, *other_tools], selector=_select_tool_names)
+    agent.messages.extend([
+        {"role": "user", "content": "do we have C# locally?"},
+        {"role": "assistant", "content": "The local csharp library exists."},
+        {"role": "user", "content": prior_user},
+        {"role": "assistant", "content": "I can also discuss commands and the workspace."},
+    ])
+
+    events = list(agent.run(followup))
+
+    schemas = {schema["function"]["name"] for schema in runtime.requests[0][1]}
+    assert "query_knowledge" in schemas
+    assert "list_commands" not in schemas
+    assert "workspace_info" not in schemas
+    assert not schemas & {"web_search", "fetch_url", "code_search"}
+    assert any(event.kind == "tool_result" and event.payload["tool"] == "query_knowledge"
+               for event in events)
+    assert not any(event.kind == "retry" for event in events)
+
+
+def test_dependent_followup_does_not_revive_older_unrelated_user_tools():
+    runtime = Runtime([{"role": "assistant", "content": "I can help with commands."}])
+    tools = [
+        Tool(name, name, {"type": "object", "properties": {}}, lambda: "")
+        for name in ("query_knowledge", "list_commands")
+    ]
+    agent = make_agent(runtime, tools, selector=_select_tool_names)
+    agent.messages.extend([
+        {"role": "user", "content": "search local knowledge"},
+        {"role": "assistant", "content": "I found a library."},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "I can list commands."},
+    ])
+
+    list(agent.run("try again"))
+
+    schemas = {schema["function"]["name"] for schema in runtime.requests[0][1]}
+    assert "query_knowledge" not in schemas
+
+
+def test_local_source_scope_does_not_cross_a_new_web_topic():
+    runtime = Runtime([{"role": "assistant", "content": "No search was run."}])
+    tools = [
+        Tool(name, name, {"type": "object", "properties": {}}, lambda: "")
+        for name in ("query_knowledge", "web_search")
+    ]
+    agent = make_agent(runtime, tools, selector=_select_tool_names)
+    agent.messages.extend([
+        {"role": "user", "content": "do we have C# locally?"},
+        {"role": "assistant", "content": "The local library exists."},
+        {"role": "user", "content": "what's the news today?"},
+        {"role": "assistant", "content": "I need to search the web."},
+    ])
+
+    list(agent.run("try again"))
+
+    schemas = {schema["function"]["name"] for schema in runtime.requests[0][1]}
+    assert "web_search" in schemas
+    assert "query_knowledge" not in schemas
+
+
 @pytest.mark.parametrize(
     "message",
     [
@@ -296,6 +732,8 @@ def test_multi_source_followup_inherits_safe_retrieval_without_mcp_or_writes():
 @pytest.mark.parametrize("source_question", [
     "Which source did you use for that answer?",
     "Which knowledge sources did you use?",
+    "Which source and tool did you actually use?",
+    "Can you tell me which source you used?",
     "did u use your local knowledge library, did research, use context7, or "
     "simply with general intelligence/knowledge",
 ])
@@ -377,6 +815,32 @@ def test_source_use_tracks_completed_results_not_started_calls_or_missing_eviden
     assert "No retrieval tool was used" not in result
 
 
+def test_restored_line_session_names_actual_context7_tool_from_receipt():
+    turns = [
+        {"role": "user", "content": "Use only Context7 to find the Godot library ID."},
+        {"role": "system", "content": {
+            "event": "research_receipt",
+            "tool": "mcp__context7__resolve-library-id_90c1dcae",
+            "status": "completed",
+            "result_replayable": False,
+        }},
+        {"role": "assistant", "content": "The ID is /websites/godotengine_en_4_7."},
+    ]
+    runtime = Runtime([{"role": "assistant", "content": "I have no record."}])
+    agent = make_agent(runtime, [])
+    agent.restore_session(turns)
+
+    result = list(agent.run(
+        "For your preceding answer, which source and tool did you actually use? "
+        "Can you tell me from the execution record?"
+    ))[0].payload["content"]
+
+    assert not runtime.requests
+    assert "mcp__context7__resolve-library-id_90c1dcae" in result
+    assert "do not by themselves preserve" in result
+    assert "no record" not in result.casefold()
+
+
 def test_research_receipt_is_bounded_metadata_and_recovery_requires_refetch():
     receipt = research_receipt(
         "fetch_url",
@@ -444,9 +908,23 @@ def test_line_chat_persists_research_receipt_separately_from_tool_audit(tmp_path
     assert receipts[0]["library"] == "godot"
     assert receipts[0]["result_count"] == 1
     assert "PRIVATE GODOT CHUNK" not in str(receipts[0])
+    audits = [
+        turn["content"] for turn in turns
+        if turn["role"] == "system" and isinstance(turn["content"], dict)
+        and turn["content"].get("event") == "tool_audit"
+    ]
+    assert [audit["phase"] for audit in audits] == ["start", "result"]
+    assert audits[-1]["tool"] == "query_knowledge"
+    assert audits[-1]["executed"] is True
+    assert "PRIVATE GODOT CHUNK" not in str(audits)
     source_answer = list(agent.run("Which sources did you use?"))[0].payload["content"]
-    assert "local knowledge" in source_answer
+    assert "local knowledge (query_knowledge)" in source_answer
     assert "No retrieval tool was used" not in source_answer
+
+    restored = make_agent(Runtime([]), [tool])
+    restored.restore_session(turns)
+    restored_answer = list(restored.run("Which source and tool did you use?"))[0]
+    assert "local knowledge (query_knowledge)" in restored_answer.payload["content"]
 
 
 def test_line_chat_persists_provider_state_only_as_model_content(tmp_path):
@@ -480,7 +958,7 @@ def test_unavailable_tool_recovery_bounded():
     assert len(runtime.requests) == 2
     assert events[-1].kind == "error"
     assert "Callable this request: (none)" in runtime.requests[0][0][0]["content"]
-    assert "Unavailable this request: run_shell" in runtime.requests[0][0][0]["content"]
+    assert "Not callable this request: run_shell" in runtime.requests[0][0][0]["content"]
 
 
 def test_repeated_tool_failure_retires_tool_and_finalizes_without_looping():
@@ -673,6 +1151,62 @@ def test_line_renderer_uses_durable_turn_lifecycle(tmp_path, monkeypatch):
         event["kind"] == "turn_done"
         for event in memory.session_events_since("session", 0)
     )
+
+
+def test_line_renderer_renews_lease_during_a_long_synchronous_turn(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from klaude_cli.session_io import SessionLeaseKeeper
+
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    acquire = memory.acquire_session_lease
+    monkeypatch.setattr(
+        memory,
+        "acquire_session_lease",
+        lambda session, client, turn: acquire(session, client, turn, ttl=0.06),
+    )
+    monkeypatch.setattr(
+        "klaude_cli.main.SessionLeaseKeeper",
+        lambda *args, **kwargs: SessionLeaseKeeper(
+            *args, **kwargs, interval=0.01, ttl=0.06
+        ),
+    )
+
+    class SlowLineAgent:
+        model = "fake"
+
+        def run(self, _message, *, scope=None):
+            yield AgentEvent("progress", {"stage": "waiting"})
+            time.sleep(0.16)
+            yield AgentEvent("text", {"content": "Completed after a slow response."})
+            yield AgentEvent("done", {})
+
+    monkeypatch.setattr("klaude_cli.main._print_trace", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "klaude_cli.main._print_assistant_text", lambda *_args, **_kwargs: None
+    )
+    outcome = []
+    worker = threading.Thread(
+        target=lambda: outcome.append(
+            _render(SlowLineAgent(), memory, "session", "question", plain=True)
+        )
+    )
+    worker.start()
+    try:
+        deadline = time.monotonic() + 1
+        while memory.session_live_state("session")["state"] != "running":
+            assert time.monotonic() < deadline
+            time.sleep(0.002)
+        time.sleep(0.09)
+        snapshot = memory.session_snapshot("session")
+        assert snapshot["live"]["state"] == "running"
+        assert not snapshot["recovered_turn_ids"]
+    finally:
+        worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert outcome == ["Completed after a slow response."]
+    assert memory.session_live_state("session")["state"] == "idle"
 
 
 def test_line_renderer_marks_silent_turn_failed(tmp_path, monkeypatch):

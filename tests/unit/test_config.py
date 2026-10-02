@@ -185,6 +185,21 @@ def test_small_qwen_defaults_to_non_thinking_and_allows_override(tmp_path, monke
     assert cfg.ollama_code_think_for_model("gpt-oss:20b") == "low"
     assert cfg.ollama_think_for_model("qwen3-coder:30b") is None
     assert cfg.ollama_options["num_predict"] == 2048
+    assert cfg.ollama_code_options["num_predict"] == 4096
+
+    (config_dir / "config.toml").write_text(
+        "[ollama.options]\nnum_predict = 6144\n"
+        "[ollama.code_options]\ntemperature = 0.1\n"
+    )
+    larger_general_budget = load_config()
+    assert larger_general_budget.ollama_code_options["num_predict"] == 6144
+
+    (config_dir / "config.toml").write_text(
+        "[ollama.options]\nnum_predict = 6144\n"
+        "[ollama.code_options]\nnum_predict = 3072\n"
+    )
+    explicit_code_budget = load_config()
+    assert explicit_code_budget.ollama_code_options["num_predict"] == 3072
 
     (config_dir / "config.toml").write_text("[ollama]\nthink = true\ncode_think = 'medium'\n")
     overridden = load_config()

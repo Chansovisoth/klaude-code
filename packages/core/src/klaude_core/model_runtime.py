@@ -632,6 +632,7 @@ class OpenAIRuntime(_CancelableResponseRuntime):
         response_stream = self._track_active_response(self._response_create(**kwargs))
         completed = False
         streamed_text = False
+        streamed_items: list[Any] = []
         try:
             for event in response_stream:
                 kind = getattr(event, "type", "")
@@ -641,6 +642,9 @@ class OpenAIRuntime(_CancelableResponseRuntime):
                 elif kind == "response.refusal.delta":
                     streamed_text = True
                     yield {"role": "assistant", "content": getattr(event, "delta", "")}
+                elif kind == "response.output_item.done":
+                    if (item := getattr(event, "item", None)) is not None:
+                        streamed_items.append(item)
                 elif kind == "response.completed":
                     response = getattr(event, "response", None)
                     if response is None:
@@ -650,7 +654,7 @@ class OpenAIRuntime(_CancelableResponseRuntime):
                     self._record(response)
                     self._raise_for_terminal_response(response)
                     completed = True
-                    terminal = self._message(response)
+                    terminal = self._message(response, streamed_items=streamed_items)
                     metadata = {
                         key: value
                         for key, value in terminal.items()
@@ -827,11 +831,23 @@ class OpenAIRuntime(_CancelableResponseRuntime):
         return result
 
     @classmethod
-    def _message(cls, response: Any) -> dict[str, Any]:
+    def _message(cls, response: Any, *, streamed_items: list[Any] | None = None) -> dict[str, Any]:
         calls = []
         refusals: list[str] = []
+        texts: list[str] = []
         response_items: list[dict[str, Any]] = []
-        for item in getattr(response, "output", []) or []:
+        seen: set[tuple[str, str]] = set()
+        # Some compatible Responses servers omit output from the terminal
+        # envelope. Completed stream items remain authoritative evidence;
+        # partial added/delta events must never become executable calls.
+        for item in [*(getattr(response, "output", []) or []), *(streamed_items or [])]:
+            kind = str(getattr(item, "type", ""))
+            item_id = str(getattr(item, "call_id", "") or getattr(item, "id", ""))
+            if item_id:
+                identity = (kind, item_id)
+                if identity in seen:
+                    continue
+                seen.add(identity)
             if replay_item := cls._response_item(item):
                 response_items.append(replay_item)
             if getattr(item, "type", "") == "function_call":
@@ -845,10 +861,12 @@ class OpenAIRuntime(_CancelableResponseRuntime):
                     }
                 )
             for part in getattr(item, "content", []) or []:
+                if kind == "message" and getattr(part, "type", "") == "output_text":
+                    texts.append(str(getattr(part, "text", "") or ""))
                 refusal = getattr(part, "refusal", None)
                 if getattr(part, "type", "") == "refusal" and refusal:
                     refusals.append(str(refusal))
-        content = getattr(response, "output_text", "") or ""
+        content = getattr(response, "output_text", "") or "".join(texts)
         if not content and refusals:
             content = "\n".join(refusals)
         return {
@@ -981,6 +999,11 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         error = cls._attribute(chunk, "error", None)
         if not error:
             return
+        if cls._attribute(error, "code", None) == 402:
+            raise RuntimeError(
+                "OpenRouter request exceeds available credits; reduce the output budget "
+                "or add credits."
+            )
         message = cls._attribute(error, "message", None)
         raise RuntimeError(str(message or "OpenRouter stream failed."))
 
@@ -990,6 +1013,7 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
         think: bool | str | None,
+        options: dict[str, Any] | None = None,
     ):
         kwargs: dict[str, Any] = {
             "model": model,
@@ -997,11 +1021,32 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        output_limit = (options or {}).get("num_predict", 2048)
+        kwargs["max_tokens"] = (
+            output_limit
+            if isinstance(output_limit, int)
+            and not isinstance(output_limit, bool)
+            and output_limit > 0
+            else 2048
+        )
         if tools:
             kwargs["tools"] = tools
         if think not in {None, False, "off", "auto"}:
             kwargs["extra_body"] = {"reasoning": {"effort": str(think)}}
-        return self._client().chat.completions.create(**kwargs)
+        try:
+            return self._client().chat.completions.create(**kwargs)
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            if status == 402:
+                raise RuntimeError(
+                    "OpenRouter request exceeds available credits; reduce the output budget "
+                    "or add credits."
+                ) from None
+            if isinstance(status, int):
+                # SDK exception strings can include account IDs and response
+                # bodies. Keep status diagnostics without persisting that body.
+                raise RuntimeError(f"OpenRouter request rejected (HTTP {status}).") from None
+            raise
 
     def chat(
         self,
@@ -1012,7 +1057,7 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         think: bool | str | None = None,
     ) -> dict[str, Any]:
         response_stream = self._track_active_response(
-            self._stream(model, messages, tools, think)
+            self._stream(model, messages, tools, think, options=options)
         )
         content: list[str] = []
         calls: dict[int, dict[str, Any]] = {}
@@ -1089,7 +1134,7 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         think: bool | str | None = None,
     ):
         response_stream = self._track_active_response(
-            self._stream(model, messages, tools, think)
+            self._stream(model, messages, tools, think, options=options)
         )
         response_id = ""
         usage: Any = None
@@ -1242,6 +1287,7 @@ class CodexRuntime(OpenAIRuntime):
         refusals: list[str] = []
         calls: list[dict[str, Any]] = []
         reasoning_items: list[dict[str, Any]] = []
+        streamed_items: list[Any] = []
         try:
             for event in response_stream:
                 kind = getattr(event, "type", "")
@@ -1251,6 +1297,8 @@ class CodexRuntime(OpenAIRuntime):
                     refusals.append(str(getattr(event, "delta", "") or ""))
                 elif kind == "response.output_item.done":
                     item = getattr(event, "item", None)
+                    if item is not None:
+                        streamed_items.append(item)
                     call = self._tool_call_item(item)
                     if call:
                         calls.append(call)
@@ -1277,7 +1325,7 @@ class CodexRuntime(OpenAIRuntime):
             raise RuntimeError("OpenAI Codex stream ended without a completed response.")
         self._record(completed)
         self._raise_for_terminal_response(completed)
-        terminal = self._message(completed)
+        terminal = self._message(completed, streamed_items=streamed_items)
         for item in getattr(completed, "output", []) or []:
             call = self._tool_call_item(item)
             if call and all(existing["id"] != call["id"] for existing in calls):
@@ -1321,12 +1369,16 @@ class CodexRuntime(OpenAIRuntime):
         response_stream = self._track_active_response(self._response_create(**kwargs))
         completed = False
         streamed_text = False
+        streamed_items: list[Any] = []
         try:
             for event in response_stream:
                 kind = getattr(event, "type", "")
                 if kind in {"response.output_text.delta", "response.refusal.delta"}:
                     streamed_text = True
                     yield {"role": "assistant", "content": getattr(event, "delta", "") or ""}
+                elif kind == "response.output_item.done":
+                    if (item := getattr(event, "item", None)) is not None:
+                        streamed_items.append(item)
                 elif kind == "response.completed":
                     response = getattr(event, "response", None)
                     if response is None:
@@ -1336,7 +1388,7 @@ class CodexRuntime(OpenAIRuntime):
                     self._record(response)
                     self._raise_for_terminal_response(response)
                     completed = True
-                    terminal = self._message(response)
+                    terminal = self._message(response, streamed_items=streamed_items)
                     metadata = {
                         key: value
                         for key, value in terminal.items()
@@ -1403,13 +1455,13 @@ class CodexRuntime(OpenAIRuntime):
         return [dict(item) for item in items if isinstance(item, dict)]
 
     @staticmethod
-    def _message(response: Any) -> dict[str, Any]:
-        message = OpenAIRuntime._message(response)
-        reasoning_items = []
-        for item in getattr(response, "output", []) or []:
-            reasoning = CodexRuntime._reasoning_item(item)
-            if reasoning:
-                reasoning_items.append(reasoning)
+    def _message(response: Any, *, streamed_items: list[Any] | None = None) -> dict[str, Any]:
+        message = OpenAIRuntime._message(response, streamed_items=streamed_items)
+        reasoning_items = [
+            item
+            for item in message.get("openai_response_items", [])
+            if item.get("type") == "reasoning"
+        ]
         if reasoning_items:
             message["codex_reasoning_items"] = reasoning_items
         return message

@@ -20,6 +20,10 @@ from klaude_core import (
     evaluate_agent_turn,
     load_config,
 )
+from klaude_core.evaluation_interfaces import (
+    KNOWLEDGE_INTERFACES,
+    configure_knowledge_interface,
+)
 from klaude_core.model_runtime import load_model_cache, save_model_cache
 
 _LEARNED_DOCUMENT_SOURCE = "https://docs.example.invalid/aerolith/cache-beacons"
@@ -35,10 +39,13 @@ SCENARIOS = {
         name="conversation-continuation",
         prior_messages=(
             {"role": "user", "content": "Explain the difference between Context7 and web search."},
-            {"role": "assistant", "content": (
-                "Context7 retrieves library documentation and code examples. Web search "
-                "is useful for broader sources, including"
-            )},
+            {
+                "role": "assistant",
+                "content": (
+                    "Context7 retrieves library documentation and code examples. Web search "
+                    "is useful for broader sources, including"
+                ),
+            },
         ),
         prompt="You didn't finish. Continue from where you stopped. Do not use tools.",
         forbid_any_tool=True,
@@ -133,6 +140,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--include-network", action="store_true")
     parser.add_argument("--output", type=Path, help="new JSON report path")
     parser.add_argument("--yes", action="store_true", help="confirm live provider usage")
+    parser.add_argument(
+        "--knowledge-interface",
+        action="append",
+        choices=KNOWLEDGE_INTERFACES,
+        help="local-knowledge interface experiment; repeatable (name supports Ollama only)",
+    )
+    parser.add_argument("--repetitions", type=int, default=1, help="repeats per scenario (1-5)")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--result-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--progress-file", type=Path, help=argparse.SUPPRESS)
@@ -152,11 +166,13 @@ def _worker(
     workspace: Path,
     result_file: Path,
     progress_file: Path,
+    knowledge_interface: str = "current",
 ) -> int:
     # Import CLI wiring only in the isolated worker. The evaluator deliberately
     # exercises the same model resolution, runtime, tools, and prompt as Klaude.
     from klaude_cli.main import (
         _agent_local_ollama,
+        _apply_session_mode,
         _build_agent,
         _resolve_requested_chat_model,
         _set_agent_model,
@@ -168,6 +184,10 @@ def _worker(
     if selected is None:
         raise ValueError(f"model is unavailable or ambiguous: {model_ref}")
     _set_agent_model(agent, cfg, _agent_local_ollama(agent), selected)
+    # Match ordinary interactive model selection rather than inheriting the
+    # initial coder model's reasoning defaults after switching runtimes.
+    _apply_session_mode(agent, cfg, "standard")
+    configure_knowledge_interface(agent, knowledge_interface)
     if scenario_name == "learned-document":
         from klaude_knowledge import Knowledge
 
@@ -183,16 +203,16 @@ def _worker(
     # ask-policy invocation. Evaluation scope independently removes mutation,
     # arbitrary shell, persistent learning, delegation, and interactive input.
     expected_tools = set(SCENARIOS[scenario_name].expected_any_tools)
-    agent.gate.set_ask_callback(
-        lambda tool, _detail: "y" if tool in expected_tools else "n"
-    )
+    agent.gate.set_ask_callback(lambda tool, _detail: "y" if tool in expected_tools else "n")
     result = evaluate_agent_turn(
         agent,
         SCENARIOS[scenario_name],
         model_ref=selected.ref,
         progress_observer=lambda payload: _write_progress(progress_file, payload),
     )
-    result_file.write_text(json.dumps(result.to_dict(), sort_keys=True), encoding="utf-8")
+    payload = result.to_dict()
+    payload["knowledge_interface"] = knowledge_interface
+    result_file.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     return 0
 
 
@@ -200,6 +220,8 @@ def _worker_error_category(error: Exception) -> str:
     """Reduce provider/setup failures to stable categories without returning details."""
     status_code = getattr(error, "status_code", None)
     lowered = f"{type(error).__name__} {error}".casefold()
+    if "name experiment currently supports only ollama" in lowered:
+        return "unsupported_interface"
     if status_code == 429 or "usage limit" in lowered or "rate limit" in lowered:
         return "rate_limit"
     if "auth" in lowered or "credential" in lowered or status_code in {401, 403}:
@@ -221,6 +243,8 @@ def _valid_worker_output_path(path: Path) -> bool:
         and resolved.parent.parent == temporary_root
         and resolved.parent.name.startswith("klaude-eval-")
     )
+
+
 def _stop_worker(process: subprocess.Popen[str]) -> None:
     try:
         if os.name == "posix":
@@ -361,9 +385,7 @@ def _read_progress(path: Path) -> dict[str, Any]:
         sanitized["event_counts"] = {
             str(key)[:64]: value
             for key, value in list(counts.items())[:64]
-            if isinstance(value, int)
-            and not isinstance(value, bool)
-            and 0 <= value <= 1_000_000
+            if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1_000_000
         }
     for key in ("tools_started", "tools_completed", "tools_succeeded"):
         values = payload.get(key)
@@ -378,6 +400,7 @@ def _run_isolated(
     scenario: str,
     workspace: Path,
     timeout: float,
+    knowledge_interface: str = "current",
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="klaude-eval-") as temporary:
         result_file = Path(temporary) / "result.json"
@@ -407,6 +430,8 @@ def _run_isolated(
             "--progress-file",
             str(progress_file),
         ]
+        if knowledge_interface != "current":
+            command.extend(["--knowledge-interface", knowledge_interface])
         started = datetime.now(UTC)
         process = subprocess.Popen(
             command,
@@ -441,8 +466,10 @@ def _run_isolated(
             payload = json.loads(result_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return _failed_result(model, scenario, "harness", elapsed)
-        return payload if isinstance(payload, dict) else _failed_result(
-            model, scenario, "harness", elapsed
+        return (
+            payload
+            if isinstance(payload, dict)
+            else _failed_result(model, scenario, "harness", elapsed)
         )
 
 
@@ -466,11 +493,13 @@ def main() -> int:
             or len(args.scenario) != 1
             or args.result_file is None
             or args.progress_file is None
+            or len(args.knowledge_interface or []) > 1
+            or args.repetitions != 1
         ):
             return 2
-        if not _valid_worker_output_path(
-            args.result_file
-        ) or not _valid_worker_output_path(args.progress_file):
+        if not _valid_worker_output_path(args.result_file) or not _valid_worker_output_path(
+            args.progress_file
+        ):
             return 2
         try:
             return _worker(
@@ -479,6 +508,7 @@ def main() -> int:
                 args.workspace.resolve(),
                 args.result_file,
                 args.progress_file,
+                (args.knowledge_interface or ["current"])[0],
             )
         except Exception as exc:
             # The parent records a bounded category. Raw provider exceptions can
@@ -504,6 +534,9 @@ def main() -> int:
     if not 1 <= args.timeout <= 3600:
         print("--timeout must be between 1 and 3600 seconds.", file=sys.stderr)
         return 2
+    if not 1 <= args.repetitions <= 5:
+        print("--repetitions must be between 1 and 5.", file=sys.stderr)
+        return 2
     output: Path | None = None
     if args.output is not None:
         output = args.output.resolve()
@@ -525,27 +558,38 @@ def main() -> int:
 
     script = Path(__file__).resolve()
     results: list[dict[str, Any]] = []
+    cancelled = False
     try:
         for model in args.model:
             for scenario in scenarios:
-                print(f"Evaluating {model} / {scenario} ...", flush=True)
-                result = _run_isolated(
-                    script,
-                    model,
-                    scenario,
-                    args.workspace.resolve(),
-                    args.timeout,
-                )
-                results.append(result)
-                state = "PASS" if result.get("success") else "FAIL"
-                print(f"  {state} ({result.get('elapsed_seconds', 0)}s)")
+                for repetition in range(1, args.repetitions + 1):
+                    for variant in args.knowledge_interface or ["current"]:
+                        print(
+                            f"Evaluating {model} / {scenario} / {variant} "
+                            f"(repeat {repetition}) ...",
+                            flush=True,
+                        )
+                        result = _run_isolated(
+                            script,
+                            model,
+                            scenario,
+                            args.workspace.resolve(),
+                            args.timeout,
+                            variant,
+                        )
+                        result["knowledge_interface"] = variant
+                        result["repetition"] = repetition
+                        results.append(result)
+                        state = "PASS" if result.get("success") else "FAIL"
+                        print(f"  {state} ({result.get('elapsed_seconds', 0)}s)")
     except KeyboardInterrupt:
         print("\nEvaluation cancelled.", file=sys.stderr)
-        return 130
+        cancelled = True
 
     report = {
         "schema_version": 2,
         "generated_at": datetime.now(UTC).isoformat(),
+        "cancelled": cancelled,
         "results": results,
         "summary": {
             "total": len(results),
@@ -555,6 +599,7 @@ def main() -> int:
         "comparison": {
             "by_model": _aggregate_results(results, "model_ref"),
             "by_scenario": _aggregate_results(results, "scenario"),
+            "by_knowledge_interface": _aggregate_results(results, "knowledge_interface"),
         },
     }
     rendered = json.dumps(report, indent=2, sort_keys=True)
@@ -564,7 +609,7 @@ def main() -> int:
         print(f"Report: {output}")
     else:
         print(rendered)
-    return 0 if report["summary"]["failed"] == 0 else 1
+    return 130 if cancelled else (0 if report["summary"]["failed"] == 0 else 1)
 
 
 if __name__ == "__main__":

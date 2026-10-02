@@ -5360,6 +5360,26 @@ def test_session_setting_failures_report_original_scope_without_changing_runtime
     assert tui.agent.ollama is original
 
 
+@pytest.mark.parametrize("path", [
+    "packages/core/src/klaude_core/knowledge_tool_contract.py",
+    "/home/klaude/klaude-code/packages/core/src/klaude_core/agent.py",
+    "https://example.org/model/reference",
+])
+def test_workspace_paths_and_urls_are_not_slash_command_help(path):
+    request = (
+        f"Inspect the workspace read-only. Read {path} and explain its behavior. "
+        "Do not use web search or modify files."
+    )
+    assert resolve_command_help_request(request) is None
+    tools = {
+        name: Tool(name, name, {}, lambda: "")
+        for name in ("read_file", "list_dir", "grep", "workspace_info", "list_commands")
+    }
+    selected = _select_tool_names(request, tools)
+    assert "read_file" in selected
+    assert "list_commands" not in selected
+
+
 @pytest.mark.parametrize("operation", ["model", "memory"])
 def test_settings_picker_responds_while_session_write_is_blocked(
     tmp_path, monkeypatch, operation
@@ -7917,6 +7937,33 @@ def test_tool_selector_routes_explicit_learning_only_to_persistent_ingestion():
     ) == ["learn_source"]
 
 
+def test_tool_selector_preserves_an_explicit_crawl_site_request_with_a_url():
+    tools = {
+        name: Tool(
+            name,
+            f"{name}.",
+            {"type": "object", "properties": {}, "required": []},
+            lambda: "",
+        )
+        for name in ("learn_source", "crawl_site", "web_search", "fetch_url")
+    }
+    request = (
+        "Test the built-in `crawl_site` capability. Crawl this page and store it "
+        "in the test library: https://docs.python.org/3/library/unittest.html"
+    )
+
+    assert _select_tool_names(request, tools) == ["crawl_site"]
+    assert _select_tool_names(
+        "Do not use crawl_site; learn and keep this documentation: "
+        "https://docs.python.org/3/library/unittest.html",
+        tools,
+    ) == ["learn_source"]
+    assert _select_tool_names(
+        request,
+        {name: tool for name, tool in tools.items() if name != "crawl_site"},
+    ) == []
+
+
 def test_tool_selector_discovers_named_learning_source_before_ingestion():
     tools = {
         name: Tool(
@@ -9622,6 +9669,14 @@ def test_mcp_enable_save_does_not_hold_setup_and_late_result_reports_actual_outc
         name="test", transport="http", enabled=False, url="https://example.com/mcp"
     )})
     monkeypatch.setattr(cli_main, "_mcp_registry", lambda: registry)
+
+    async def inline_to_thread(function, /, *args, **kwargs):
+        # Definition reads and JSON encoding are incidental here. Keep the
+        # save on its real mutation thread while avoiding this host's Python
+        # 3.12 default-executor shutdown wakeup race.
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", inline_to_thread)
     entered = threading.Event()
     release = threading.Event()
     ui_thread = threading.get_ident()
@@ -9668,7 +9723,8 @@ def test_mcp_enable_save_does_not_hold_setup_and_late_result_reports_actual_outc
                 tui.session_id = "different-session"
         finally:
             release.set()
-        await asyncio.to_thread(tui._mcp_mutations.close, wait=True)
+        # This is bounded test teardown, not a UI action.
+        tui._mcp_mutations.close(wait=True)
         tui._before_render(None)
         assert registry.load()["test"].enabled is (outcome != "save_failure")
         assert bool(published) is (outcome == "success")
@@ -9695,6 +9751,11 @@ def test_mcp_enable_saved_but_failed_catalog_keeps_old_tools(tmp_path, monkeypat
     )})
     monkeypatch.setattr(cli_main, "_mcp_registry", lambda: registry)
 
+    async def inline_to_thread(function, /, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", inline_to_thread)
+
     async def discover(*_):
         return [{"name": "inspect", "inputSchema": {"type": "object"}}]
 
@@ -9713,7 +9774,7 @@ def test_mcp_enable_saved_but_failed_catalog_keeps_old_tools(tmp_path, monkeypat
         monkeypatch.setattr(tui, "_open_settings_category", lambda *_: None)
         tui._run_mcp_enable("test")
         await tui._setup_job
-        await asyncio.to_thread(tui._mcp_mutations.close, wait=True)
+        tui._mcp_mutations.close(wait=True)
         tui._before_render(None)
         assert registry.load()["test"].enabled
         assert tui.agent.tools is old_tools
@@ -10702,6 +10763,8 @@ def test_mcp_disabled_server_review_has_no_ui_registry_read_and_binds_confirmati
 
 
 def test_mcp_enable_rejects_definition_changed_after_review_before_discovery(tmp_path, monkeypatch):
+    import asyncio
+
     from klaude_cli.mcp_inventory import definition_digest
     from klaude_core.mcp_client import MCPClient, MCPRegistry, MCPServerConfig
 
@@ -10713,6 +10776,12 @@ def test_mcp_enable_rejects_definition_changed_after_review_before_discovery(tmp
     changed["docs"].command = "different-command"
     registry.save(changed)
     monkeypatch.setattr("klaude_cli.main._mcp_registry", lambda: registry)
+
+    async def inline_to_thread(function, /, *args, **kwargs):
+        # This case tests definition identity, not executor scheduling.
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", inline_to_thread)
     monkeypatch.setattr(
         MCPClient, "discover_async", lambda *args: pytest.fail("Unreviewed server discovery")
     )
@@ -11250,3 +11319,32 @@ def test_status_metadata_failure_is_visible_without_retry_loop(tmp_path):
     tui._set_input("/status")
     tui._submit_buffer(steer=False)
     assert "Memory        Unavailable" in tui.output.text
+
+
+@pytest.mark.parametrize("spelling", ["http_probe", "http probe"])
+def test_named_probe_remains_exposed_in_multi_tool_request(spelling):
+    tools = {
+        name: Tool(name, name, {"type": "object", "properties": {}}, lambda: "")
+        for name in ("http_probe", "current_time", "weather_lookup")
+    }
+    selected = _select_tool_names(
+        f"Get the current time and weather, and perform a HEAD {spelling} of https://www.python.org.",
+        tools,
+    )
+    assert set(selected) == set(tools)
+
+
+@pytest.mark.parametrize("service", ["Hugging Face", "HuggingFace"])
+def test_remote_hub_repository_inspection_does_not_become_workspace_inspection(service):
+    names = ("read_file", "list_dir", "workspace_info", "huggingface_search",
+             "huggingface_details", "huggingface_readme", "http_probe")
+    tools = {name: Tool(name, name, {"type": "object", "properties": {}}, lambda: "")
+             for name in names}
+    selected = _select_tool_names(
+        f"Use the {service} tools to find Qwen/Qwen3.5-0.8B, inspect its repository details "
+        "and read its model card. Also use http_probe with HEAD on https://www.python.org.",
+        tools,
+    )
+    assert set(selected) == {
+        "huggingface_search", "huggingface_details", "huggingface_readme", "http_probe"
+    }

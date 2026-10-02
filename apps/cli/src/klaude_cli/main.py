@@ -100,9 +100,14 @@ from klaude_core.config import (
 )
 from klaude_core.dates import find_establishment_date, operating_duration_since
 from klaude_core.intent import (
+    explicit_only_tool_names,
     explicit_workspace_inspection,
     explicitly_disallows_tools,
     has_nonnegated_action,
+)
+from klaude_core.knowledge_tool_contract import (
+    KNOWLEDGE_TOOL_DESCRIPTION,
+    knowledge_tool_parameters,
 )
 from klaude_core.memory import explicit_memory_candidate, is_sensitive_memory
 from klaude_core.model_runtime import (
@@ -118,7 +123,7 @@ from klaude_core.model_runtime import (
     normalize_token_usage,
     save_model_cache,
 )
-from klaude_core.research_receipts import research_receipt
+from klaude_core.research_receipts import evidence_excerpt, research_receipt
 from klaude_core.runtime_context import (
     collect_runtime_context,
     context_to_dict,
@@ -187,7 +192,13 @@ from .mcp_mutations import (
 )
 from .pickers import PickerController, PickerRow, match_score
 from .session_actions import AutomaticMemoryUpdate, SessionActionWriter, SessionSettingUpdate
-from .session_io import SessionIOCoordinator, SessionIORequest, SessionIOResult, collect_session_io
+from .session_io import (
+    SessionIOCoordinator,
+    SessionIORequest,
+    SessionIOResult,
+    SessionLeaseKeeper,
+    collect_session_io,
+)
 from .settings_overview import SettingsOverviewSnapshot
 from .settings_panel import (
     PanelAction,
@@ -4443,6 +4454,13 @@ def _fetch_url_tool_result(web, url: str) -> dict:
             "search_provenance": fetched.get("provenance") or [],
             "untrusted_external_evidence": True,
         }
+        if metadata["status"] != "failed":
+            excerpt = evidence_excerpt(
+                str(fetched.get("final_url") or url), raw_content,
+                source_id=str(fetched.get("source_id") or ""),
+            )
+            if excerpt is not None:
+                metadata["research_evidence"] = [excerpt]
         if metadata["status"] == "failed":
             failure = fetched.get("failure") or {}
             reason = str(failure.get("reason") or "page could not be read")
@@ -4725,6 +4743,13 @@ def _tool_activity(tool: str, args: dict, *, completed: bool) -> tuple[str, str]
             "explored" if completed else "exploring",
             f"{role} subagent",
         )
+    if tool.startswith("mcp__"):
+        # MCP names are namespaced, but their public activity should describe
+        # the completed kind of work rather than persist a generic [worked].
+        operation = tool.rsplit("__", 1)[-1].replace("_", "-").casefold()
+        if any(word in operation for word in ("search", "query", "docs", "resolve", "read")):
+            return ("explored" if completed else "exploring", tool.replace("_", " "))
+        return ("ran" if completed else "running", tool.replace("_", " "))
     return ("worked" if completed else "working", tool.replace("_", " "))
 
 
@@ -5003,7 +5028,11 @@ def _query_knowledge_tool_result(
     k: int = 6,
 ) -> dict:
     target_library = library or collection
-    content = kn.query_as_context(query, target_library, k)
+    if callable(getattr(kn, "query_with_evidence", None)):
+        content, evidence = kn.query_with_evidence(query, target_library, k)
+    else:
+        content = kn.query_as_context(query, target_library, k)
+        evidence = []
     found = not content.startswith("No relevant local knowledge found.")
     return {
         "content": content,
@@ -5012,6 +5041,7 @@ def _query_knowledge_tool_result(
             "library": target_library,
             "found": found,
             "result_count": _knowledge_context_chunk_count(content) if found else 0,
+            "research_evidence": evidence,
         },
     }
 
@@ -5073,7 +5103,9 @@ def _format_single_command_help(
     return "\n".join(lines)
 
 
-SLASH_COMMAND_RE = re.compile(r"/[a-z][a-z0-9_-]*", re.IGNORECASE)
+SLASH_COMMAND_RE = re.compile(
+    r"(?<![\w./\\-])/[a-z][a-z0-9_-]*(?![\w/\\]|\.[\w])", re.IGNORECASE
+)
 FOCUSED_COMMAND_HELP_RE = re.compile(
     r"(?i)\b(?:what does|how do i use|how does|explain|what command|which command)\b"
 )
@@ -5141,9 +5173,15 @@ def resolve_command_help_request(user_message: str) -> CommandResolution | None:
     if not help_intent:
         return None
 
+    # A restriction in a later sentence ("Do not use web search") is not
+    # the subject of an earlier request to explain workspace code.
+    help_text = " ".join(
+        clause for clause in re.split(r"[.!?;\n]", text)
+        if has_nonnegated_action(clause, FOCUSED_COMMAND_HELP_RE)
+    )
     lookup = _registered_command_map()
     for key in sorted(lookup, key=len, reverse=True):
-        if key and re.search(rf"(?<![\w/-]){re.escape(key)}(?![\w/-])", text):
+        if key and re.search(rf"(?<![\w/-]){re.escape(key)}(?![\w/-])", help_text):
             return CommandResolution(exact=lookup[key])
     return None
 
@@ -5338,6 +5376,22 @@ def _normalized_request_text(user_message: str) -> str:
     return " ".join(user_message.lower().strip().strip("?.!").split())
 
 
+def _contains_request_phrase(text: str, phrases: tuple[str, ...]) -> bool:
+    """Match routing words as words, never inside names such as `profile`."""
+    return any(
+        re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", text)
+        for phrase in phrases
+    )
+
+
+def _explicit_workspace_target(text: str) -> bool:
+    return bool(re.search(
+        r"\b(?:in|inside|within|of)\s+(?:this|the|my|our)\s+"
+        r"(?:repo|repository|project|workspace|codebase)\b",
+        text,
+    ))
+
+
 def _looks_like_public_lookup_term(user_message: str) -> bool:
     stripped = user_message.strip().strip("?.!,")
     text = stripped.lower()
@@ -5415,7 +5469,11 @@ def _is_standalone_code_generation_request(user_message: str) -> bool:
     """
     text = _normalized_request_text(user_message)
     asks_to_generate = bool(
-        re.search(r"\b(?:write|create|generate|make|code|give|provide|produce)\b", text)
+        re.search(
+            r"\b(?:write|create|generate|make|give|provide|produce)\b|"
+            r"\b(?:please\s+)?code\s+(?:me\s+)?(?:a|an|the|this|that|up|for)\b",
+            text,
+        )
     )
     code_subject = bool(
         re.search(
@@ -5465,16 +5523,21 @@ def _tool_use_route(user_message: str) -> ToolUseRoute:
         or resolve_command_help_request(user_message) is not None
     ):
         return ToolUseRoute.COMMAND_REFERENCE
-    workspace_inspection = explicit_workspace_inspection(text)
-    if any(word in text for word in WORKSPACE_LOCATION_PATTERNS) or workspace_inspection:
+    public_remote = _contains_request_phrase(
+        text, ("github", "gitlab", "facebook", "huggingface", "hugging face")
+    )
+    workspace_inspection = explicit_workspace_inspection(text) and (
+        not public_remote or _explicit_workspace_target(text)
+    )
+    if _contains_request_phrase(text, WORKSPACE_LOCATION_PATTERNS) or workspace_inspection:
         return ToolUseRoute.WORKSPACE_TOOL
     if _is_standalone_code_generation_request(user_message):
         return ToolUseRoute.DIRECT_RESPONSE
-    if any(word in text for word in ("time", "date", "weather", "forecast")):
+    if _contains_request_phrase(text, ("time", "date", "weather", "forecast")):
         return ToolUseRoute.UTILITY_TOOL
-    if any(word in text for word in ("search", "web", "latest", "current", "online")):
+    if _contains_request_phrase(text, ("search", "web", "latest", "current", "online")):
         return ToolUseRoute.WEB_TOOL
-    if any(word in text for word in ("docs", "documentation", "knowledge", "library")):
+    if _contains_request_phrase(text, ("docs", "documentation", "knowledge", "library")):
         return ToolUseRoute.KNOWLEDGE_TOOL
     if _is_direct_response_request(user_message):
         return ToolUseRoute.DIRECT_RESPONSE
@@ -5484,17 +5547,49 @@ def _tool_use_route(user_message: str) -> ToolUseRoute:
 def _matching_mcp_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
     """Select a small relevant MCP subset without flooding constrained models."""
     text = _normalized_request_text(user_message)
-    words = {word for word in re.findall(r"[a-z0-9]+", text) if len(word) >= 3}
+    generic_words = {
+        "the", "and", "for", "with", "what", "whats", "can", "you", "find",
+        "search", "query", "tool", "tools", "current", "latest", "today",
+    }
+    words = {
+        word for word in re.findall(r"[a-z0-9]+", text)
+        if len(word) >= 3 and word not in generic_words
+    }
+    local_knowledge = bool(
+        re.search(r"\b(?:locally|local (?:knowledge|library|docs)|indexed)\b", text)
+    )
+    public_lookup = bool(re.search(
+        r"\b(?:news|headlines|facebook|instagram|github|repositories|repos|profile)\b",
+        text,
+    ))
+    documentation_request = bool(re.search(
+        r"\b(?:docs|documentation|api|code example|code snippet|sdk)\b", text
+    ))
     ranked: list[tuple[int, str]] = []
     for name, tool in tools.items():
         if not name.startswith("mcp__"):
             continue
         parts = name.split("__", 2)
         server = parts[1].replace("_", " ").casefold() if len(parts) > 1 else ""
+        explicit_server = bool(server and server in text)
+        documentation_tool = bool(re.search(
+            r"(?:context7|query.docs|resolve.library|documentation)",
+            f"{name} {tool.description}",
+            re.IGNORECASE,
+        ))
+        # Documentation MCPs are useful for APIs, but broad token overlap
+        # ("current", "search", a product name) is not web discovery.
+        if documentation_tool and not explicit_server and (
+            local_knowledge or public_lookup or not documentation_request
+        ):
+            continue
         haystack = f"{name.replace('_', ' ')} {tool.description}".casefold()
-        tokens = {word for word in re.findall(r"[a-z0-9]+", haystack) if len(word) >= 3}
+        tokens = {
+            word for word in re.findall(r"[a-z0-9]+", haystack)
+            if len(word) >= 3 and word not in generic_words
+        }
         score = len(words & tokens)
-        if server and server in text:
+        if explicit_server:
             score += 8
         if "mcp" in words and score:
             score += 2
@@ -5523,7 +5618,28 @@ def _select_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
         ]
     if explicitly_disallows_tools(user_message):
         return []
+    explicit_only = explicit_only_tool_names(user_message, set(tools))
+    if explicit_only is not None:
+        return explicit_only
     if _knowledge_ingestion_intent(user_message):
+        explicit_crawl_site = bool(
+            re.search(
+                r"\b(?:use|call|invoke|test|try)\b[^.!?;]{0,64}\bcrawl_site\b",
+                user_message,
+                re.IGNORECASE,
+            )
+        )
+        negated_crawl_site = bool(
+            re.search(
+                r"\b(?:do\s+not|don't|never|avoid)\b[^.!?;]{0,64}\bcrawl_site\b",
+                user_message,
+                re.IGNORECASE,
+            )
+        )
+        if explicit_crawl_site and not negated_crawl_site:
+            # A direct request to use this tool must survive the URL-ingestion
+            # shortcut below, which otherwise exposes only learn_source.
+            return ["crawl_site"] if "crawl_site" in tools else []
         if re.search(r"https?://\S+", user_message, flags=re.IGNORECASE):
             # Persistent learning is its own explicit mutation when the user
             # already supplied the source. Do not distract the model with
@@ -5615,10 +5731,10 @@ def _select_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
                 names.append(name)
         if execute and not storage and "run_shell" in tools and "run_shell" not in names:
             names.append("run_shell")
-        if not mutation:
-            names = [
-                name for name in names if name not in {"write_file", "edit_file", "git_commit"}
-            ]
+    if not mutation:
+        names = [
+            name for name in names if name not in {"write_file", "edit_file", "git_commit"}
+        ]
     return list(dict.fromkeys(names))[:14]
 
 
@@ -5632,6 +5748,11 @@ def _heuristic_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str
     if route == ToolUseRoute.COMMAND_REFERENCE:
         return ["list_commands"] if "list_commands" in tools else []
     if route == ToolUseRoute.WORKSPACE_TOOL:
+        if explicit_workspace_inspection(text):
+            return [
+                name for name in ("read_file", "list_dir", "grep", "workspace_info")
+                if name in tools
+            ]
         workspace_selected: list[str] = []
         if any(word in text for word in ("folder", "directory", "image")):
             workspace_selected.extend(name for name in ("list_dir",) if name in tools)
@@ -5698,8 +5819,15 @@ def _heuristic_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str
         "link",
         "links",
     )
-    if any(word in text for word in search_words):
+    if _contains_request_phrase(text, search_words):
         add("web_search", "fetch_url")
+    if re.search(
+        r"\b(?:news|headlines|facebook|instagram|github|repositories|repos|profile)\b",
+        text,
+    ) and not _explicit_workspace_target(text):
+        add("web_search", "fetch_url")
+    if re.search(r"\b(?:locally|local (?:knowledge|library|docs)|indexed)\b", text):
+        add("query_knowledge")
     # Discovery/recommendation requests often contain no literal "search".
     # Expose read-only discovery without treating "find a file" as web intent.
     local_discovery = bool(re.search(
@@ -5715,6 +5843,7 @@ def _heuristic_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str
 
     probe_words = (
         "http probe",
+        "http_probe",
         "status code",
         "response code",
         "check endpoint",
@@ -5732,7 +5861,7 @@ def _heuristic_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str
     if not selected and _looks_like_public_lookup_term(user_message):
         add("search_sessions", "query_knowledge", "web_search", "fetch_url")
 
-    if any(word in text for word in ("today", "date", "time", "day is", "what day")):
+    if _contains_request_phrase(text, ("today", "date", "time", "day is", "what day")):
         add("current_time")
 
     weather_words = (
@@ -5796,7 +5925,7 @@ def _heuristic_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str
         "valorant",
         "youtube",
     )
-    if any(word in text for word in evidence_words):
+    if _contains_request_phrase(text, evidence_words):
         add("query_knowledge", "web_search", "fetch_url")
 
     capability_words = (
@@ -5856,7 +5985,10 @@ def _heuristic_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str
         "finalise",
         "finish",
     )
-    if any(word in text for word in workspace_words):
+    public_remote_repository = bool(re.search(r"\b(?:github|gitlab)\b", text)) and not (
+        explicit_workspace_inspection(text)
+    )
+    if _contains_request_phrase(text, workspace_words) and not public_remote_repository:
         add(
             "read_file",
             "list_dir",
@@ -6807,12 +6939,8 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
         ),
         Tool(
             "query_knowledge",
-            "Search learned local documentation when it is relevant to the request.",
-            {
-                "type": "object",
-                "properties": {"question": S, "query": S, "library": S, "collection": S},
-                "required": [],
-            },
+            KNOWLEDGE_TOOL_DESCRIPTION,
+            knowledge_tool_parameters(),
             lambda question="", query="", library="", collection="": (
                 _query_knowledge_tool_result(
                     get_knowledge(),
@@ -7322,6 +7450,8 @@ def _render(
             # cleanup below must still run if event persistence is degraded.
             return
 
+    lease_keeper: SessionLeaseKeeper | None = None
+
     if live_lifecycle and not memory.acquire_session_lease(
         session_id, client_id, turn_id
     ):
@@ -7337,6 +7467,15 @@ def _render(
                 user_msg,
                 model_content=(effective_message if effective_message != user_msg else None),
             )
+            cancel_transports = getattr(agent, "cancel_active_transports", None)
+            lease_keeper = SessionLeaseKeeper(
+                memory,
+                session_id,
+                client_id,
+                turn_id,
+                on_lost=cancel_transports if callable(cancel_transports) else None,
+            )
+            lease_keeper.start()
             publish("activity", {"text": "working"})
         except Exception:
             memory.release_session_lease(
@@ -7376,8 +7515,8 @@ def _render(
     effective_scope = scope if scope is not None else (
         TurnScope.REVIEW if read_only else None
     )
-    events = agent.run(effective_message, scope=effective_scope)
     try:
+        events = agent.run(effective_message, scope=effective_scope)
         for event in events:
             if event.kind == "text_delta" and event.payload.get("content"):
                 piece = event.payload["content"]
@@ -7410,14 +7549,13 @@ def _render(
                 tool_name = event.payload["tool"]
                 if tool_name in {"web_search", "fetch_url", "http_probe"}:
                     pending_tool_start_metadata[tool_name] = event.payload.get("metadata") or {}
-                publish(
-                    "tool_audit",
-                    {
-                        "tool": tool_name,
-                        "phase": "start",
-                        "execution_id": event.payload.get("execution_id"),
-                    },
-                )
+                audit = {
+                    "tool": tool_name,
+                    "phase": "start",
+                    "execution_id": event.payload.get("execution_id"),
+                }
+                publish("tool_audit", audit)
+                memory.log_turn(session_id, "system", {"event": "tool_audit", **audit})
                 if tool_name not in {
                     "web_search", "fetch_url", "http_probe", "list_commands", "query_knowledge"
                 }:
@@ -7432,16 +7570,15 @@ def _render(
                 )
                 if receipt is not None:
                     memory.log_turn(session_id, "system", receipt)
-                publish(
-                    "tool_audit",
-                    {
-                        "tool": event.payload.get("tool"),
-                        "phase": "result",
-                        "execution_id": metadata.get("execution_id"),
-                        "executed": bool(metadata.get("executed")),
-                        "output_characters": len(str(event.payload.get("result", ""))),
-                    },
-                )
+                audit = {
+                    "tool": event.payload.get("tool"),
+                    "phase": "result",
+                    "execution_id": metadata.get("execution_id"),
+                    "executed": bool(metadata.get("executed")),
+                    "output_characters": len(str(event.payload.get("result", ""))),
+                }
+                publish("tool_audit", audit)
+                memory.log_turn(session_id, "system", {"event": "tool_audit", **audit})
                 if metadata.get("suppress_user_output"):
                     continue
                 tool_name = event.payload.get("tool")
@@ -7539,6 +7676,8 @@ def _render(
                     "turn_capabilities": getattr(agent, "last_turn_capabilities", {}),
                 },
             )
+            if lease_keeper is not None:
+                lease_keeper.close()
             try:
                 memory.release_session_lease(
                     session_id, client_id, turn_id, state=state

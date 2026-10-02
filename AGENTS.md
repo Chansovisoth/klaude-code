@@ -613,7 +613,8 @@ Chat slash commands currently include:
   Ollama response socket to wake blocked reads; tools already executing may
   still need to finish before the switch can proceed. Resuming a session from
   another process follows its live model activity and emitted response deltas.
-  A renewable SQLite lease permits only one model worker per session, while
+  A renewable SQLite lease with a 60-second expiry permits only one model
+  worker per session, while
   every connected client keeps an independent shared draft and pending queue;
   one client's composer must never overwrite another's. Session and turn IDs
   use full random UUID hex values rather than display-truncated identifiers.
@@ -832,9 +833,13 @@ simulate streaming character by character. Cloud requests stream public text
 even when tools are available, while structured calls assemble and validate
 before execution. Ollama requests with tool schemas still assemble before
 structured calls are resolved. Non-interactive stdin retains line-oriented compatibility and plain
-output. Line-oriented and one-shot turns use the same renewable session lease,
-durable start/result/completion events, partial-output preservation, and
-failed/interrupted finalization as TUI turns. If a process disappears before
+output. Line-oriented and one-shot turns keep the renewable session lease alive
+with a dedicated five-second heartbeat throughout the synchronous model loop;
+TUI lease renewal remains on its asynchronous session-I/O path. The 60-second
+expiry still recovers crashed workers instead of leaving an infinite lock.
+Line-oriented turns use the same durable start/result/completion events,
+partial-output preservation, and failed/interrupted finalization as TUI turns.
+If a process disappears before
 finalization, the first client observing its expired lease performs one
 transactional recovery under `BEGIN IMMEDIATE`: public partial output is
 promoted to the durable transcript when no assistant turn was already saved,
@@ -854,12 +859,25 @@ discussed sources inherits only safe built-in retrieval capabilities such as
 web search and local knowledge; it cannot inherit write, shell, or arbitrary
 MCP tools from assistant prose. Research tools also save bounded typed receipts
 separate from audit outcomes: query/library or a public fetch URL/source ID,
-status, and counts, never an arbitrary full result. An interrupted restored turn
-can use those receipts to plan refetching; they are not replayable evidence.
+status, and counts, never an arbitrary full result. Successful local-knowledge
+and URL-fetch results may additionally retain up to three sanitized, query-relevant
+public-source excerpts of 1,200 characters each, with capture time, hash, source
+and offset. Local file contents and arbitrary MCP bodies are not retained this
+way. Recovery treats these as partial historical, untrusted source text; current
+claims and missing details still require refetching. Recovery context is bounded
+to 8,000 characters; an audit alone never reconstructs missing evidence.
 When asked which sources were actually used for an answer, Klaude answers from
-the preceding turn's executed result records, including saved audits after
-resume. A question about which sources could be used remains a capability
-question. In the TUI,
+executed result records, including saved audits after
+resume and completed bounded research receipts from older line-oriented
+sessions. A bounded in-memory index of the last 128 answers supports explicit
+older-answer references across compaction and model switches and is rebuilt from
+saved turns on restore. Ambiguous or missing references are reported honestly;
+the index cannot recover unsaved execution records. Source-use questions remain
+distinct from questions about available capabilities. Line-oriented chat saves
+the same bounded start/result audits
+to session turns as the TUI. An audit or receipt confirms execution, not the
+tool's full result or the answer's specific evidence. A question about which
+sources could be used remains a capability question. In the TUI,
 `/help` category names are underlined, and each user or
 assistant message begins with a full-width gray divider containing the speaker
 name and local date/time. Each session starts with a `Session: <id>` divider
@@ -885,6 +903,8 @@ neutral informational badge treatment. Permission outcomes use `APPROVED`,
 `DENIED`, or `CANCELLED`, never `WAITED`. They summarize only observable actions
 and their public arguments; they never contain hidden model reasoning. Failed
 tool milestones use the existing red `FAILED` badge.
+MCP documentation/query/read operations complete as `EXPLORED`; other MCP
+operations complete as `RAN`, with failures retaining `FAILED`.
 Consecutive built-in file edits show grouped file counts, added/removed line
 totals, and bounded line-numbered patch previews with filename-based syntax
 colors. Counts describe the operations in the group (repeated edits accumulate).
@@ -1017,6 +1037,11 @@ When the user explicitly asks for the complete command list, use the
 deterministic command-reference handler and preserve its formatting. When the
 user asks about one command, use focused command help from the registry. If a
 requested command is unsupported, say so and suggest only close registry matches.
+Slash command matching excludes embedded filesystem paths and URL components.
+Focused command-help subjects stay in their explanatory clause, so a later
+restriction such as "Do not use web search" does not turn workspace inspection
+into search-command help. Workspace inspection exposes the bounded read/search
+tools even when the user names a path without the literal word "file".
 
 ## Config, Data, And Secrets
 
@@ -1162,9 +1187,11 @@ and surface refusal and failed-stream events instead of silently producing an
 empty reply. Streaming OpenAI and Codex requests require an explicit completed
 terminal event; malformed terminal events and native function-call items fail
 closed instead of being treated as successful output. Codex reconciles streamed
-tool/reasoning items against the authoritative completed response, deduplicates
-items by provider ID, and falls back to completed response text when a transport
-omits text deltas. Both OpenAI Responses adapters request encrypted reasoning
+tool/reasoning items against the completed response, deduplicates
+items by provider ID, and retains completed stream items when the terminal
+envelope omits its output array. Both adapters use completed message text when
+the terminal convenience field or text deltas are absent; partial tool items
+never execute without terminal completion. Both OpenAI Responses adapters request encrypted reasoning
 content and retain a strict, non-rendered replay envelope containing only
 provider-issued reasoning, compaction, assistant-message, and function-call items. This
 preserves opaque reasoning and exact assistant `phase` values across stateless
@@ -1223,6 +1250,12 @@ plugins are not enabled. Streamed function-call fragments are validated and
 assembled locally, and complete `reasoning_details` sequences are preserved
 privately and in order for provider tool continuations without rendering private
 reasoning in the transcript.
+
+OpenRouter requests map a positive configured `num_predict` to `max_tokens`;
+unset, invalid, or Ollama-only unlimited values use a bounded 2,048-token default.
+This limit includes reasoning tokens where the upstream provider counts them.
+Credit-limit errors report the budget remedy without SDK account IDs or response
+bodies; other HTTP rejections expose their status rather than the raw body.
 
 ## Agent And Tool Routing
 
@@ -1300,6 +1333,19 @@ Treat explicit prohibitions as constraints, not positive intent. `Do not inspect
 tools merely because the prohibited verb appears in the request. An explicit
 `do not use tools`, `without calling tools`, or `no tools` removes every model
 tool schema for that turn. Positive actions in separate clauses remain effective.
+`Use only TOOL_NAME` limits that turn's schemas to named callable tools,
+including excluding the usual structured-user-input control tool; an unknown
+name does not reopen unrelated tools.
+Tool-use prohibitions are constraints rather than the subject of a request:
+adding `Do not use tools` to a conversational continuation does not cause the
+full repository/product guide to replace its compact conversation prompt.
+Actual questions about Klaude settings or commands retain product context.
+
+Explicit requests to quote/excerpt at most a specified number of code lines
+are enforced across fenced quotations, with an omission notice if needed.
+These responses buffer until the quotation constraint has been applied; ordinary
+streaming and complete-program generation are unchanged. Partial quotations are
+not treated as standalone programs for automatic code validation.
 
 Use tools when they materially improve correctness or perform a requested
 action. The model, not a keyword router, decides whether to call an exposed
@@ -1313,6 +1359,9 @@ schemas while retaining bounded durable user/project preferences. Unsupported
 languages stream tool-free output. Python and GDScript are buffered until
 dependency-free validation succeeds, with safe reasoning/drafting progress and
 bounded diagnostic repairs, then persist one completed assistant turn.
+Read-only questions about code use the ordinary output budget. A local model
+that exhausts its output limit without a visible answer stops with an explicit
+error instead of blindly repeating the same request.
 Retrieval remains available when the user explicitly requests search, current
 documentation, or workspace inspection. Explicit `do not search` language
 removes knowledge and web tools for the turn. If Ollama rejects malformed Qwen
@@ -1344,6 +1393,30 @@ Ordinary shell paths, including glob expansions, remain workspace-scoped.
 
 Each model request receives an immutable capability block derived from its actual
 schemas, with reasons for unavailable tools and a separate global-enabled inventory.
+Tools omitted only by turn routing are described as enabled but not callable in
+that request, never as globally unavailable. A false unavailable claim about a
+currently callable web, local-knowledge, file-reading, or named MCP tool receives one bounded correction
+attempt before a nonstreamed answer; streamed answers receive an explicit
+capability correction. Public news, social-profile, and GitHub discovery route to web retrieval
+without incidental documentation-MCP matches; explicit local-library questions
+expose `query_knowledge`. Generic MCP word overlap excludes common words.
+Required local-retrieval checks distinguish learned/indexed/local documentation
+from external library documentation. Context7 library resolution and references
+to general documentation do not force an additional local-knowledge call.
+The assistant's `query_knowledge` schema exposes one required nonempty `query`
+and an optional `library`, with descriptions of local indexed content, returned
+passages/source references, automatic library selection, and read-only scope.
+Legacy `question` and `collection` arguments normalize before validation and
+permission checks, retaining the existing question-first/library-first precedence.
+Malformed supplied canonical or legacy fields cannot be hidden by a valid
+preferred field; they fail validation before approval or execution.
+The canonical tool ID, permission keys, audits, and knowledge MCP API remain
+unchanged; alternate names are not added to the production registry.
+Routing words and phrases match token boundaries, so `profile` cannot imply
+`file` and `runtime` cannot imply `time`; remote social/repository targets do
+not implicitly receive workspace tools. Explicit workspace targets retain them.
+Web-search result messages carry the successful providers from execution metadata;
+an explicit conflicting provider claim receives a host-generated correction.
 It records effective ask/allow/deny policies, provider tool/context/effort support,
 injected guidance paths, workspace state, hard safety constraints, and remaining
 turn budgets. Every turn has one typed scope: `standard`, `plan`, `review`, `init`,
@@ -1355,6 +1428,17 @@ path. Plan mode overrides standard and init turns with the stricter plan scope.
 events use the same sanitized snapshot. Short repair follow-ups retain the previous
 request's selected capabilities when they contain no new tool intent. Short
 execution follow-ups use preceding fenced commands as disambiguating context.
+Explicit continuation of workspace work resolves tools from the prior user
+request before assistant summary prose and never infers Git mutation.
+Dependent research follow-ups likewise check the nearest user objective before
+assistant summaries. A question about whether existing knowledge contains code
+snippets is a retrieval question, not a standalone code-generation request.
+An explicit positive request to use or test `crawl_site` keeps that exact tool
+callable during URL ingestion; when it is unavailable, the selector does not
+silently substitute `learn_source`.
+Short dependent follow-ups to an explicitly local-library request retain that
+local source scope; public web/code search and external MCP tools are not
+inferred from the phrase "code snippets". A new unrelated topic ends the scope.
 Alternate bare tool XML is detected, never evaluated; one structured-call repair
 is permitted before a visible error. Arguments are checked against the built-in
 schema subset before preflight and approval. Repeated non-web tool failures stop
@@ -1550,6 +1634,9 @@ vector search plus SQLite FTS5, merges with reciprocal-rank fusion, optionally
 reranks with FlashRank, then applies confidence thresholds before returning
 context. Fusion retains both vector and lexical ranks for matching chunks, and
 an enabled reranker's order remains authoritative after thresholding.
+Library routing normalizes punctuation-bearing language names such as C#, C++,
+and F# to `csharp`, `cpp`, and `fsharp` so short local-library questions can
+reach the indexed source.
 
 ## Docs, Crawling, And Skills
 
@@ -1878,7 +1965,9 @@ checks are not a complete semantic guarantee; inspect live answers and executed
 queries when assessing whether a model retained the intended task.
 Each model/scenario pair runs read-only in
 an isolated child process with a hard timeout and a private temporary Klaude data
-directory; real memory, sessions, and learned libraries are neither read nor
+directory. Model selection explicitly applies Standard mode, matching the
+ordinary interactive default rather than inheriting the startup model's reasoning
+settings. Real memory, sessions, and learned libraries are neither read nor
 modified. Only the public model-capability cache is copied into that directory so
 transient catalog discovery does not invalidate a configured model. The learned
 document scenario seeds synthetic text locally and passes only when the answer
@@ -1895,6 +1984,19 @@ worker-failure reports retain bounded event counts, tool names, request counts,
 permission counts, and available token counters without retaining content.
 Network retrieval requires an explicit scenario plus `--include-network`; report
 schema version 2 paths must be new files inside the evaluated workspace.
+`--knowledge-interface baseline|description|schema|name` compares the historical
+interface, description-only improvement, simplified schema, and the candidate
+`search_local_knowledge` wire name. Repeat the flag to compare variants and use
+`--repetitions 1-5` for bounded repeated runs. Each repetition is isolated; naming
+experiments currently support Ollama only, since cloud continuation formats need
+separate compatibility verification. They translate structured tool names at the
+runtime seam and explain the mapping in a separate system instruction without
+rewriting user text or retrieved evidence. Canonical routing, permissions,
+execution records, and session messages remain intact. Switching variants restores
+the original runtime and contract before applying the next variant. Reports
+include variant/repetition and aggregates by interface, without raw content;
+Ctrl+C preserves completed comparison results in a report marked cancelled.
+These are opt-in evaluations, not a production rename or permission migration.
 
 For secret-safe Compose validation:
 

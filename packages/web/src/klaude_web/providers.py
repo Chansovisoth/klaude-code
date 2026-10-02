@@ -2123,14 +2123,30 @@ class ParallelProvider(BaseProvider):
         data = self._post_json(
             "https://api.parallel.ai/v1beta/search",
             headers={
-                "Authorization": f"Bearer {self.api_key()}",
+                "x-api-key": self.api_key(),
                 "Content-Type": "application/json",
             },
-            json_body={"query": search_text, "max_results": query.result_limit},
+            json_body={
+                "objective": search_text,
+                "search_queries": [search_text],
+                "max_results": query.result_limit,
+                "excerpt_settings": {"max_chars_per_result": 5000},
+            },
             timeout=self.provider_config.timeout_seconds,
         )
         items = data.get("results") or data.get("search_results") or []
-        return _dict_items_response(self.name, query, items)
+        normalized = [
+            {
+                **item,
+                "snippet": "\n".join(
+                    excerpt for excerpt in (item.get("excerpts") or [])
+                    if isinstance(excerpt, str)
+                )[:5000],
+                "published_at": item.get("publish_date"),
+            }
+            for item in items
+        ]
+        return _dict_items_response(self.name, query, normalized)
 
 
 class TavilyProvider(BaseProvider):
