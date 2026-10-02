@@ -289,3 +289,60 @@ def test_import_saves_all_valid_entries_disabled_without_cached_tools(tmp_path):
     servers = MCPRegistry(path).load()
     assert set(servers) == {"docs", "one", "two"}
     assert all(not servers[name].enabled and not servers[name].tools for name in ("one", "two"))
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_remove_revalidates_definition_and_preserves_other_servers(tmp_path, changed):
+    from klaude_cli.mcp_mutations import MCPRemove
+
+    path, server = configured(tmp_path)
+    fingerprint = definition_digest(server)
+    registry = MCPRegistry(path)
+    servers = registry.load()
+    servers["other"] = MCPServerConfig(
+        name="other", transport="http", url="https://other.example/mcp"
+    )
+    if changed:
+        servers["docs"].url = "https://changed.example/mcp"
+    registry.save(servers)
+    events = queue.Queue()
+    prepared = []
+    writer = MCPMutationWriter(path, lambda *event: events.put(event),
+                               lambda values: prepared.append(set(values)) or ([], None))
+    assert writer.submit(MCPRemove("remove", "session", "docs", fingerprint))
+    assert writer.close(wait=True)
+    result = events.get_nowait()[1]
+    assert result.state == ("rejected" if changed else "saved")
+    remaining = MCPRegistry(path).load()
+    assert "other" in remaining
+    assert ("docs" in remaining) is changed
+    assert prepared == ([] if changed else [{"other"}])
+
+
+@pytest.mark.parametrize("cleanup_error", [False, True])
+def test_remove_oauth_cleanup_is_scoped_and_failure_is_honest(tmp_path, monkeypatch, cleanup_error):
+    from klaude_cli.mcp_mutations import MCPRemove
+    from klaude_core.mcp_client import MCPTokenStorage, mcp_auth_file
+
+    path, server = configured(tmp_path)
+    server.oauth = True
+    registry = MCPRegistry(path)
+    registry.load()
+    registry.save({"docs": server})
+    cleared = []
+
+    def clear(storage):
+        cleared.append(storage.path)
+        if cleanup_error:
+            raise OSError("private-secret")
+
+    monkeypatch.setattr(MCPTokenStorage, "clear", clear)
+    auth_dir = tmp_path / "auth"
+    writer = MCPMutationWriter(path, lambda *args: None, lambda _: ([], None), auth_dir=auth_dir)
+    result = writer._apply(MCPRemove("remove", "session", "docs", definition_digest(server)))
+    assert result.state == "saved"
+    assert result.cleanup_failed is cleanup_error
+    assert result.catalog == ([], None)
+    assert cleared == [mcp_auth_file(auth_dir, "docs")]
+    assert MCPRegistry(path).load() == {}
+    assert "private-secret" not in repr(result)

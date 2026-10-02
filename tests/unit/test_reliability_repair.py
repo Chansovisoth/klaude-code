@@ -1694,3 +1694,75 @@ def test_manual_compact_reclaims_below_threshold_context_and_keeps_recent_protoc
     snapshot = deepcopy(agent.messages)
     agent.compact_now()
     assert agent.messages == snapshot
+
+
+def test_compaction_preserves_original_objective_through_long_repeated_compactions():
+    agent = make_agent(Runtime([]), [])
+    agent.ollama_options = {"num_ctx": 32768, "num_predict": 2048}
+    agent.messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": (
+            "Build offline project Atlas. Preserve dirty work; never push."
+        )},
+        {"role": "assistant", "content": "I will preserve the project."},
+    ]
+    for i in range(35):
+        agent.messages.extend([
+            {"role": "user", "content": f"Task {i}: " + "public details " * 30},
+            {"role": "assistant", "content": "Discussion " * 55},
+        ])
+    agent.compact_now()
+    recap = next(m["content"] for m in agent.messages if m.get("compaction_summary"))
+    assert "Build offline project Atlas" in recap
+    assert "never push" in recap
+    for i in range(5):
+        agent.messages.extend([
+            {"role": "user", "content": f"Correction {i}: require keyboard navigation."},
+            {"role": "assistant", "content": "More discussion " * 100},
+        ])
+        agent.compact_now()
+    recap = next(m["content"] for m in agent.messages if m.get("compaction_summary"))
+    assert "Build offline project Atlas" in recap
+    assert "Correction 2: require keyboard navigation" in recap
+    assert recap.count("Build offline project Atlas") == 1
+    assert len(recap) <= 6300
+
+
+def test_automatic_compaction_counts_large_function_arguments_without_splitting_pairs():
+    agent = make_agent(Runtime([]), [])
+    agent.ollama_options = {"num_ctx": 4096, "num_predict": 1024}
+    agent.messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "Inspect the old document"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "huge", "function": {"name": "read_file", "arguments": {"path": "x" * 12000}}}
+        ]},
+        {"role": "tool", "tool_call_id": "huge", "content": "PRIVATE RESULT"},
+        {"role": "assistant", "content": "The document was inspected"},
+        {"role": "user", "content": "Now explain the next step"},
+    ]
+    agent._compact_history([])
+    assert not any(m.get("tool_calls") or m.get("tool_call_id") for m in agent.messages)
+    assert "PRIVATE RESULT" not in str(agent.messages)
+    assert agent.messages[-1]["content"] == "Now explain the next step"
+
+
+def test_manual_compaction_can_reclaim_an_oversized_latest_complete_tool_exchange():
+    agent = make_agent(Runtime([]), [])
+    agent.ollama_options = {"num_ctx": 8192, "num_predict": 2048}
+    agent.messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "Inspect Atlas without changing files"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "large", "function": {"name": "read_file", "arguments": {"path": "atlas.py"}}}
+        ]},
+        {"role": "tool", "tool_call_id": "large", "content": "PRIVATE OUTPUT " * 10000},
+        {"role": "assistant", "content": "I found the implementation"},
+    ]
+    before = len(str(agent.messages))
+    agent.compact_now()
+    assert len(str(agent.messages)) < before // 10
+    assert "Inspect Atlas without changing files" in str(agent.messages)
+    assert not any(m.get("tool_calls") or m.get("tool_call_id") for m in agent.messages)
+    assert "PRIVATE OUTPUT" not in str(agent.messages)
+    assert "Re-fetch omitted tool results" in str(agent.messages)

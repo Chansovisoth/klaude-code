@@ -13,10 +13,8 @@ from klaude_knowledge import (
     IndexDocument,
     Knowledge,
     finalize_docs_source,
-    finalize_skill_package,
     install_crawl_source,
     install_docs_source,
-    install_skill_package,
     list_docs_sources,
     list_installed_skills,
     update_docs_source,
@@ -235,29 +233,11 @@ def main() -> None:
         if error := require_writes():
             return error
         safe_path = workspace_path(path)
-        installed = install_skill_package(
-            cfg, str(safe_path), name=name, library=library or collection
+        from .skill_management import import_indexed_skill
+
+        installed, total = import_indexed_skill(
+            cfg, safe_path, name=name, library=library or collection, knowledge=kn
         )
-        documents = []
-        for file, source_uri in zip(
-            installed.text_files,
-            installed.source_uris,
-            strict=False,
-        ):
-            rel = file.relative_to(installed.current_dir).as_posix()
-            documents.append(
-                IndexDocument(
-                    source=source_uri,
-                    text=file.read_text(errors="replace"),
-                    title=rel,
-                )
-            )
-        total = kn.replace_owner_snapshot_atomic(
-            installed.library,
-            f"skill:{installed.name}",
-            documents,
-        )
-        finalize_skill_package(installed)
         return (
             f"installed skill '{installed.name}' into library '{installed.library}'; "
             f"learned {total} chunks from {len(installed.text_files)} text files"

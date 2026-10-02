@@ -155,10 +155,84 @@ Chat slash commands currently include:
   writing. It takes no arguments and queues in input order while work is active.
 - `/keybinds`: print only keyboard controls directly. Slash commands belong in
   `/help` and the `/` completion popup.
-- `/settings [CATEGORY]`: configure categorized Theme, Input Field, Models,
-  Providers, MCP Servers, Memory, Skills, Tools, Permissions, and Runtime controls. Its
+- `/settings [CATEGORY]`: configure categorized Theme, Input Field, Divider, Spinner, Models,
+  Providers, Tools, MCPs, Memory, Skills, Permissions, and Runtime controls. Its
   home page is a grouped, aligned overview that shows the live value or a
-  concise status for every category. Enter opens that category, and returning
+  concise status for every category. Theme and Spinner parent summaries display
+  Default when values match their defaults; selection pages retain actual choices.
+  Input Field shows `6-6, border` by default (live min/max and border state); Divider shows
+  `ON, default, default` (live visibility and color names, with default colors
+  labeled default).
+  Tools shows enabled/registered counts from
+  the live tool registry and availability state. Skills shows the installed count
+  from its existing owned background inventory, with loading/unavailable states.
+  Memory shows the bounded saved-fact count and automatic-memory flag as
+  `1 saved, ON`; its overview worker returns counts without exposing fact text.
+  ASSISTANT groups Models, Providers,
+  Tools, MCPs, Memory, and Skills in that order. Inside MCPs, the MCP Servers
+  heading shows `2 installed, 1 enabled` beside the snapshot age, independently
+  of discovered tool counts. The Settings home keeps enabled/total counts.
+  MCPs retains `/mcp` and
+  `/settings mcp servers`; `/settings mcps` also opens that page.
+  APPEARANCE includes Divider (also `/settings divider`): Show divider hides or
+  reveals the separator line while retaining speaker/time/session/duration text.
+  The Divider page lists Show divider, Line color, Text color, Custom,
+  then the built-in `━`, `─`, `━ `, and `─ ` patterns. Presets change only the
+  pattern; the footer Reset restores all divider defaults. Built-in rows mark the active pattern
+  Current; Custom opens the Line pattern editor and is Current for other patterns.
+  Line pattern accepts 1–24 characters and repeats them to fill the separator's
+  terminal width. Control characters, blank-only patterns, and leading
+  zero-width characters are rejected; spaces inside a visible pattern are kept.
+  Editing uses the transient settings composer, never a model/chat turn.
+  Line color and Text color are independent; each offers Accent, Normal text,
+  the 16 terminal palette colors, Orange, Purple, Pink, and their bright variants.
+  Line color also offers Same as text and Same as input field (the
+  active theme's composer background). Accent follows the active
+  interface theme. Line color begins with Accent, Same as text, and
+  Same as input field; regular hues follow in rainbow order, then bright hues
+  in the same order, and finally neutral colors and Normal text. Text color
+  uses the same hue ordering after its Accent and Normal text choices.
+  Line color defaults to Same as input field and restores that value through a
+  scoped Reset to default footer action. Text color also uses a scoped Reset to
+  default footer action to restore Gray (terminal palette), with no standalone Default choice.
+  Existing saved colors remain unchanged.
+  Reset restores visible lines, the `━ ` pattern, Same as input field line color,
+  and Gray text color.
+  These typed controls apply to new output and replayed session history.
+  Applied appearance changes automatically replay existing output with the
+  current styling, as `/refresh` does, while retaining the open page and live
+  work. Theme navigation remains a temporary preview until applied. Saved
+  turns and exports are unchanged.
+  Divider color and interface/text-theme choices stay open after Enter applies
+  a color, with the applied row marked Current. Later theme previews do not move
+  that marker; Escape/Back restores the most recently applied theme. Applying
+  preserves the current filter, focus, and viewport, including save failures.
+  Spinner (also `/settings spinner`) offers the bundled 90-entry cli-spinners
+  catalog plus `claude` (· ✢ ✳ ✶ ✻ ✽ at 100 ms) and a custom animation editor.
+  Its single selection page lists Custom (opens the editor), then every bundled
+  animation, followed by a Reset to default footer action; there is no separate
+  catalog page or Default choice. The active animation carries the Current tag.
+  The unmodified upstream catalog and Sindre
+  Sorhus's MIT license are vendored at commit
+  `f0450952b30c960dda79f9d17ef8f1b8684db16c`, including original frame intervals.
+  Catalog focus animates a temporary fixed-header preview without saving or
+  changing active progress indicators; Enter applies the selected animation.
+  Custom frames accept compact Unicode grapheme clusters or comma-separated
+  double-quoted JSON strings, retaining intentional spaces and multi-character
+  frames. Custom interval defaults to 100 ms and accepts 16–10000 ms. Frames
+  are bounded to 256 entries and 80 terminal cells each; terminal control text
+  is rejected. Custom edits remain a draft until Apply spinner applies it.
+  Spinner frame/interval and Divider line-pattern editors are single-line inputs:
+  modified Enter cannot insert a newline, and pasted line breaks become spaces.
+  Retained parent panels do not intercept editor typing or Backspace; setup
+  editors also do not navigate chat history with Up/Down.
+  All TUI work/setup/permission/input indicators share this animation renderer;
+  frames pad to a stable width and unsupported encodings fall back to ASCII.
+  Faster animations adjust the application's redraw cadence while idle chat
+  retains its existing cadence. Reset restores the built-in dots spinner.
+  Spinner saves use the existing field-scoped appearance writer and footer
+  acknowledgements; failed saves keep the chosen live animation active.
+  Enter opens that category, and returning
   with Back or Escape keeps the selector on the same logical summary row even
   when its displayed value changed. Every Settings category and its selection
   subpages use a Prompt Toolkit panel with a fixed breadcrumb/header and
@@ -166,24 +240,47 @@ Chat slash commands currently include:
   MCP server/detail pages have typed actions; other Settings pages adapt their
   existing picker identities and action handlers into typed presentation rows.
   Row IDs, values, and descriptions are separate from rendered labels in the
-  panel. Category headings start with `▪` before an underlined title, without a
-  separate rule row, and remain non-selectable. Enabled panel toggles color only
+  panel. Footer controls have one non-selectable blank row above their group,
+  including Back/Cancel/Close without a preceding Reset. Explicit control types
+  determine spacing and keep exit controls visible through filtering.
+  Category headings start with `▪` before an underlined title, without a
+  separate rule row, and remain non-selectable. Trailing heading colons are not
+  underlined; inline comments and counts
+  stay muted. Table headers use uppercase
+  words; only the words are underlined, with spaces and alignment padding unstyled.
+  Enabled panel toggles color only
   their square with the active theme's primary accent; brackets and value text
   retain normal value styling. Reset and MCP bulk-policy actions use plain
-  labels without bracketed controls. The focused selectable row uses a subtle theme
-  background across wrapped lines without recoloring labels, values, or muted
-  descriptions. Permission policy values use semantic green ALLOW, yellow ASK,
+  labels without bracketed controls. Panel navigation controls show `← BACK`,
+  `× CLOSE`, or `× CANCEL`; scoped resets show `⏻ RESET TO DEFAULT` and the
+  overall reset remains explicitly `⏻ RESET APPEARANCE SETTINGS`. These are presentation
+  labels only; stable row IDs and action semantics remain unchanged.
+  Reset appearance settings requires a confirmation with Cancel focused by default;
+  Escape/Cancel returns to the Settings reset row without saving. The confirmation
+  states its existing scope: Theme, Input Field, Divider, and Spinner defaults.
+  Memory and Runtime persistence feedback appears only in the fixed footer.
+  Model provider labels consistently use OpenAI API and Gemini API; tool-provider
+  rows omit the redundant Provider prefix. Skills keeps concise import guidance
+  above its inventory; user-facing memory management calls saved facts memories.
+  `/settings reset` uses the same confirmation.
+  The focused selectable row uses a subtle theme
+  background across wrapped lines. A blank, non-interactive row separates the
+  Reset and Back/Close controls from page content, without doubling an existing gap.
+  Focus does not recolor labels, values, or muted descriptions.
+  Permission policy values use semantic green ALLOW, yellow ASK,
   and red DENY text without recoloring the rest of the row. Slash activates
   page-local search; Escape clears search before
   navigating back. The live row below Settings keeps the ordinary ready/activity,
   queue, context, and token counters; panel titles and navigation hints stay in
-  the panel. Transient masked input
+  the panel. Errors shown in the page footer are omitted from the live status row,
+  including its compact error badge. Transient editors retain their own feedback
+  while the parent panel is hidden. Transient masked input
   and setup-progress screens retain their specialized composers. The panel
   preserves an unsent composer draft when it closes and leaves the transcript
   in ordinary terminal scrollback.
   Overview memory/MCP metadata comes from an owned eight-second read-only job,
   never synchronous SQLite/config parsing in
-  navigation or rendering. It returns only the automatic-memory flag and MCP
+  navigation or rendering. It returns only the automatic-memory flag, saved-fact count, and MCP
   enabled/total counts, without connecting to servers or publishing definitions,
   credentials, tools, or conversation content. The summary shows loading,
   unavailable, or aged cached values honestly. Successful snapshots and failed
@@ -195,7 +292,9 @@ Chat slash commands currently include:
   writes still have separate synchronous paths pending responsiveness work.
   Models
   opens the same source, provider, model, mode, and effort selection flow as
-  `/model`. Selecting a model during local or observed remote work queues it
+  `/model`. The active model's source, cloud provider, and model rows show Current;
+  browsing other providers does not change these markers.
+  Selecting a model during local or observed remote work queues it
   for the next prompt without changing the running turn's runtime. Cloud
   dependency/auth validation remains cancellable background work and may run
   alongside the turn. The latest accepted selection wins, stays scoped to the
@@ -243,8 +342,8 @@ Chat slash commands currently include:
   acknowledgements cannot restore earlier values. Unconfirmed saves keep current
   choices active and retain failed intent for the next explicit save. Availability
   changes never relax transport, permission, or workspace safety boundaries.
-  The footer keeps its compact
-  Braille-spinner presentation while active, with progressive states and a
+  The footer uses the selected Spinner animation (Braille dots by default)
+  while active, with progressive states and a
   compact unit-based elapsed value such as `⠋ WORKING 4s`, `⠙ EXPLORING 7s`,
   `⠹ EDITING 11s`, `⠸ RUNNING 16s`, `⠼ LEARNING 18s`, and `⠴ WAITING 20s`.
   Transcript badges retain only completed outcomes such as `[EXPLORED] (9s)`,
@@ -266,7 +365,7 @@ Chat slash commands currently include:
   and its exact ask/allow/deny policy; PageUp/PageDown scroll that preview.
   Highlighting `reset to default` previews the configured default policy map
   before Enter applies it.
-  Enter applies and persists a preset. Enter on a tool row cycles
+  Enter applies and persists a preset. Enter or Space on an individual tool row cycles
   ask -> allow -> deny -> ask and persists the custom map; exact preset matches
   are detected automatically. Reset restores configured defaults.
   Permission changes apply to the live gate immediately and save through the
@@ -286,9 +385,14 @@ Chat slash commands currently include:
   `delegate_task` appears under Orchestration and defaults to ask. Read Only also
   keeps it at ask because delegation can consume model quota even though the
   child cannot mutate state.
-  Memory shows a persistent Automatic Memory toggle, the durable-fact count,
-  and up to eight recent facts; reset restores automatic memory to on. Its page
-  opens immediately with loading or a 30-second cached snapshot. An owned
+  Memory shows a persistent Automatic Memory toggle and the durable-fact count,
+  without a Recent Facts preview; reset restores automatic memory to on. It has
+  a visible Manage memories entry for editing or deleting individual facts.
+  That entry remains inert with Loading or Unavailable feedback until a sanitized
+  inventory is available. Editing uses a private settings composer; deletion
+  requires confirmation. Exact fact-ID mutations run on the ordered background
+  action lane, with saving/saved/unconfirmed feedback and stale-ID rejection.
+  Its page opens immediately with loading or a 30-second cached snapshot. An owned
   eight-second read-only job reads the existing database with a 200ms busy timeout
   and at most 1 MiB of regular, non-symlink memory-file content, without initializing
   or migrating storage. It returns bounded sanitized facts and hides detected
@@ -313,8 +417,35 @@ Chat slash commands currently include:
   action lane and cross-client file lock, reject stale IDs, duplicate or
   sensitive replacements, and report saved/unconfirmed only after acknowledgement.
   Sensitive facts stay hidden; the inventory ceiling is explicit. Skills
-  is a read-only inventory of installed skills with their library and indexed
-  file counts, plus the canonical `klaude import-skill` hint. Its optional
+  begins with Discovery and an inert Search placeholder marked unavailable.
+  Add Skills keeps an Import skills action and a Drop ZIPs or skill files here
+  row showing the full configured folder path, wrapped on narrow terminals,
+  followed by Skills with its muted installed count. Installed rows show indexed
+  file counts and a library name only when it differs from the skill name.
+  Reload refreshes the inventory asynchronously; Delete skill opens an installed
+  skill chooser and then the existing confirmation, preserving parent focus.
+  Installed rows remain directly enterable. Enter
+  opens a Delete skill action and a separate confirmation, initially on Back.
+  Confirmation binds the exact manifest hash; a changed package requires review
+  again. Deletion removes only that skill's owner across its libraries and its
+  installed directory, preserving other owners in shared libraries. Imports and
+  deletions use one ordered background lane and a cross-client skill lock;
+  accepted work survives navigation and exit attempts a two-second drain.
+  Drop ZIPs or supported text files directly into `.klaude/data/skills/`.
+  While the TUI is running, its ordered skill worker polls up to 1,000 entries
+  and waits for two seconds of unchanged metadata before displaying pending
+  filenames and a detected count. Detection never imports or indexes files.
+  Press Import skills to start explicitly; with no files it reports the exact
+  folder to add them to. Installed directories, hidden entries, symlinks, empty
+  and oversized files are ignored. Imports execute no skill content and use the
+  configured embedding model and an immutable private copy. Successful originals
+  move into `skills/.imports/`; failed or changed files remain for explicit retry.
+  An existing legacy skills-inbox is also supported by the import action. Imports
+  never silently replace installed packages. The watcher starts with the TUI,
+  shares its mutation lane and stops on exit; accepted imports use the lane's
+  bounded shutdown drain. Folders/custom names remain supported through
+  `klaude import-skill`.
+  Its optional
   manifest scan runs in an owned bounded worker without importing the knowledge
   indexing stack, so the
   picker opens immediately with a loading row and then refreshes from a short-lived
@@ -388,7 +519,9 @@ Chat slash commands currently include:
   background without blocking picker input. Gemini remains one shared key for
   Gemini chat and Google web search. SearXNG's deployment secret stays in its
   separate `config/searxng.env` configuration.
-  Input border defaults on. Every category includes its own reset action.
+  Input border defaults on. Pages with supported defaults include a reset action.
+  Providers, provider credentials, and MCP server management have no generic
+  reset action; their existing explicit credential/server actions define scope.
   Runtime also offers scoped external
   Nano editors for Klaude's `config.toml` and saved runtime preferences; they
   return to the chat after exit and changes apply to the next chat.
@@ -401,19 +534,31 @@ Chat slash commands currently include:
   use the same writer rather than synchronous special-case writes.
 - `/permission`: open the Permissions settings page directly. It takes no
   arguments; permission changes are made and persisted through that page.
-  The MCP Servers row opens a server list; active MCP tools appear under one
+  MCP tool permissions are managed under `/mcp` → Manage permissions, rather
+  than as a category in general Permissions. Active MCP tools appear under one
   row per server there. Entering a server shows
   its individual ask/allow/deny policies and scoped Allow all, Ask for each
   tool, and Deny all actions. Server-wide changes save only that server's tool
-  policies and preserve unrelated permissions. The `/mcp` settings page has a
-  shortcut to these server permission rows.
-- `/mcp`: open the external MCP server settings page directly. It can search the
-  official MCP Registry asynchronously, inspect supported plans, and save plans
+  policies and preserve unrelated permissions. Back returns to MCPs settings.
+  General permission presets and reset retain their existing policy scope.
+- `/mcp`: open the external MCP server settings page directly. Its
+  `Delete MCP` action lists configured servers, including disabled servers, and
+  requires confirmation with Cancel focused initially. Removal revalidates the
+  complete definition in the existing ordered mutation lane, preserves unrelated
+  servers and shared environment secrets, and removes dedicated local OAuth
+  credentials. Only acknowledged saves publish the updated tool catalog; uncertain
+  outcomes retain the existing queued-work hold. Packages are not uninstalled.
+  It can search the official MCP Registry asynchronously, inspect supported plans, and save plans
   as disabled definitions. Required registry inputs are collected in-place;
   Search opens with local suggested search terms immediately; these are prompts,
   not registry results or popularity/security endorsements. Typed searches can
   also show live registry-name suggestions as they arrive.
-  secrets use the masked composer and private `config/.env` references. The same
+  Registry results use MCP Name, Version, and Description columns with fixed
+  headings; all fields wrap without display truncation, and narrow terminals
+  stack the fields. PageUp/PageDown scroll a focused result's wrapped content
+  before moving between results. Filtering includes names, friendly titles,
+  versions, and descriptions while preserving stable registry identity.
+  Secrets use the masked composer and private `config/.env` references. The same
   settings page can add custom Streamable HTTP or stdio servers, import VS Code,
   OpenCode, or standard MCP JSON, and review then connect/enable a saved server.
   Settings and registry-detail navigation read configured names/status through an
@@ -466,7 +611,7 @@ Chat slash commands currently include:
   and warns if completion remains unconfirmed. Queued model work waits for the
   acknowledgement and stays paused after uncertain persistence, failed catalog
   preparation, or a stale-scope saved result until verified publication/reload.
-  `Reload configured MCP tools` is a focusable settings action that runs a fixed
+  `Reload` is a focusable MCPs settings action that runs a fixed
   read-only operation on the same lane. It prepares tools without connecting,
   then verifies the complete configuration still matches its read snapshot before
   acknowledgement. Successful current reload clears the queue hold and prior
@@ -512,9 +657,18 @@ Chat slash commands currently include:
   Manual compaction runs even below the automatic pressure threshold, retains
   the two newest complete user-turn/tool exchanges within the existing budget,
   and recaps older public dialogue locally. Long-message excerpts retain both
-  the beginning and ending so late corrections survive. Tool results and
-  private provider state never enter the extractive recap; automatic pressure
-  compaction retains its existing budget-driven behavior.
+  the beginning and ending so late corrections survive. The bounded recap admits
+  whole attributed excerpts, reserving the initial request and recent user
+  corrections before assistant prose. Repeated passes reuse original excerpts
+  without re-summarizing summaries; legacy recaps recover only attributed lines.
+  Assistant claims remain attributed and unverified. Tool results and private
+  provider state never enter the extractive recap; omitted evidence must be
+  re-fetched. Manual compaction may also drop an oversized latest complete exchange,
+  preserving its public request in the recap rather than leaving the large result
+  in context. Automatic compaction includes tool-call arguments in its budget
+  estimate and preserves the current user request. Neither path rewrites saved
+  transcript history. Excerpts remain lossy, and budgets use conservative character
+  estimates rather than claiming exact provider token counts.
 - `/recap`: show a concise local recap of the current session's recent turns.
 - `/status`: available immediately even while a local or remote model turn is
   working. Show session ID and effective name, model, reasoning mode and effort,
@@ -598,7 +752,11 @@ Chat slash commands currently include:
   read-only snapshot and may run during active work; finish active and queued
   work before using the other state-dependent actions in the TUI.
 - `/resume [SESSION_ID]`: list all saved sessions newest first in a scrollable
-  input picker with age, session ID, and a name derived from the first user turn.
+  panel using the Settings presentation, with a fixed Sessions header, column
+  headings, and help footer. Session names, ages, and IDs are separate typed
+  fields; names and IDs wrap on narrow terminals. Slash searches the list;
+  Escape clears search first, then cancels. Focus and muted metadata use the
+  same styling as Settings. Names derive from the first user turn unless renamed.
   Sessions whose unexpired renewable worker lease is still running prefix the
   name with an `[ACTIVE]` badge. The badge uses a green background and green
   bracket glyphs with dark label text, matching Klaude's compact semantic-label
@@ -608,6 +766,9 @@ Chat slash commands currently include:
   session unchanged. This picker has no reset action. An explicit ID resumes
   directly. A successful resume clears the terminal view and scrollback before
   replaying the selected session's saved user/assistant turns and transcript,
+  then measures the live UI's cursor origin after replay so delayed terminal
+  cursor reports cannot reserve the cleared screen and hide the latest messages.
+  Older history remains available through ordinary terminal scrolling. Resume
   retains the current model and workspace, and saves new turns under the selected
   ID. Bare `/resume` opens the picker immediately during local or remote work
   without interrupting that work; cancelling the picker leaves the active turn
@@ -717,15 +878,22 @@ Chat slash commands currently include:
   shared drafts, completion, or input history. Clear the composer on submit,
   Escape, Ctrl+C, and exit. The same modal is the foundation for future API-key
   entry, but secret persistence still belongs only in private `config/.env`.
-- `/refresh`: discard and redraw the current TUI frame without changing session state, for clearing terminal-render artifacts.
+- `/refresh`: clear the terminal view/scrollback and replay its retained transcript
+  with current theme/divider styling and terminal width, then redraw the live UI.
+  Preserve session/model state, active work, pending inputs, and queued work;
+  do not restore from storage or recover output removed by `/clear`. Partial
+  streaming text stays live. Ordinary redraws remain incremental.
 - `/cd [PATH]`: show or change the agent workspace directory. Relative paths
   resolve from the current agent directory; the process cwd is unchanged.
   Typing `/cd ` uses the ordinary completion box for directories only, with
-  `../` and `~/` shortcuts. Parent, home, absolute, and quoted paths retain
+  the `../` shortcut. Home suggestions appear when typing `~`. Parent, home, absolute, and quoted paths retain
   their typed form; completion never changes the workspace until submission.
 - `/pwd`: show the current agent workspace directory.
-- `/ls [OPTIONS]`: run the colorized Linux `ls` command in the current agent
-  workspace (for example, `/ls -lha`); positional paths remain jailed there.
+- `/ls [OPTIONS] [PATH ...]`: run the colorized Linux `ls` command at explicit
+  user-selected paths, or in the current workspace when omitted. Flags may come
+  before or after paths (`/ls -lsha ~` or `/ls ~ -lsha`); quoted paths and `~`
+  expansion are supported. This read-only user command runs without a shell and
+  does not change the workspace or widen agent tool permissions.
 - `/attach PATH`: attach a file or folder as bounded context for the next
   message. Typing `/attach ` offers paths from the current agent workspace;
   absolute paths are also accepted. Typing `~` offers `~/`, and `~/` searches
@@ -736,7 +904,7 @@ Chat slash commands currently include:
   such as `@"project notes/brief.md"`.
 - `/theme [NAME]`: open Theme settings for interface and text/code colors;
   an optional NAME sets persistent TUI chrome independently from content
-  colors. Built-ins include Crimson Red, Autumn (default), Egg Yolk, Hacker
+  colors. The default is Pastelle Azure. Built-ins include Crimson Red, Autumn, Egg Yolk, Hacker
   Green, Neon Synth, and a contiguous rainbow-ordered Pastelle family: Red,
   Orange, Yellow, Lime, Green, Cyan, Azure, Blue, Lavender, Purple, Magenta,
   and Pink. Every Pastelle theme uses the same neutral, non-hued background;
@@ -798,7 +966,10 @@ Interactive chat writes its transcript to ordinary terminal scrollback rather
 than taking over the terminal's alternate screen. This lets the terminal handle
 wheel scrolling and native drag-to-select without Shift. Every interactive
 startup first clears the visible terminal and its scrollback, then reserves one
-terminal viewport so the composer begins at the terminal bottom; it remains a
+terminal viewport so the composer begins at the terminal bottom. Once appearance
+configuration is available, early system/Git setup messages and the reserved
+blank viewport use the active output background; terminal attributes are reset
+after printing, including on setup failure. The composer remains a
 Prompt Toolkit input below the printed transcript. Alt+Enter inserts a
 newline when distinguishable, Ctrl+J is the legacy-terminal newline fallback,
 repeated Alt+Up edits queued follow-ups from newest to oldest, and Ctrl+C
@@ -807,8 +978,9 @@ input. Enter saves a queue edit; Alt+Backslash promotes the selected edited
 follow-up to the front of the queue and steers the active turn at its next safe
 boundary, without losing that follow-up's attachments or leaving a duplicate.
 Queued session actions cannot be converted into model steering messages. Empty
-text plus Enter deletes that item. Pending inputs render in a compact live strip immediately
-above the input field, and automatic queue consumption pauses during editing.
+text plus Enter deletes that item. Pending inputs render in a compact live strip
+headed `⏳ Queued follow-up inputs` immediately above the input field, and
+automatic queue consumption pauses during editing.
 Permission prompts accept `y`/`yes`, `n`/`no`, or `a`/`always` typed in the
 composer and confirmed with Enter. Pressing Enter on an empty permission prompt
 allows only that invocation, exactly like `y`; it does not activate process-wide
@@ -895,7 +1067,7 @@ to session turns as the TUI. An audit or receipt confirms execution, not the
 tool's full result or the answer's specific evidence. A question about which
 sources could be used remains a capability question. In the TUI,
 `/help` category names are underlined, and each user or
-assistant message begins with a full-width gray divider containing the speaker
+assistant message has a full-width divider (gray by default) containing the speaker
 name and local date/time. Each session starts with a `Session: <id>` divider
 after the logo and intro; the composer is labeled `you`, and each turn closes
 the actual user message with its `you` divider and the streamed assistant output
@@ -980,21 +1152,24 @@ receives it, which cannot be disambiguated in the application; `/steer TEXT`
 remains the terminal-independent steering fallback.
 
 Interactive appearance is stored in `.klaude/data/appearance.json` (or the
-configured data directory) as categorized `theme` and `input_field` objects.
+configured data directory) as categorized `theme`, `input_field`, `divider`, and `spinner` objects.
 Legacy `output_field` values are ignored because the terminal owns transcript
 rendering and scrolling. Chrome and content syntax themes are deliberately
-separate settings. Theme, border, height, and appearance resets apply immediately
+separate settings. Theme, border, height, divider, and appearance resets apply immediately
+and automatically repaint retained transcript output using the current styling,
 and save asynchronously through their own serialized, field-scoped writer.
 Legacy flat-theme migration runs inside the same cross-client file lock, preserving
-unrelated values. Theme/Input Field pages show saving, saved, or save-unconfirmed
-feedback without moving the selector or clearing its filter. Only the latest
+unrelated values. Theme/Input Field/Divider pages show saving, saved, or save-unconfirmed
+feedback in the fixed footer without moving the selector or clearing its filter.
+Routine appearance changes add no transcript notices or duplicate saved-status rows.
+Only the latest
 appearance revision can acknowledge persistence; acknowledgements never replace
 live appearance values or affect permission policies. Failed intent remains for
 the next explicit save. Navigation does not cancel accepted writes; exit drains
 this writer for at most two seconds and warns if unconfirmed, with the same
 kernel-blocked-thread limitation as the preferences writer.
 `/theme` opens the Theme category. Input height grows between `input_field.min_height`
-and `input_field.max_height` (defaults 8 and 12); legacy `height` is accepted as
+and `input_field.max_height` (defaults 6 and 6); legacy `height` is accepted as
 the minimum. Input Field → Height → Enter min/max accepts two integers with
 `1 <= min <= max <= 12`. Invalid input stays in the editor without saving;
 invalid persisted ranges fall back to defaults. Escape/Ctrl+C cancels the editor.
@@ -1008,7 +1183,14 @@ Completed transcript lines must be printed once above the live composer, with
 the renderer origin reset below them. `full_screen=False` alone does not retain
 history: never put the full transcript in a redrawable TextArea. Only the
 unfinished streaming line and temporary theme preview belong in the live output
-area. Refresh, resize, and picker changes must not rewrite printed history.
+area. One blank output-background row follows that area before the queue and
+composer gaps; it never inherits user-message or code-row background colors. Ordinary redraws, resize, and picker changes must not rewrite printed history.
+Explicit `/refresh` clears and reprints the retained view once with current styling.
+Applied appearance changes use this same replay; persistence acknowledgements do not replay it.
+The live layout aligns its footer at the bottom of available space, placing
+unused layout height above the composer. Explicit replay and session-view clears
+reuse startup's themed viewport reservation so terminals without cursor-position
+reports also keep the footer at the bottom after a short replay.
 Printed transcript rows inherit the output background; user and code rows use
 their surface background across the full terminal width, including blank cells.
 Fill trailing cells without inserting copyable padding or erasing a full row's
@@ -1697,7 +1879,8 @@ delays, and stores crawl options so docs update can refresh it later.
 `klaude import-skill` installs a folder, ZIP, or single file into
 `.klaude/data/skills/<name>/`, indexes text-like files only, skips symlinks,
 hidden files, binary files, `__MACOSX`, and files above the indexing byte limit.
-ZIP extraction rejects unsafe paths. Re-imports create content-addressed
+ZIP extraction rejects unsafe paths and symlink entries, with ceilings of
+2,000 entries and 64 MiB expanded content. Re-imports create content-addressed
 versions and finalize the manifest only after knowledge indexing succeeds.
 
 ## Web Search

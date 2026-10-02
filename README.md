@@ -147,7 +147,17 @@ suggestions with descriptions. `/keybinds` lists every keyboard control and
 does not include slash commands or involve the model.
 `/vim` toggles Vim composer controls; invoke it again to restore the standard
 composer. The selected mode persists across chats.
-`/settings` organizes appearance under Theme and Input Field, plus Tools and Runtime.
+`/settings` organizes appearance under Theme, Input Field, Divider, and Spinner,
+alongside the other settings categories. Divider includes Custom and four built-in
+patterns (`━`, `─`, `━ `, `─ `). Reset to default restores `━ ` and the divider defaults.
+Spinner offers 90 bundled animations
+from `cli-spinners`, preserving their frames and timing without runtime network
+access, plus `claude` (· ✢ ✳ ✶ ✻ ✽, 100 ms). The page lists Custom,
+then every built-in animation, with Reset to default at the bottom. Browse to preview an animation, then Enter to apply it.
+Custom animations accept compact graphemes (`⠋⠙⠹`) or explicit quoted frames
+(`"⢎⡰", "⢎⡡"`); the latter preserves spaces and multi-character frames.
+Set a custom interval in milliseconds (blank defaults to 100), preview it, then
+choose Apply spinner. `/settings spinner` opens this page directly.
 Tools lets you independently turn web-search and local-knowledge result validation on or off.
 Turning validation off exposes unvalidated discovery leads, but retains the normal transport,
 provenance, and fetch safety limits. It also offers an opt-in Reasoning Activity view for
@@ -161,8 +171,8 @@ Runtime also exposes Subagent Workers: Auto uses one local Ollama worker or two
 cloud workers, while an explicit 1–4 value is available for quota and hardware
 tuning. Only audited independent read-only workspace inspections can overlap;
 web, knowledge, shell, Git, and mutation work remains sequential.
-Each category can be reset independently. Autumn is the
-default interface theme, with Crimson Red, Egg Yolk, Hacker Green, Neon Synth,
+Each category can be reset independently. Pastelle Azure is the
+default interface theme, with Autumn, Crimson Red, Egg Yolk, Hacker Green, Neon Synth,
 and rainbow-ordered Pastelle Red, Orange, Yellow, Lime, Green, Cyan, Azure,
 Blue, Lavender, Purple, Magenta, and Pink also
 included. Text/code colors remain independent: VS Code Dark, GitHub Dark,
@@ -282,6 +292,20 @@ the same for `llms.txt` and crawled documentation sources. If downloaded content
 unchanged, Klaude updates `checked_at` without creating a snapshot. By default it
 keeps the last 3 snapshots. Searchable chunks live in the knowledge store;
 original files stay in `docs-sources/` and `skills/`.
+
+In chat, open `/settings skills` to manage installed skills. Select a skill,
+choose **Delete skill**, then confirm to remove its installed files and indexed
+content without deleting other sources in the library.
+
+Drop skill ZIPs or text files directly into `.klaude/data/skills/` (the exact
+path is shown in Settings → Skills). Klaude detects settled new files and lists
+pending filenames; select **Import skills** to import them. Detection alone does
+not import anything. With no files, Import skills shows the folder to add them to.
+Successful originals move into `skills/.imports/`; installed skill directories
+are ignored. Failed files stay for review and explicit retry. Imports index text
+without executing scripts and never silently replace an installed skill. The
+configured embedding model must be available.
+Use `klaude import-skill PATH --name NAME` for folders or explicit names.
 
 ## Memory
 

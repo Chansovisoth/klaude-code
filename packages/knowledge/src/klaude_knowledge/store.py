@@ -401,11 +401,16 @@ class KnowledgeStore:
             )
         return cursor.rowcount if cursor.rowcount is not None else 0
 
-    def garbage_collect_obsolete_versions(self, library: str | None = None) -> int:
+    def garbage_collect_obsolete_versions(
+        self, library: str | None = None, *, owner: str = ""
+    ) -> int:
         params = [library] if library else []
         where = "WHERE status IN ('obsolete', 'failed')"
         if library:
             where += " AND library=?"
+        if owner:
+            where += " AND owner=?"
+            params.append(owner)
         rows = self.fts.execute(
             f"SELECT version_id, library FROM source_versions {where}",
             params,

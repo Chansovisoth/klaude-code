@@ -1,0 +1,2 @@
+# Preserve the pinned upstream spinner catalog byte for byte.
+apps/cli/src/klaude_cli/vendor/cli_spinners/spinners.json whitespace=-space-before-tab

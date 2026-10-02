@@ -14,6 +14,7 @@ class SettingsOverviewSnapshot:
     mcp_loaded_at: float = 0.0
     memory_failed: bool = False
     mcp_failed: bool = False
+    memory_count: int | None = None
 
     def refreshed(self, result: object, now: float) -> SettingsOverviewSnapshot:
         values = result if isinstance(result, dict) else {}
@@ -29,6 +30,8 @@ class SettingsOverviewSnapshot:
             now if valid_memory else self.memory_loaded_at,
             now if valid_mcp else self.mcp_loaded_at,
             not valid_memory, not valid_mcp,
+            values["memory_count"] if type(values.get("memory_count")) is int
+            and 0 <= values["memory_count"] <= 1_048_576 else self.memory_count,
         )
 
     def with_memory(self, enabled: bool, now: float) -> SettingsOverviewSnapshot:

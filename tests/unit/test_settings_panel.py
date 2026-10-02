@@ -1,5 +1,6 @@
 """Behavioral checks for the typed, scrollable settings panel."""
 
+import pytest
 from klaude_cli.settings_panel import (
     PanelAction,
     PanelPage,
@@ -10,6 +11,7 @@ from klaude_cli.settings_panel import (
     render_footer,
     render_header,
 )
+from prompt_toolkit.utils import get_cwidth
 
 
 def _page(checked: bool = True) -> PanelPage:
@@ -248,3 +250,199 @@ def test_long_value_stacks_before_description_and_narrow_header_keeps_title():
         )
     assert "firecrawl" in str(render_header(page, 30, "policy"))
     assert "/policy" in str(render_footer(30, search=True, query="policy"))
+
+
+def test_footer_group_has_one_noninteractive_blank_line_and_keeps_focus():
+    for width in (110, 70, 18):
+        for existing_gap in (False, True):
+            content = [PanelRow("option", RowKind.CHOICE, "Theme", "Autumn")]
+            if existing_gap:
+                content.append(PanelRow("gap", RowKind.SEPARATOR, ""))
+            content.extend([
+                PanelRow("reset", RowKind.ACTION, "Restore preferences", footer=True,
+                         action=PanelAction("legacy-choice", "reset to default")),
+                PanelRow("back", RowKind.NAVIGATION, "Back", action=PanelAction("back")),
+            ])
+            state = PanelState(PanelPage("test", ("Settings",), tuple(content)), "reset")
+            body = render_body(state, width)
+            reset_line = body.row_for_line.index("reset")
+            assert not "".join(text for _style, text in body.lines[reset_line - 1]).strip()
+            assert "".join(text for _style, text in body.lines[reset_line - 2]).strip()
+            assert body.selected_line == reset_line
+            assert state.picker.selected_id == "reset"
+            state.move(-1)
+            assert state.picker.selected_id == "option"
+
+
+def _registry_page(
+    description: str = "Search code examples and extract public documentation",
+) -> PanelPage:
+    return PanelPage(
+        "registry", ("Settings", "MCP Servers", "Registry"),
+        (
+            PanelRow("heading", RowKind.SECTION, "Official MCP Registry"),
+            PanelRow("registry:example", RowKind.NAVIGATION,
+                     "io.github.example/documentation-server", "2026.10.2-preview.12",
+                     description, section_id="heading", search_terms="Friendly Browser",
+                     action=PanelAction("open", "example")),
+            PanelRow("search", RowKind.ACTION, "Search again", footer=True),
+            PanelRow("back", RowKind.NAVIGATION, "Back", footer=True),
+        ),
+        column_headers=("MCP Name", "Version", "Description"),
+    )
+
+
+@pytest.mark.parametrize("width", (140, 100, 70, 60, 59, 36, 18))
+def test_registry_table_wraps_every_field_without_ellipsis(width):
+    description = "Browse code examples and documentation. 文档检索示例 " * 6
+    page = _registry_page(description)
+    state = PanelState(page)
+    body = render_body(state, width)
+    fragments = [fragment for line, owner in zip(body.lines, body.row_for_line, strict=True)
+                 if owner == "registry:example" for fragment in line]
+    for field, style in ((page.rows[1].label, "panel.label"),
+                         (page.rows[1].value, "panel.value"),
+                         (description, "panel.muted")):
+        rendered = "".join(text for tone, text in fragments if style in tone)
+        assert "".join(rendered.split()) == "".join(field.split())
+        assert "…" not in rendered
+    assert all(get_cwidth("".join(text for _style, text in line)) <= width
+               for line in body.lines)
+    assert all("panel.selected" in style for style, _text in fragments)
+    header = "".join(text for _style, text in render_header(page, width))
+    if width >= 60:
+        assert header.count("\n") == 2
+        assert all(column.upper() in header for column in page.column_headers)
+        heading_fragments = render_header(page, width)
+        assert all(text == text.strip() and " " not in text
+                   for style, text in heading_fragments if style == "class:panel.section")
+    else:
+        assert header.count("\n") == 1
+    search_line = body.row_for_line.index("search")
+    assert not _text((body.lines[search_line - 1],)).strip()
+
+
+def test_registry_table_filter_refresh_keeps_identity_and_searches_hidden_friendly_title():
+    state = PanelState(_registry_page())
+    for query in ("examples", "2026.10.2", "Friendly Browser", "documentation-server"):
+        state.filter(query)
+        assert state.picker.selected_id == "registry:example"
+        assert "heading" in [row.id for row in state.visible_rows()]
+    state.scroll_top = 2
+    state.replace(_registry_page("Updated documentation-server description"))
+    assert state.picker.query == "documentation-server"
+    assert state.picker.selected_id == "registry:example"
+    assert state.scroll_top == 2
+    state.filter("")
+    assert state.picker.selected_id == "registry:example"
+
+
+def test_registry_table_long_row_can_scroll_resize_and_restore_focus():
+    state = PanelState(_registry_page("Detailed example and reference information " * 12))
+    body = render_body(state, 18)
+    assert state.scroll_row(10, body)
+    target = state.focus_line(body)
+    assert body.row_for_line[target] == "registry:example"
+    top = state.viewport(8, body)
+    assert top <= target < top + 8
+    assert top > body.selected_line
+    wider = render_body(state, 140)
+    target = state.focus_line(wider)
+    top = state.viewport(8, wider)
+    assert top <= target < top + 8
+    assert wider.row_for_line[target] == "registry:example"
+    state.move(1)
+    assert state.picker.selected_id == "search"
+    state.focus_line(render_body(state, 18))
+    state.move(-1)
+    assert state.focus_line(render_body(state, 18)) == body.selected_line
+    state.scroll_row(5, body)
+    state.filter("example")
+    assert state.focus_line(render_body(state, 18)) == body.selected_line
+
+
+@pytest.mark.parametrize("width", [24, 70, 110])
+def test_section_comment_is_muted_and_wraps_without_underlining(width):
+    comment = "Configuration snapshot 0s old"
+    state = PanelState(PanelPage("mcp", ("Settings", "MCPs"), (
+        PanelRow("configured", RowKind.SECTION, "MCP Servers", description=comment),
+    )))
+    body = render_body(state, width)
+    fragments = [fragment for line in body.lines for fragment in line]
+    assert any(style == "class:panel.section" and text == "MCP SERVERS"
+               for style, text in fragments)
+    muted = " ".join(text.strip() for style, text in fragments if style == "class:panel.muted")
+    assert muted == comment
+    assert all(get_cwidth("".join(text for _, text in line)) <= width for line in body.lines)
+    if width >= 70:
+        assert len(body.lines) == 1
+
+
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_installed_skill_heading_has_muted_inventory_count(count):
+    from klaude_cli.skills_panel import skills_page
+
+    page = skills_page([{"name": f"skill-{index}"} for index in range(count)], "/tmp/inbox")
+    heading = next(row for row in page.rows if row.id == "installed")
+    assert heading.label == "SKILLS"
+    assert heading.description == f"{count} installed"
+    line = next(line for line in render_body(PanelState(page), 70).lines
+                if ("class:panel.section", "SKILLS") in line)
+    assert ("class:panel.section", "SKILLS") in line
+    assert ("class:panel.heading-marker", ":") not in line
+    assert ("class:panel.muted", f"  {count} installed") in line
+    assert not any(row.id == "count" for row in page.rows)
+
+
+@pytest.mark.parametrize("width", [24, 55, 100])
+def test_skills_page_clear_import_flow_and_compact_inventory(width):
+    from klaude_cli.skills_panel import skills_page
+
+    inbox = "/tmp/klaude/skills-inbox"
+    page = skills_page([
+        {"name": "testing", "library": "testing", "indexed_file_count": 1, "identity": "a"},
+        {"name": "frontend", "library": "shared", "indexed_file_count": 3, "identity": "b"},
+    ], inbox)
+    assert [row.id for row in page.rows[:6]] == [
+        "discovery", "search", "add", "import", "inbox", "installed",
+    ]
+    rows = {row.id: row for row in page.rows}
+    assert rows["inbox"].label == f"Drop ZIPs or skill files here: {inbox}, then import"
+    assert rows["inbox"].description == ""
+    assert rows["import"].description == ""
+    assert rows["import"].action.kind == "skill-import"
+    assert rows["skill:testing"].value == "1 file"
+    assert rows["skill:testing"].description == ""
+    assert rows["skill:frontend"].description == "Library: shared"
+    state = PanelState(page, "import")
+    assert state.picker.selected_id == "import"
+    body = render_body(state, width)
+    path_lines = [line for line, owner in zip(body.lines, body.row_for_line, strict=True)
+                  if owner == "inbox"]
+    assert "".join(text for line in path_lines for _, text in line).replace(" ", "").endswith(
+        f"{inbox}, then import".replace(" ", "")
+    )
+    assert all(get_cwidth("".join(text for _, text in line)) <= width for line in body.lines)
+    assert "klaude import-skill" not in "".join(text for line in body.lines for _, text in line)
+    state.picker.filter("frontend")
+    assert any(row.id == "installed" for row in state.picker.visible)
+    assert state.picker.selected_id == "skill:frontend"
+
+
+@pytest.mark.parametrize("width", [18, 70, 110])
+@pytest.mark.parametrize("confirmation", [False, True])
+def test_mcp_delete_back_and_cancel_have_gap_without_reset(width, confirmation):
+    from klaude_cli.mcp_management import removal_confirmation, removal_page
+
+    page = removal_confirmation("docs") if confirmation else removal_page([
+        {"name": "docs", "enabled": False},
+    ])
+    identity = "cancel" if confirmation else "back"
+    state = PanelState(page, identity)
+    body = render_body(state, width)
+    index = body.row_for_line.index(identity)
+    assert not "".join(text for _, text in body.lines[index - 1]).strip()
+    assert "".join(text for _, text in body.lines[index - 2]).strip()
+    assert body.selected_line == index
+    state.picker.filter("no matching server")
+    assert identity in [row.id for row in state.visible_rows()]

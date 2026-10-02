@@ -650,7 +650,11 @@ def test_transcript_lexer_underlines_help_categories_and_grays_message_dividers(
     get_line = TranscriptLexer().lex_document(document)
 
     assert get_line(0) == [("class:help.category", "CLI COMMANDS")]
-    assert get_line(2) == [("class:transcript.divider", "━━ you · 2026-09-05 12:34:56 ━━━━━━━━━━")]
+    assert get_line(2) == [
+        ("class:transcript.divider.rule", "━━ "),
+        ("class:transcript.divider.text", "you · 2026-09-05 12:34:56"),
+        ("class:transcript.divider.rule", " ━━━━━━━━━━"),
+    ]
 
 
 def test_transcript_lexer_highlights_fenced_code_with_its_language():
@@ -710,7 +714,7 @@ def test_live_activity_uses_progressive_label_and_whole_turn_elapsed(monkeypatch
 
     status = "".join(text for _style, text in tui._status_fragments())
 
-    assert "⠋ EDITING" in status
+    assert f"{tui.appearance.spinner.animation.frame_at(111.0)} EDITING" in status
     assert "11s" in status
     assert "[EDITING]" not in status
     assert "src/app.py" not in status
@@ -741,7 +745,7 @@ def test_permission_wait_uses_braille_footer_and_compact_elapsed(monkeypatch):
 
     status = "".join(text for _style, text in tui._status_fragments())
 
-    assert "⠋ WAITING" in status
+    assert f"{tui.appearance.spinner.animation.frame_at(111.0)} WAITING" in status
     assert "1m 11s" in status
     assert "[WAITING]" not in status
 
@@ -876,11 +880,24 @@ def test_resume_lists_all_sessions_in_columns_and_continues_selected_session(tmp
     first = tui._choice_values[0]
     assert first == "now        saved-14  Original session title 14"
     assert tui._choice_values[1] == "now        saved-13  [ACTIVE] Original session title 13"
-    assert first in tui._choice_fragments()[0][1]
-    fragments = tui._choice_fragments()
+    assert tui._panel.page.breadcrumb == ("Sessions",)
+    assert tui._panel.page.column_headers == ("Session", "Age", "Session ID")
+    row = tui._panel.row()
+    assert row.label == "Original session title 14"
+    assert row.value == "now"
+    assert row.description == "saved-14"
+    fragments = tui._panel_body_fragments()
     assert ("class:choice.active.edge", "[") in fragments
     assert ("class:choice.active.word", "ACTIVE") in fragments
     assert ("class:choice.active.edge", "]") in fragments
+    tui._set_input("ACTIVE")
+    tui._refresh_choice_filter()
+    assert tui._picker.selected_id == "session:saved-13"
+    assert tui._panel.row().label_badge == "ACTIVE"
+    tui._set_input("")
+    tui._refresh_choice_filter()
+    tui._panel.picker.focus("session:saved-14")
+    tui._apply_picker_state()
     assert tui.memory.release_session_lease("saved-13", "other-client", "active-turn")
     tui._refresh_resume_choices()
     assert tui._choice_values[1] == "now        saved-13  Original session title 13"
@@ -1098,7 +1115,7 @@ def test_debug_label_includes_cycling_footer_preview_without_starting_ai(tmp_pat
 
     clock["now"] = 102.1
     status = "".join(text for _style, text in tui._status_fragments())
-    assert "⠙ EXPLORING" in status
+    assert f"{tui.appearance.spinner.animation.frame_at(102.1)} EXPLORING" in status
     assert "1m 13s" in status
 
     tui._set_input("/debug_label")
@@ -2549,6 +2566,19 @@ def _fake_persistent_tui(appearance_path=None, chat_preferences_path=None):
             return True
 
     tui._session_actions = FakeSessionActions()
+    tui._skill_actions.close()
+    class FakeSkillActions:
+        def watch(self):
+            pass
+
+        def submit(self, action):
+            return False
+
+        def close(self, *, wait=False):
+            return True
+
+    tui._skill_actions = FakeSkillActions()
+    tui._skill_inbox_preparation_attempted = True
     class UnconfiguredMCPMutations:
         """Never let a default fake TUI write real MCP configuration."""
         path = tui.cfg.mcp_servers_file
@@ -2850,7 +2880,7 @@ def test_permission_policy_values_use_semantic_green_yellow_red_styles():
         row for row in server_page.rows if row.id == "server:firecrawl"
     ).value_tone == "error"
     detail_rows = {row.id: row for row in detail_page.rows}
-    assert detail_rows["current-policy"].value_tone == "error"
+    assert detail_rows["server-heading"].description == "Current policy  DENY"
     assert detail_rows[f"mcp-tool:{tool}"].value_tone == "error"
 
     style = _tui_style("autumn", DEFAULT_TEXT_THEME)
@@ -2920,9 +2950,10 @@ def test_mcp_permissions_group_by_server_and_offer_scoped_bulk_controls(tmp_path
     tui.agent.tools = tools
     tui._open_settings_category("permissions")
 
-    assert "MCP Servers: 2 active" in tui._choice_values
+    assert not any("MCP" in row for row in tui._choice_values)
     assert not any("resolve library:" in row for row in tui._choice_values)
-    tui._choice_index = tui._choice_values.index("MCP Servers: 2 active")
+    tui._open_settings_category("mcp servers")
+    tui._choice_index = tui._choice_values.index("Manage permissions")
     tui._accept_choice()
     assert tui._choice_kind == "mcp permission servers"
     assert "context7: ASK · 2 tools" in tui._choice_values
@@ -2930,6 +2961,12 @@ def test_mcp_permissions_group_by_server_and_offer_scoped_bulk_controls(tmp_path
     tui._choice_index = tui._choice_values.index("context7: ASK · 2 tools")
     tui._accept_choice()
     assert tui._choice_kind == "mcp permission tools"
+    heading = tui._panel.page.rows[0]
+    assert heading.label == "SERVER:"
+    assert heading.description == "Current policy  ASK"
+    assert not any(row.id == "current-policy" for row in tui._panel.page.rows)
+    heading_line = tui._panel_body().lines[0]
+    assert ("class:panel.muted", "  Current policy  ASK") in heading_line
     assert "resolve library: ASK" in tui._choice_values
     assert {"ALLOW ALL", "ASK FOR EACH TOOL", "DENY ALL"}.issubset(tui._choice_values)
     bulk_rows = [
@@ -2956,7 +2993,7 @@ def test_mcp_permissions_group_by_server_and_offer_scoped_bulk_controls(tmp_path
 
     tui._choice_index = tui._choice_values.index("resolve library: ALLOW")
     tui._accept_choice()
-    assert any("Current: CUSTOM" in row for row in tui._choice_values)
+    assert tui._panel.page.rows[0].description == "Current policy  CUSTOM"
     assert any(tui.agent.gate.policies[name] == "deny" for name in context_tools)
     tui._choice_index = tui._choice_values.index("DENY ALL")
     tui._accept_choice()
@@ -2970,8 +3007,8 @@ def test_mcp_permissions_group_by_server_and_offer_scoped_bulk_controls(tmp_path
     assert tui._choice_kind == "mcp permission servers"
     tui._choice_index = tui._choice_values.index("back")
     tui._accept_choice()
-    assert tui._choice_kind == "permission settings"
-    assert "MCP Servers: 2 active" in tui._choice_values
+    assert tui._choice_kind == "mcp settings"
+    assert tui._choice_values[tui._choice_index] == "Manage permissions"
 
 
 def test_mcp_settings_shortcut_focuses_server_permissions(tmp_path):
@@ -2980,15 +3017,21 @@ def test_mcp_settings_shortcut_focuses_server_permissions(tmp_path):
     tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "chat-preferences.json")
     name = namespaced_tool_name("firecrawl", "search")
     tui.agent.tools = {name: SimpleNamespace(description="MCP server firecrawl: search")}
+    tui._mcp_inventory = {"servers": [], "truncated": False}
+    tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
+    tui._mcp_inventory_loaded_at = time.monotonic()
     tui._open_settings_category("mcp servers")
-    tui._choice_index = tui._choice_values.index("MCP server permissions")
+    heading = next(row for row in tui._panel.page.rows if row.label == "MCP Servers")
+    assert heading.description.startswith("0 installed, 0 enabled · Configuration snapshot ")
+    assert not any(row.label.startswith("Configuration snapshot ") for row in tui._panel.page.rows)
+    tui._choice_index = tui._choice_values.index("Manage permissions")
     tui._accept_choice()
     assert tui._choice_kind == "mcp permission servers"
     assert tui._choice_values[tui._choice_index] == "firecrawl: ASK · 1 tool"
     tui._choice_index = tui._choice_values.index("back")
     tui._accept_choice()
     assert tui._choice_kind == "mcp settings"
-    assert tui._choice_values[tui._choice_index] == "MCP server permissions"
+    assert tui._choice_values[tui._choice_index] == "Manage permissions"
 
 
 def test_mcp_permission_groups_keep_original_server_identity(tmp_path):
@@ -3002,8 +3045,8 @@ def test_mcp_permission_groups_keep_original_server_identity(tmp_path):
         )
         for server in servers
     }
-    tui._open_settings_category("permissions")
-    tui._choice_index = tui._choice_values.index("MCP Servers: 2 active")
+    tui._open_settings_category("mcp servers")
+    tui._choice_index = tui._choice_values.index("Manage permissions")
     tui._accept_choice()
     assert all(f"{server}: ASK · 1 tool" in tui._choice_values for server in servers)
 
@@ -3128,6 +3171,7 @@ def test_settings_include_memory_skills_and_provider_categories():
     assert any(value.startswith("Skills:") for value in categories)
     assert any(value.startswith("Permissions:") for value in categories)
     assert any(value.startswith("Runtime:") for value in categories)
+    assert "Divider" in categories
     assert "" not in categories
 
 
@@ -3143,6 +3187,7 @@ def test_settings_overview_opens_without_synchronous_memory_or_mcp_reads(monkeyp
     assert tui._background_jobs.requests["settings-overview"] == {
         "kind": "settings_overview", "sessions_db": "",
         "mcp_file": str(tui.cfg.mcp_servers_file),
+        "memory_file": "",
     }
 
 
@@ -3248,7 +3293,9 @@ def test_live_settings_overview_is_filterable_during_background_read():
                 ))
                 await asyncio.sleep(0.15)
                 assert tui._choice_filter_query == "mcp"
-                assert tui._choice_values[tui._choice_index] == "MCP servers: 1/2 enabled"
+                assert tui._choice_values[tui._choice_index] == (
+                    "MCP servers: 1/2 enabled"
+                )
                 assert tui.panel_body_window.render_info is not None
             finally:
                 tui.application.exit()
@@ -3284,7 +3331,7 @@ def test_settings_back_returns_to_the_same_summary_row(
     assert tui._choice_values[tui._choice_index].startswith(summary_prefix)
 
 
-def test_memory_settings_toggle_show_facts_and_reset_to_enabled(tmp_path):
+def test_memory_settings_toggle_inventory_without_recent_facts_and_reset(tmp_path):
     tui = _fake_persistent_tui()
     tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
     tui.memory.remember("Prefer concise answers", source="manual")
@@ -3298,8 +3345,12 @@ def test_memory_settings_toggle_show_facts_and_reset_to_enabled(tmp_path):
 
     assert tui._choice_kind == "memory settings"
     assert "automatic memory: on (toggle)" in tui._choice_values
-    assert any(value.startswith("\0info:Durable facts: 1") for value in tui._choice_values)
-    assert any("Prefer concise answers" in value for value in tui._choice_values)
+    heading = next(row for row in tui._panel.page.rows if row.label == "MEMORY")
+    assert heading.description.startswith("Saved memories: 1 · snapshot ")
+    assert not any(value.startswith("\0info:Durable facts:") for value in tui._choice_values)
+    assert "Manage memories" in tui._choice_values
+    assert not any("Prefer concise answers" in value for value in tui._choice_values)
+    assert not any("RECENT FACTS" in value for value in tui._choice_values)
     tui._choice_index = tui._choice_values.index("automatic memory: on (toggle)")
     tui._accept_choice()
     assert not tui.memory.auto_memory_enabled()
@@ -3324,7 +3375,9 @@ def test_memory_picker_and_pending_toggles_use_snapshots_without_ui_io(tmp_path,
     for method in ("list_facts", "auto_memory_enabled", "set_auto_memory"):
         monkeypatch.setattr(tui.memory, method, lambda *args: pytest.fail("UI memory I/O"))
     tui._open_settings_category("memory")
-    assert "\0info:Loading memory inventory…" in tui._choice_values
+    assert next(row for row in tui._panel.page.rows if row.label == "MEMORY").description == (
+        "Loading memory inventory…"
+    )
     identity = tui._background_jobs.latest["memory-inventory"]
     tui._apply_background_result(("memory-inventory", identity, {
         "enabled": True, "count": 0, "facts": [], "hidden": 0,
@@ -3342,7 +3395,8 @@ def test_memory_picker_and_pending_toggles_use_snapshots_without_ui_io(tmp_path,
     tui._emit("memory_setting_saved", (actions[-1], False))
     tui._before_render(None)
     assert tui._memory_save_state == "failed" and tui.memory._auto_memory_override is False
-    assert any("save unconfirmed" in row for row in tui._choice_values)
+    assert "Save unconfirmed" in "".join(text for _, text in tui._panel_footer_fragments())
+    assert not any("save unconfirmed" in row for row in tui._choice_values)
     tui._choice_index = tui._choice_values.index(RESET_THEME_CHOICE)
     tui._accept_choice()
     assert actions[-1].enabled is True
@@ -3386,7 +3440,7 @@ def test_memory_inventory_late_and_failed_results_preserve_scope_and_cache(tmp_p
     tui.memory.db.close()
 
 
-def test_skills_settings_show_read_only_installed_inventory(monkeypatch):
+def test_skills_settings_show_installed_inventory_and_import_action(monkeypatch):
     tui = _fake_persistent_tui()
     installed = [
             {
@@ -3401,7 +3455,10 @@ def test_skills_settings_show_read_only_installed_inventory(monkeypatch):
 
     assert time.monotonic() - opened_at < 0.25
     assert tui._choice_kind == "skills settings"
-    assert "\0info:Loading installed skills…" in tui._choice_values
+    assert tui._panel.page.rows[0].label == "DISCOVERY"
+    assert next(row for row in tui._panel.page.rows if row.id == "installed").description == (
+        "Loading installed skills…"
+    )
     identity = tui._background_jobs.latest["skills"]
     tui._events.put(("background_result", (
         "skills", identity, {"skills": installed, "truncated": False}, ""
@@ -3409,15 +3466,18 @@ def test_skills_settings_show_read_only_installed_inventory(monkeypatch):
     tui._before_render(tui.application)
 
     assert not tui._skills_inventory_loading
-    assert "\0info:Installed: 1" in tui._choice_values
-    assert (
-        "\0info:crawl4ai · library web-tools · 2 indexed files" in tui._choice_values
-    )
+    heading = next(row for row in tui._panel.page.rows if row.id == "installed")
+    assert heading.label == "SKILLS"
+    assert heading.description == "1 installed"
+    row = next(row for row in tui._panel.page.rows if row.id == "skill:crawl4ai")
+    assert row.value == "2 files"
+    assert row.description == "Library: web-tools"
+    assert "Import skills" in tui._choice_values
     assert "reset to default" not in tui._choice_values
     assert tui._choice_values[-1] == "back"
-    rendered = "".join(text for _style, text in tui._choice_fragments())
+    rendered = "".join(fragment[1] for fragment in tui._panel_body_fragments())
     assert "\0info:" not in rendered
-    assert "crawl4ai · library web-tools · 2 indexed files" in rendered
+    assert "crawl4ai" in rendered and "Library: web-tools" in rendered
 
 
 def test_tools_settings_persist_and_apply_individual_research_tool_toggles(tmp_path):
@@ -4170,16 +4230,17 @@ def test_persistent_tui_shows_compact_queued_inputs_above_composer():
     rendered = "".join(text for _style, text in tui._queue_fragments())
 
     assert rendered == (
-        "• Queued follow-up inputs\n"
+        "⏳ Queued follow-up inputs\n"
         "  ↳ like this\n"
         "  ↳ and ↵ this\n"
         "    alt + ↑ edit last queued message"
     )
     root = tui.application.layout.container
     assert root.content.children[0] is tui.text_theme_preview_panel
-    assert root.content.children[2] is tui.queue_panel
-    assert root.content.children[3] is tui.input_spacer
-    assert root.content.children[4] is tui.input_panel
+    assert root.content.children[2] is tui.output_spacer
+    assert root.content.children[3] is tui.queue_panel
+    assert root.content.children[4] is tui.input_spacer
+    assert root.content.children[5] is tui.input_panel
 
 
 def test_repeated_alt_up_edits_queued_inputs_from_newest_to_oldest():
@@ -5250,7 +5311,7 @@ def test_model_picker_cancels_while_theme_picker_goes_back_to_settings(tmp_path)
     tui._set_input("/theme")
     tui._submit_buffer(steer=False)
     assert tui._choice_kind == "theme settings"
-    tui._choice_index = tui._choice_values.index("interface theme: Autumn")
+    tui._choice_index = tui._choice_values.index("interface theme: Pastelle Azure")
     tui._accept_choice()
     assert tui._choice_values[-1] == "back"
     tui._choice_index = len(tui._choice_values) - 1
@@ -5490,7 +5551,7 @@ def test_unauthenticated_cloud_provider_opens_login_action(monkeypatch):
 
     assert tui._choice_kind == "model"
     assert tui._choice_values[tui._choice_index] == "Login"
-    assert "\0info:Status: not signed in" in tui._choice_values
+    assert tui._panel.page.rows[0].description == "Status: not signed in"
 
 
 def test_expired_codex_auth_keeps_model_picker_open(monkeypatch):
@@ -5585,17 +5646,21 @@ def test_live_picker_keeps_heading_above_first_option_visible():
 
 @pytest.mark.parametrize("responds_to_cpr", [False, True])
 @pytest.mark.parametrize("switch_session", [False, True])
+@pytest.mark.parametrize("show_divider", [False, True])
 def test_terminal_scrollback_survives_streaming_refresh_resize_and_preview(
     tmp_path,
     responds_to_cpr,
     switch_session,
+    show_divider,
 ):
     import pyte
     from prompt_toolkit.data_structures import Size
     from prompt_toolkit.output.vt100 import Vt100_Output
+    from prompt_toolkit.renderer import CPR_Support
 
     async def exercise():
         tui = _fake_persistent_tui(tmp_path / "appearance.json")
+        tui.appearance.divider_visible = show_divider
 
         class Screen(pyte.HistoryScreen):
             def write_process_input(self, data):
@@ -5633,6 +5698,11 @@ def test_terminal_scrollback_survives_streaming_refresh_resize_and_preview(
             tui.application.input = pipe
             tui.application.output = output
             tui.application.renderer.output = output
+            # The fake TUI starts with DummyOutput, which disables CPR. Merely
+            # swapping output does not enable terminal cursor reports.
+            tui.application.renderer.cpr_support = (
+                CPR_Support.SUPPORTED if responds_to_cpr else CPR_Support.NOT_SUPPORTED
+            )
             task = asyncio.create_task(tui.application.run_async())
             try:
                 await asyncio.sleep(0.05)
@@ -5681,16 +5751,30 @@ def test_terminal_scrollback_survives_streaming_refresh_resize_and_preview(
                     tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
                     tui.memory.log_turn("session-1", "user", "Original saved conversation")
                     tui.memory.log_turn("other", "user", "Selected saved conversation")
+                    saved_lines = [f"restored answer line {i:03d}" for i in range(60)]
+                    tui.memory.log_turn("other", "assistant", "\n".join(saved_lines))
                     tui.agent.restore_session = lambda turns: Agent.restore_session(
                         tui.agent,
                         turns,
                     )
+                    if responds_to_cpr:
+                        # A terminal whose CPR support is still being detected
+                        # permits only one outstanding measurement. A report
+                        # taken before replay would incorrectly reserve the
+                        # whole screen after the replay has already printed.
+                        tui.application.renderer.cpr_support = CPR_Support.UNKNOWN
                     tui._set_input("/resume other")
                     tui._submit_buffer(steer=False)
                     tui.application._redraw()
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0.1)
                     lines = transcript_lines()
                     assert "Selected saved conversation" in lines
+                    assert [line for line in lines if line in saved_lines] == saved_lines
+                    assert saved_lines[-1] in [line.rstrip() for line in screen.display]
+                    closing = next(line for line in lines if "klaude · " in line)
+                    assert ("━" in closing) is show_divider
+                    assert tui.input.window.render_info is not None
+                    assert tui.application.layout.current_control is tui.input.control
                     assert not any(line in expected for line in lines)
                     assert "Session: session-1" not in "\n".join(lines)
                     tui._set_input("/new")
@@ -5699,7 +5783,7 @@ def test_terminal_scrollback_survives_streaming_refresh_resize_and_preview(
                     await asyncio.sleep(0.01)
                     assert "Selected saved conversation" not in transcript_lines()
                     assert tui.session_id in "\n".join(transcript_lines())
-                    assert len(tui.memory.load_session("other")) == 1
+                    assert len(tui.memory.load_session("other")) == 2
                     assert len(tui.memory.load_session("session-1")) == 1
                     expected = []
             finally:
@@ -5713,13 +5797,16 @@ def test_terminal_scrollback_survives_streaming_refresh_resize_and_preview(
     asyncio.run(exercise())
 
 
-def test_printed_transcript_background_fills_rows_without_padding(tmp_path):
+@pytest.mark.parametrize("show_divider", [False, True])
+def test_printed_transcript_background_fills_rows_without_padding(tmp_path, show_divider):
     import pyte
+    from klaude_cli.main import _session_divider
     from prompt_toolkit.data_structures import Size
     from prompt_toolkit.output.color_depth import ColorDepth
     from prompt_toolkit.output.vt100 import Vt100_Output
 
     tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui.appearance.divider_visible = show_divider
     tui.application.style = _tui_style("autumn", "vscode-dark")
     screen = pyte.Screen(80, 30)
     stream = pyte.Stream(screen)
@@ -5739,7 +5826,7 @@ def test_printed_transcript_background_fills_rows_without_padding(tmp_path):
     )
     tui.application.output = tui.application.renderer.output = output
     lines = [
-        "━━ Session: test ━━",
+        _session_divider("test", width=80),
         "[success] Green success",
         "",
         "━━ you · time ━━",
@@ -5822,11 +5909,11 @@ def test_theme_preview_cancel_restores_colors_and_preserves_new_output(tmp_path)
     path = tmp_path / "appearance.json"
     tui = _fake_persistent_tui(path)
     original = (tui.appearance.theme, tui.appearance.text_theme)
-    tui._begin_choice("theme", ["autumn", "neon-synth"], "autumn")
+    tui._begin_choice("theme", [DEFAULT_TUI_THEME, "neon-synth"], DEFAULT_TUI_THEME)
     tui._move_choice(1)
     assert tui.appearance.theme == "neon-synth"
     preview_rows = "".join(text for _style, text in tui._choice_fragments())
-    assert "autumn *" in preview_rows
+    assert f"{DEFAULT_TUI_THEME} *" in preview_rows
     assert "neon-synth *" not in preview_rows
     assert not path.exists()
     tui._cancel_choice()
@@ -6358,7 +6445,7 @@ def test_provider_settings_collect_and_save_api_key_through_masked_composer(monk
     tui._accept_choice()
 
     assert tui._choice_kind == "provider key settings"
-    assert "\0info:Status: not configured" in tui._choice_values
+    assert tui._panel.page.rows[0].description == "Status: not configured"
     assert "Add API key" in tui._choice_values
     assert "Remove API key" not in tui._choice_values
     tui._choice_index = tui._choice_values.index("Add API key")
@@ -6377,7 +6464,7 @@ def test_provider_settings_collect_and_save_api_key_through_masked_composer(monk
     assert tui.cfg.openrouter_api_key == "sk-or-secret"
     assert "sk-or-secret" not in tui.output.text
     assert tui._choice_kind == "provider key settings"
-    assert "\0info:Status: configured" in tui._choice_values
+    assert tui._panel.page.rows[0].description == "Status: configured"
     assert "Update API key" in tui._choice_values
     assert "Remove API key" in tui._choice_values
     assert tui._choice_values[tui._choice_index] == "Update API key"
@@ -6413,7 +6500,7 @@ def test_provider_settings_collect_and_save_api_key_through_masked_composer(monk
     )
     assert tui.cfg.brave_search_api_key == "brave-private-key"
     assert "brave-private-key" not in tui.output.text
-    assert "\0info:Status: configured" in tui._choice_values
+    assert tui._panel.page.rows[0].description == "Status: configured"
     assert "Remove API key" in tui._choice_values
 
     tui._choice_index = tui._choice_values.index("Remove API key")
@@ -6421,7 +6508,7 @@ def test_provider_settings_collect_and_save_api_key_through_masked_composer(monk
 
     assert saved[-1] == (tui.cfg.config_dir, "BRAVE_SEARCH_API_KEY", "")
     assert tui.cfg.brave_search_api_key == ""
-    assert "\0info:Status: not configured" in tui._choice_values
+    assert tui._panel.page.rows[0].description == "Status: not configured"
     assert "Remove API key" not in tui._choice_values
     assert tui._choice_values[tui._choice_index] == "Add API key"
 
@@ -6689,6 +6776,7 @@ def test_tui_appearance_store_defaults_and_round_trips(tmp_path):
         text_theme="monokai",
         input_border=False,
         input_height=12,
+        input_max_height=12,
     )
     _save_tui_appearance(path, appearance)
 
@@ -6838,6 +6926,11 @@ def test_persistent_tui_categorized_field_settings_toggle_and_reset(tmp_path):
     tui._cancel_choice()
     tui._set_input("/settings reset")
     tui._submit_buffer(steer=False)
+    assert _load_tui_appearance(path).input_border is False
+    assert tui._choice_kind == "settings reset confirmation"
+    tui._panel.picker.focus("confirm")
+    tui._apply_picker_state()
+    tui._accept_choice()
     assert _load_tui_appearance(path) == TUIAppearance()
     assert tui.output.window.right_margins == []
 
@@ -7026,6 +7119,102 @@ def test_tui_mcp_registry_result_event_is_runtime_safe(monkeypatch, tmp_path):
     assert "Runtime Safe" in tui._choice_values[tui._choice_index]
 
 
+def test_tui_mcp_registry_table_keeps_distinct_servers_and_detail_navigation():
+    from klaude_core.mcp_catalog import MCPCatalogServer
+
+    servers = [MCPCatalogServer(
+        name=f"io.github.example/{name}", title="Shared friendly name",
+        description=f"Unique {name} documentation examples", version="1.0.0", status="active",
+    ) for name in ("first", "second")]
+    tui = _fake_persistent_tui()
+    tui._mcp_catalog_request_id = "table-request"
+    tui._begin_choice("mcp registry results", ["back"], "back")
+    assert tui._panel.page.column_headers is None
+    tui._events.put(("mcp_catalog_results", ("table-request", servers, False, "")))
+    tui._before_render(None)
+    assert len(tui._mcp_catalog_results) == 2
+    assert tui._panel.page.column_headers == ("MCP Name", "Version", "Description")
+    tui._set_input("Unique second")
+    tui._refresh_choice_filter()
+    assert tui._panel.row().label == servers[1].name
+    assert tui._panel.row().value == "1.0.0"
+    identity = tui._picker.selected_id
+    tui._accept_choice()
+    assert tui._choice_kind == "mcp registry detail"
+    assert tui._mcp_detail_server is servers[1]
+    tui._dismiss_picker()
+    assert tui._choice_kind == "mcp registry results"
+    assert tui._picker.selected_id == identity
+    assert tui._picker.query == "unique second"
+
+
+def test_tui_mcp_registry_table_live_resize_and_long_description_scrolling():
+    from klaude_core.mcp_catalog import MCPCatalogServer
+    from prompt_toolkit.data_structures import Size
+
+    class SizedOutput(DummyOutput):
+        columns = 120
+
+        def get_size(self):
+            return Size(rows=30, columns=self.columns)
+
+    async def exercise():
+        tui = _fake_persistent_tui()
+        output = SizedOutput()
+        server = MCPCatalogServer(
+            "io.github.example/documentation", "Documentation",
+            "Public documentation and code examples " * 12, "2026.10.2-preview.12", "active",
+        )
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = output
+            tui.application.renderer.output = output
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                await asyncio.sleep(0.08)
+                tui._set_input("unsent draft")
+                tui._begin_choice("settings", tui._settings_categories(), "mcp servers")
+                tui._open_settings_category("mcp servers")
+                tui._mcp_catalog_results = {"documentation-result": server}
+                tui._open_mcp_catalog_results(new_results=True)
+                for width in (120, 75, 36, 22, 120):
+                    output.columns = width
+                    tui.application._redraw()
+                    assert tui.application.layout.current_control is tui.panel_control
+                    info = tui.panel_body_window.render_info
+                    assert tui._panel_selected_line() in info.displayed_lines
+                    header_height = 3 if tui._panel_width() >= 60 else 2
+                    assert tui.panel_header_window.render_info.window_height == header_height
+                    assert tui.panel_footer_window.render_info.window_height == 2
+                    assert tui._picker.selected_id == "registry:" + server.name
+                output.columns = 22
+                tui.application._redraw()
+                identity = tui._picker.selected_id
+                pipe.send_text("\x1b[6~")  # PageDown
+                await asyncio.sleep(0.08)
+                tui.application._redraw()
+                assert tui._picker.selected_id == identity
+                assert tui._panel_selected_line() > tui._panel_body().selected_line
+                assert tui.panel_body_window.render_info.vertical_scroll > 0
+                assert tui.panel_header_window.render_info.window_height == 2
+                pipe.send_text("\x1b[5~")  # PageUp
+                await asyncio.sleep(0.08)
+                tui.application._redraw()
+                assert tui._panel_selected_line() == tui._panel_body().selected_line
+                tui._dismiss_picker()
+                tui._dismiss_picker()
+                tui._dismiss_picker()
+                assert tui._choice_kind is None
+                assert tui.input.text == "unsent draft"
+                assert tui.application.layout.current_control is tui.input.control
+                assert not tui.application.full_screen
+            finally:
+                tui.application.exit()
+                await task
+
+    asyncio.run(exercise())
+
+
 def test_tui_registry_install_collects_required_secret_in_settings(monkeypatch, tmp_path):
     from klaude_core.mcp_catalog import MCPCatalogInput, MCPInstallPlan
     from klaude_core.mcp_client import MCPRegistry
@@ -7134,6 +7323,7 @@ def test_persistent_tui_input_height_picker_persists_and_resets(tmp_path):
     tui._accept_choice()
 
     assert _load_tui_appearance(path).input_height == DEFAULT_INPUT_HEIGHT
+    assert _load_tui_appearance(path).input_max_height == 6
 
 
 def test_trace_print_preserves_provider_brackets(monkeypatch):
@@ -9828,7 +10018,7 @@ def test_configured_mcp_servers_render_boolean_toggles_with_transport_details():
          "transport": "stdio", "oauth": False},
     ], "truncated": False}
     tui._begin_choice("mcp settings", [
-        "MCP server permissions", "Reload configured MCP tools",
+        "Manage permissions", "Reload",
         "Configuration snapshot 0s old",
         "context7: on (toggle) · http · 2 tools",
         "firecrawl-mcp-server: off (toggle) · stdio · 25 tools",
@@ -9937,11 +10127,11 @@ def test_mcp_reload_recovery_is_scoped_and_keeps_queue_safe(monkeypatch, outcome
         path=tui.cfg.mcp_servers_file, submit=lambda request: requests.append(request) or True,
     )
     tui._mcp_catalog_unconfirmed = True
-    tui._begin_choice("mcp settings", ["Reload configured MCP tools", "back"],
-                      "Reload configured MCP tools")
+    tui._begin_choice("mcp settings", ["Reload", "back"],
+                      "Reload")
     published = []
     monkeypatch.setattr(tui, "_publish_mcp_tools", lambda *_: published.append(True))
-    tui._apply_settings_action("mcp settings", "Reload configured MCP tools")
+    tui._apply_settings_action("mcp settings", "Reload")
     assert isinstance(requests[0], MCPReload)
     assert tui._mcp_mutation_pending is not None
     if outcome == "stale":
@@ -10153,27 +10343,27 @@ def test_settings_permission_mcp_breadcrumb_and_parent_focus_restore():
     tui = _fake_persistent_tui()
     tool = namespaced_tool_name("firecrawl", "search")
     tui.agent.tools = {tool: SimpleNamespace(description="MCP server firecrawl: search")}
-    tui._begin_choice("settings", tui._settings_categories(), "permissions")
-    assert tui._panel.picker.selected_id == "category:permissions"
+    tui._begin_choice("settings", tui._settings_categories(), "mcp servers")
+    assert tui._panel.picker.selected_id == "category:mcp servers"
     home = tui._panel
     home.scroll_top = 2
     tui._accept_choice()
-    assert tui._panel.page.breadcrumb == ("Settings", "Permissions")
-    tui._panel.picker.focus("mcp-servers")
+    assert tui._panel.page.breadcrumb == ("Settings", "MCPs")
+    tui._panel.picker.focus("manage permissions")
     tui._apply_picker_state()
     tui._accept_choice()
-    assert tui._panel.page.breadcrumb == ("Settings", "Permissions", "MCP Servers")
+    assert tui._panel.page.breadcrumb == ("Settings", "MCPs", "Manage permissions")
     tui._accept_choice()
     assert tui._panel.page.breadcrumb == (
-        "Settings", "Permissions", "MCP Servers", "firecrawl"
+        "Settings", "MCPs", "Manage permissions", "firecrawl"
     )
     tui._cancel_choice()
     assert tui._panel.picker.selected_id == "server:firecrawl"
     tui._cancel_choice()
-    assert tui._panel.picker.selected_id == "mcp-servers"
+    assert tui._panel.picker.selected_id == "manage permissions"
     tui._cancel_choice()
     assert tui._panel is home
-    assert tui._panel.picker.selected_id == "category:permissions"
+    assert tui._panel.picker.selected_id == "category:mcp servers"
     assert tui._panel.scroll_top == 2
 
 
@@ -10182,9 +10372,10 @@ def test_settings_permission_mcp_breadcrumb_and_parent_focus_restore():
     [
         ("theme", "Theme"),
         ("input field", "Input Field"),
+        ("divider", "Divider"),
         ("models", "Models"),
         ("providers", "Providers"),
-        ("mcp servers", "MCP Servers"),
+        ("mcp servers", "MCPs"),
         ("memory", "Memory"),
         ("skills", "Skills"),
         ("tools", "Tools"),
@@ -10380,6 +10571,125 @@ def test_picker_live_resume_refresh_preserves_filter_and_session_identity(monkey
     assert all("Parser investigation" not in value for value in tui._choice_values)
 
 
+@pytest.mark.parametrize("wait_kind", ("none", "input", "secret"))
+@pytest.mark.parametrize("cancel_key", ("\x1b", "\x03"))
+def test_resume_panel_live_resize_search_refresh_and_cancel_preserve_active_work(
+    monkeypatch, wait_kind, cancel_key,
+):
+    from prompt_toolkit.data_structures import Size
+    from prompt_toolkit.utils import get_cwidth
+
+    sessions = [
+        {"session_id": "a" * 32, "title": "Parser investigation with detailed context",
+         "ts": time.time(), "active": True},
+        {"session_id": "b" * 32, "title": "Other project", "ts": time.time(), "active": False},
+    ]
+
+    class SizedOutput(DummyOutput):
+        columns = 120
+
+        def get_size(self):
+            return Size(rows=30, columns=self.columns)
+
+    async def exercise():
+        tui = _fake_persistent_tui()
+        monkeypatch.setattr(tui.memory, "resumable_sessions", lambda: sessions, raising=False)
+        tui.running = True
+        tui.pending.append("queued follow-up")
+        request = {"question": "Choose an option", "options": ["One", "Two"],
+                   "done": threading.Event(), "answer": None,
+                   "label": "private credential", "prompt": "Enter credential"}
+        if wait_kind == "input":
+            tui._user_input_request = request
+        elif wait_kind == "secret":
+            tui._secret_request = request
+        output = SizedOutput()
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = output
+            tui.application.renderer.output = output
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+                transcript = tui.output.text
+                tui._open_resume()
+                for width in (120, 75, 36, 22, 120):
+                    output.columns = width
+                    tui.application._redraw()
+                    assert tui.application.layout.current_control is tui.panel_control
+                    assert tui.panel_body_window.render_info is not None
+                    assert tui.panel_header_window.render_info.window_height == (
+                        3 if tui._panel_width() >= 60 else 2
+                    )
+                    assert tui.panel_footer_window.render_info.window_height == 2
+                    body = tui._panel_body()
+                    assert all(get_cwidth("".join(text for _style, text in line))
+                               <= tui._panel_width() for line in body.lines)
+                    assert tui.output.text == transcript
+                pipe.send_text("\x1b[B")  # Down selects another session, not an input answer.
+                await asyncio.sleep(0.08)
+                assert tui._picker.selected_id == "session:" + "b" * 32
+                pipe.send_text("/Parser")
+                await asyncio.sleep(0.08)
+                assert tui._panel.search_active
+                assert tui._picker.selected_id == "session:" + "a" * 32
+                tui._panel.scroll_top = 1
+                sessions[0].update(title="Parser repaired", active=False)
+                tui._refresh_resume_choices()
+                assert tui._picker.query == "parser"
+                assert tui._panel.row().label == "Parser repaired"
+                assert not tui._panel.row().label_badge
+                assert tui._panel.scroll_top == 1
+                tui._append("\nBackground progress\n")
+                tui.application._redraw()
+                assert tui._choice_kind == "session"
+                assert "Background progress" in tui.output.text
+                pipe.send_text(cancel_key)
+                await asyncio.sleep(0.6)
+                assert tui._choice_kind == "session"  # First Escape leaves search.
+                assert not tui._picker.query
+                pipe.send_text(cancel_key)
+                await asyncio.sleep(0.6)
+                assert tui._choice_kind is None
+                assert tui._panel is None
+                assert tui.application.layout.current_control is tui.input.control
+                assert tui.session_id == "session-1"
+                assert tui.running
+                assert not tui.cancel_requested.is_set()
+                assert list(tui.pending) == ["queued follow-up"]
+                assert not request["done"].is_set()
+                assert not tui.application.full_screen
+            finally:
+                tui.application.exit()
+                await task
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("wait_kind", ("input", "secret", "permission"))
+def test_resume_panel_enter_selects_session_without_answering_pending_prompt(
+    monkeypatch, wait_kind,
+):
+    tui = _fake_persistent_tui()
+    monkeypatch.setattr(tui.memory, "resumable_sessions", lambda: [
+        {"session_id": "saved", "title": "Saved project", "ts": time.time(), "active": False},
+    ], raising=False)
+    request = {"question": "Choose", "options": ["Yes", "No"], "done": threading.Event(),
+               "answer": None, "label": "private credential", "prompt": "Enter credential",
+               "tool": "run_shell"}
+    setattr(tui, f"_{'user_input' if wait_kind == 'input' else wait_kind}_request", request)
+    targets = []
+    monkeypatch.setattr(tui, "_resume_session", targets.append)
+    tui._open_resume()
+    enter = next(binding.handler for binding in tui.key_bindings.bindings
+                 if tuple(binding.keys) == (Keys.Enter,))
+    enter(None)
+    assert targets == ["saved"]
+    assert tui._choice_kind is None
+    assert not request["done"].is_set()
+    assert request["answer"] is None
+
+
 def test_picker_back_restores_parent_filter():
     tui = _fake_persistent_tui()
     tui._open_settings_category("providers")
@@ -10565,7 +10875,8 @@ def test_pending_tool_toggles_and_reset_use_live_state_without_disk_reads(monkey
     tui._before_render(None)
     assert tui._runtime_save_state == "failed"
     assert "query_knowledge" in tui.agent.disabled_tool_names
-    assert "save unconfirmed" in " ".join(tui._choice_values).lower()
+    footer = "".join(text for _style, text in tui._panel_footer_fragments())
+    assert "save unconfirmed" in footer.lower()
 
 
 def test_tool_ack_merges_only_registered_boolean_settings():
@@ -10650,6 +10961,9 @@ def test_leaving_skills_cancels_job_and_drops_late_result():
     tui._before_render(tui.application)
     assert tui._choice_kind == "settings"
     assert tui._skills_inventory is None
+    assert tui._skills_inventory_loading  # Settings owns a fresh count inventory.
+    assert tui._background_jobs.latest["skills"] != identity
+    tui._cancel_choice()  # Closing Settings cancels that job too.
     assert not tui._skills_inventory_loading
     tui._open_settings_category("skills")
     assert tui._background_jobs.latest["skills"] != identity
@@ -10672,7 +10986,9 @@ def test_mcp_settings_navigation_never_loads_registry_and_retains_focus_filter(m
     tui = _fake_persistent_tui()
     monkeypatch.setattr("klaude_cli.main._mcp_registry", lambda: pytest.fail("UI registry read"))
     tui._open_settings_category("mcp servers")
-    assert "\0info:Loading configured MCP servers…" in tui._choice_values
+    assert next(row for row in tui._panel.page.rows if row.label == "MCP Servers").description == (
+        "Loading configured MCP servers…"
+    )
     identity = tui._background_jobs.latest["mcp-inventory"]
     result = {"servers": [{
         "name": "browser", "enabled": False, "oauth": False,
@@ -11362,7 +11678,7 @@ def test_cd_completion_directories_and_navigation_shortcuts(tmp_path, monkeypatc
     completer = ChatCommandCompleter(workdir_provider=lambda: workspace)
     values = [item.text for item in completer.get_completions(Document(prefix), None)]
     expected = {
-        "/cd ": ["../", "~/", "src/"],
+        "/cd ": ["../", "src/"],
         "/cd ..": ["../"],
         "/cd ~": ["~/"],
         "/cd ~/": ["~/projects/"],
@@ -11440,3 +11756,1619 @@ def test_memory_edit_input_cancel_returns_to_memory_without_chat_history():
     assert tui._panel.page.breadcrumb[-1] == "Manage memories"
     assert tui._settings_input_request is None
     assert not tui._history
+
+
+def test_memory_management_is_visible_while_loading_and_opens_after_refresh(tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    try:
+        tui._open_settings_category("memory")
+        row = next(row for row in tui._panel.page.rows if row.id == "manage memories")
+        assert row.label == "Manage memories"
+        assert row.value == "Loading…"
+        assert "Edit or delete" in row.description
+        assert not row.enabled
+        tui._panel.picker.focus(row.id)
+        tui._apply_picker_state()
+        tui._accept_choice()
+        assert tui._choice_kind == "memory settings"
+        identity = tui._background_jobs.latest["memory-inventory"]
+        tui._apply_background_result(("memory-inventory", identity, {
+            "enabled": True, "count": 1, "hidden": 0, "facts": ["Prefer uv"],
+            "entries": [{"id": "123456abcdef", "fact": "Prefer uv"}],
+        }, ""))
+        assert tui._panel.picker.selected_id == "manage memories"
+        row = next(row for row in tui._panel.page.rows if row.id == "manage memories")
+        assert row.enabled
+        assert not row.value
+        tui._accept_choice()
+        assert tui._panel.page.breadcrumb == ("Settings", "Memory", "Manage memories")
+        tui._accept_choice()
+        assert {row.label for row in tui._panel.page.rows} >= {"Edit memory", "Delete memory"}
+    finally:
+        tui.memory.db.close()
+
+
+def test_memory_management_unavailable_remains_visible_and_inert(tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._open_settings_category("memory")
+    identity = tui._background_jobs.latest["memory-inventory"]
+    tui._apply_background_result(("memory-inventory", identity, None, "private failure"))
+    row = next(row for row in tui._panel.page.rows if row.id == "manage memories")
+    assert row.value == "Unavailable"
+    assert not row.enabled
+    tui._panel.picker.focus(row.id)
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._choice_kind == "memory settings"
+
+
+@pytest.mark.parametrize("category", ["providers", "mcp servers"])
+def test_settings_management_pages_do_not_invent_reset_actions(category, tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._open_settings_category(category)
+    assert RESET_THEME_CHOICE not in tui._choice_values
+    if category == "providers":
+        tui._open_provider_key_settings("Tavily")
+        assert RESET_THEME_CHOICE not in tui._choice_values
+
+
+def test_tools_cancel_returns_to_settings_and_restores_draft_after_closing(tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._set_input("Unsent draft")
+    tui._begin_choice("settings", tui._settings_categories(), "tools")
+    tui._open_settings_category("tools")
+    tui._cancel_choice()
+    assert tui._panel.page.breadcrumb == ("Settings",)
+    assert tui._panel.picker.selected_id == "category:tools"
+    tui._cancel_choice()
+    assert tui.input.text == "Unsent draft"
+
+
+def test_input_height_back_is_navigation_and_does_not_save(tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._open_settings_category("input field")
+    tui._apply_settings_action("input field settings", "height: 6–6 lines")
+    assert "back" in tui._choice_values
+    tui._panel.picker.focus("back")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._panel.page.breadcrumb == ("Settings", "Input Field")
+    assert not (tmp_path / "appearance.json").exists()
+
+
+def test_skills_delete_confirmation_is_inert_until_confirmed_and_keeps_identity(tmp_path):
+    from klaude_cli.settings_panel import PanelAction
+    from klaude_cli.skill_actions import SkillAction
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._skills_inventory = [{
+        "name": "demo", "library": "shared", "indexed_file_count": 2, "identity": "old",
+    }]
+    requests = []
+    tui._skill_actions.submit = lambda action: requests.append(action) or True
+    tui._open_settings_category("skills")
+    tui._panel.picker.focus("skill:demo")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._panel.page.breadcrumb == ("Settings", "Skills", "demo")
+    tui._accept_choice()
+    assert tui._panel.page.breadcrumb[-1] == "Confirm deletion"
+    assert tui._panel.picker.selected_id == "back"
+    assert not requests
+    # A refresh after confirmation cannot silently authorize a different definition.
+    tui._skills_inventory[0]["identity"] = "new"
+    tui._apply_panel_action(PanelAction("skill-delete", "demo"))
+    assert requests == [SkillAction("delete", "demo", "old")]
+    assert tui._skill_action_pending
+    tui._cancel_choice()
+    tui._events.put(("skill_action_done", (requests[0], True, "Skill deleted")))
+    tui._before_render(tui.application)
+    assert tui._panel.page.breadcrumb == ("Settings",)
+    assert not tui._skill_action_pending
+
+
+def test_skills_confirmation_reopens_on_back_even_after_previous_delete_focus(tmp_path):
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._skills_inventory = [{"name": "demo", "identity": "id", "library": "demo"}]
+    tui._open_settings_category("skills")
+    tui._apply_panel_action(PanelAction("skill-confirm", "demo"))
+    tui._panel.picker.focus("delete")
+    tui._apply_picker_state()
+    tui._cancel_choice()
+    tui._apply_panel_action(PanelAction("skill-confirm", "demo"))
+    assert tui._panel.picker.selected_id == "back"
+
+
+def test_skills_open_prepares_drop_folder_once_without_importing(tmp_path):
+    from klaude_cli.skill_actions import SkillAction
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._skill_inbox_preparation_attempted = False
+    requests = []
+    tui._skill_actions.submit = lambda action: requests.append(action) or True
+    tui._open_settings_category("skills")
+    assert requests == [SkillAction("prepare")]
+    assert tui._skill_action_pending
+    tui._events.put(("skill_action_done", (requests[0], True, "")))
+    tui._before_render(tui.application)
+    tui._open_settings_category("skills")
+    assert requests == [SkillAction("prepare")]
+    assert not tui._skill_action_pending
+
+
+def test_divider_settings_navigation_toggle_colors_reset_and_save_feedback(tmp_path):
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._set_input("unsent draft")
+    tui._begin_choice("settings", tui._settings_categories(), "divider")
+    assert tui._panel.row().section_id == "section:appearance"
+    tui._accept_choice()
+    assert tui._panel.page.breadcrumb == ("Settings", "Divider")
+    tui._activate_panel_toggle()
+    assert not tui.appearance.divider_visible
+    assert not _load_tui_appearance(tui.appearance_path).divider_visible
+    assert tui._panel.picker.selected_id == "visible"
+    tui._before_render(None)
+    assert "Saved" in "".join(text for _style, text in tui._panel_footer_fragments())
+    tui._panel.picker.focus("line-color")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._panel.page.breadcrumb == ("Settings", "Divider", "Line color")
+    tui._panel.picker.focus("color:same-as-text")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui.appearance.divider_color == "same-as-text"
+    assert tui._panel.picker.selected_id == "color:same-as-text"
+    assert tui._panel.row().value == "Current"
+    tui._cancel_choice()
+    assert tui._panel.picker.selected_id == "line-color"
+    tui._panel.picker.focus("text-color")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    tui._panel.picker.focus("color:red")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui.appearance.divider_text_color == "red"
+    assert _load_tui_appearance(tui.appearance_path).divider_text_color == "red"
+    before = tui._panel.picker.selected_id
+    tui._panel.search_active = True
+    tui._set_input("Red")
+    tui._refresh_choice_filter()
+    tui._emit("appearance_saved", (tui._appearance_save_revision, False))
+    tui._before_render(None)
+    assert tui._panel.picker.selected_id == before
+    assert tui._picker.query == "red"
+    assert tui.appearance.divider_text_color == "red"
+    assert "Save unconfirmed" in "".join(text for _style, text in tui._panel_footer_fragments())
+    tui._cancel_choice()  # Clear search first.
+    assert tui._choice_kind == "divider color"
+    tui._cancel_choice()
+    assert tui._choice_kind == "divider settings"
+    tui._apply_panel_action(PanelAction("divider-reset"))
+    assert tui.appearance.divider_visible
+    assert tui.appearance.divider_color == "same-as-input-field"
+    assert tui.appearance.divider_text_color == "bright-black"
+    tui._cancel_choice()
+    assert tui._panel.picker.selected_id == "category:divider"
+    tui._cancel_choice()
+    assert tui.input.text == "unsent draft"
+
+
+def test_settings_divider_direct_entry_and_color_back_preserve_selection(tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._set_input("/settings divider")
+    tui._submit_buffer(steer=False)
+    assert tui._choice_kind == "divider settings"
+    tui._panel.picker.focus("text-color")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    tui._cancel_choice()
+    assert tui._panel.picker.selected_id == "text-color"
+    assert tui.appearance.divider_text_color == "bright-black"
+
+
+def test_divider_panel_live_keyboard_resize_and_composer_restoration(tmp_path):
+    from prompt_toolkit.data_structures import Size
+
+    class SizedOutput(DummyOutput):
+        columns = 110
+
+        def get_size(self):
+            return Size(rows=30, columns=self.columns)
+
+    async def exercise():
+        tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+        output = SizedOutput()
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = output
+            tui.application.renderer.output = output
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+                tui._set_input("unsent divider draft")
+                tui._begin_choice("settings", tui._settings_categories(), "divider")
+                pipe.send_text("\r")
+                await asyncio.sleep(0.08)
+                for width in (110, 70, 36, 18, 110):
+                    output.columns = width
+                    tui.application._redraw()
+                    assert tui.panel_header_window.render_info.window_height == 2
+                    assert tui.panel_footer_window.render_info.window_height == 2
+                    assert tui.application.layout.current_control is tui.panel_control
+                    assert tui._panel.picker.selected_id == "visible"
+                pipe.send_text(" ")
+                await asyncio.sleep(0.08)
+                assert not tui.appearance.divider_visible
+                assert tui._panel.picker.selected_id == "visible"
+                pipe.send_text("\x1b[B\r")  # Open Line color.
+                await asyncio.sleep(0.08)
+                assert tui._panel.page.breadcrumb[-1] == "Line color"
+                pipe.send_text("/Accent")
+                await asyncio.sleep(0.08)
+                assert tui._panel.picker.selected_id == "color:accent"
+                pipe.send_text("\r")
+                await asyncio.sleep(0.08)
+                assert tui.appearance.divider_color == "accent"
+                assert tui._panel.picker.selected_id == "color:accent"
+                assert tui._panel.row().value == "Current"
+                pipe.send_text("\x1b")  # Clear the filter.
+                await asyncio.sleep(0.6)
+                pipe.send_text("\x1b")  # Return to Divider.
+                await asyncio.sleep(0.6)
+                assert tui._panel.picker.selected_id == "line-color"
+                pipe.send_text("\x1b[B\x1b[B\r")  # Text color -> Custom pattern editor.
+                await asyncio.sleep(0.08)
+                assert tui._settings_input_request["on_submit"] == ("divider-pattern",)
+                assert tui.application.layout.current_control is tui.input.control
+                pipe.send_text("\x01\x0b∘₊✧\r")  # Replace the default pattern and apply.
+                await asyncio.sleep(0.08)
+                assert tui.appearance.divider_pattern == "∘₊✧"
+                assert tui._panel.picker.selected_id == "pattern"
+                pipe.send_text("\r")
+                await asyncio.sleep(0.08)
+                pipe.send_text("\x1b")  # Cancel editing without leaving Divider.
+                await asyncio.sleep(0.6)
+                assert tui._choice_kind == "divider settings"
+                assert tui._panel.picker.selected_id == "pattern"
+                pipe.send_text("\x1b")
+                await asyncio.sleep(0.6)
+                assert tui._panel.picker.selected_id == "category:divider"
+                pipe.send_text("\x1b")
+                await asyncio.sleep(0.6)
+                assert tui._panel is None
+                assert tui.input.text == "unsent divider draft"
+                assert tui.application.layout.current_control is tui.input.control
+                assert not tui.application.full_screen
+            finally:
+                tui.application.exit()
+                await task
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("responds_to_cpr", [False, True])
+def test_refresh_command_replays_current_style_without_changing_live_session(
+    tmp_path, responds_to_cpr,
+):
+    import pyte
+    from klaude_cli.main import _session_divider
+    from prompt_toolkit.data_structures import Size
+    from prompt_toolkit.output.color_depth import ColorDepth
+    from prompt_toolkit.output.vt100 import Vt100_Output
+    from prompt_toolkit.renderer import CPR_Support
+
+    async def exercise():
+        tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+
+        class Screen(pyte.HistoryScreen):
+            def write_process_input(self, data):
+                if responds_to_cpr:
+                    pipe.send_text(data)
+
+        screen = Screen(100, 30, history=2000)
+        stream = pyte.Stream(screen)
+        captured = StringIO()
+
+        class Terminal:
+            def isatty(self):
+                return True
+
+            def write(self, text):
+                captured.write(text)
+                stream.feed(text)
+
+            def flush(self):
+                pass
+
+        output = Vt100_Output(
+            Terminal(), lambda: Size(rows=screen.lines, columns=screen.columns),
+            default_color_depth=ColorDepth.DEPTH_24_BIT, enable_cpr=responds_to_cpr,
+        )
+
+        def all_lines():
+            return [
+                "".join(row[x].data for x in range(screen.columns)).rstrip()
+                for row in screen.history.top
+            ] + [line.rstrip() for line in screen.display]
+
+        def assert_replayed(visible):
+            lines = all_lines()
+            footer_row = next(i for i, line in enumerate(screen.display) if "klaude v" in line)
+            assert footer_row == screen.lines - 1, screen.display
+            assert [line for line in lines if line in messages] == messages
+            row = next(i for i, line in enumerate(screen.display) if "klaude · " in line)
+            assert ("━" in screen.display[row]) is visible
+            label_start = 3 if visible else 0
+            assert screen.buffer[row][label_start].fg == "ff80bf"
+            if visible:
+                assert screen.buffer[row][0].fg == "ff9f43"
+            assert "streaming partial" in screen.display[row + 1]
+            assert tui.live_output.text == "streaming partial"
+            assert tui.running
+            assert not tui.cancel_requested.is_set()
+            assert list(tui.pending) == ["queued follow-up"]
+            assert tui.session_id == "session-1"
+            assert tui.agent.messages == original_messages
+            assert tui._history[:len(original_history)] == original_history
+            assert all(command == "/refresh" for command in tui._history[len(original_history):])
+            assert tui.application.layout.current_control is tui.input.control
+            assert not tui.application.full_screen
+
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = tui.application.renderer.output = output
+            tui.application.renderer.cpr_support = (
+                CPR_Support.SUPPORTED if responds_to_cpr else CPR_Support.NOT_SUPPORTED
+            )
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+                tui._clear_session_view()
+                messages = [f"retained transcript message {i:03d}" for i in range(80)]
+                tui._append(_session_divider(tui.session_id, width=99) + "\n")
+                tui._append("\n".join(messages) + "\n")
+                tui._append(_message_divider("klaude", width=99) + "\nstreaming partial")
+                tui.application._redraw()
+                await asyncio.sleep(0.05)
+                canonical = tui.output.text
+                tui.running = True
+                tui.pending.append("queued follow-up")
+                original_messages = list(tui.agent.messages)
+                original_history = list(tui._history)
+                tui.appearance.divider_color = "orange"
+                tui.appearance.divider_text_color = "pink"
+                tui.application.style = tui._appearance_style()
+                tui._set_input("unsent draft")
+                tui._refresh_tui(replay_transcript=True)
+                tui.application._redraw()
+                await asyncio.sleep(0.1)
+                assert_replayed(True)
+                assert tui.input.text == "unsent draft"
+                assert tui.output.text == canonical
+                for visible in (False, True):
+                    tui.appearance.divider_visible = visible
+                    if responds_to_cpr:
+                        tui.application.renderer.cpr_support = CPR_Support.UNKNOWN
+                    tui._set_input("/refresh")
+                    tui._submit_buffer(steer=False)
+                    tui.application._redraw()
+                    await asyncio.sleep(0.1)
+                    assert_replayed(visible)
+                rendered = captured.getvalue()
+                tui.application._redraw()
+                await asyncio.sleep(0.05)
+                assert not any(
+                    message in captured.getvalue()[len(rendered):] for message in messages
+                )
+                assert "\x1b[?1049h" not in captured.getvalue()
+                tui._set_input("/clear")
+                tui._submit_buffer(steer=False)
+                tui._append("Only after clear\n")
+                tui._set_input("/refresh")
+                tui._submit_buffer(steer=False)
+                tui.application._redraw()
+                await asyncio.sleep(0.1)
+                assert "Only after clear" in all_lines()
+                footer_row = next(i for i, line in enumerate(screen.display) if "klaude v" in line)
+                assert footer_row == screen.lines - 1, screen.display
+                for columns, rows in ((70, 24), (110, 40), (100, 30)):
+                    screen.resize(lines=rows, columns=columns)
+                    tui._commit_appearance("Appearance redraw", fields=("divider_visible",))
+                    tui.application._redraw()
+                    await asyncio.sleep(0.1)
+                    footer_row = next(
+                        i for i, line in enumerate(screen.display) if "klaude v" in line
+                    )
+                    assert footer_row == rows - 1, screen.display
+                    assert all_lines().count("Only after clear") == 1
+                    tui.application._redraw()
+                    await asyncio.sleep(0.05)
+                    assert "klaude v" in screen.display[-1]
+                assert not any(message in all_lines() for message in messages)
+                assert tui.running
+                assert list(tui.pending) == ["queued follow-up"]
+            finally:
+                tui.application.exit()
+                await task
+
+    asyncio.run(exercise())
+
+
+def test_refresh_replay_keeps_picker_preview_and_defers_pending_output(monkeypatch, tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    printed = []
+    monkeypatch.setattr("klaude_cli.main.print_formatted_text",
+                        lambda **kwargs: printed.append(kwargs["formatted_text"]))
+    tui._append("\nExisting public transcript\n")
+    tui._flush_transcript()
+    printed.clear()
+    tui._begin_choice("permission preset", ["Custom", "Balanced", "back"], "Balanced")
+    tui._show_permission_preview("Temporary policy preview")
+    tui._append("Pending public output\n")
+    panel = tui._panel
+    tui._refresh_tui(replay_transcript=True)
+    tui._flush_transcript()
+    assert not printed
+    assert tui._permission_preview_visible
+    assert tui._panel is panel
+    assert tui.text_theme_preview.text == "Temporary policy preview"
+    assert tui._text_theme_preview_pending == "Pending public output\n"
+    tui._hide_permission_preview()
+    tui._flush_transcript()
+    public = "".join(value for batch in printed for _style, value in batch)
+    assert public.count("Existing public transcript") == 1
+    assert public.count("Pending public output") == 1
+    assert "Temporary policy preview" not in public
+    tui._flush_transcript()
+    assert len(printed) == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("theme", "hacker-green"), ("text_theme", "monokai"),
+    ("input_border", False), ("input_height", 4), ("input_max_height", 10),
+    ("divider_visible", False), ("divider_color", "orange"),
+    ("divider_text_color", "pink"),
+    ("divider_pattern", "∘₊✧"),
+])
+def test_applied_appearance_repaints_history_and_preserves_filtered_panel(
+    tmp_path, field, value,
+):
+    import pyte
+    from prompt_toolkit.data_structures import Size
+    from prompt_toolkit.output.color_depth import ColorDepth
+    from prompt_toolkit.output.vt100 import Vt100_Output
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    screen = pyte.HistoryScreen(100, 30, history=2000)
+    stream = pyte.Stream(screen)
+    captured = StringIO()
+
+    class Terminal:
+        def write(self, text):
+            captured.write(text)
+            stream.feed(text)
+
+        def flush(self):
+            pass
+
+    output = Vt100_Output(
+        Terminal(), lambda: Size(rows=30, columns=100),
+        default_color_depth=ColorDepth.DEPTH_24_BIT, enable_cpr=False,
+    )
+    tui.application.output = tui.application.renderer.output = output
+    tui._clear_session_view()
+    messages = [f"earlier public message {i:03d}" for i in range(50)]
+    tui._append("\n".join(messages) + "\n")
+    divider = _message_divider("klaude", width=99)
+    tui._append(divider + "\n")
+    tui._flush_transcript()
+    tui._set_input("unsent draft")
+    tui._open_settings_category("divider")
+    tui._panel.search_active = True
+    tui._set_input("color")
+    tui._refresh_choice_filter()
+    panel = tui._panel
+    focused = panel.picker.selected_id
+    panel.scroll_top = 2
+    tui.running = True
+    tui.pending.append("queued follow-up")
+    messages_before = list(tui.agent.messages)
+    setattr(tui.appearance, field, value)
+    tui._commit_appearance("test setting", fields=(field,))
+    tui._flush_transcript()
+    lines = [
+        "".join(row[x].data for x in range(screen.columns)).rstrip()
+        for row in screen.history.top
+    ] + [line.rstrip() for line in screen.display]
+    assert [line for line in lines if line in messages] == messages
+    row = next(i for i, line in enumerate(screen.display) if "klaude · " in line)
+    assert (tui.appearance.divider_pattern in screen.display[row]) is tui.appearance.divider_visible
+    label_start = 3 if tui.appearance.divider_visible else 0
+    style = tui.application.style
+    assert screen.buffer[row][label_start].fg == style.get_attrs_for_style_str(
+        "class:transcript.divider.text"
+    ).color.removeprefix("ansi")
+    if tui.appearance.divider_visible:
+        assert screen.buffer[row][0].fg == style.get_attrs_for_style_str(
+            "class:transcript.divider.rule"
+        ).color
+    assert tui._panel is panel
+    assert panel.picker.selected_id == focused
+    assert panel.picker.query == "color"
+    assert panel.scroll_top == 2
+    assert tui._panel_composer_draft[0] == "unsent draft"
+    assert tui.running and not tui.cancel_requested.is_set()
+    assert list(tui.pending) == ["queued follow-up"]
+    assert tui.agent.messages == messages_before
+    clears = captured.getvalue().count(TERMINAL_CLEAR_SEQUENCE)
+    tui._emit("appearance_saved", (tui._appearance_save_revision, False))
+    tui._before_render(None)
+    assert captured.getvalue().count(TERMINAL_CLEAR_SEQUENCE) == clears
+    assert getattr(tui.appearance, field) == value
+    assert panel.picker.selected_id == focused
+
+
+def test_divider_pattern_editor_validation_cancel_save_and_reset(tmp_path):
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._set_input("unsent draft")
+    tui._open_settings_category("divider")
+    tui._panel.picker.focus("pattern")
+    tui._apply_picker_state()
+    messages = list(tui.agent.messages)
+    tui._accept_choice()
+    assert tui._settings_input_request["on_submit"] == ("divider-pattern",)
+    assert tui.input.text == "━ "
+    revision = tui._appearance_save_revision
+    for invalid in ("", "x" * 25, "x\t", "\x1b[31m"):
+        tui._set_input(invalid)
+        tui._submit_settings_input_response()
+        assert tui._settings_input_request is not None
+        assert tui.input.text == invalid
+        assert tui.status_error
+        assert tui._appearance_save_revision == revision
+        assert tui.appearance.divider_pattern == "━ "
+    tui._answer_settings_input(None)
+    assert tui._choice_kind == "divider settings"
+    assert tui._panel.picker.selected_id == "pattern"
+    assert not tui.status_error
+    tui._accept_choice()
+    tui._set_input(" ∘₊✧ ")
+    tui._submit_settings_input_response()
+    assert tui._settings_input_request is None
+    assert tui._panel.picker.selected_id == "pattern"
+    assert tui.appearance.divider_pattern == " ∘₊✧ "
+    assert _load_tui_appearance(tui.appearance_path).divider_pattern == " ∘₊✧ "
+    tui._emit("appearance_saved", (tui._appearance_save_revision, False))
+    tui._before_render(None)
+    assert tui.appearance.divider_pattern == " ∘₊✧ "
+    assert tui._panel.picker.selected_id == "pattern"
+    assert "Save unconfirmed" in "".join(text for _, text in tui._panel_footer_fragments())
+    tui._apply_panel_action(PanelAction("divider-reset"))
+    assert tui.appearance.divider_pattern == "━ "
+    assert _load_tui_appearance(tui.appearance_path).divider_pattern == "━ "
+    assert tui.agent.messages == messages
+    tui._cancel_choice()
+    tui._cancel_choice()
+    assert tui.input.text == "unsent draft"
+
+
+@pytest.mark.parametrize("category", ["theme", "input field", "divider"])
+def test_appearance_save_feedback_stays_in_panel_footer(tmp_path, category):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._open_settings_category(category)
+    tui.appearance.divider_pattern = "∘₊✧"
+    tui._commit_appearance("Line pattern", fields=("divider_pattern",))
+    assert "[appearance]" not in tui.output.text
+    assert "Saving" in "".join(text for _, text in tui._panel_footer_fragments())
+    tui._before_render(None)
+    assert tui._appearance_save_state == "saved"
+    assert "Saved" in "".join(text for _, text in tui._panel_footer_fragments())
+    tui._open_settings_category(category)
+    body = "".join(text for _, text in tui._panel_body_fragments())
+    assert "Appearance saved" not in body
+    assert "Saving appearance" not in body
+    assert "Changes automatically refresh" not in body
+    assert "[appearance]" not in tui.output.text
+    assert _load_tui_appearance(tui.appearance_path).divider_pattern == "∘₊✧"
+
+
+def test_spinner_settings_preview_selection_custom_draft_and_save_feedback(tmp_path, monkeypatch):
+    from klaude_cli.settings_panel import PanelAction
+    from klaude_cli.spinners import CATALOG, SpinnerSettings
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: 0.2)
+    tui._set_input("unsent spinner draft")
+    tui._begin_choice("settings", tui._settings_categories(), "spinner")
+    assert tui._panel.row().section_id == "section:appearance"
+    tui._accept_choice()
+    assert tui._panel.page.breadcrumb == ("Settings", "Spinner")
+    assert tui._choice_kind == "spinner settings"
+    assert tui._panel.page.rows[0].label == "Custom"
+    assert not any(row.id == "default" for row in tui._panel.page.rows)
+    assert tui._panel.page.rows[-2].id == "reset"
+    initial = tui.appearance.spinner
+    revision = tui._appearance_save_revision
+    tui._panel.picker.focus("spinner:dots2")
+    tui._apply_picker_state()
+    preview = "".join(text for _, text in tui._panel_header_fragments())
+    assert CATALOG["dots2"].frame_at(0.2) in preview
+    assert tui._spinner_preview().interval == 80
+    assert tui.appearance.spinner == initial
+    assert tui._appearance_save_revision == revision
+    tui._accept_choice()
+    assert tui.appearance.spinner.name == "dots2"
+    assert _load_tui_appearance(tui.appearance_path).spinner.name == "dots2"
+    tui._before_render(None)
+    assert "Saved" in "".join(text for _, text in tui._panel_footer_fragments())
+    tui._apply_panel_action(PanelAction("spinner-custom"))
+    tui._accept_choice()  # Frames editor.
+    assert tui.application.layout.current_control is tui.input.control
+    tui._set_input('"⢎⡰", " ⢎⡡ "')
+    tui._submit_settings_input_response()
+    assert tui._spinner_draft.frames == ("⢎⡰", " ⢎⡡ ")
+    assert tui.appearance.spinner.name == "dots2"
+    tui._apply_panel_action(PanelAction("spinner-interval"))
+    tui._set_input("0")
+    tui._submit_settings_input_response()
+    assert tui._settings_input_request is not None
+    assert tui.status_error
+    tui._set_input("240")
+    tui._submit_settings_input_response()
+    assert tui._spinner_draft.interval == 240
+    tui._apply_panel_action(PanelAction("spinner-frames"))
+    tui._set_input("")
+    tui._submit_settings_input_response()
+    assert tui._settings_input_request is not None
+    tui._answer_settings_input(None)
+    assert tui._choice_kind == "spinner custom"
+    assert tui._spinner_draft.frames == ("⢎⡰", " ⢎⡡ ")
+    tui._apply_panel_action(PanelAction("spinner-apply"))
+    assert tui.appearance.spinner == SpinnerSettings("custom", ("⢎⡰", " ⢎⡡ "), 240)
+    assert _load_tui_appearance(tui.appearance_path).spinner == tui.appearance.spinner
+    tui._emit("appearance_saved", (tui._appearance_save_revision, False))
+    tui._before_render(None)
+    assert "Save unconfirmed" in "".join(text for _, text in tui._panel_footer_fragments())
+    assert tui.appearance.spinner.name == "custom"
+    assert tui._panel.picker.selected_id == "custom"
+    tui._panel.picker.focus("reset")
+    tui._apply_picker_state()
+    assert tui._spinner_preview() == CATALOG["dots"]
+    assert tui.appearance.spinner.name == "custom"
+    tui._accept_choice()
+    assert tui.appearance.spinner == SpinnerSettings()
+    assert tui._panel.picker.selected_id == "reset"
+    assert tui._panel.row().value == ""
+    assert next(row for row in tui._panel.page.rows if row.id == "spinner:dots").value == "Current"
+    assert _load_tui_appearance(tui.appearance_path).spinner == SpinnerSettings()
+    tui._cancel_choice()
+    assert tui._panel.picker.selected_id == "category:spinner"
+    tui._cancel_choice()
+    assert tui.input.text == "unsent spinner draft"
+
+
+@pytest.mark.parametrize("activity", ["work", "remote", "setup", "permission", "input"])
+def test_selected_spinner_used_by_every_tui_progress_indicator(monkeypatch, activity):
+    from klaude_cli.spinners import SpinnerSettings
+
+    tui = _fake_persistent_tui()
+    tui.appearance.spinner = SpinnerSettings("custom", ("ab", "cd"), 200)
+    monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: 0.2)
+    if activity == "work":
+        tui.running = True
+    elif activity == "remote":
+        tui._watching_remote = True
+    elif activity == "setup":
+        tui._setup_job = object()
+    elif activity == "permission":
+        tui._permission_request = {"tool": "run_shell"}
+    else:
+        tui._user_input_request = {"id": "test"}
+    assert " cd " in "".join(text for _, text in tui._status_fragments())
+    tui._setup_job = None
+    tui._permission_request = None
+    tui._user_input_request = None
+    tui.running = tui._watching_remote = False
+    assert "★ READY" in "".join(text for _, text in tui._status_fragments())
+
+
+def test_spinner_settings_live_keyboard_preview_resize_custom_and_close(tmp_path):
+    from prompt_toolkit.data_structures import Size
+
+    class SizedOutput(DummyOutput):
+        columns = 110
+
+        def get_size(self):
+            return Size(rows=30, columns=self.columns)
+
+    async def exercise():
+        tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+        output = SizedOutput()
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = tui.application.renderer.output = output
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+                tui._set_input("unsent spinner draft")
+                tui._open_settings_category("spinner")
+                pipe.send_text("/dots2")
+                await asyncio.sleep(0.08)
+                assert tui._panel.picker.selected_id == "spinner:dots2"
+                assert tui.appearance.spinner.name == "dots"
+                for width in (110, 70, 36, 18, 110):
+                    output.columns = width
+                    tui.application._redraw()
+                    assert tui.panel_header_window.render_info.window_height >= 3
+                    assert tui.panel_footer_window.render_info.window_height == 2
+                    assert tui._panel.picker.selected_id == "spinner:dots2"
+                pipe.send_text("\r")
+                await asyncio.sleep(0.08)
+                assert tui.appearance.spinner.name == "dots2"
+                assert tui._choice_kind == "spinner settings"
+                assert tui._panel.picker.query == "dots2"
+                assert tui._panel.row().value == "Current"
+                pipe.send_text("\x1b")  # Clear search before opening Custom.
+                await asyncio.sleep(0.6)
+                tui._panel.picker.focus("custom")
+                tui._apply_picker_state()
+                pipe.send_text("\r\r")  # Custom -> Frames.
+                await asyncio.sleep(0.08)
+                assert tui._settings_input_request["on_submit"] == ("spinner-frames",)
+                pipe.send_text("\x01\x0b👩🏽\u200d💻🇺🇸\r")
+                await asyncio.sleep(0.08)
+                assert tui._spinner_draft.frames == ("👩🏽\u200d💻", "🇺🇸")
+                assert tui.appearance.spinner.name == "dots2"
+                pipe.send_text("\x1b[B\x1b[B\r")  # Apply spinner.
+                await asyncio.sleep(0.08)
+                assert tui.appearance.spinner.name == "custom"
+                assert tui.application.refresh_interval == 0.1
+                pipe.send_text("\x1b")
+                await asyncio.sleep(0.6)
+                pipe.send_text("\x1b")
+                await asyncio.sleep(0.6)
+                assert tui._panel is None
+                assert tui.input.text == "unsent spinner draft"
+                assert tui.application.layout.current_control is tui.input.control
+                assert not tui.application.full_screen
+            finally:
+                tui.application.exit()
+                await task
+
+    asyncio.run(exercise())
+
+
+def test_spinner_direct_entry_clock_cadence_and_background_state_are_preserved(tmp_path):
+    from klaude_cli.spinners import SpinnerSettings
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._set_input("/settings spinner")
+    tui._submit_buffer(steer=False)
+    assert tui._choice_kind == "spinner settings"
+    tui.running = True
+    tui.pending.append("queued follow-up")
+    original = list(tui.agent.messages)
+    tui._before_render(None)
+    before = tui.output.text
+    tui._panel.picker.focus("spinner:dots8Bit")  # Upstream interval is 80 ms.
+    tui._apply_picker_state()
+    tui._before_render(None)
+    assert tui.application.refresh_interval == 0.08
+    assert tui.appearance.spinner.name == "dots"
+    assert tui.output.text == before
+    tui.appearance.spinner = SpinnerSettings("custom", ("ab", "x"), 16)
+    tui._panel.picker.focus("custom")
+    tui._apply_picker_state()
+    tui._before_render(None)
+    assert tui.application.refresh_interval == 0.016
+    tui._cancel_choice()
+    tui._cancel_choice()
+    tui._before_render(None)
+    assert tui.running
+    assert list(tui.pending) == ["queued follow-up"]
+    assert tui.agent.messages == original
+    tui.running = False
+    tui.pending.clear()
+    tui._before_render(None)
+    assert tui.application.refresh_interval == 0.1
+
+
+@pytest.mark.parametrize("target,field", [
+    ("line", "divider_color"), ("text", "divider_text_color"),
+])
+def test_divider_color_apply_keeps_page_filter_viewport_and_current_marker(tmp_path, target, field):
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui._open_settings_category("divider")
+    tui._apply_panel_action(PanelAction("divider-colors", target))
+    tui._panel.search_active = True
+    tui._set_input("blue")
+    tui._refresh_choice_filter()
+    tui._panel.picker.focus("color:blue")
+    tui._apply_picker_state()
+    panel = tui._panel
+    scroll = panel.scroll_top
+    tui._accept_choice()
+    assert tui._choice_kind == "divider color"
+    assert tui._panel is panel
+    assert panel.picker.query == "blue"
+    assert panel.scroll_top == scroll
+    assert panel.picker.selected_id == "color:blue"
+    assert panel.row().value == "Current"
+    assert [row.id for row in panel.page.rows if row.selected] == ["color:blue"]
+    assert getattr(_load_tui_appearance(tui.appearance_path), field) == "blue"
+    tui._emit("appearance_saved", (tui._appearance_save_revision, False))
+    tui._before_render(None)
+    assert panel.row().value == "Current"
+    assert getattr(tui.appearance, field) == "blue"
+    assert panel.picker.query == "blue"
+    tui._cancel_choice()  # Clear search.
+    tui._cancel_choice()  # Explicit back.
+    assert tui._choice_kind == "divider settings"
+
+
+@pytest.mark.parametrize("kind,field,choice,other", [
+    ("theme", "theme", "pastelle-pink", "autumn"),
+    ("text theme", "text_theme", "monokai", "vscode-dark"),
+])
+def test_theme_apply_keeps_picker_and_marks_applied_value_through_preview_and_failure(
+    tmp_path, kind, field, choice, other,
+):
+    from klaude_cli.main import TEXT_THEME_LABELS, TUI_THEME_LABELS
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    labels = TUI_THEME_LABELS if kind == "theme" else TEXT_THEME_LABELS
+    tui._begin_choice(kind, list(labels), getattr(tui.appearance, field))
+    original_id = tui._panel.row().id
+    assert tui._panel.row().value == "Current"
+    tui._panel.search_active = True
+    tui._set_input(choice)
+    tui._refresh_choice_filter()
+    tui._apply_choice_preview()
+    assert getattr(tui.appearance, field) == choice
+    assert [row.id for row in tui._panel.page.rows if row.selected] == [original_id]
+    panel = tui._panel
+    tui._accept_choice()
+    assert tui._choice_kind == kind
+    assert tui._panel is panel
+    assert tui._panel.picker.query == choice
+    assert tui._panel.row().value == "Current"
+    assert [row.id for row in tui._panel.page.rows if row.selected] == [choice]
+    assert getattr(_load_tui_appearance(tui.appearance_path), field) == choice
+    tui._emit("appearance_saved", (tui._appearance_save_revision, False))
+    tui._before_render(None)
+    assert tui._panel.row().value == "Current"
+    assert "Save unconfirmed" in "".join(text for _, text in tui._panel_footer_fragments())
+    tui._cancel_choice()  # Clear search.
+    tui._picker.focus(other)
+    tui._apply_picker_state()
+    tui._apply_choice_preview()
+    assert getattr(tui.appearance, field) == other
+    assert [row.id for row in tui._panel.page.rows if row.selected] == [choice]
+    tui._cancel_choice()
+    assert getattr(tui.appearance, field) == choice
+    assert tui._choice_kind == "theme settings"
+
+
+@pytest.mark.parametrize("editor", ["divider-pattern", "spinner-frames", "spinner-interval"])
+def test_appearance_editors_keyboard_delete_typing_paste_and_cancel(tmp_path, editor):
+    from klaude_cli.settings_panel import PanelAction
+
+    async def exercise():
+        tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+        tui._history = ["previous chat message"]
+        tui._set_input("unsent chat draft")
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+                if editor == "divider-pattern":
+                    tui._open_settings_category("divider")
+                else:
+                    tui._open_settings_category("spinner")
+                    tui._apply_panel_action(PanelAction("spinner-custom"))
+                parent = tui._panel
+                tui._apply_panel_action(PanelAction(editor))
+                assert tui._panel is parent  # Retained navigation state is not an active picker.
+                assert tui._choice_kind is None
+                assert not tui.input.buffer.multiline()
+                pipe.send_text("\x01\x0banyz\x7f\x08")
+                await asyncio.sleep(0.08)
+                assert tui.input.text == "an"
+                assert tui.application.layout.current_control is tui.input.control
+                pipe.send_text("y\x1b\r\x0a")  # Alt+Enter and Ctrl+J must not add newlines.
+                await asyncio.sleep(0.08)
+                assert tui.input.text == "any"
+                pipe.send_text("\x1b[A\x1b[B")  # Never load chat history into a setup editor.
+                await asyncio.sleep(0.08)
+                assert tui.input.text == "any"
+                pipe.send_text("\x1b[200~a\r\nb\nc\x1b[201~")
+                await asyncio.sleep(0.08)
+                assert tui.input.text == "anya b c"
+                assert not tui._composer_pastes
+                assert tui._session_io_request().draft is None
+                pipe.send_text("\x01\x0b\r")  # Invalid empty input stays editable.
+                await asyncio.sleep(0.08)
+                if editor != "spinner-interval":  # Blank interval has a valid default.
+                    assert tui._settings_input_request is not None
+                    pipe.send_text("any\x7f")
+                    await asyncio.sleep(0.08)
+                    assert tui.input.text == "an"
+                    pipe.send_text("\x1b")
+                    await asyncio.sleep(0.6)
+                assert tui._settings_input_request is None
+                assert tui._choice_kind == (
+                    "divider settings" if editor == "divider-pattern" else "spinner custom"
+                )
+                assert tui.appearance.divider_pattern == "━ "
+                assert tui.appearance.spinner.name == "dots"
+                tui._cancel_choice()
+                if editor != "divider-pattern":
+                    tui._cancel_choice()
+                tui._cancel_choice()
+                assert tui._panel is None
+                assert tui.input.text == "unsent chat draft"
+                assert tui.input.buffer.multiline()
+                pipe.send_text("\x0a")
+                await asyncio.sleep(0.08)
+                assert tui.input.text == "unsent chat draft\n"
+            finally:
+                tui.application.exit()
+                await task
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("text,surface", [
+    ("assistant answer\n", "class:output-field"),
+    ("━━ Session: test\nuser message\n", "class:output-field class:transcript.user-message"),
+    ("```python\nvalue = 1\n", "class:output-field class:transcript.code"),
+    ("assistant partial", "class:output-field"),
+])
+def test_gap_below_output_keeps_output_background(tmp_path, text, surface):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui.output.buffer.set_document(Document(text, len(text)), bypass_readonly=True)
+    tui._flush_transcript()
+    assert tui.output_spacer.height == 1
+    assert tui.input_spacer.height == 2
+    assert tui.output_spacer.style == "class:output-field"
+    assert tui.input_spacer.style == "class:output-field"
+    for theme in ("autumn", "pastelle"):
+        style = _tui_style(theme, "vscode-dark")
+        assert style.get_attrs_for_style_str(tui.output_spacer.style).bgcolor == (
+            style.get_attrs_for_style_str("class:output-field").bgcolor
+        )
+    tui._text_theme_preview_visible = True
+    assert tui.output_spacer.style == "class:output-field"
+    tui._text_theme_preview_visible = False
+    assert tui.output_spacer.style == "class:output-field"
+    tui._clear_session_view()
+    assert tui.output_spacer.style == "class:output-field"
+
+
+@pytest.mark.parametrize("backend", ["openai_api", "openai_codex", "gemini_api", "openrouter"])
+@pytest.mark.parametrize("signed_in", [False, True])
+def test_model_provider_sign_in_status_is_muted_beside_heading(monkeypatch, backend, signed_in):
+    import klaude_cli.main as cli_main
+
+    monkeypatch.setattr(cli_main, "_model_picker_rows", lambda *args, **kwargs: ([], {}))
+    tui = _fake_persistent_tui()
+    provider = cli_main.MODEL_PROVIDER_FOR_BACKEND[backend]
+    if backend == "openai_codex":
+        tui._codex_auth_state = signed_in
+    else:
+        _env_name, attribute = cli_main.MODEL_API_KEY_PROVIDERS[provider]
+        setattr(tui.cfg, attribute, "private-test-key" if signed_in else "")
+    tui._open_model_backend(backend, "cloud")
+    expected = "Status: signed in" if signed_in else "Status: not signed in"
+    heading = tui._panel.page.rows[0]
+    assert heading.label == provider.upper()
+    assert heading.description == expected
+    assert ("class:panel.muted", "  " + expected) in tui._panel_body().lines[0]
+    assert not any(row.label.startswith("Status:") for row in tui._panel.page.rows)
+    assert tui._choice_values[tui._choice_index] == ("Logout" if signed_in else "Login")
+    assert "private-test-key" not in repr(tui._panel.page)
+
+
+@pytest.mark.parametrize("width", [70, 120])
+@pytest.mark.parametrize(
+    "category", ["model", "tools", "permissions", "runtime", "memory", "spinner"]
+)
+def test_panel_errors_only_appear_in_page_footer(monkeypatch, category, width):
+    from os import terminal_size
+
+    import klaude_cli.main as cli_main
+
+    monkeypatch.setattr(
+        cli_main.shutil, "get_terminal_size", lambda fallback: terminal_size((width, 30))
+    )
+    monkeypatch.setattr(cli_main, "_model_picker_rows", lambda *args, **kwargs: ([], {}))
+    tui = _fake_persistent_tui()
+    if category == "model":
+        tui._open_model_backend("gemini_api", "cloud")
+    else:
+        tui._open_settings_category(category)
+    tui.status_error = "Gemini API — models unavailable"
+    footer = "".join(text for _, text in tui._panel_footer_fragments())
+    assert tui.status_error in footer
+    status = tui._status_fragments()
+    text = "".join(text for _, text in status)
+    assert "READY" in text
+    assert "ctx" in text
+    assert "q:" in text or "queue" in text
+    assert not any(style == "class:runtime_error" for style, _ in status)
+    assert tui.status_error not in text
+
+
+def test_modal_editor_errors_remain_visible_with_retained_parent_panel():
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui()
+    tui._open_settings_category("divider")
+    tui._apply_panel_action(PanelAction("divider-pattern"))
+    assert tui._panel is not None
+    tui.status_error = "Enter 1–24 characters"
+    assert tui.status_error in "".join(text for _, text in tui._status_fragments())
+    tui._answer_settings_input(None)
+    tui._cancel_choice()
+    tui._cancel_choice()
+    tui.status_error = "Normal chat error"
+    assert tui.status_error in "".join(text for _, text in tui._status_fragments())
+
+
+def test_panel_save_failure_keeps_error_in_footer():
+    tui = _fake_persistent_tui()
+    tui._open_settings_category("tools")
+    tui._runtime_save_state = "failed"
+    tui.status_error = "Retry save"
+    footer = "".join(text for _, text in tui._panel_footer_fragments())
+    assert "Save unconfirmed" in footer
+    assert "Retry save" in footer
+    assert tui.status_error not in "".join(text for _, text in tui._status_fragments())
+
+
+@pytest.mark.parametrize("row_id,pattern", [
+    ("pattern:heavy", "━"), ("pattern:light", "─"),
+    ("pattern:heavy-spaced", "━ "), ("pattern:light-spaced", "─ "),
+])
+def test_divider_presets_apply_only_pattern_and_preserve_focus(tmp_path, row_id, pattern):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui.appearance.divider_visible = False
+    tui.appearance.divider_color = "accent"
+    tui.appearance.divider_text_color = "red"
+    tui.appearance.divider_pattern = "∘₊✧"
+    tui._commit_appearance("Divider", fields=(
+        "divider_visible", "divider_color", "divider_text_color", "divider_pattern"
+    ))
+    tui._open_settings_category("divider")
+    panel = tui._panel
+    panel.picker.focus(row_id)
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._panel is panel
+    assert panel.picker.selected_id == row_id
+    assert tui.appearance.divider_pattern == pattern
+    saved = _load_tui_appearance(tui.appearance_path)
+    assert saved.divider_pattern == pattern
+    assert not saved.divider_visible
+    assert saved.divider_color == "accent"
+    assert saved.divider_text_color == "red"
+    assert [row.action.target for row in panel.page.rows if row.selected] == [
+        "heavy-spaced" if pattern == "━ " else "heavy" if pattern == "━"
+        else "light-spaced" if pattern == "─ " else "light"
+    ]
+    tui._emit("appearance_saved", (tui._appearance_save_revision, False))
+    tui._before_render(None)
+    assert panel.picker.selected_id == row_id
+    assert tui.appearance.divider_pattern == pattern
+    assert "Save unconfirmed" in "".join(text for _, text in tui._panel_footer_fragments())
+
+
+@pytest.mark.parametrize("target", ["line", "text"])
+def test_divider_color_reset_is_scoped_and_stays_on_page(tmp_path, target):
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui.appearance.divider_visible = False
+    tui.appearance.divider_color = "accent"
+    tui.appearance.divider_text_color = "red"
+    tui.appearance.divider_pattern = "─ "
+    tui._commit_appearance("Divider", fields=(
+        "divider_visible", "divider_color", "divider_text_color", "divider_pattern"
+    ))
+    tui._open_settings_category("divider")
+    tui._apply_panel_action(PanelAction("divider-colors", target))
+    panel = tui._panel
+    assert not any(row.label == "Default" for row in panel.page.rows)
+    reset = next(row for row in panel.page.rows if row.id == "color:default")
+    assert reset.display_label == "⏻ RESET TO DEFAULT"
+    assert reset.footer
+    panel.picker.focus(reset.id)
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._panel is panel
+    assert panel.picker.selected_id == reset.id
+    assert panel.row().value == ""
+    saved = _load_tui_appearance(tui.appearance_path)
+    assert saved.divider_color == ("same-as-input-field" if target == "line" else "accent")
+    assert saved.divider_text_color == ("bright-black" if target == "text" else "red")
+    assert saved.divider_pattern == "─ "
+    assert not saved.divider_visible
+
+
+def test_settings_reset_all_requires_confirmation_and_restores_parent_and_draft(tmp_path):
+    tui = _fake_persistent_tui(tmp_path / "appearance.json")
+    tui.appearance = TUIAppearance(theme="autumn", divider_visible=False, divider_pattern="─")
+    original = tui.appearance
+    revision = tui._appearance_save_revision
+    tui._set_input("unsent draft")
+    tui._begin_choice("settings", tui._settings_categories(), RESET_THEME_CHOICE)
+    tui._accept_choice()
+    assert tui._choice_kind == "settings reset confirmation"
+    assert tui._panel.picker.selected_id == "cancel"
+    assert tui.appearance is original
+    assert tui._appearance_save_revision == revision
+    assert not tui.appearance_path.exists()
+    tui._cancel_choice()
+    assert tui._panel.picker.selected_id == "reset-all"
+    tui._accept_choice()
+    tui._accept_choice()  # Cancel is the default action.
+    assert tui._choice_kind == "settings"
+    assert tui.appearance is original
+    assert tui._appearance_save_revision == revision
+    tui._accept_choice()
+    tui._panel.picker.focus("confirm")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui.appearance == TUIAppearance()
+    assert _load_tui_appearance(tui.appearance_path) == TUIAppearance()
+    assert tui._appearance_save_revision == revision + 1
+    assert tui._choice_kind == "settings"
+    assert tui._panel.picker.selected_id == "reset-all"
+    tui._accept_choice()
+    assert tui._panel.picker.selected_id == "cancel"  # Reopening resets focus.
+    tui._cancel_choice()
+    tui._cancel_choice()
+    assert tui.input.text == "unsent draft"
+
+
+@pytest.mark.parametrize("command", ["/settings reset", "/settings reset all"])
+def test_settings_reset_command_requires_confirmation(command):
+    tui = _fake_persistent_tui()
+    tui.appearance.divider_visible = False
+    revision = tui._appearance_save_revision
+    tui._set_input(command)
+    tui._submit_buffer(steer=False)
+    assert tui._choice_kind == "settings reset confirmation"
+    assert tui._panel.picker.selected_id == "cancel"
+    assert not tui.appearance.divider_visible
+    assert tui._appearance_save_revision == revision
+
+
+@pytest.mark.parametrize("backend,provider", [
+    ("ollama", None), ("openrouter", "OpenRouter"), ("openai_api", "OpenAI"),
+    ("openai_codex", "OpenAI Codex"), ("gemini_api", "Google"),
+])
+def test_model_panel_current_markers_follow_active_source_provider_and_model(
+    monkeypatch, backend, provider
+):
+    tui = _fake_persistent_tui()
+    active = ModelInfo(
+        backend, "openrouter/free" if backend == "openrouter" else "active-model", "Active"
+    )
+    other = ModelInfo(backend, "other-model", "Other")
+    tui.agent.model_info = active
+    tui.agent.model = active.model_id
+    tui._local_models = [active, other] if backend == "ollama" else []
+    monkeypatch.setattr("klaude_cli.main._available_chat_models", lambda *args: [active, other])
+    monkeypatch.setattr(tui, "_refresh_local_models", lambda: None)
+    monkeypatch.setattr(tui, "_refresh_codex_auth_state", lambda: None)
+    tui._open_model_source("settings")
+    assert [(row.label, row.value) for row in tui._panel.page.rows if row.selected] == [
+        ("Local" if backend == "ollama" else "Cloud", "Current")
+    ]
+    if provider:
+        tui._open_cloud_provider()
+        assert [(row.label, row.value) for row in tui._panel.page.rows if row.selected] == [
+            ({"OpenAI": "OpenAI API", "Google": "Gemini API"}.get(provider, provider), "Current")
+        ]
+    tui._open_model_backend(backend, "cloud" if provider else "source")
+    assert [(row.label, row.value) for row in tui._panel.page.rows if row.selected] == [
+        (active.model_id, "Current")
+    ]
+    other_row = next(row for row in tui._panel.page.rows if row.label == other.model_id)
+    tui._panel.picker.focus(other_row.id)
+    tui._apply_picker_state()
+    assert next(row for row in tui._panel.page.rows if row.selected).label == active.model_id
+    assert tui.agent.model_info == active
+    tui._open_model_backend("openrouter" if backend != "openrouter" else "ollama", "source")
+    assert not any(row.selected for row in tui._panel.page.rows)
+
+
+def test_settings_tools_summary_counts_live_registered_tools_after_toggle_and_back(tmp_path):
+    tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "prefs.json")
+    tui.agent.tools = {"read_file": object(), "web_search": object(), "mcp_test": object()}
+    tui.agent.disabled_tool_names = {"mcp_test", "not_registered"}
+    tui._begin_choice("settings", tui._settings_categories(), "tools")
+    assert tui._panel.row().value == "2/3 enabled"
+    tui._accept_choice()
+    row = next(row for row in tui._panel.page.rows if row.id == "web search")
+    tui._panel.picker.focus(row.id)
+    tui._apply_picker_state()
+    tui._activate_panel_toggle()
+    tui._cancel_choice()
+    assert tui._panel.picker.selected_id == "category:tools"
+    assert tui._panel.row().value == "1/3 enabled"
+
+
+def test_settings_skills_count_loads_without_navigation_and_preserves_focus_and_filter():
+    tui = _fake_persistent_tui()
+    tui._begin_choice("settings", tui._settings_categories(), "tools")
+    panel = tui._panel
+    skills = next(row for row in panel.page.rows if row.id == "category:skills")
+    assert skills.value == "Loading…"
+    assert tui._skills_inventory_loading
+    panel.search_active = True
+    tui._set_input("tools")
+    tui._refresh_choice_filter()
+    tui._emit("skills_inventory", ([{"name": "demo"}, {"name": "other"}], ""))
+    tui._before_render(None)
+    assert tui._panel is panel
+    assert panel.picker.selected_id == "category:tools"
+    assert panel.picker.query == "tools"
+    skills = next(row for row in panel.page.rows if row.id == "category:skills")
+    assert skills.value == "2 installed"
+    tui._cancel_choice()
+    tui._cancel_choice()
+    assert not tui._skills_inventory_loading
+
+
+def test_settings_skills_empty_and_unavailable_counts_are_honest():
+    tui = _fake_persistent_tui()
+    tui._skills_inventory_error = "Inventory unavailable"
+    page = tui._settings_home_page()
+    assert next(row for row in page.rows if row.id == "category:skills").value == "Unavailable"
+    tui._skills_inventory = []
+    page = tui._settings_home_page()
+    assert next(row for row in page.rows if row.id == "category:skills").value == "0 installed"
+
+
+@pytest.mark.parametrize("enabled,label", [(True, "1 saved, ON"), (False, "1 saved, OFF")])
+def test_settings_memory_summary_shows_saved_count_and_flag(enabled, label):
+    from klaude_cli.settings_overview import SettingsOverviewSnapshot
+
+    tui = _fake_persistent_tui()
+    tui._settings_overview_scope = tui._settings_overview_paths()
+    tui._settings_overview = SettingsOverviewSnapshot().refreshed({
+        "memory_enabled": enabled, "memory_count": 1, "mcp_enabled": 0, "mcp_total": 0,
+    }, time.monotonic())
+    row = next(row for row in tui._settings_home_page().rows if row.id == "category:memory")
+    assert row.value == label
+
+
+def test_appearance_parent_summaries_show_defaults_and_keep_actual_choices():
+    tui = _fake_persistent_tui()
+    tui.appearance = TUIAppearance()
+    rows = {row.id: row for row in tui._settings_home_page().rows}
+    assert rows["category:theme"].value == "Default"
+    assert rows["category:input field"].value == "6-6, border"
+    assert rows["category:spinner"].value == "Default, 80 ms"
+    assert rows["category:divider"].value == "ON, default, default"
+    tui._open_settings_category("divider")
+    rows = {row.id: row for row in tui._panel.page.rows}
+    assert rows["line-color"].value == rows["text-color"].value == "Default"
+    tui._open_settings_category("theme")
+    rows = {row.id: row for row in tui._panel.page.rows}
+    assert rows["interface theme"].value == rows["text/code theme"].value == "Default"
+    tui.appearance.theme = "autumn"
+    tui.appearance.text_theme = "monokai"
+    tui.appearance.divider_color = "red"
+    tui.appearance.divider_text_color = "accent"
+    rows = {row.id: row for row in tui._settings_home_page().rows}
+    assert rows["category:theme"].value == "Autumn, Monokai"
+    assert rows["category:divider"].value == "ON, red, accent"
+
+
+def test_settings_input_and_divider_summaries_show_live_values_without_comments():
+    tui = _fake_persistent_tui()
+    tui.appearance.divider_text_color = "bright-black"
+    rows = {row.id: row for row in tui._settings_home_page().rows}
+    assert rows["category:input field"].value == "6-6, border"
+    assert rows["category:input field"].description == ""
+    assert rows["category:divider"].value == "ON, default, default"
+    assert rows["category:divider"].description == ""
+    tui.appearance.input_border = False
+    tui.appearance.input_height = 4
+    tui.appearance.input_max_height = 6
+    tui.appearance.divider_visible = False
+    rows = {row.id: row for row in tui._settings_home_page().rows}
+    assert rows["category:input field"].value == "4-6, no border"
+    assert rows["category:divider"].value == "OFF, default, default"
+
+
+@pytest.mark.parametrize("truncated,prefix", [(False, ""), (True, "At least ")])
+def test_mcp_page_heading_shows_installed_and_enabled_counts(truncated, prefix):
+    tui = _fake_persistent_tui()
+    tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
+    tui._mcp_inventory_loaded_at = time.monotonic()
+    tui._mcp_inventory = {"servers": [
+        {"name": "one", "enabled": True, "oauth": False, "transport": "http", "tool_count": 2},
+        {"name": "two", "enabled": False, "oauth": False, "transport": "stdio", "tool_count": 0},
+    ], "truncated": truncated}
+    tui._open_settings_category("mcp servers")
+    heading = next(row for row in tui._panel.page.rows if row.label == "MCP Servers")
+    assert heading.description.startswith(
+        prefix + "2 installed, 1 enabled · Configuration snapshot "
+    )
+
+
+def test_settings_conventions_use_scoped_reset_and_footer_only_persistence(monkeypatch):
+    monkeypatch.setattr("klaude_cli.main.shutil.which", lambda name: "/usr/bin/nano")
+    tui = _fake_persistent_tui()
+    tui._runtime_device_mode = "auto"
+    reset = next(row for row in tui._settings_home_page().rows if row.id == "reset-all")
+    assert reset.display_label == "⏻ RESET APPEARANCE SETTINGS"
+    tui._runtime_save_state = "saved"
+    tui._open_settings_category("runtime")
+    assert "Saved" in "".join(text for _, text in tui._panel_footer_fragments())
+    assert not any("saved" in row.label.lower() for row in tui._panel.page.rows)
+    device = next(row for row in tui._panel.page.rows if row.id == "device")
+    assert device.value == "Auto"
+    editor = next(row for row in tui._panel.page.rows if row.id == "edit config.toml (nano)")
+    assert editor.label == "Edit configuration"
+    tui._open_settings_category("tools")
+    assert not any(row.label.lower().startswith("provider ") for row in tui._panel.page.rows)
+    assert not any("saved" in row.label.lower() for row in tui._panel.page.rows)
+    tui._memory_save_state = "saved"
+    tui._open_settings_category("memory")
+    assert not any("preference saved" in row.label.lower() for row in tui._panel.page.rows)
+    assert "Saved" in "".join(text for _, text in tui._panel_footer_fragments())
+
+
+@pytest.mark.parametrize("input_field, expected", [
+    ({}, (6, 6)),
+    ({"min_height": 8, "max_height": 12}, (8, 12)),
+    ({"height": 8}, (8, 12)),
+    ({"min_height": 9, "max_height": 2}, (6, 6)),
+])
+def test_input_height_defaults_preserve_explicit_and_legacy_ranges(tmp_path, input_field, expected):
+    path = tmp_path / "appearance.json"
+    path.write_text(json.dumps({"input_field": input_field}))
+    appearance = _load_tui_appearance(path)
+    assert (appearance.input_height, appearance.input_max_height) == expected
+    default = TUIAppearance()
+    assert (default.input_height, default.input_max_height) == (6, 6)
+
+
+@pytest.mark.parametrize("mcp", [False, True])
+def test_space_cycles_individual_permission_policies_and_preserves_focus(tmp_path, mcp):
+    from klaude_core.mcp_client import namespaced_tool_name
+
+    async def exercise():
+        path = tmp_path / "permissions.json"
+        tui = _fake_persistent_tui(chat_preferences_path=path)
+        if mcp:
+            name = namespaced_tool_name("context7", "get_docs")
+            tui.agent.tools = {name: SimpleNamespace(description="MCP server context7: get_docs")}
+            tui._open_mcp_permission_server("context7")
+            row_id = f"mcp-tool:{name}"
+        else:
+            name = "write_file"
+            tui._open_settings_category("permissions")
+            row_id = f"tool:{name}"
+        tui._panel.picker.focus(row_id)
+        tui._apply_picker_state()
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = DummyOutput()
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+                for policy in ("allow", "deny", "ask"):
+                    pipe.send_text(" ")
+                    await asyncio.sleep(0.05)
+                    assert tui.agent.gate.policies[name] == policy
+                    assert json.loads(path.read_text())["permissions"][name] == policy
+                    assert tui._panel.picker.selected_id == row_id
+                    assert not tui._panel.search_active
+                pipe.send_text("/get docs" if mcp else "/write file")
+                await asyncio.sleep(0.05)
+                assert " " in tui._panel.picker.query
+                assert tui.agent.gate.policies[name] == "ask"
+            finally:
+                tui.application.exit()
+                await task
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("category, first", [("divider", "visible"), ("spinner", "custom")])
+def test_appearance_page_reentry_starts_at_first_option_after_back(category, first):
+    tui = _fake_persistent_tui()
+    tui._begin_choice("settings", tui._settings_categories(), category)
+    tui._accept_choice()
+    assert tui._panel.picker.selected_id == first
+    tui._panel.picker.focus("back")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._choice_kind == "settings"
+    tui._accept_choice()
+    assert tui._panel.picker.selected_id == first
+    assert tui._panel.picker.query == ""
+
+
+@pytest.mark.parametrize("arguments", ["-lsha ~", "~ -lsha"])
+def test_ls_expands_home_with_flags_in_either_order(tmp_path, monkeypatch, arguments):
+    from klaude_cli.main import _list_agent_directory
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".hidden-file").write_text("test")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    agent = SimpleNamespace(workdir=workspace)
+    ok, output = _list_agent_directory(agent, arguments)
+    assert ok, output
+    assert ".hidden-file" in output
+    assert agent.workdir == workspace
+
+
+def test_ls_quoted_paths_and_option_terminator_are_literal(tmp_path):
+    from klaude_cli.main import _list_agent_directory
+
+    directory = tmp_path / "folder with spaces"
+    directory.mkdir()
+    (directory / "example.txt").write_text("test")
+    agent = SimpleNamespace(workdir=tmp_path)
+    ok, output = _list_agent_directory(agent, '-a "folder with spaces"')
+    assert ok, output
+    assert "example.txt" in output
+    (tmp_path / "-literal").mkdir()
+    (tmp_path / "-literal" / "safe.txt").write_text("test")
+    ok, output = _list_agent_directory(agent, "-- -literal")
+    assert ok, output
+    assert "safe.txt" in output
+    ok, output = _list_agent_directory(agent, '"unterminated')
+    assert not ok
+    assert "invalid ls arguments" in output
+
+
+def test_mcp_remove_settings_confirmation_cancel_and_submit(tmp_path, monkeypatch):
+    from klaude_cli.mcp_mutations import MCPMutationResult, MCPRemove
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._mcp_inventory = {"servers": [{
+        "name": "docs", "enabled": False, "transport": "http", "oauth": False,
+        "tool_count": 0, "fingerprint": "a" * 64,
+    }], "truncated": False}
+    tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
+    tui._mcp_inventory_loaded_at = time.monotonic()
+    requests = []
+    tui._mcp_mutations = SimpleNamespace(path=tui.cfg.mcp_servers_file,
+                                       submit=lambda request: requests.append(request) or True)
+    tui._open_settings_category("mcp servers")
+    assert "Delete MCP" in tui._choice_values
+    tui._panel.picker.focus(next(row.id for row in tui._panel.page.rows
+                                if row.label == "Delete MCP"))
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._choice_kind == "mcp remove servers"
+    tui._accept_choice()
+    assert tui._panel.picker.selected_id == "cancel"
+    assert requests == []
+    tui._cancel_choice()
+    assert tui._choice_kind == "mcp remove servers"
+    tui._accept_choice()
+    assert tui._panel.picker.selected_id == "cancel"
+    tui._panel.picker.focus("remove")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert len(requests) == 1
+    assert isinstance(requests[0], MCPRemove)
+    assert requests[0].name == "docs" and requests[0].fingerprint == "a" * 64
+    assert tui._choice_kind == "mcp settings"
+    assert "Removing" in tui.status_error
+    published = []
+    monkeypatch.setattr(tui, "_publish_mcp_tools", lambda *catalog: published.append(catalog))
+    catalog = ([], None)
+    tui._events.put(("mcp_mutation_saved", MCPMutationResult(
+        requests[0], str(tui.cfg.mcp_servers_file), "saved", catalog,
+    )))
+    tui._before_render(tui.application)
+    assert published == [catalog]
+    assert tui._mcp_mutation_pending is None
+    assert "Removed MCP server docs" in tui.output.text
+
+
+def test_mcp_actions_order_and_nonselectable_gap_before_servers():
+    from klaude_cli.settings_panel import RowKind
+
+    tui = _fake_persistent_tui()
+    tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
+    tui._mcp_inventory_loaded_at = time.monotonic()
+    tui._mcp_inventory = {"servers": [{
+        "name": "docs", "enabled": True, "transport": "http", "oauth": False,
+        "tool_count": 2, "fingerprint": "a" * 64,
+    }], "truncated": False}
+    tui._open_settings_category("mcp servers")
+    rows = tui._panel.page.rows
+    start = next(index for index, row in enumerate(rows) if row.label == "MCP Servers")
+    assert [row.label for row in rows[start + 1:start + 4]] == [
+        "Reload", "Manage permissions", "Delete MCP",
+    ]
+    server = next(index for index, row in enumerate(rows) if row.label == "docs")
+    assert rows[server - 1].kind == RowKind.SEPARATOR
+    assert not rows[server - 1].selectable
+    tui._panel.picker.focus(rows[start + 3].id)
+    tui._apply_picker_state()
+    tui._move_choice(1)
+    assert tui._panel.row().label == "docs"
+
+
+def test_skill_drop_inventory_shows_files_without_importing_and_preserves_focus():
+    tui = _fake_persistent_tui()
+    tui._skills_inventory = [{
+        "name": "demo", "library": "demo", "indexed_file_count": 1, "identity": "id",
+    }]
+    requests = []
+    tui._skill_actions.submit = lambda request: requests.append(request) or True
+    tui._open_settings_category("skills")
+    tui._panel.picker.focus("skill:demo")
+    tui._apply_picker_state()
+    tui._events.put(("skill_drop_inventory", ("file.zip", "file2.zip")))
+    tui._before_render(tui.application)
+    assert tui._panel.picker.selected_id == "skill:demo"
+    assert requests == []
+    rendered = "".join(text for line in tui._panel_body().lines for _, text in line)
+    assert "Detected 2 new skill files" in rendered
+    assert "Press Import skills to start importing" in rendered
+    assert "- file.zip" in rendered and "- file2.zip" in rendered
+    tui._panel.picker.focus("import")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert len(requests) == 1 and requests[0].kind == "import"
+
+
+def test_skills_discovery_reload_and_delete_navigation_preserve_safety():
+    tui = _fake_persistent_tui()
+    tui._skills_inventory = [{"name": "demo", "library": "demo", "identity": "reviewed"}]
+    tui._skills_inventory_loaded_at = time.monotonic()
+    requests = []
+    tui._skill_actions.submit = lambda action: requests.append(action) or True
+    tui._open_settings_category("skills")
+    assert tui._panel.page.rows[0].label == "DISCOVERY"
+    tui._panel.picker.focus("search")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._choice_kind == "skills settings" and requests == []
+    assert not tui._panel.row().enabled
+    tui._panel.picker.focus("reload")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._skills_inventory_loading
+    assert tui._panel.picker.selected_id == "reload"
+    assert requests == []
+    tui._panel.picker.focus("delete-skills")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._choice_kind == "skill delete list"
+    assert tui._panel.page.breadcrumb == ("Settings", "Skills", "Delete skill")
+    tui._accept_choice()
+    assert tui._panel.page.breadcrumb[-1] == "Confirm deletion"
+    assert tui._panel.picker.selected_id == "back"
+    assert requests == []
+    tui._accept_choice()
+    assert tui._choice_kind == "skill delete list"
+    tui._cancel_choice()
+    assert tui._choice_kind == "skills settings"
+    assert tui._panel.picker.selected_id == "delete-skills"

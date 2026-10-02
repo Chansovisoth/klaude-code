@@ -43,8 +43,10 @@ import uuid
 import webbrowser
 from collections import deque
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractContextManager, nullcontext
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from datetime import datetime
 from difflib import get_close_matches
 from enum import StrEnum
@@ -152,6 +154,7 @@ from prompt_toolkit.layout import (
     FloatContainer,
     HSplit,
     Layout,
+    VerticalAlign,
     VSplit,
     Window,
 )
@@ -180,6 +183,21 @@ from rich.table import Table
 from rich.text import Text
 
 from .background_jobs import OwnedBackgroundJobs
+from .dividers import (
+    DEFAULT_DIVIDER_COLOR,
+    DEFAULT_DIVIDER_PATTERN,
+    DEFAULT_DIVIDER_TEXT_COLOR,
+    DIVIDER_COLORS,
+    DIVIDER_PATTERNS,
+    LINE_COLORS,
+    color_label,
+    divider_color_page,
+    divider_fragments,
+    divider_page,
+    divider_styles,
+    validate_divider_pattern,
+)
+from .mcp_management import removal_confirmation, removal_page
 from .mcp_mutations import (
     MCPAddDisabled,
     MCPEnable,
@@ -188,6 +206,7 @@ from .mcp_mutations import (
     MCPMutationResult,
     MCPMutationWriter,
     MCPReload,
+    MCPRemove,
     MCPToggle,
 )
 from .memory_panel import memory_detail_page, memory_list_page
@@ -211,12 +230,26 @@ from .settings_panel import (
     PanelPage,
     PanelRow,
     PanelState,
+    RowControl,
     RowKind,
     render_body,
     render_footer,
     render_header,
 )
 from .settings_writer import SettingsWriter
+from .skill_actions import SkillAction, SkillActionWriter
+from .skills_panel import skill_delete_page, skill_detail_page, skills_page
+from .spinners import (
+    CATALOG,
+    Spinner,
+    SpinnerSettings,
+    custom_spinner_page,
+    load_spinner_settings,
+    parse_frames,
+    parse_interval,
+    spinner_page,
+)
+from .terminal_surface import clear_output_surface, startup_output_surface
 
 app = typer.Typer(
     add_completion=False,
@@ -293,11 +326,12 @@ ANSI_SEQUENCES.setdefault("\x1b[27;5;99~", Keys.ControlC)
 ANSI_SEQUENCES.setdefault("\x1b[27;5;100~", Keys.ControlD)
 ANSI_SEQUENCES.setdefault("\x1b[99;5u", Keys.ControlC)
 ANSI_SEQUENCES.setdefault("\x1b[100;5u", Keys.ControlD)
-DEFAULT_TUI_THEME = "autumn"
+DEFAULT_TUI_THEME = "pastelle-azure"
 DEFAULT_TEXT_THEME = "vscode-dark"
 DEFAULT_INPUT_BORDER = True
 MIN_INPUT_HEIGHT = 1
-DEFAULT_INPUT_HEIGHT = 8
+DEFAULT_INPUT_HEIGHT = 6
+DEFAULT_INPUT_MAX_HEIGHT = 6
 MAX_INPUT_HEIGHT = 12
 INPUT_PLACEHOLDER_TEXT = "Ask Klaude anything. Type '/' to use commands."
 INIT_REQUEST_PREFIX = "[Klaude /init repository-guidance task]"
@@ -305,7 +339,6 @@ LARGE_PASTE_CHARACTER_THRESHOLD = 1_000
 ACTIVE_SESSION_BADGE = "[ACTIVE]"
 ESCAPE_SEQUENCE_TIMEOUT = 0.05
 CHARACTER_STREAM_DELAY = 0.01
-BRAILLE_LOADING_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 DEBUG_LABEL_ACTIVITY_STATES = (
     "working",
     "exploring",
@@ -457,6 +490,8 @@ PROVIDER_API_KEY_DESCRIPTIONS = {
 SETTINGS_CATEGORY_FOR_KIND = {
     "theme settings": "theme",
     "input field settings": "input field",
+    "divider settings": "divider",
+    "spinner settings": "spinner",
     "memory settings": "memory",
     "skills settings": "skills",
     "providers settings": "providers",
@@ -466,7 +501,7 @@ SETTINGS_CATEGORY_FOR_KIND = {
     "runtime settings": "runtime",
 }
 
-# These existing settings flows retain their action and background-job state
+# These existing settings/session flows retain their action and background-job state
 # machines while using the shared panel presentation. Transient masked input
 # and setup-progress composers intentionally remain separate.
 PANEL_SETTINGS_KINDS = frozenset({
@@ -478,6 +513,7 @@ PANEL_SETTINGS_KINDS = frozenset({
     "mcp registry results",
     "mcp registry detail", "mcp transport", "mcp remote authentication",
     "mcp enable confirmation", "mcp review",
+    "session",
 })
 
 MODEL_BACKEND_FOR_API_KEY = {
@@ -1009,7 +1045,12 @@ class TranscriptLexer(Lexer):
             or (line.startswith("║") and line.endswith("║"))
         )
 
-    def __init__(self) -> None:
+    def __init__(
+        self, divider_visible: Callable[[], bool] | None = None,
+        divider_pattern: Callable[[], str] | None = None,
+    ) -> None:
+        self._divider_visible = divider_visible or (lambda: True)
+        self._divider_pattern = divider_pattern or (lambda: "━")
         self._markdown = PygmentsLexer(MarkdownLexer)
         self._diff = PygmentsLexer(DiffLexer)
 
@@ -1132,8 +1173,11 @@ class TranscriptLexer(Lexer):
                 return [("class:transcript.logo", line)]
             if line in HELP_CATEGORY_TITLES:
                 return [("class:help.category", line)]
-            if line.startswith(self._MESSAGE_PREFIXES):
-                return [("class:transcript.divider", line)]
+            divider = divider_fragments(
+                line, visible=self._divider_visible(), pattern=self._divider_pattern()
+            )
+            if divider is not None:
+                return divider
             status_notice = self._status_notice_fragments(line)
             if status_notice is not None:
                 return status_notice
@@ -1303,7 +1347,10 @@ class InputPlaceholderProcessor(Processor):
         )
 
 
-def _tui_style(theme: str, text_theme: str):
+def _tui_style(
+    theme: str, text_theme: str, *, divider_color: str = DEFAULT_DIVIDER_COLOR,
+    divider_text_color: str = DEFAULT_DIVIDER_TEXT_COLOR,
+):
     chrome = TUI_THEME_STYLES.get(theme, TUI_THEME_STYLES[DEFAULT_TUI_THEME])
     input_background = next(
         token.removeprefix("bg:")
@@ -1463,6 +1510,11 @@ def _tui_style(theme: str, text_theme: str):
                 }
             ),
             TRANSCRIPT_STYLE,
+            Style.from_dict(divider_styles(
+                divider_color, divider_text_color,
+                accent=foreground(chrome["frame.border"]), foreground=output_foreground,
+                input_background=input_background,
+            )),
         ]
     )
 
@@ -1473,7 +1525,12 @@ class TUIAppearance:
     text_theme: str = DEFAULT_TEXT_THEME
     input_border: bool = DEFAULT_INPUT_BORDER
     input_height: int = DEFAULT_INPUT_HEIGHT
-    input_max_height: int = MAX_INPUT_HEIGHT
+    input_max_height: int = DEFAULT_INPUT_MAX_HEIGHT
+    divider_visible: bool = True
+    divider_color: str = DEFAULT_DIVIDER_COLOR
+    divider_text_color: str = DEFAULT_DIVIDER_TEXT_COLOR
+    divider_pattern: str = DEFAULT_DIVIDER_PATTERN
+    spinner: SpinnerSettings = dataclass_field(default_factory=SpinnerSettings)
 
 
 def _load_tui_appearance(path: Path) -> TUIAppearance:
@@ -1500,9 +1557,23 @@ def _load_tui_appearance(path: Path) -> TUIAppearance:
     if not isinstance(input_group, dict):
         input_group = {}
     lower = input_group.get("min_height", input_group.get("height", DEFAULT_INPUT_HEIGHT))
-    upper = input_group.get("max_height", MAX_INPUT_HEIGHT)
+    upper = input_group.get(
+        "max_height",
+        MAX_INPUT_HEIGHT if "min_height" in input_group or "height" in input_group
+        else DEFAULT_INPUT_MAX_HEIGHT,
+    )
     if type(lower) is not int or type(upper) is not int or not 1 <= lower <= upper <= 12:
-        lower, upper = DEFAULT_INPUT_HEIGHT, MAX_INPUT_HEIGHT
+        lower, upper = DEFAULT_INPUT_HEIGHT, DEFAULT_INPUT_MAX_HEIGHT
+    divider = value.get("divider", {})
+    if not isinstance(divider, dict):
+        divider = {}
+    visible = divider.get("visible", True)
+    color = divider.get("color", DEFAULT_DIVIDER_COLOR)
+    text_color = divider.get("text_color", DEFAULT_DIVIDER_TEXT_COLOR)
+    try:
+        pattern = validate_divider_pattern(divider.get("pattern", DEFAULT_DIVIDER_PATTERN))
+    except ValueError:
+        pattern = DEFAULT_DIVIDER_PATTERN
     return TUIAppearance(
         theme=theme,
         text_theme=text_theme,
@@ -1511,6 +1582,14 @@ def _load_tui_appearance(path: Path) -> TUIAppearance:
         else DEFAULT_INPUT_BORDER,
         input_height=lower,
         input_max_height=upper,
+        divider_visible=visible if type(visible) is bool else True,
+        divider_color=color if isinstance(color, str) and color in LINE_COLORS
+        else DEFAULT_DIVIDER_COLOR,
+        divider_text_color=text_color
+        if isinstance(text_color, str) and text_color in DIVIDER_COLORS
+        else DEFAULT_DIVIDER_TEXT_COLOR,
+        divider_pattern=pattern,
+        spinner=load_spinner_settings(value.get("spinner")),
     )
 
 
@@ -1526,6 +1605,17 @@ def _appearance_changes(
             ("input_field", "min_height"): appearance.input_height,
         },
         "input_max_height": {("input_field", "max_height"): appearance.input_max_height},
+        "divider_visible": {("divider", "visible"): appearance.divider_visible},
+        "divider_color": {("divider", "color"): appearance.divider_color},
+        "divider_text_color": {("divider", "text_color"): appearance.divider_text_color},
+        "divider_pattern": {("divider", "pattern"): appearance.divider_pattern},
+        "spinner_name": {("spinner", "name"): appearance.spinner.name},
+        "spinner_custom_frames": {
+            ("spinner", "custom_frames"): list(appearance.spinner.custom_frames)
+        },
+        "spinner_custom_interval": {
+            ("spinner", "custom_interval"): appearance.spinner.custom_interval
+        },
     }
     changes: dict[tuple[str, ...], object] = {}
     for field_name in fields if fields is not None else values:
@@ -2870,13 +2960,17 @@ CHAT_COMMANDS = (
         "settings",
         CommandSurface.CHAT,
         "/settings [CATEGORY]",
-        "Configure Theme, Input Field, Models, Providers, Tools, or Runtime settings.",
+        "Configure appearance, models, providers, tools, MCPs, memory, skills, "
+        "permissions, and runtime.",
         examples=(
             "/settings",
             "/settings theme",
+            "/settings divider",
+            "/settings spinner",
             "/settings models",
             "/settings providers",
             "/settings tools",
+            "/settings mcps",
             "/settings runtime",
         ),
     ),
@@ -2957,7 +3051,8 @@ CHAT_COMMANDS = (
         "refresh-tui",
         CommandSurface.CHAT,
         "/refresh",
-        "Redraw the TUI without changing the chat session.",
+        "Repaint the TUI and visible chat history with current styling "
+        "without changing the session.",
     ),
     CommandSpec(
         "cd",
@@ -2975,8 +3070,9 @@ CHAT_COMMANDS = (
     CommandSpec(
         "ls",
         CommandSurface.CHAT,
-        "/ls",
-        "List files and directories in the current agent workspace.",
+        "/ls [OPTIONS] [PATH ...]",
+        "List files and directories at the given paths, or in the current workspace.",
+        examples=("/ls -lsha ~", "/ls ~ -lsha"),
     ),
     CommandSpec(
         "attach",
@@ -3120,7 +3216,7 @@ class ChatCommandCompleter(Completer):
             fragment = attachment_fragment.removeprefix('"')
             quoted = attachment_fragment.startswith('"')
             if directory_completion and fragment in {"", ".."}:
-                for value in (["../", "~/"] if not fragment else ["../"]):
+                for value in ["../"]:
                     yield Completion(
                         value + ('"' if quoted else ''),
                         start_position=-len(fragment),
@@ -7212,8 +7308,8 @@ def _list_agent_directory(agent: Agent, arguments: str = "") -> tuple[bool, str]
         tokens = shlex.split(arguments) if arguments.strip() else []
     except ValueError as exc:
         return False, f"invalid ls arguments: {exc}"
-    # Keep ls useful while preserving the active workspace jail. Options are
-    # passed directly to ls; positional paths must remain below the workspace.
+    # This explicit user command is read-only navigation, like /cd. It does not
+    # widen the agent tool jail or execute a shell; flags may precede or follow paths.
     path_tokens: list[str] = []
     options: list[str] = []
     options_done = False
@@ -7225,13 +7321,10 @@ def _list_agent_directory(agent: Agent, arguments: str = "") -> tuple[bool, str]
         if not options_done and token.startswith("-"):
             options.append(token)
             continue
-        path_tokens.append(token)
-    for token in path_tokens:
-        candidate = (
-            (current / token).resolve() if not Path(token).is_absolute() else Path(token).resolve()
-        )
-        if not candidate.is_relative_to(current):
-            return False, f"path escapes workspace: {token}"
+        try:
+            path_tokens.append(str(Path(token).expanduser()))
+        except RuntimeError as exc:
+            return False, f"invalid ls path: {exc}"
     try:
         completed = subprocess.run(
             [
@@ -8511,6 +8604,7 @@ class PersistentChatTUI:
         self._memory_fact_save_state = ""
         self._panel_composer_draft: tuple[str, list[ComposerPaste]] | None = None
         self._resume_choices: dict[str, str] = {}
+        self._resume_sessions: dict[str, dict[str, Any]] = {}
         self._choice_index = 0
         self._choice_click_id: str | None = None
         self._choice_prior_model: str | None = None
@@ -8520,6 +8614,7 @@ class PersistentChatTUI:
         self._model_activation_id = ""
         self._model_flow_parent = ""
         self._model_auth_backend = ""
+        self._model_auth_status = ""
         self._model_choices: dict[str, ModelInfo] = {}
         self._codex_auth_state: bool | None = None
         self._codex_auth_checking = False
@@ -8535,10 +8630,18 @@ class PersistentChatTUI:
         self._background_jobs = OwnedBackgroundJobs(self._emit)
         self._session_io = SessionIOCoordinator(memory, self._emit)
         self._session_actions = SessionActionWriter(memory, self._emit)
+        self._skill_actions = SkillActionWriter(cfg, self._emit)
+        self._skill_action_pending = False
+        self._skill_feedback = ""
+        self._skill_drop_files: tuple[str, ...] = ()
+        self._skill_delete_identity = ""
+        self._skill_inbox_preparation_attempted = False
         self._mcp_mutations = MCPMutationWriter(
-            cfg.mcp_servers_file, self._emit, self._prepare_mcp_catalog
+            cfg.mcp_servers_file, self._emit, self._prepare_mcp_catalog,
+            auth_dir=cfg.mcp_auth_dir,
         )
         self._mcp_mutation_pending: tuple[MCPMutation, float] | None = None
+        self._mcp_remove_candidate: tuple[str, str, str, str] | None = None
         self._mcp_mutation_warned = False
         self._mcp_catalog_unconfirmed = False
         self._last_session_io_submit = 0.0
@@ -8578,7 +8681,6 @@ class PersistentChatTUI:
         self._permission_preview_visible = False
         self._permission_custom_snapshot: dict[str, str] | None = None
         self._permission_mcp_server: str | None = None
-        self._permission_return_to_mcp = False
         self._provider_key_label = ""
         self._skills_inventory: list[dict[str, object]] | None = None
         self._skills_inventory_loading = False
@@ -8614,6 +8716,7 @@ class PersistentChatTUI:
         self._debug_label_started_at: float | None = None
         self._remote_turn_started_at = 0.0
         self._printed_transcript_length = 0
+        self._terminal_position_pending = False
         self._review_next = False
         self._pending_resume: str | None = None
         self._executing_queued_command = False
@@ -8650,6 +8753,7 @@ class PersistentChatTUI:
         )
         self._termux_terminal = _is_termux_terminal()
         self.appearance = _load_tui_appearance(self.appearance_path)
+        self._spinner_draft: Spinner | None = None
 
         self.output = TextArea(
             text=(
@@ -8670,7 +8774,9 @@ class PersistentChatTUI:
             focusable=False,
             wrap_lines=True,
             scrollbar=False,
-            lexer=TranscriptLexer(),
+            lexer=TranscriptLexer(
+                lambda: self.appearance.divider_visible, lambda: self.appearance.divider_pattern
+            ),
             style="class:output-field",
         )
         output_window = self.output.window
@@ -8692,7 +8798,9 @@ class PersistentChatTUI:
             focusable=False,
             wrap_lines=True,
             height=Dimension(min=1, max=8),
-            lexer=TranscriptLexer(),
+            lexer=TranscriptLexer(
+                lambda: self.appearance.divider_visible, lambda: self.appearance.divider_pattern
+            ),
             style="class:output-field",
         )
         self.live_output_panel = ConditionalContainer(
@@ -8749,6 +8857,7 @@ class PersistentChatTUI:
             wrap_lines=True,
             style="class:input-field",
         )
+        self.input.buffer.multiline = Condition(lambda: not self._settings_input_is_single_line())
         self.input.buffer.on_text_changed += self._keep_exact_command_completion
         self.input.buffer.on_text_changed += self._composer_text_changed
         self.input.buffer.on_cursor_position_changed += self._keep_exact_command_completion
@@ -8771,7 +8880,8 @@ class PersistentChatTUI:
         )
         self.panel_header_window = Window(
             content=FormattedTextControl(self._panel_header_fragments),
-            height=2,
+            height=self._panel_header_height,
+            wrap_lines=True,
             style="class:input-field",
         )
         self.panel_control = TwoClickPanelControl(self)
@@ -8818,7 +8928,8 @@ class PersistentChatTUI:
         )
         self.composer = ConditionalContainer(
             content=self.user_input_composer,
-            filter=Condition(lambda: self._user_input_request is not None),
+            filter=Condition(lambda: self._user_input_request is not None
+                             and self._choice_kind is None),
             alternative_content=self.standard_composer,
         )
         self.composer_row = VSplit(
@@ -8933,8 +9044,13 @@ class PersistentChatTUI:
                 lambda: bool(self.pending or self._remote_draft or self._remote_queue)
             ),
         )
-        self.input_spacer = Window(
+        self.output_spacer = Window(
             height=1,
+            char=" ",
+            style="class:output-field",
+        )
+        self.input_spacer = Window(
+            height=2,
             char=" ",
             style="class:output-field",
         )
@@ -8983,6 +9099,7 @@ class PersistentChatTUI:
             [
                 self.text_theme_preview_panel,
                 self.live_output_panel,
+                self.output_spacer,
                 self.queue_panel,
                 self.input_spacer,
                 self.input_panel,
@@ -8990,6 +9107,7 @@ class PersistentChatTUI:
                 self.status_spacer,
                 self.footer_row,
             ],
+            align=VerticalAlign.BOTTOM,
             style="class:background",
         )
         self.completion_float = Float(
@@ -9017,7 +9135,7 @@ class PersistentChatTUI:
             paste_mode=False,
             key_bindings=self.key_bindings,
             editing_mode=(EditingMode.VI if self.composer_mode == "vim" else EditingMode.EMACS),
-            style=_tui_style(self.appearance.theme, self.appearance.text_theme),
+            style=self._appearance_style(),
             refresh_interval=0.1,
             before_render=self._before_render,
         )
@@ -9151,7 +9269,7 @@ class PersistentChatTUI:
         width = max(24, self._transcript_content_width() - 4)
         queued = list(self.pending)
         start, stop = self._queue_preview_bounds()
-        fragments = [("class:queue.title", "• Queued follow-up inputs\n")]
+        fragments = [("class:queue.title", "⏳ Queued follow-up inputs\n")]
         if self._remote_draft:
             draft = textwrap.shorten(
                 " ↵ ".join(self._remote_draft.splitlines()),
@@ -9202,6 +9320,13 @@ class PersistentChatTUI:
         return max(0, min(centered, maximum))
 
     def _panel_width(self) -> int:
+        # RenderInfo belongs to the previous frame during resize. Header height
+        # and all three table columns must use this frame's terminal width.
+        try:
+            return max(1, self.application.output.get_size().columns
+                       - 4 - int(self.appearance.input_border))
+        except (AttributeError, OSError):
+            pass
         info = self.panel_body_window.render_info
         return max(1, info.window_width if info else self._transcript_content_width() - 6)
 
@@ -9224,9 +9349,26 @@ class PersistentChatTUI:
     def _panel_header_fragments(self):
         if self._panel is None:
             return []
-        return list(render_header(
+        fragments = list(render_header(
             self._panel.page, self._panel_width(), self._panel.picker.query
         ))
+        if self._spinner_page_open():
+            fragments.extend([
+                ("class:panel.muted", "\nPreview "),
+                ("class:panel.value", self._spinner_frame(self._spinner_preview())),
+            ])
+        return fragments
+
+    def _spinner_page_open(self) -> bool:
+        return self._choice_kind in {"spinner settings", "spinner custom"}
+
+    def _panel_header_height(self) -> int:
+        if self._spinner_page_open():
+            preview_width = get_cwidth("Preview ") + self._spinner_preview().width
+            width = self._panel_width()
+            return 2 + max(1, (preview_width + width - 1) // width)
+        return 3 if self._panel is not None and self._panel.page.column_headers \
+            and self._panel_width() >= 60 else 2
 
     def _panel_body_fragments(self):
         if self._panel is None:
@@ -9244,7 +9386,8 @@ class PersistentChatTUI:
             return []
         kind = self._choice_kind or ""
         if kind in {"theme settings", "theme", "text theme", "input field settings",
-                    "input height"}:
+                    "input height", "divider settings", "divider color",
+                    "spinner settings", "spinner custom"}:
             save_state = self._appearance_save_state
         elif kind in {"memory facts", "memory fact"}:
             save_state = self._memory_fact_save_state
@@ -9261,6 +9404,8 @@ class PersistentChatTUI:
             save_state = ""
         if save_state == "failed":
             status, style = "Save unconfirmed", "class:panel.warning"
+            if self.status_error:
+                status += f" · {self.status_error}"
         elif self.status_error:
             status, style = self.status_error, "class:panel.warning"
         elif save_state == "saving":
@@ -9272,10 +9417,12 @@ class PersistentChatTUI:
         return list(render_footer(
             self._panel_width(), search=self._panel.search_active,
             query=self._panel.picker.query, status=status, status_style=style,
+            navigation_hints="↑↓ move · ENTER resume · / search · ESC cancel"
+            if kind == "session" else "",
         ))
 
     def _panel_selected_line(self) -> int:
-        return self._panel_body().selected_line if self._panel is not None else 0
+        return self._panel.focus_line(self._panel_body()) if self._panel is not None else 0
 
     def _panel_scroll(self, window) -> int:
         if self._panel is None:
@@ -9365,9 +9512,11 @@ class PersistentChatTUI:
         self._composer_pastes = pastes
 
     def _legacy_panel_breadcrumb(self, kind: str) -> tuple[str, ...]:
+        if kind == "session":
+            return ("Sessions",)
         category = SETTINGS_CATEGORY_FOR_KIND.get(kind)
         if category:
-            titles = {"mcp servers": "MCP Servers", "input field": "Input Field"}
+            titles = {"mcp servers": "MCPs", "input field": "Input Field"}
             return ("Settings", titles.get(category, category.title()))
         if kind == "provider key settings":
             return ("Settings", "Providers", self._provider_key_label)
@@ -9402,7 +9551,7 @@ class PersistentChatTUI:
                 "mcp enable confirmation": self._mcp_enable_name or "Enable server",
                 "mcp review": "Review server",
             }
-            return ("Settings", "MCP Servers", titles.get(kind, kind.title()))
+            return ("Settings", "MCPs", titles.get(kind, kind.title()))
         return ("Settings", kind.title())
 
     def _legacy_toggle_checked(self, kind: str, identity: str) -> bool | None:
@@ -9436,10 +9585,55 @@ class PersistentChatTUI:
         section_id = ""
         for item in self._picker.rows:
             original = item.label
+            if kind == "session" and original in self._resume_choices:
+                session_id = self._resume_choices[original]
+                session = self._resume_sessions[session_id]
+                rows.append(PanelRow(
+                    item.id, RowKind.NAVIGATION, session["title"] or "Untitled session",
+                    _session_age(session["ts"]), session_id,
+                    action=PanelAction("legacy-choice", item.id), legacy_label=original,
+                    label_badge="ACTIVE" if session.get("active") else "",
+                ))
+                continue
             if _is_choice_section(original):
                 section_id = item.id
+                title = _choice_section_title(original)
+                description = ""
+                if kind == "mcp settings" and title == "MCP Servers":
+                    if self._mcp_inventory is not None:
+                        age = max(0, int(time.monotonic() - self._mcp_inventory_loaded_at))
+                        servers = self._mcp_inventory["servers"]
+                        enabled = sum(server["enabled"] for server in servers)
+                        prefix = "At least " if self._mcp_inventory.get("truncated") else ""
+                        description = (
+                            f"{prefix}{len(servers)} installed, {enabled} enabled"
+                            f" · Configuration snapshot {age}s old"
+                        )
+                    if self._mcp_inventory_request:
+                        description = " · ".join(filter(None, (
+                            description, "Loading configured MCP servers…",
+                        )))
+                elif kind == "memory settings" and title == "MEMORY":
+                    if self._memory_inventory is not None:
+                        age = max(0, int(time.monotonic() - self._memory_inventory_loaded_at))
+                        description = (
+                            f"Saved memories: {self._memory_inventory['count']}"
+                            f" · snapshot {age}s old"
+                        )
+                    if self._memory_inventory_request:
+                        description = " · ".join(filter(None, (
+                            description, "Loading memory inventory…",
+                        )))
+                elif kind == "model" and title == MODEL_PROVIDER_FOR_BACKEND.get(
+                    self._model_auth_backend, ""
+                ).upper():
+                    description = self._model_auth_status
+                elif kind == "provider key settings" and title == self._provider_key_label.upper():
+                    _env_name, attribute = PROVIDER_API_KEY_PROVIDERS[self._provider_key_label]
+                    configured = bool(getattr(self.cfg, attribute, ""))
+                    description = f"Status: {'configured' if configured else 'not configured'}"
                 rows.append(PanelRow(item.id, RowKind.SECTION,
-                                     _choice_section_title(original), legacy_label=original))
+                                     title, description=description, legacy_label=original))
                 continue
             if not item.selectable:
                 if not original:
@@ -9453,6 +9647,7 @@ class PersistentChatTUI:
             row_kind = RowKind.CHOICE
             value = ""
             description = ""
+            search_terms = ""
             checked = self._legacy_toggle_checked(kind, item.id)
             if checked is not None:
                 row_kind = RowKind.TOGGLE
@@ -9468,6 +9663,38 @@ class PersistentChatTUI:
                     text, value = text.split(": ", 1)
                     value = value.removesuffix(" (toggle)")
                     text = text[:1].upper() + text[1:]
+            if kind == "model cloud provider":
+                text = {"OpenAI": "OpenAI API", "Google": "Gemini API"}.get(text, text)
+            if kind == "runtime settings":
+                text = {
+                    "auto calibrate": "Auto calibrate", "cancel calibration": "Cancel calibration",
+                    "edit config.toml (nano)": "Edit configuration",
+                    "edit runtime preferences (nano)": "Edit preferences",
+                }.get(text, text)
+                if value == "auto (Klaude decides)":
+                    value = "Auto"
+                if item.id == "edit config.toml (nano)":
+                    description = "config.toml · Nano"
+                elif item.id == "edit runtime preferences (nano)":
+                    description = "Saved runtime preferences · Nano"
+            if kind == "tools settings" and item.id.startswith("provider "):
+                name = item.id.removeprefix("provider ")
+                text = {
+                    "google": "Google", "exa": "Exa", "tavily": "Tavily",
+                    "firecrawl": "Firecrawl", "brave": "Brave", "parallel": "Parallel",
+                    "searxng": "SearXNG",
+                }.get(name, name[:1].upper() + name[1:])
+            if kind == "theme settings":
+                if item.id == "interface theme" and self.appearance.theme == DEFAULT_TUI_THEME:
+                    value = "Default"
+                elif item.id == "text/code theme" \
+                        and self.appearance.text_theme == DEFAULT_TEXT_THEME:
+                    value = "Default"
+            if kind == "input field settings" and item.id == "height" \
+                    and (self.appearance.input_height, self.appearance.input_max_height) == (
+                        DEFAULT_INPUT_HEIGHT, DEFAULT_INPUT_MAX_HEIGHT
+                    ):
+                value = "Default"
             if kind == "mcp settings":
                 metadata = next((server for server in (self._mcp_inventory or {}).get(
                     "servers", []) if server["name"].casefold() == item.id), None)
@@ -9481,6 +9708,12 @@ class PersistentChatTUI:
             if kind == "providers settings" and text in PROVIDER_API_KEY_PROVIDERS:
                 description = PROVIDER_API_KEY_DESCRIPTIONS[text]
                 value = value.upper()
+            current_theme = kind in {"theme", "text theme"} \
+                and self._choice_value_is_active(original)
+            current_model = kind in {"model source", "model cloud provider", "model"} \
+                and self._choice_value_is_active(original)
+            if current_theme or current_model:
+                value = "Current"
             if kind == "tools settings":
                 if item.id == "activity updates":
                     description = "Show concise live agent milestones"
@@ -9489,13 +9722,25 @@ class PersistentChatTUI:
                 elif item.id == "knowledge search validation":
                     description = "Verify candidate local evidence"
             if kind == "memory settings" and item.id == "automatic memory":
-                description = "Generate durable facts automatically"
+                description = "Save useful memories automatically"
+            if kind == "memory settings" and item.id == "manage memories":
+                row_kind = RowKind.NAVIGATION
+                description = "Edit or delete saved memories"
+                if self._memory_inventory is None:
+                    value = "Unavailable" if self._memory_inventory_error else "Loading…"
+            if kind == "mcp registry results" and original in self._mcp_catalog_results:
+                server = self._mcp_catalog_results[original]
+                row_kind = RowKind.NAVIGATION
+                text = server.name
+                value = server.version
+                description = server.description
+                search_terms = server.title
             if kind == "input field settings" and item.id == "border":
                 description = "Show the composer border"
             if text == "back":
                 text = "Back"
             elif text == CANCEL_CHOICE:
-                text = "Close"
+                text = "Cancel" if kind == "session" else "Close"
             elif text == RESET_THEME_CHOICE:
                 text = "Reset to default"
             rows.append(PanelRow(
@@ -9503,9 +9748,20 @@ class PersistentChatTUI:
                 action=PanelAction("legacy-choice", item.id),
                 navigation_target="back" if item.exit else "",
                 section_id=section_id, legacy_label=original, checked=checked,
+                selected=current_theme or current_model,
+                footer=item.exit or original == RESET_THEME_CHOICE,
+                search_terms=search_terms,
+                control={"back": RowControl.BACK, RESET_THEME_CHOICE: RowControl.RESET,
+                         CANCEL_CHOICE: RowControl.CANCEL if kind == "session"
+                         else RowControl.CLOSE}.get(original),
             ))
         return PanelPage(page_id, self._legacy_panel_breadcrumb(kind), tuple(rows),
-                         legacy_actions=True)
+                         legacy_actions=True,
+                         column_headers=("Session", "Age", "Session ID") if kind == "session"
+                         else ("MCP Name", "Version", "Description")
+                         if kind == "mcp registry results" and any(
+                             row.kind == RowKind.NAVIGATION and not row.footer for row in rows
+                         ) else None)
 
     def _present_legacy_choice_as_panel(self, kind: str) -> None:
         assert self._picker is not None
@@ -9665,6 +9921,14 @@ class PersistentChatTUI:
     def _choice_value_is_active(self, value: str) -> bool:
         """Whether a picker row represents the value currently in use."""
         kind = self._choice_kind
+        if kind in {"model source", "model cloud provider"}:
+            backend = getattr(getattr(self.agent, "model_info", None), "backend", "ollama")
+            if kind == "model source":
+                return value == ("Local" if backend == "ollama" else "Cloud")
+            return value == {
+                "openai_codex": "OpenAI Codex", "openai_api": "OpenAI",
+                "openrouter": "OpenRouter", "gemini_api": "Google",
+            }.get(backend)
         if kind == "theme":
             saved_theme = (
                 self._choice_preview_appearance[0]
@@ -9869,6 +10133,15 @@ class PersistentChatTUI:
             buffer.on_completions_changed.fire()
 
     def _composer_text_changed(self, _buffer) -> None:
+        if self._settings_input_is_single_line() and any(
+            char in _buffer.text for char in "\r\n"
+        ):
+            text = _buffer.text
+            cursor = _buffer.cursor_position
+            def single_line(value: str) -> str:
+                return value.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+            _buffer.set_document(Document(single_line(text), len(single_line(text[:cursor]))))
+            return
         self._discard_missing_pastes()
         if self._mcp_catalog_query:
             self._mcp_suggestion_due = time.monotonic() + 0.35
@@ -10128,11 +10401,34 @@ class PersistentChatTUI:
             return "class:scrollbar.button"
         return "class:scrollbar.background"
 
+    def _spinner_preview(self) -> Spinner:
+        if self._choice_kind == "spinner settings" and self._panel is not None:
+            row = self._panel.row()
+            if row is not None and row.action and row.action.kind == "spinner-select":
+                return CATALOG[row.action.target]
+            if row is not None and row.action and row.action.kind == "spinner-reset":
+                return CATALOG["dots"]
+            if row is not None and row.action and row.action.kind == "spinner-custom":
+                return Spinner(self.appearance.spinner.custom_frames,
+                               self.appearance.spinner.custom_interval)
+        if self._choice_kind == "spinner custom" and self._spinner_draft is not None:
+            return self._spinner_draft
+        return self.appearance.spinner.animation
+
+    def _spinner_frame(self, spinner: Spinner | None = None) -> str:
+        encoding = getattr(self.application.output, "encoding", "utf-8")
+        if callable(encoding):
+            try:
+                encoding = encoding()
+            except (AttributeError, OSError):
+                encoding = "utf-8"
+        return (spinner or self.appearance.spinner.animation).frame_at(
+            time.monotonic(), encoding=encoding if isinstance(encoding, str) else "utf-8"
+        )
+
     def _status_fragments(self):
         if self._setup_job is not None:
-            indicator = BRAILLE_LOADING_FRAMES[
-                int(time.monotonic() * 10) % len(BRAILLE_LOADING_FRAMES)
-            ]
+            indicator = self._spinner_frame()
             elapsed = _activity_elapsed(int(time.monotonic() - self._setup_started_at))
             return [
                 ("class:runtime_busy", f" {indicator} WAITING {elapsed} · {self._setup_title} "),
@@ -10150,35 +10446,31 @@ class PersistentChatTUI:
         used = self.ui_state.prompt_tokens
         context = max(1, self.ui_state.context_window)
         percent = min(100, round(used * 100 / context))
-        if self._secret_request:
+        if self._secret_request and self._choice_kind is None:
             label = str(self._secret_request["label"])
             return [
                 ("class:runtime_busy", f" SECRET · {label} "),
                 ("class:runtime_text", "masked · Enter submit · Ctrl+C cancel "),
             ]
-        if self._settings_input_request:
+        if self._settings_input_request and self._choice_kind is None:
             return [
                 ("class:runtime_busy", f" INPUT · {self._settings_input_request['label']} "),
                 ("class:runtime_text", "Enter submit · Esc cancel "),
                 ("class:runtime_error", self.status_error),
             ]
-        if self._permission_request:
+        if self._permission_request and self._choice_kind is None:
             tool = str(self._permission_request["tool"])
             elapsed = _activity_elapsed(self._turn_elapsed_seconds())
-            indicator = BRAILLE_LOADING_FRAMES[
-                int(time.monotonic() * 10) % len(BRAILLE_LOADING_FRAMES)
-            ]
+            indicator = self._spinner_frame()
             return [
                 ("class:runtime_busy", f" {indicator} WAITING "),
                 ("class:runtime_text", f"{elapsed}  "),
                 ("class:runtime_text", "type y/n/a · Enter confirm (empty allows once) "),
                 ("class:runtime_text", f"{tool} "),
             ]
-        if self._user_input_request:
+        if self._user_input_request and self._choice_kind is None:
             elapsed = _activity_elapsed(self._turn_elapsed_seconds())
-            indicator = BRAILLE_LOADING_FRAMES[
-                int(time.monotonic() * 10) % len(BRAILLE_LOADING_FRAMES)
-            ]
+            indicator = self._spinner_frame()
             return [
                 ("class:runtime_busy", f" {indicator} WAITING "),
                 ("class:runtime_text", f"{elapsed}  "),
@@ -10225,7 +10517,7 @@ class PersistentChatTUI:
                 int(debug_age // 2) % len(DEBUG_LABEL_ACTIVITY_STATES)
             ]
         indicator = (
-            BRAILLE_LOADING_FRAMES[int(time.monotonic() * 10) % len(BRAILLE_LOADING_FRAMES)]
+            self._spinner_frame()
             if worker_active
             else "★"
         )
@@ -10249,6 +10541,7 @@ class PersistentChatTUI:
             elapsed = f" {_activity_elapsed(elapsed_seconds)}"
         width = shutil.get_terminal_size((100, 24)).columns
         estimate = "~" if self.ui_state.prompt_tokens_estimated else ""
+        show_error = bool(self.status_error) and not (self._choice_kind and self._panel is not None)
         if width < 92:
             fragments = [
                 (state_style, f" {state} "),
@@ -10260,7 +10553,7 @@ class PersistentChatTUI:
                     f"↑{used:,} ↓{self.ui_state.output_tokens:,} ",
                 ),
             ]
-            if self.status_error:
+            if show_error:
                 fragments.append(("class:runtime_error", " error "))
             return fragments
         fragments = [
@@ -10276,7 +10569,7 @@ class PersistentChatTUI:
                 f"last ↑{used:,} ↓{self.ui_state.output_tokens:,} ",
             ),
         ]
-        if self.status_error:
+        if show_error:
             fragments.append(("class:runtime_error", f" {self.status_error} "))
         return fragments
 
@@ -10289,6 +10582,8 @@ class PersistentChatTUI:
         ]
 
     def _keybind_fragments(self):
+        if self._settings_input_is_single_line():
+            return [("class:footer.keybinds", " ENTER apply · ESC back ")]
         mode = "Vim composer · " if self.composer_mode == "vim" else ""
         return [
             (
@@ -10358,17 +10653,20 @@ class PersistentChatTUI:
                 return
             self._dismiss_picker()
 
-        @bindings.add("escape", filter=Condition(lambda: self._secret_request is not None))
+        @bindings.add("escape", filter=Condition(lambda: self._secret_request is not None
+                                                and self._choice_kind is None))
         def dismiss_secret(event) -> None:
             self._answer_secret(None, cancelled=True)
 
         @bindings.add(
-            "escape", filter=Condition(lambda: self._settings_input_request is not None)
+            "escape", filter=Condition(lambda: self._settings_input_request is not None
+                                       and self._choice_kind is None)
         )
         def dismiss_settings_input(event) -> None:
             self._answer_settings_input(None)
 
-        @bindings.add("escape", filter=Condition(lambda: self._user_input_request is not None))
+        @bindings.add("escape", filter=Condition(lambda: self._user_input_request is not None
+                                                and self._choice_kind is None))
         def dismiss_user_input(event) -> None:
             if self.input.text:
                 self._set_input("")
@@ -10403,6 +10701,12 @@ class PersistentChatTUI:
 
         @bindings.add("pageup", filter=Condition(lambda: bool(self._choice_kind)))
         def previous_page(event) -> None:
+            if self._panel is not None and self._panel.page.column_headers:
+                height = self.panel_body_window.render_info.window_height \
+                    if self.panel_body_window.render_info else 12
+                if self._panel.scroll_row(-max(1, height - 1), self._panel_body()):
+                    self.application.invalidate()
+                    return
             if self._choice_kind in {"text theme", "permission preset"} and (
                 self._text_theme_preview_visible or self._permission_preview_visible
             ):
@@ -10412,6 +10716,12 @@ class PersistentChatTUI:
 
         @bindings.add("pagedown", filter=Condition(lambda: bool(self._choice_kind)))
         def next_page(event) -> None:
+            if self._panel is not None and self._panel.page.column_headers:
+                height = self.panel_body_window.render_info.window_height \
+                    if self.panel_body_window.render_info else 12
+                if self._panel.scroll_row(max(1, height - 1), self._panel_body()):
+                    self.application.invalidate()
+                    return
             if self._choice_kind in {"text theme", "permission preset"} and (
                 self._text_theme_preview_visible or self._permission_preview_visible
             ):
@@ -10438,11 +10748,11 @@ class PersistentChatTUI:
                 # picker can still be cancelled to return to that prompt.
                 self._submit_buffer(steer=False)
                 return
-            if self._user_input_request:
-                self._submit_user_input_response()
-                return
             if self._choice_kind:
                 self._submit_choice_response()
+                return
+            if self._user_input_request:
+                self._submit_user_input_response()
                 return
             if self._settings_input_request:
                 self._submit_settings_input_response()
@@ -10463,7 +10773,7 @@ class PersistentChatTUI:
 
             @bindings.add(key)
             def permission_answer(event, key=key) -> None:
-                if self._panel is not None and not self._panel.search_active:
+                if self._choice_kind and self._panel is not None and not self._panel.search_active:
                     if not self._panel.page.legacy_actions:
                         return
                     self._panel.search_active = True
@@ -10474,7 +10784,7 @@ class PersistentChatTUI:
         @bindings.add("escape", "enter")
         @bindings.add("c-j")
         def newline(event) -> None:
-            if self._choice_kind:
+            if self._choice_kind or self._settings_input_is_single_line():
                 return
             self.input.buffer.insert_text("\n")
 
@@ -10487,10 +10797,12 @@ class PersistentChatTUI:
         @bindings.add("backspace")
         @bindings.add("c-h")
         def delete_and_refresh_command_completion(event) -> None:
-            if self._panel is not None and not self._panel.search_active:
+            if self._choice_kind and self._panel is not None and not self._panel.search_active:
                 return
             buffer = self.input.buffer
             buffer.delete_before_cursor(count=1)
+            if self._settings_input_request:
+                return
             if self._choice_kind:
                 self._refresh_choice_filter()
                 return
@@ -10504,15 +10816,16 @@ class PersistentChatTUI:
 
         @bindings.add("c-c")
         def cancel(event) -> None:
-            if self._secret_request:
+            if self._choice_kind:
+                self._cancel_choice()
+            elif self._secret_request:
                 self._answer_secret(None, cancelled=True)
             elif self._settings_input_request:
                 self._answer_settings_input(None)
             elif self._user_input_request:
                 self._answer_user_input(None, "cancelled")
             elif (
-                self._choice_kind
-                or self._height_edit
+                self._height_edit
                 or self._runtime_edit
                 or self._mcp_catalog_query
             ):
@@ -10536,11 +10849,14 @@ class PersistentChatTUI:
 
         @bindings.add("up")
         def previous(event) -> None:
+            if self._choice_kind:
+                self._move_choice(-1)
+                return
             if self._user_input_request:
                 self._move_user_input_choice(-1)
                 return
-            if self._choice_kind:
-                self._move_choice(-1)
+            if self._settings_input_request:
+                self.input.buffer.cursor_up()
                 return
             if self.input.buffer.complete_state is not None:
                 self.input.buffer.complete_previous()
@@ -10556,11 +10872,14 @@ class PersistentChatTUI:
 
         @bindings.add("down")
         def following(event) -> None:
+            if self._choice_kind:
+                self._move_choice(1)
+                return
             if self._user_input_request:
                 self._move_user_input_choice(1)
                 return
-            if self._choice_kind:
-                self._move_choice(1)
+            if self._settings_input_request:
+                self.input.buffer.cursor_down()
                 return
             if self.input.buffer.complete_state is not None:
                 self.input.buffer.complete_next()
@@ -10972,18 +11291,12 @@ class PersistentChatTUI:
             else:
                 self.appearance.text_theme = original[1]
             self._show_text_theme_preview()
-        self.application.style = _tui_style(
-            self.appearance.theme,
-            self.appearance.text_theme,
-        )
+        self.application.style = self._appearance_style()
 
     def _end_choice_preview(self, *, restore: bool) -> None:
         if restore and self._choice_preview_appearance is not None:
             self.appearance.theme, self.appearance.text_theme = self._choice_preview_appearance
-            self.application.style = _tui_style(
-                self.appearance.theme,
-                self.appearance.text_theme,
-            )
+            self.application.style = self._appearance_style()
         self._choice_preview_appearance = None
         self._hide_text_theme_preview()
         self._hide_permission_preview()
@@ -11001,9 +11314,11 @@ class PersistentChatTUI:
             self._refresh_settings_overview()
             page = self._settings_home_page()
             default_id = next((row.id for row in page.rows if (
-                row.legacy_label == default or row.label.casefold() == default.casefold()
+                row.id == f"category:{default.casefold()}"
+                or row.legacy_label == default or row.label.casefold() == default.casefold()
             )), "")
             self._open_panel(page, kind, default_id)
+            self._refresh_skills_inventory()
             return
         self._panel = None
         previous_kind = self._choice_kind
@@ -11012,16 +11327,6 @@ class PersistentChatTUI:
             previous_kind in mcp_inventory_modes and kind in mcp_inventory_modes
         ):
             self._cancel_inventory_job(previous_kind)
-        if (kind in {"permission settings", "mcp permission tools", "tools settings"}
-                and self._runtime_save_state):
-            values = [*values, _choice_info(self._preference_save_hint())]
-        if kind in {"theme settings", "input field settings"} and self._appearance_save_state:
-            hint = (
-                "Saving appearance…" if self._appearance_save_state == "saving"
-                else "Appearance saved" if self._appearance_save_state == "saved"
-                else "Appearance save unconfirmed · active for this session"
-            )
-            values = [*values, _choice_info(hint)]
         if kind == "settings" and any(row.startswith("MCP servers:") for row in values):
             self._refresh_settings_overview()
             values = self._settings_categories()
@@ -11046,6 +11351,9 @@ class PersistentChatTUI:
                 "model cloud provider",
                 "model logout confirmation",
                 "skills settings",
+                "providers settings",
+                "provider key settings",
+                "mcp settings",
                 "mcp registry results",
                 "mcp registry detail",
                 "mcp transport",
@@ -11154,17 +11462,18 @@ class PersistentChatTUI:
         self._model_choices = choices
         self._model_parent = parent
         self._model_auth_backend = backend
+        self._model_auth_status = ""
         provider = MODEL_PROVIDER_FOR_BACKEND.get(backend, "Ollama")
         authenticated = False
         if backend != "ollama":
             authenticated = self._model_backend_authenticated(backend)
             auth_action = "Logout" if authenticated else "Login"
             status = "signed in" if authenticated else "not signed in"
+            self._model_auth_status = f"Status: {status}"
             model_rows = list(rows)
             rows = [
                 _choice_section(provider.upper()),
                 auth_action,
-                _choice_info(f"Status: {status}"),
                 _choice_section("MODELS"),
                 *model_rows,
             ]
@@ -11603,15 +11912,16 @@ class PersistentChatTUI:
                 self._apply_picker_state()
                 self.application.invalidate()
                 return
+            if self._panel.page.id == "settings-reset-confirmation":
+                self._begin_choice(
+                    "settings", self._settings_categories(), RESET_THEME_CHOICE, restore=True
+                )
+                return
             if self._panel.page.id.startswith("mcp-permission:"):
                 self._open_mcp_permission_servers()
                 return
             if self._panel.page.id == "mcp-permission-servers":
-                if self._permission_return_to_mcp:
-                    self._permission_return_to_mcp = False
-                    self._open_settings_category("mcp servers", "MCP server permissions")
-                else:
-                    self._open_settings_category("permissions")
+                self._open_settings_category("mcp servers", "Manage permissions")
                 return
         self._sync_picker_selection()
         self._cancel_inventory_job(self._choice_kind)
@@ -11645,6 +11955,21 @@ class PersistentChatTUI:
             "effort",
         }
         choice_kind = self._choice_kind or ""
+        if choice_kind == "mcp remove confirmation":
+            self._apply_panel_action(PanelAction("mcp-remove-list"))
+            return
+        if choice_kind == "mcp remove servers":
+            self._open_settings_category("mcp servers", "Delete MCP")
+            return
+        if choice_kind == "skill detail":
+            if getattr(self, "_skill_delete_parent", False):
+                self._apply_panel_action(PanelAction("skill-delete-list"))
+                return
+            self._open_settings_category("skills")
+            return
+        if choice_kind == "skill delete list":
+            self._open_settings_category("skills", "delete-skills")
+            return
         if choice_kind == "memory fact":
             self._open_memory_facts()
             return
@@ -11656,19 +11981,22 @@ class PersistentChatTUI:
             "text theme": "theme",
             "theme settings": "settings",
             "input field settings": "settings",
+            "divider settings": "settings",
+            "divider color": "divider",
+            "spinner settings": "settings",
+            "spinner custom": "spinner",
             "memory settings": "settings",
             "skills settings": "settings",
+            "tools settings": "settings",
             "providers settings": "settings",
             "provider key settings": "providers",
             "mcp settings": "settings",
             "mcp registry results": "mcp servers",
             "mcp registry detail": "mcp registry results",
             "mcp enable confirmation": "mcp servers",
-            "permission settings": (
-                "mcp servers" if self._permission_return_to_mcp else "settings"
-            ),
+            "permission settings": "settings",
             "permission preset": "permissions",
-            "mcp permission tools": "permissions",
+            "mcp permission tools": "mcp servers",
             "runtime settings": "settings",
             "runtime device": "runtime",
             "CPU threads": "runtime",
@@ -12115,7 +12443,7 @@ class PersistentChatTUI:
                 selected = "medium"
             elif self._choice_kind == "input height":
                 self.appearance.input_height = DEFAULT_INPUT_HEIGHT
-                self.appearance.input_max_height = MAX_INPUT_HEIGHT
+                self.appearance.input_max_height = DEFAULT_INPUT_MAX_HEIGHT
         if self._choice_kind == "model":
             info = getattr(self, "_model_choices", {}).get(
                 selected, ModelInfo("ollama", selected, selected)
@@ -12136,6 +12464,9 @@ class PersistentChatTUI:
             self._apply_appearance_choice(self._choice_kind, selected)
             return
         if self._choice_kind == "input height":
+            if selected == "back":
+                self._open_settings_category("input field", "height:")
+                return
             if selected == "enter min/max":
                 self._choice_kind = None
                 self._choice_values = []
@@ -12160,6 +12491,7 @@ class PersistentChatTUI:
         self._finish_reasoning_selection()
 
     def _apply_appearance_choice(self, kind: str, selected: str) -> None:
+        stay_open = self._choice_kind == kind and self._picker is not None
         reset = selected == RESET_THEME_CHOICE
         if kind == "theme":
             self.appearance.theme = DEFAULT_TUI_THEME if reset else selected
@@ -12168,21 +12500,32 @@ class PersistentChatTUI:
             self.appearance.text_theme = DEFAULT_TEXT_THEME if reset else selected
             label = TEXT_THEME_LABELS[self.appearance.text_theme]
         self._end_choice_preview(restore=False)
-        self._choice_kind = None
-        self._choice_values = []
-        self._set_input("")
+        if not stay_open:
+            self._choice_kind = None
+            self._choice_values = []
+            self._set_input("")
         self._commit_appearance(
             f"{kind}: {label}", reset=reset,
             fields=("theme",) if kind == "theme" else ("text_theme",),
+        )
+        if stay_open:
+            # Later previews/cancellation restore this newly applied choice.
+            self._choice_preview_appearance = (self.appearance.theme, self.appearance.text_theme)
+            self._present_legacy_choice_as_panel(kind)
+            self.application.layout.focus(self.panel_body_window)
+            self.application.invalidate()
+
+    def _appearance_style(self):
+        return _tui_style(
+            self.appearance.theme, self.appearance.text_theme,
+            divider_color=self.appearance.divider_color,
+            divider_text_color=self.appearance.divider_text_color,
         )
 
     def _commit_appearance(
         self, message: str, *, reset: bool = False, fields: tuple[str, ...] | None = None
     ) -> None:
-        self.application.style = _tui_style(
-            self.appearance.theme,
-            self.appearance.text_theme,
-        )
+        self.application.style = self._appearance_style()
         self._apply_field_settings()
         self._appearance_save_revision = self._appearance_writer.submit(
             _appearance_changes(self.appearance, fields=fields)
@@ -12190,10 +12533,8 @@ class PersistentChatTUI:
         self._appearance_save_state = "saving"
         if self.status_error.startswith("Appearance save"):
             self.status_error = ""
-        reset_note = " (default restored)" if reset else ""
-        self._append(f"\n[appearance] {message}{reset_note} · applied; saving.\n")
         self.activity = "ready" if not self.running else self.activity
-        self.application.invalidate()
+        self._refresh_tui(replay_transcript=True)
 
     def _settings_overview_paths(self) -> tuple[str, str]:
         return str(getattr(self.memory, "sessions_db", "")), str(self.cfg.mcp_servers_file)
@@ -12214,7 +12555,8 @@ class PersistentChatTUI:
             return
         identity = self._background_jobs.submit(
             "settings-overview", {
-                "kind": "settings_overview", "sessions_db": scope[0], "mcp_file": scope[1]
+                "kind": "settings_overview", "sessions_db": scope[0], "mcp_file": scope[1],
+                "memory_file": self._memory_paths()[1],
             }, timeout=8,
         )
         self._settings_overview_request = (identity, self.session_id, scope)
@@ -12236,8 +12578,16 @@ class PersistentChatTUI:
         memory_state, mcp_detail = snapshot.labels(
             loading=self._settings_overview_request is not None, now=time.monotonic()
         )
+        memory_summary = (
+            f"{snapshot.memory_count} saved, " + (
+                "ON" if snapshot.memory_enabled else "OFF"
+            ) if snapshot.memory_count is not None and snapshot.memory_enabled is not None
+            else memory_state
+        )
+        if snapshot.memory_count is not None and " · " in memory_state:
+            memory_summary += " · " + memory_state.split(" · ", 1)[1]
         if self._memory_save_state in {"saving", "failed"}:
-            memory_state += (
+            memory_summary += (
                 " · saving preference" if self._memory_save_state == "saving"
                 else " · preference save unconfirmed"
             )
@@ -12246,6 +12596,13 @@ class PersistentChatTUI:
             for _env_name, attribute in PROVIDER_API_KEY_PROVIDERS.values()
         )
         provider_total = len(PROVIDER_API_KEY_PROVIDERS)
+        registered_tools = set(getattr(self.agent, "tools", {}))
+        disabled_tools = set(getattr(self.agent, "disabled_tool_names", set()))
+        tools_summary = f"{len(registered_tools - disabled_tools)}/{len(registered_tools)} enabled"
+        skills_summary = (
+            f"{len(self._skills_inventory)} installed" if self._skills_inventory is not None
+            else "Unavailable" if self._skills_inventory_error else "Loading…"
+        )
         permission_names = _permission_tool_names(self.agent)
         permission_preset = _permission_preset_name(
             _effective_permission_policies(self.agent, self.cfg),
@@ -12271,20 +12628,52 @@ class PersistentChatTUI:
         text_theme = TEXT_THEME_LABELS[self.appearance.text_theme]
         height = f"{self.appearance.input_height}–{self.appearance.input_max_height} lines"
         border = f"border {'on' if self.appearance.input_border else 'off'}"
+        theme_summary = ", ".join((
+            "Default" if self.appearance.theme == DEFAULT_TUI_THEME else theme,
+            "Default" if self.appearance.text_theme == DEFAULT_TEXT_THEME else text_theme,
+        ))
+        if self.appearance.theme == DEFAULT_TUI_THEME \
+                and self.appearance.text_theme == DEFAULT_TEXT_THEME:
+            theme_summary = "Default"
+        input_summary = (
+            f"{self.appearance.input_height}-{self.appearance.input_max_height}, "
+            + ("border" if self.appearance.input_border else "no border")
+        )
+        spinner_summary = (
+            "Default" if self.appearance.spinner.name == SpinnerSettings().name
+            else self.appearance.spinner.name
+        )
+        line_color_summary = color_label(
+            self.appearance.divider_color, default=DEFAULT_DIVIDER_COLOR
+        ).lower()
+        text_color_summary = color_label(
+            self.appearance.divider_text_color, default=DEFAULT_DIVIDER_TEXT_COLOR
+        ).lower()
+        divider_summary = ", ".join((
+            "ON" if self.appearance.divider_visible else "OFF",
+            line_color_summary, text_color_summary,
+        ))
         providers = f"{configured_providers}/{provider_total} API keys"
         runtime = (f"{device} · {self.agent.max_steps} steps · "
                    f"{_subagent_parallelism_label(self.agent)} workers")
         rows = [
             PanelRow("section:appearance", RowKind.SECTION, "APPEARANCE",
                      legacy_label=_choice_section("APPEARANCE")),
-            PanelRow("category:theme", RowKind.NAVIGATION, "Theme", theme,
-                     f"Text/code theme: {text_theme}", action=PanelAction("category", "theme"),
+            PanelRow("category:theme", RowKind.NAVIGATION, "Theme", theme_summary,
+                     action=PanelAction("category", "theme"),
                      section_id="section:appearance",
                      legacy_label=f"Theme: {theme} · {text_theme}"),
-            PanelRow("category:input field", RowKind.NAVIGATION, "Input Field", height,
-                     border, action=PanelAction("category", "input field"),
+            PanelRow("category:input field", RowKind.NAVIGATION, "Input Field", input_summary,
+                     action=PanelAction("category", "input field"),
                      section_id="section:appearance",
                      legacy_label=f"Input field: {height} · {border}"),
+            PanelRow("category:divider", RowKind.NAVIGATION, "Divider", divider_summary,
+                     action=PanelAction("category", "divider"), section_id="section:appearance",
+                     legacy_label="Divider"),
+            PanelRow("category:spinner", RowKind.NAVIGATION, "Spinner",
+                     f"{spinner_summary}, {self.appearance.spinner.animation.interval} ms",
+                     action=PanelAction("category", "spinner"), section_id="section:appearance",
+                     legacy_label="Spinner"),
             PanelRow("section:assistant", RowKind.SECTION, "ASSISTANT",
                      legacy_label=_choice_section("ASSISTANT")),
             PanelRow("category:models", RowKind.NAVIGATION, "Models", model_detail,
@@ -12293,20 +12682,21 @@ class PersistentChatTUI:
             PanelRow("category:providers", RowKind.NAVIGATION, "Providers", providers,
                      action=PanelAction("category", "providers"), section_id="section:assistant",
                      legacy_label=f"Providers: {providers}"),
-            PanelRow("category:mcp servers", RowKind.NAVIGATION, "MCP Servers", mcp_detail,
+            PanelRow("category:tools", RowKind.NAVIGATION, "Tools", tools_summary,
+                     action=PanelAction("category", "tools"), section_id="section:assistant",
+                     legacy_label="Tools: availability, providers, and validation"),
+            PanelRow("category:mcp servers", RowKind.NAVIGATION, "MCPs", mcp_detail,
                      action=PanelAction("category", "mcp servers"),
-                     section_id="section:assistant", legacy_label=f"MCP servers: {mcp_detail}"),
-            PanelRow("category:memory", RowKind.NAVIGATION, "Memory", memory_state,
+                     section_id="section:assistant", legacy_label=f"MCP servers: {mcp_detail}",
+                     search_terms="MCP servers"),
+            PanelRow("category:memory", RowKind.NAVIGATION, "Memory", memory_summary,
                      action=PanelAction("category", "memory"), section_id="section:assistant",
                      legacy_label=f"Memory: {memory_state}"),
-            PanelRow("category:skills", RowKind.NAVIGATION, "Skills", "installed inventory",
+            PanelRow("category:skills", RowKind.NAVIGATION, "Skills", skills_summary,
                      action=PanelAction("category", "skills"), section_id="section:assistant",
                      legacy_label="Skills: installed inventory"),
             PanelRow("section:capabilities", RowKind.SECTION, "CAPABILITIES & SAFETY",
                      legacy_label=_choice_section("CAPABILITIES & SAFETY")),
-            PanelRow("category:tools", RowKind.NAVIGATION, "Tools", "Availability and validation",
-                     action=PanelAction("category", "tools"), section_id="section:capabilities",
-                     legacy_label="Tools: availability, providers, and validation"),
             PanelRow("category:permissions", RowKind.NAVIGATION, "Permissions", permission_preset,
                      action=PanelAction("category", "permissions"),
                      section_id="section:capabilities",
@@ -12318,7 +12708,7 @@ class PersistentChatTUI:
                      f"{_subagent_parallelism_label(self.agent)} workers",
                      action=PanelAction("category", "runtime"), section_id="section:advanced",
                      legacy_label=f"Runtime: {runtime}"),
-            PanelRow("reset-all", RowKind.ACTION, "Reset all settings",
+            PanelRow("reset-all", RowKind.ACTION, "Reset appearance settings",
                      action=PanelAction("reset-all"), legacy_label=RESET_THEME_CHOICE),
             PanelRow("close", RowKind.NAVIGATION, "Close", action=PanelAction("close"),
                      legacy_label=CANCEL_CHOICE),
@@ -12328,11 +12718,42 @@ class PersistentChatTUI:
     def _open_settings_category(
         self, category: str, default: str | None = None, *, restore: bool = False
     ) -> None:
-        if category == "permissions" and self._choice_kind not in {
-            "mcp settings", "permission settings", "mcp permission tools", "permission preset"
-        }:
-            self._permission_return_to_mcp = False
         begin_choice = partial(self._begin_choice, restore=restore, refresh=True)
+        if category == "reset all":
+            self._open_panel(PanelPage(
+                "settings-reset-confirmation", ("Settings", "Reset appearance settings"),
+                (
+                    PanelRow("scope", RowKind.INFO,
+                             "Restore Theme, Input Field, Divider, and Spinner defaults?"),
+                    PanelRow("confirm", RowKind.ACTION, "Reset appearance settings",
+                             action=PanelAction("confirm-reset-all"), control=RowControl.RESET),
+                    PanelRow("cancel", RowKind.NAVIGATION, "Cancel",
+                             action=PanelAction("back"), control=RowControl.CANCEL, footer=True),
+                ),
+            ), "settings reset confirmation", "cancel")
+            # Reopening must never retain a previously focused confirm action.
+            assert self._panel is not None
+            self._panel.picker.focus("cancel")
+            self._apply_picker_state()
+            return
+        initial_appearance_entry = not restore and (
+            self._choice_kind == "settings"
+            or (self._choice_kind is None and self._panel is None)
+        )
+        if category == "spinner":
+            self._open_panel(
+                spinner_page(self.appearance.spinner), "spinner settings",
+                default or ("custom" if initial_appearance_entry else ""),
+            )
+            return
+        if category == "divider":
+            self._open_panel(divider_page(
+                self.appearance.divider_visible, self.appearance.divider_color,
+                self.appearance.divider_text_color,
+                self.appearance.divider_pattern,
+            ), "divider settings",
+                default or ("visible" if initial_appearance_entry else ""))
+            return
         if category == "models":
             self._open_model_source("settings")
             return
@@ -12397,85 +12818,34 @@ class PersistentChatTUI:
                 _choice_section("MEMORY"),
                 toggle,
             ]
-            if inventory is not None:
-                choices.append("Manage memories")
-            if self._memory_inventory_request:
-                choices.append(_choice_info("Loading memory inventory…"))
+            choices.append(
+                "Manage memories" if inventory is not None
+                else _choice_unavailable("Manage memories")
+            )
             if self._memory_inventory_error:
                 choices.append(_choice_info(
                     "Memory inventory unavailable; previous snapshot retained"
                 ))
-            facts = inventory.get("facts", []) if inventory else []
             if inventory is not None:
-                age = max(0, int(time.monotonic() - self._memory_inventory_loaded_at))
-                choices.append(_choice_info(
-                    f"Durable facts: {inventory['count']} · snapshot {age}s old"
-                ))
                 if inventory.get("hidden"):
-                    choices.append(_choice_info(f"Sensitive facts hidden: {inventory['hidden']}"))
-            if self._memory_save_state:
-                choices.append(_choice_info(
-                    "Saving memory preference…" if self._memory_save_state == "saving"
-                    else "Memory preference saved" if self._memory_save_state == "saved"
-                    else "Memory preference save unconfirmed · active for this process"
-                ))
-            if facts:
-                choices.extend(
-                    [
-                        "",
-                        _choice_section("RECENT FACTS"),
-                        *[
-                            _choice_info(textwrap.shorten(fact, width=120, placeholder="…"))
-                            for fact in facts[:8]
-                        ],
-                    ]
-                )
+                    choices.append(_choice_info(
+                        f"Sensitive memories hidden: {inventory['hidden']}"
+                    ))
             choices.extend([RESET_THEME_CHOICE, "back", CANCEL_CHOICE])
             begin_choice(
                 "memory settings", choices, _settings_choice_default(choices, default)
             )
             return
         if category == "skills":
-            installed = self._skills_inventory
-            choices = [
-                _choice_section("INSTALLED SKILLS"),
-            ]
-            if installed is None:
-                choices.append(_choice_info("Loading installed skills…"))
-            else:
-                choices.append(_choice_info(f"Installed: {len(installed)}"))
-            if installed:
-                for skill in installed:
-                    indexed_files = skill.get("indexed_files", [])
-                    indexed_count = (
-                        len(indexed_files) if isinstance(indexed_files, list) else 0
-                    )
-                    file_count = skill.get("indexed_file_count")
-                    if type(file_count) is int:
-                        indexed_count = file_count
-                    choices.append(
-                        _choice_info(
-                            f"{skill.get('name', '?')} · "
-                            f"library {skill.get('library', '?')} · "
-                            f"{indexed_count} indexed files"
-                        )
-                    )
-            elif installed is not None:
-                choices.append(_choice_info("No skills installed"))
-            if self._skills_inventory_error:
-                choices.append(_choice_info(self._skills_inventory_error))
-            choices.extend(
-                [
-                    "",
-                    "Tip: Install one with klaude import-skill ZIP -l LIBRARY",
-                    "back",
-                    CANCEL_CHOICE,
-                ]
-            )
-            begin_choice(
-                "skills settings", choices, _settings_choice_default(choices, default)
-            )
+            self._open_panel(skills_page(
+                self._skills_inventory, str(self.cfg.data_dir / "skills"),
+                " · ".join(filter(None, (self._skill_feedback, self._skills_inventory_error))),
+                self._skill_action_pending, detected=getattr(self, "_skill_drop_files", ()),
+            ), "skills settings", default or "")
             self._refresh_skills_inventory()
+            if not self._skill_inbox_preparation_attempted and not self._skill_action_pending:
+                self._skill_inbox_preparation_attempted = True
+                self._submit_skill_action(SkillAction("prepare"))
             return
         if category == "providers":
             choices = []
@@ -12509,15 +12879,15 @@ class PersistentChatTUI:
         if category == "mcp servers":
             self._refresh_mcp_inventory()
             choices = [
+                _choice_section("DISCOVER"),
+                "Search official MCP Registry",
                 _choice_section("SET UP"),
                 "Add custom MCP server",
                 "Import MCP configuration",
-                _choice_section("DISCOVER"),
-                "Search official MCP Registry",
-                _choice_info("Registry entries are metadata, not security endorsements"),
-                _choice_section("CONFIGURED SERVERS"),
-                "MCP server permissions",
-                "Reload configured MCP tools",
+                _choice_section("MCP Servers"),
+                "Reload",
+                "Manage permissions",
+                "Delete MCP",
             ]
             inventory = self._mcp_inventory
             if self._mcp_mutation_pending:
@@ -12529,15 +12899,13 @@ class PersistentChatTUI:
                 ))
             if self._mcp_catalog_unconfirmed:
                 choices.append(_choice_info("Queued work paused; reload to verify current tools"))
-            if self._mcp_inventory_request:
-                choices.append(_choice_info("Loading configured MCP servers…"))
             if self._mcp_inventory_error:
                 choices.append(_choice_info(
                     "MCP inventory unavailable; previous snapshot retained"
                 ))
             if inventory is not None:
-                age = max(0, int(time.monotonic() - self._mcp_inventory_loaded_at))
-                choices.append(_choice_info(f"Configuration snapshot {age}s old"))
+                if inventory["servers"]:
+                    choices.append("")
                 for server in inventory["servers"]:
                     auth = " · OAuth" if server["oauth"] else ""
                     label = (
@@ -12556,8 +12924,6 @@ class PersistentChatTUI:
                     ))
             choices.extend(
                 [
-                    _choice_info("New and imported servers are saved disabled for review"),
-                    _choice_info("External tools default to ASK permission"),
                     "back",
                     CANCEL_CHOICE,
                 ]
@@ -12596,9 +12962,6 @@ class PersistentChatTUI:
                 "cancel calibration" if self._calibration_request else "auto calibrate",
                 *([_choice_info("Reading local hardware…")] if self._calibration_request else []),
                 _choice_section("FILES"),
-                *([_choice_info(
-                    self._preference_save_hint()
-                )] if self._runtime_save_state else []),
                 config_editor,
                 preferences_editor,
                 "back",
@@ -12651,11 +13014,6 @@ class PersistentChatTUI:
                 "tools settings", choices, _settings_choice_default(choices, default)
             )
             return
-        self.appearance = TUIAppearance()
-        self._choice_kind = None
-        self._choice_values = []
-        self._set_input("")
-        self._commit_appearance("all settings", reset=True)
 
     def _permission_panel_page(self) -> PanelPage:
         names = _permission_tool_names(self.agent)
@@ -12671,18 +13029,11 @@ class PersistentChatTUI:
         ]
         grouped = _permission_group_rows(names)
         for group, tools in grouped:
+            if group == "MCP SERVERS":
+                continue
             section_id = f"group:{group}"
             rows.append(PanelRow(section_id, RowKind.SECTION, group,
                                  legacy_label=_choice_section(group)))
-            if group == "MCP SERVERS":
-                servers = _mcp_permission_server_rows(self.agent)
-                rows.append(PanelRow(
-                    "mcp-servers", RowKind.NAVIGATION, "MCP Servers",
-                    f"{len(servers)} active", "Inspect each server's tool policies",
-                    action=PanelAction("mcp-servers"), section_id=section_id,
-                    legacy_label=f"MCP Servers: {len(servers)} active",
-                ))
-                continue
             for name, label in tools:
                 rows.append(PanelRow(
                     f"tool:{name}", RowKind.CHOICE, label, policies[name].upper(),
@@ -12690,15 +13041,6 @@ class PersistentChatTUI:
                     legacy_label=f"{label}: {policies[name].upper()}",
                     value_tone=PERMISSION_VALUE_TONES.get(policies[name], "neutral"),
                 ))
-        if not any(row.id == "mcp-servers" for row in rows):
-            rows.extend([
-                PanelRow("group:MCP SERVERS", RowKind.SECTION, "MCP SERVERS",
-                         legacy_label=_choice_section("MCP SERVERS")),
-                PanelRow("mcp-servers", RowKind.NAVIGATION, "MCP Servers", "0 active",
-                         "Enable an MCP server to configure its tools",
-                         action=PanelAction("mcp-servers"), section_id="group:MCP SERVERS",
-                         legacy_label="MCP Servers: 0 active"),
-            ])
         rows.extend([
             PanelRow("reset", RowKind.ACTION, "Reset to default",
                      description="Restore configured permission defaults",
@@ -12713,7 +13055,11 @@ class PersistentChatTUI:
         policies = _effective_permission_policies(self.agent, self.cfg)
         servers = _mcp_permission_server_rows(self.agent)
         rows = [PanelRow("servers-heading", RowKind.SECTION, "MCP SERVERS",
-                         legacy_label=_choice_section("MCP SERVERS"))]
+                         legacy_label=_choice_section("MCP SERVERS")),
+                PanelRow("default-policy", RowKind.INFO,
+                         "External tools default to ASK permission",
+                         section_id="servers-heading",
+                         legacy_label=_choice_info("External tools default to ASK permission"))]
         for server, tools in servers.items():
             count = len(tools)
             rows.append(PanelRow(
@@ -12735,7 +13081,7 @@ class PersistentChatTUI:
         rows.append(PanelRow("back", RowKind.NAVIGATION, "Back",
                              action=PanelAction("back"), legacy_label="back"))
         return PanelPage("mcp-permission-servers",
-                         ("Settings", "Permissions", "MCP Servers"), tuple(rows))
+                         ("Settings", "MCPs", "Manage permissions"), tuple(rows))
 
     def _open_mcp_permission_servers(self, default: str = "") -> None:
         self._open_panel(self._mcp_permission_servers_page(),
@@ -12745,11 +13091,206 @@ class PersistentChatTUI:
         if self._panel is None:
             return
         row = self._panel.row()
-        if row is not None and row.kind == RowKind.TOGGLE and row.enabled and row.action:
+        if (
+            row is not None and row.enabled and row.action
+            and (row.kind == RowKind.TOGGLE or row.action.kind in {"tool-policy", "mcp-tool"})
+        ):
             self._apply_panel_action(row.action)
 
     def _apply_panel_action(self, action: PanelAction) -> None:
-        if action.kind == "memory-list":
+        if action.kind.startswith("mcp-remove-"):
+            if action.kind == "mcp-remove-back":
+                self._open_settings_category("mcp servers", "Delete MCP")
+                return
+            if action.kind == "mcp-remove-list":
+                if self._mcp_inventory is None:
+                    self._open_settings_category("mcp servers", "Delete MCP")
+                    self.status_error = "Wait for the configured server inventory"
+                    return
+                self._open_panel(removal_page(
+                    self._mcp_inventory["servers"],
+                    truncated=self._mcp_inventory.get("truncated", False),
+                ), "mcp remove servers")
+                return
+            if action.kind == "mcp-remove-review":
+                metadata = next((item for item in (self._mcp_inventory or {}).get("servers", [])
+                                 if item["name"] == action.target), None)
+                if metadata is None or not re.fullmatch(
+                    r"[a-f0-9]{64}", metadata.get("fingerprint", "")
+                ):
+                    self.status_error = "Refresh the MCP inventory before removing this server"
+                    return
+                self._mcp_remove_candidate = (
+                    self.session_id, str(self.cfg.mcp_servers_file), action.target,
+                    metadata["fingerprint"],
+                )
+                self._open_panel(removal_confirmation(action.target),
+                                 "mcp remove confirmation", "cancel")
+                assert self._panel is not None
+                self._panel.picker.focus("cancel")
+                self._apply_picker_state()
+                return
+            if action.kind == "mcp-remove-confirm":
+                candidate = getattr(self, "_mcp_remove_candidate", None)
+                if self._choice_kind != "mcp remove confirmation" or candidate is None or (
+                    candidate[:3] != (
+                        self.session_id, str(self.cfg.mcp_servers_file), action.target
+                    )
+                ):
+                    return
+                if self.running or self._setup_job is not None or self._mcp_mutation_pending:
+                    self.status_error = "Finish the active operation before removing MCP tools"
+                    return
+                if self._mcp_mutations.path != self.cfg.mcp_servers_file:
+                    self.status_error = "MCP configuration path changed; restart before removing it"
+                    return
+                request = MCPRemove(uuid.uuid4().hex, self.session_id,
+                                    action.target, candidate[3])
+                self._mcp_mutation_pending = (request, time.monotonic())
+                self._mcp_mutation_warned = False
+                if not self._mcp_mutations.submit(request):
+                    self._mcp_mutation_pending = None
+                    self.status_error = "MCP save lane unavailable; no removal was accepted"
+                    return
+                self._mcp_remove_candidate = None
+                self._open_settings_category("mcp servers", "Delete MCP")
+                self.status_error = f"Removing MCP server {action.target}…"
+                return
+            return
+        if action.kind.startswith("spinner-"):
+            if action.kind == "spinner-custom":
+                self._spinner_draft = Spinner(self.appearance.spinner.custom_frames,
+                                              self.appearance.spinner.custom_interval)
+                self._open_panel(custom_spinner_page(self._spinner_draft), "spinner custom")
+            elif action.kind in {"spinner-frames", "spinner-interval"}:
+                draft = self._spinner_draft
+                if draft is None:
+                    return
+                frames_input = action.kind == "spinner-frames"
+                self._begin_settings_input(
+                    "Spinner frames" if frames_input else "Spinner interval",
+                    'Enter compact frames or double-quoted frames separated by commas.'
+                    if frames_input else "Enter milliseconds (16–10000); blank uses 100.",
+                    (action.kind,),
+                )
+                self._set_input(
+                    ", ".join(json.dumps(frame, ensure_ascii=False) for frame in draft.frames)
+                    if frames_input else str(draft.interval)
+                )
+            elif action.kind == "spinner-select" and action.target in CATALOG:
+                self.appearance.spinner = replace(self.appearance.spinner, name=action.target)
+                self._commit_appearance("Spinner", fields=("spinner_name",))
+                self._open_settings_category("spinner")
+            elif action.kind in {"spinner-apply", "spinner-reset"}:
+                if action.kind == "spinner-reset":
+                    self.appearance.spinner = SpinnerSettings()
+                elif self._spinner_draft is not None:
+                    self.appearance.spinner = SpinnerSettings(
+                        "custom", self._spinner_draft.frames, self._spinner_draft.interval
+                    )
+                else:
+                    return
+                self._commit_appearance("Spinner", fields=(
+                    "spinner_name", "spinner_custom_frames", "spinner_custom_interval"
+                ))
+                self._open_settings_category(
+                    "spinner", "custom" if action.kind == "spinner-apply" else "reset"
+                )
+        elif action.kind.startswith("divider-"):
+            if action.kind == "divider-pattern":
+                self._begin_settings_input(
+                    "Line pattern", "Enter 1–24 characters to repeat across the divider.",
+                    ("divider-pattern",),
+                )
+                self._set_input(self.appearance.divider_pattern)
+                return
+            if action.kind == "divider-colors":
+                if action.target not in {"line", "text"}:
+                    return
+                selected = self.appearance.divider_color if action.target == "line" \
+                    else self.appearance.divider_text_color
+                self._open_panel(divider_color_page(action.target, selected),
+                                 "divider color", "color:" + selected)
+                return
+            fields: tuple[str, ...]
+            if action.kind == "divider-toggle":
+                self.appearance.divider_visible = not self.appearance.divider_visible
+                fields = ("divider_visible",)
+            elif action.kind == "divider-line" and action.target in LINE_COLORS:
+                self.appearance.divider_color = action.target
+                fields = ("divider_color",)
+            elif action.kind == "divider-text" and action.target in DIVIDER_COLORS:
+                self.appearance.divider_text_color = action.target
+                fields = ("divider_text_color",)
+            elif action.kind == "divider-preset" and action.target in DIVIDER_PATTERNS:
+                self.appearance.divider_pattern = DIVIDER_PATTERNS[action.target]
+                fields = ("divider_pattern",)
+            elif action.kind == "divider-reset":
+                self.appearance.divider_visible = True
+                self.appearance.divider_color = DEFAULT_DIVIDER_COLOR
+                self.appearance.divider_text_color = DEFAULT_DIVIDER_TEXT_COLOR
+                self.appearance.divider_pattern = DEFAULT_DIVIDER_PATTERN
+                fields = ("divider_visible", "divider_color", "divider_text_color",
+                          "divider_pattern")
+            else:
+                return
+            self._commit_appearance("Divider settings", reset=action.kind == "divider-reset",
+                                    fields=fields)
+            if action.kind in {"divider-line", "divider-text"}:
+                target = "line" if action.kind == "divider-line" else "text"
+                self._open_panel(divider_color_page(target, action.target), "divider color")
+            else:
+                self._open_settings_category("divider")
+        elif action.kind in {"skill-back", "skill-list"}:
+            if action.kind == "skill-back":
+                self._begin_choice("settings", self._settings_categories(), "skills")
+            elif self._choice_kind == "skill detail" and getattr(
+                self, "_skill_delete_parent", False
+            ):
+                self._apply_panel_action(PanelAction("skill-delete-list"))
+            else:
+                self._open_settings_category("skills", "delete-skills"
+                                             if self._choice_kind == "skill delete list" else None)
+        elif action.kind == "skill-reload":
+            if self._skill_action_pending:
+                return
+            self._background_jobs.cancel("skills")
+            self._skills_inventory_loading = False
+            self._skills_inventory_loaded_at = 0
+            self._skill_feedback = ""
+            refresh = getattr(self._skill_actions, "refresh", None)
+            if refresh is not None:
+                refresh()
+            self._open_settings_category("skills", "reload")
+        elif action.kind == "skill-delete-list":
+            if self._skills_inventory is None or self._skill_action_pending:
+                return
+            self._skill_delete_parent = True
+            self._open_panel(skill_delete_page(self._skills_inventory), "skill delete list")
+        elif action.kind == "skill-import":
+            self._submit_skill_action(SkillAction("import"))
+        elif action.kind.startswith("skill-"):
+            skill = next((item for item in self._skills_inventory or []
+                          if item.get("name") == action.target), None)
+            if skill is None or self._skill_action_pending or not skill.get("identity"):
+                return
+            if action.kind in {"skill-open", "skill-confirm"}:
+                if action.kind == "skill-open":
+                    self._skill_delete_parent = False
+                confirm = action.kind == "skill-confirm"
+                if confirm:
+                    self._skill_delete_identity = str(skill["identity"])
+                self._open_panel(skill_detail_page(skill, confirm=confirm),
+                                 "skill detail", "back" if confirm else "delete")
+                if confirm and self._panel is not None:
+                    self._panel.picker.focus("back")
+                    self._apply_picker_state()
+            elif action.kind == "skill-delete" and self._skill_delete_identity:
+                self._submit_skill_action(SkillAction(
+                    "delete", action.target, self._skill_delete_identity
+                ))
+                self._skill_delete_identity = ""
+        elif action.kind == "memory-list":
             self._open_memory_facts()
         elif action.kind == "memory-back":
             self._open_settings_category("memory", "Manage memories")
@@ -12793,10 +13334,17 @@ class PersistentChatTUI:
                 self._open_settings_category(action.target)
         elif action.kind == "reset-all":
             self._open_settings_category("reset all")
+        elif action.kind == "confirm-reset-all":
+            if self._choice_kind != "settings reset confirmation" or self._panel is None \
+                    or self._panel.page.id != "settings-reset-confirmation":
+                return
+            self.appearance = TUIAppearance()
+            self._commit_appearance("all settings", reset=True)
+            self._begin_choice(
+                "settings", self._settings_categories(), RESET_THEME_CHOICE, restore=True
+            )
         elif action.kind == "preset":
             self._open_permission_presets()
-        elif action.kind == "mcp-servers":
-            self._open_mcp_permission_servers()
         elif action.kind == "mcp-server":
             self._open_mcp_permission_server(action.target)
         elif action.kind == "reset":
@@ -12849,16 +13397,9 @@ class PersistentChatTUI:
             return None
         policies = _effective_permission_policies(self.agent, self.cfg)
         rows = [
-            PanelRow("server-heading", RowKind.SECTION, "SERVER",
+            PanelRow("server-heading", RowKind.SECTION, "SERVER:",
+                     description=f"Current policy  {_mcp_server_permission_state(tools, policies)}",
                      legacy_label=_choice_section("SERVER")),
-            PanelRow("current-policy", RowKind.STATUS, "Current policy",
-                     _mcp_server_permission_state(tools, policies),
-                     legacy_label=_choice_info(
-                         f"Current: {_mcp_server_permission_state(tools, policies)}"
-                     ),
-                     value_tone=PERMISSION_VALUE_TONES.get(
-                         _mcp_server_permission_state(tools, policies).casefold(), "neutral"
-                     )),
             PanelRow("allow-all", RowKind.ACTION, "Allow all",
                      description="Set every tool to ALLOW",
                      action=PanelAction("mcp-bulk", "allow"),
@@ -12884,7 +13425,7 @@ class PersistentChatTUI:
         rows.append(PanelRow("back", RowKind.NAVIGATION, "Back",
                              action=PanelAction("back"), legacy_label="back"))
         return PanelPage(f"mcp-permission:{server}",
-                         ("Settings", "Permissions", "MCP Servers", server), tuple(rows))
+                         ("Settings", "MCPs", "Manage permissions", server), tuple(rows))
 
     def _open_permission_presets(self) -> None:
         names = _permission_tool_names(self.agent)
@@ -12999,9 +13540,20 @@ class PersistentChatTUI:
             self._memory_fact_save_state = "failed"
         self._open_memory_facts()
 
+    def _submit_skill_action(self, action: SkillAction) -> None:
+        if self._skill_action_pending:
+            return
+        self._skill_action_pending = self._skill_actions.submit(action)
+        self._skill_feedback = (
+            "Working…" if self._skill_action_pending else "Skill change not queued; try again"
+        )
+        self._background_jobs.cancel("skills")
+        self._skills_inventory_loading = False
+        self._open_settings_category("skills")
+
     def _refresh_skills_inventory(self) -> None:
         """Load the optional knowledge package without blocking the TUI input thread."""
-        if self._skills_inventory_loading:
+        if self._skills_inventory_loading or self._skill_action_pending:
             return
         if (
             self._skills_inventory_loaded_at
@@ -13110,6 +13662,8 @@ class PersistentChatTUI:
             self._memory_inventory_request = None
             self._memory_inventory_error = ""
         if kind == "settings":
+            self._background_jobs.cancel("skills")
+            self._skills_inventory_loading = False
             self._background_jobs.cancel("settings-overview")
             self._settings_overview_request = None
         if kind == "runtime settings":
@@ -13452,13 +14006,26 @@ class PersistentChatTUI:
             "label": label,
             "prompt": prompt,
             "on_submit": callback,
+            "single_line": callback in (
+                ("divider-pattern",), ("spinner-frames",), ("spinner-interval",),
+            ),
         }
+        self.application.layout.focus(self.input)
         self.activity = "waiting for setup input"
         self.status_error = ""
         self.application.invalidate()
 
+    def _settings_input_is_single_line(self) -> bool:
+        return bool(
+            self._settings_input_request and self._settings_input_request.get("single_line")
+        )
+
     def _submit_settings_input_response(self) -> None:
-        value = self.input.text.strip()
+        request = self._settings_input_request or {}
+        value = self.input.text if request.get("on_submit") in (
+            ("divider-pattern",), ("spinner-frames",)
+        ) \
+            else self.input.text.strip()
         self._answer_settings_input(value)
 
     def _answer_settings_input(self, value: str | None) -> None:
@@ -13466,9 +14033,40 @@ class PersistentChatTUI:
         if request is None:
             return
         callback = request.get("on_submit")
+        if callback in (("spinner-frames",), ("spinner-interval",)):
+            draft = self._spinner_draft
+            if draft is None:
+                return
+            if value is not None:
+                try:
+                    updated = Spinner(parse_frames(value), draft.interval) \
+                        if callback == ("spinner-frames",) \
+                        else Spinner(draft.frames, parse_interval(value))
+                except ValueError as exc:
+                    self.status_error = str(exc)
+                    self.application.invalidate()
+                    return
+                draft = updated
+                self._spinner_draft = draft
+            self._settings_input_request = None
+            self._set_input("")
+            self._open_panel(custom_spinner_page(draft), "spinner custom")
+            return
+        if callback == ("divider-pattern",) and value is not None:
+            try:
+                validate_divider_pattern(value)
+            except ValueError as exc:
+                self.status_error = str(exc)
+                self.application.invalidate()
+                return
         self._settings_input_request = None
         self._set_input("")
         if value is None:
+            if callback == ("divider-pattern",):
+                self.status_error = ""
+                self.activity = "ready"
+                self._open_settings_category("divider")
+                return
             if isinstance(callback, tuple) and callback and callback[0] == "memory-edit":
                 self._open_memory_facts()
                 return
@@ -13482,7 +14080,11 @@ class PersistentChatTUI:
             self._open_settings_category("mcp servers")
             return
         action = str(callback[0])
-        if action == "memory-edit":
+        if action == "divider-pattern":
+            self.appearance.divider_pattern = value
+            self._commit_appearance("Divider pattern", fields=("divider_pattern",))
+            self._open_settings_category("divider")
+        elif action == "memory-edit":
             self._submit_memory_fact(str(callback[1]), value)
         elif action == "mcp_import":
             self._import_mcp_configuration(value)
@@ -14028,19 +14630,17 @@ class PersistentChatTUI:
             self.application.invalidate()
             return
         if selected == "back":
-            if kind == "permission settings" and self._permission_return_to_mcp:
-                self._permission_return_to_mcp = False
-                self._open_settings_category("mcp servers", "MCP server permissions")
-                return
             category = SETTINGS_CATEGORY_FOR_KIND.get(kind, "theme")
             self._begin_choice("settings", self._settings_categories(), category)
             return
         if kind == "mcp settings":
-            if selected == "MCP server permissions":
-                self._permission_return_to_mcp = True
+            if selected == "Delete MCP":
+                self._apply_panel_action(PanelAction("mcp-remove-list"))
+                return
+            if selected == "Manage permissions":
                 self._open_mcp_permission_servers()
                 return
-            if selected == "Reload configured MCP tools":
+            if selected == "Reload":
                 if self.running or self._setup_job is not None or self._mcp_mutation_pending:
                     self.status_error = "Finish the active operation before reloading MCP tools"
                     return
@@ -14289,7 +14889,8 @@ class PersistentChatTUI:
             return
         if kind == "memory settings":
             if selected == "Manage memories":
-                self._open_memory_facts()
+                if self._memory_inventory is not None:
+                    self._open_memory_facts()
                 return
             if self._status_memory_enabled is None and selected != RESET_THEME_CHOICE:
                 return
@@ -14340,7 +14941,7 @@ class PersistentChatTUI:
             )
             self._begin_choice(
                 "input height",
-                ["enter min/max", *INPUT_HEIGHT_CHOICES, RESET_THEME_CHOICE, CANCEL_CHOICE],
+                ["enter min/max", *INPUT_HEIGHT_CHOICES, RESET_THEME_CHOICE, "back"],
                 current,
             )
             return
@@ -14350,7 +14951,7 @@ class PersistentChatTUI:
         else:
             self.appearance.input_border = DEFAULT_INPUT_BORDER
             self.appearance.input_height = DEFAULT_INPUT_HEIGHT
-            self.appearance.input_max_height = MAX_INPUT_HEIGHT
+            self.appearance.input_max_height = DEFAULT_INPUT_MAX_HEIGHT
             message = "input field settings"
         self._commit_appearance(
             message, reset=selected.startswith("reset"),
@@ -14471,10 +15072,26 @@ class PersistentChatTUI:
                 bypass_readonly=True,
             )
 
-    def _refresh_tui(self) -> None:
-        """Discard the rendered screen so the next frame repaints it in full."""
+    def _refresh_tui(self, *, replay_transcript: bool = False) -> None:
+        """Redraw chrome; an explicit refresh also repaints retained history."""
+        if replay_transcript:
+            # Replay the view's backing transcript, including unsaved streamed
+            # output and notices, rather than restoring or switching sessions.
+            # A prior /clear remains cleared because its backing text is gone.
+            self._printed_transcript_length = 0
         self._refresh_transcript_dividers()
         self.application.renderer.erase(leave_alternate_screen=False)
+        if replay_transcript:
+            output = self.application.output
+            # Reuse startup's bottom origin even when the terminal has no CPR.
+            # Printing the replay then scrolls naturally above the live frame.
+            clear_output_surface(
+                output, self._appearance_style(), TERMINAL_CLEAR_SEQUENCE,
+                reserve_rows=max(1, output.get_size().rows - 1),
+            )
+            self._terminal_position_pending = True
+            # Preserve active preview/picker state; transcript flushing waits
+            # until a preview closes and never prints its temporary contents.
         self.application.invalidate()
 
     def _clear_session_view(self) -> None:
@@ -14483,12 +15100,16 @@ class PersistentChatTUI:
         self._hide_permission_preview()
         self.application.renderer.erase(leave_alternate_screen=False)
         output = self.application.output
-        output.write_raw(TERMINAL_CLEAR_SEQUENCE)
-        output.flush()
+        clear_output_surface(
+            output, self._appearance_style(), TERMINAL_CLEAR_SEQUENCE,
+            reserve_rows=max(1, output.get_size().rows - 1),
+        )
         self._printed_transcript_length = 0
         for field in (self.output, self.live_output, self.text_theme_preview):
             field.buffer.set_document(Document("", 0), bypass_readonly=True)
-        self.application._request_absolute_cursor_position()
+        # Measure only after the next frame replays any session text, so CPR
+        # describes the live frame's origin rather than a pre-replay position.
+        self._terminal_position_pending = True
         self.application.invalidate()
 
     def _flush_transcript(self) -> None:
@@ -14521,14 +15142,18 @@ class PersistentChatTUI:
                         else ""
                     )
                     base = "class:output-field" + surface
+                    line_fragments = get_line(lineno)
                     fragments.extend(
                         ("class:output-field" + surface + (f" {style}" if style else ""), value)
-                        for style, value in get_line(lineno)
+                        for style, value in line_fragments
                     )
                     # EL paints blank cells using the active background without
                     # adding copyable padding. Don't erase the final character
                     # when an exactly full row leaves the terminal wrap pending.
-                    cells = get_cwidth(document.lines[lineno])
+                    # Hidden divider rules leave shorter visible metadata.
+                    # Deferred-wrap and background fill follow rendered cells,
+                    # while the backing transcript retains its canonical text.
+                    cells = get_cwidth("".join(value for _style, value in line_fragments))
                     if not cells or cells % max(1, columns):
                         fragments.append((base + " [ZeroWidthEscape]", "\x1b[K"))
                     fragments.append((base, "\n"))
@@ -14539,13 +15164,16 @@ class PersistentChatTUI:
                     style=self.application.style,
                 )
                 self._printed_transcript_length = end
-                self.application._request_absolute_cursor_position()
+                self._terminal_position_pending = True
             tail = text[self._printed_transcript_length :]
         if self.live_output.text != tail:
             self.live_output.buffer.set_document(
                 Document(tail, len(tail)),
                 bypass_readonly=True,
             )
+        if self._terminal_position_pending:
+            self._terminal_position_pending = False
+            self.application._request_absolute_cursor_position()
 
     def _session_action_is_busy(self) -> bool:
         """Whether an action must wait for earlier queued work to finish."""
@@ -14709,6 +15337,7 @@ class PersistentChatTUI:
             self._append("\n[session] No saved sessions yet.\n")
             return
         self._resume_choices = {_session_choice_label(s): s["session_id"] for s in sessions}
+        self._resume_sessions = {s["session_id"]: s for s in sessions}
         values = list(self._resume_choices)
         self._begin_choice("session", values, values[0])
 
@@ -14722,9 +15351,10 @@ class PersistentChatTUI:
         refreshed = {_session_choice_label(session): session["session_id"] for session in sessions}
         values = [*refreshed, CANCEL_CHOICE]
         self._resume_choices = refreshed
+        self._resume_sessions = {s["session_id"]: s for s in sessions}
         if self._picker is not None:
             self._picker.replace(self._picker_rows("session", values))
-            self._apply_picker_state()
+            self._present_legacy_choice_as_panel("session")
         else:
             self._begin_choice("session", values, CANCEL_CHOICE)
 
@@ -14779,7 +15409,7 @@ class PersistentChatTUI:
                 self._cancel_choice()
                 return
             if value == RESET_THEME_CHOICE:
-                value = f"{DEFAULT_INPUT_HEIGHT} {MAX_INPUT_HEIGHT}"
+                value = f"{DEFAULT_INPUT_HEIGHT} {DEFAULT_INPUT_MAX_HEIGHT}"
             parts = value.split()
             if len(parts) != 2 or not all(p.isascii() and p.isdecimal() for p in parts):
                 self.status_error = "Enter two whole numbers: min max (1–12)"
@@ -15053,7 +15683,7 @@ class PersistentChatTUI:
             self._append("\n" + format_command_reference(width=width) + "\n")
             return
         if text == "/refresh":
-            self._refresh_tui()
+            self._refresh_tui(replay_transcript=True)
             return
         if text == "/keybinds":
             width = max(32, shutil.get_terminal_size((100, 24)).columns - 4)
@@ -15138,11 +15768,14 @@ class PersistentChatTUI:
                 "theme": "theme",
                 "input": "input field",
                 "input field": "input field",
+                "divider": "divider",
+                "spinner": "spinner",
                 "model": "models",
                 "models": "models",
                 "provider": "providers",
                 "providers": "providers",
                 "mcp": "mcp servers",
+                "mcps": "mcp servers",
                 "mcp servers": "mcp servers",
                 "memory": "memory",
                 "skill": "skills",
@@ -15156,7 +15789,8 @@ class PersistentChatTUI:
             }
             if requested not in category_aliases:
                 self._append(
-                    "\n[error] Settings category must be theme, input, models, providers, "
+                    "\n[error] Settings category must be theme, input, divider, spinner, "
+                    "models, providers, "
                     "memory, skills, MCP, tools, permissions, runtime, or reset.\n"
                 )
                 return
@@ -16097,7 +16731,6 @@ class PersistentChatTUI:
         self._provider_key_label = label
         choices = [
             _choice_section(label.upper()),
-            _choice_info(f"Status: {'configured' if configured else 'not configured'}"),
             _choice_info(PROVIDER_API_KEY_DESCRIPTIONS[label]),
             _choice_info(f"Environment variable: {env_name}"),
             "",
@@ -16277,9 +16910,15 @@ class PersistentChatTUI:
         ):
             self._restore_panel_composer_draft()
         self.application.layout.focus(
-            self.panel_control if self._panel is not None else
+            self.panel_control if self._panel is not None and self._choice_kind else
             self.choice_control if self._choice_kind else self.input
         )
+        spinner_preview = self._spinner_page_open()
+        animating = spinner_preview or self.running or self._watching_remote \
+            or self._setup_job is not None or self._permission_request is not None \
+            or self._user_input_request is not None or self._debug_label_started_at is not None
+        spinner = self._spinner_preview() if spinner_preview else self.appearance.spinner.animation
+        self.application.refresh_interval = min(0.1, spinner.interval / 1000) if animating else 0.1
         while True:
             try:
                 kind, payload = self._events.get_nowait()
@@ -16319,15 +16958,21 @@ class PersistentChatTUI:
                         if isinstance(mcp_result.request, MCPAddDisabled) else
                         f"Enabled MCP server {mcp_result.request.name}"
                         if isinstance(mcp_result.request, MCPEnable) else
+                        f"Removed MCP server {mcp_result.request.name}"
+                        if isinstance(mcp_result.request, MCPRemove) else
                         f"MCP setting saved for {mcp_result.request.name}"
                     )
                     if mcp_result.catalog is None:
                         message += "; live tools unchanged — restart before continuing queued work"
+                    if mcp_result.cleanup_failed:
+                        message += "; local OAuth credential cleanup failed"
                     self._append(f"\n[success] {message}.\n")
                     self.status_error = (
                         "MCP catalog unconfirmed; reload configured MCP tools to continue"
                         if self._mcp_catalog_unconfirmed else ""
                     )
+                    if mcp_result.cleanup_failed and not self.status_error:
+                        self.status_error = "Server removed; local OAuth credential cleanup failed"
                 else:
                     self.status_error = (
                         "MCP reload could not verify configuration; previous tools retained"
@@ -16339,7 +16984,7 @@ class PersistentChatTUI:
                         "review configuration"
                         if isinstance(mcp_result.request, MCPAddDisabled)
                         and mcp_result.state == "rejected" else
-                        "MCP definition changed or cannot be toggled; review and retry"
+                        "MCP definition changed or operation rejected; review and retry"
                         if mcp_result.state == "rejected" else
                         "MCP save unconfirmed; queued work paused — "
                         "inspect configuration before retrying"
@@ -16348,7 +16993,7 @@ class PersistentChatTUI:
                 if mcp_current and self._choice_kind == "mcp settings":
                     error = self.status_error
                     fallback = (
-                        "Reload configured MCP tools" if isinstance(mcp_result.request, MCPReload)
+                        "Reload" if isinstance(mcp_result.request, MCPReload)
                         else f"{mcp_result.request.name}:"
                     )
                     selected_row = (
@@ -16371,6 +17016,8 @@ class PersistentChatTUI:
                     category = "theme" if self._choice_kind == "theme settings" else "input field"
                     self._open_settings_category(category, selected)
                     self.status_error = error
+                # Typed Divider pages read this revision's status directly in
+                # the fixed footer; acknowledgements never rebuild their rows.
             elif kind == "memory_fact_saved":
                 fact_action, saved = cast(tuple[MemoryFactUpdate, bool], payload)
                 self._background_jobs.cancel("memory-inventory")
@@ -16541,6 +17188,22 @@ class PersistentChatTUI:
             elif kind == "error":
                 self.status_error = str(payload)
                 self._append(f"\n[error] {payload}\n")
+            elif kind == "skill_drop_inventory":
+                self._skill_drop_files = cast(tuple[str, ...], payload)
+                if self._choice_kind == "skills settings":
+                    self._open_settings_category("skills")
+                self.application.invalidate()
+            elif kind == "skill_action_done":
+                _action, success, message = cast(tuple[SkillAction, bool, str], payload)
+                self._skill_action_pending = False
+                self._skill_feedback = str(message)
+                self._background_jobs.cancel("skills")
+                self._skills_inventory_loading = False
+                self._skills_inventory_loaded_at = 0
+                self._skills_inventory = None
+                if self._choice_kind in {"skills settings", "skill detail"}:
+                    self._open_settings_category("skills")
+                self.application.invalidate()
             elif kind == "skills_inventory":
                 installed, error = cast(
                     tuple[list[dict[str, object]] | None, str], payload
@@ -16554,9 +17217,11 @@ class PersistentChatTUI:
                 )
                 if self._choice_kind == "skills settings":
                     self._open_settings_category("skills")
+                elif self._choice_kind == "settings":
+                    self._begin_choice(
+                        "settings", self._settings_categories(), "skills", refresh=True
+                    )
             elif kind == "mcp_catalog_results":
-                from klaude_core.mcp_catalog import install_plans
-
                 request_id, results, cached, error = cast(
                     tuple[str, list[Any], bool, str], payload
                 )
@@ -16565,11 +17230,9 @@ class PersistentChatTUI:
                 self._mcp_catalog_results = {}
                 self._mcp_catalog_cached = cached
                 for server in results:
-                    plans = install_plans(server)
-                    transports = ", ".join(plan.label for plan in plans) or "unsupported"
                     title = getattr(server, "title", getattr(server, "name", "MCP server"))
                     label = (
-                        f"{title} · {getattr(server, 'version', '?')} · {transports}"
+                        f"{title} · {getattr(server, 'version', '?')} · {server.name}"
                     )
                     self._mcp_catalog_results[label] = server
                 if self._choice_kind == "mcp registry results":
@@ -16668,6 +17331,7 @@ class PersistentChatTUI:
         self._appearance_writer.close()
         self._session_io.close()
         self._session_actions.close()
+        self._skill_actions.close()
         self._mcp_mutations.close()
         self._cancel_setup_job()
         try:
@@ -16699,6 +17363,7 @@ class PersistentChatTUI:
             return False
 
     def run(self) -> None:
+        self._skill_actions.watch()
         output = self.application.output
 
         def prepare_normal_screen() -> None:
@@ -16719,8 +17384,10 @@ class PersistentChatTUI:
             # Clear again after Prompt Toolkit owns the terminal. Some terminal
             # backends redraw or restore cursor state during Application setup,
             # which can otherwise leave pre-Klaude rows in visible scrollback.
-            output.write_raw(TERMINAL_CLEAR_SEQUENCE)
-            output.write_raw("\r\n" * max(1, rows - 1))
+            clear_output_surface(
+                output, self._appearance_style(), TERMINAL_CLEAR_SEQUENCE,
+                reserve_rows=max(1, rows - 1),
+            )
             output.write_raw(KITTY_KEYBOARD_PROTOCOL_ON)
             output.write_raw(XTERM_MODIFY_OTHER_KEYS_ON)
             output.flush()
@@ -16741,6 +17408,10 @@ class PersistentChatTUI:
             if not self._session_actions.close(wait=True):
                 output.write_raw(
                     "\r\n[warning] Session/settings saves unconfirmed.\r\n"
+                )
+            if not self._skill_actions.close(wait=True):
+                output.write_raw(
+                    "\r\n[warning] Skill changes unconfirmed; inspect next launch.\r\n"
                 )
             if not self._mcp_mutations.close(wait=True):
                 output.write_raw("\r\n[warning] MCP saves unconfirmed; inspect next launch.\r\n")
@@ -16770,9 +17441,20 @@ def chat(
     remembered_model = _load_last_chat_model(chat_preferences_path)
     requested_model = model or remembered_model or ""
     # A canonical cloud reference cannot be handed to Ollama during startup.
-    agent, memory = _build_agent(
-        Path.cwd(), None if "/" in requested_model else (requested_model or None)
-    )
+    startup_surface: AbstractContextManager[None] = nullcontext()
+    if interactive_tui:
+        from prompt_toolkit.output.defaults import create_output
+
+        appearance = _load_tui_appearance(cfg.data_dir / "appearance.json")
+        startup_surface = startup_output_surface(
+            console, create_output(stdout=console.file),
+            _tui_style(appearance.theme, appearance.text_theme),
+            TERMINAL_CLEAR_SEQUENCE,
+        )
+    with startup_surface:
+        agent, memory = _build_agent(
+            Path.cwd(), None if "/" in requested_model else (requested_model or None)
+        )
     selected_model_applied = False
     if requested_model:
         selected = _resolve_requested_chat_model(
@@ -17469,32 +18151,12 @@ def import_skill(
     name: str = typer.Option("", "--name", help="installed skill name"),
 ):
     """Install a skill ZIP/folder and index its text into a knowledge library."""
-    from klaude_knowledge import (
-        IndexDocument,
-        Knowledge,
-        finalize_skill_package,
-        install_skill_package,
-    )
+    from klaude_knowledge.skill_management import import_indexed_skill
 
     cfg = load_config()
-    installed = install_skill_package(cfg, source, name=name, library=library)
-    kn = Knowledge(cfg)
-    documents = []
-    for path, source_uri in zip(installed.text_files, installed.source_uris, strict=False):
-        rel = path.relative_to(installed.current_dir).as_posix()
-        documents.append(
-            IndexDocument(
-                source=source_uri,
-                text=path.read_text(errors="replace"),
-                title=rel,
-            )
-        )
-    total = kn.replace_owner_snapshot_atomic(
-        installed.library,
-        f"skill:{installed.name}",
-        documents,
+    installed, total = import_indexed_skill(
+        cfg, Path(source).expanduser(), name=name, library=library
     )
-    finalize_skill_package(installed)
 
     console.print(
         f"[green]installed skill '{installed.name}'[/] "

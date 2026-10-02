@@ -12,29 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from klaude_core import Config
+from klaude_core.skill_drop import SKILL_TEXT_EXTENSIONS
 
 from .snapshots import utc_timestamp
 
-TEXT_EXTENSIONS = {
-    ".css",
-    ".csv",
-    ".html",
-    ".ini",
-    ".js",
-    ".json",
-    ".jsx",
-    ".md",
-    ".markdown",
-    ".py",
-    ".rst",
-    ".toml",
-    ".ts",
-    ".tsx",
-    ".txt",
-    ".xml",
-    ".yaml",
-    ".yml",
-}
+TEXT_EXTENSIONS = SKILL_TEXT_EXTENSIONS
 MAX_INDEX_FILE_BYTES = 2_000_000
 
 
@@ -118,9 +100,13 @@ def _is_safe_zip_member(name: str) -> bool:
 
 def _extract_zip(source: Path, dest: Path) -> None:
     with zipfile.ZipFile(source) as zf:
+        if len(zf.infolist()) > 2000 or sum(i.file_size for i in zf.infolist()) > 64 * 1024 * 1024:
+            raise ValueError("skill ZIP exceeds extraction limits")
         for info in zf.infolist():
             if not _is_safe_zip_member(info.filename):
                 raise ValueError(f"unsafe zip path: {info.filename}")
+            if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                raise ValueError("symlink ZIP entries are not supported")
         zf.extractall(dest)
 
 

@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import queue
@@ -23,7 +24,7 @@ def test_real_owned_worker_reads_only_bounded_skill_metadata(tmp_path):
     (skills / "test" / "manifest.json").write_text(
         json.dumps(
             {
-                "name": "Test",
+                "name": "test",
                 "library": "docs",
                 "indexed_files": ["a", "b"],
                 "private": "not-for-ipc",
@@ -39,7 +40,10 @@ def test_real_owned_worker_reads_only_bounded_skill_metadata(tmp_path):
         kind, (key, returned, result, error) = events.get(timeout=5)
         assert (kind, key, returned, error) == ("background_result", "skills", identity, "")
         assert result == {
-            "skills": [{"name": "Test", "library": "docs", "indexed_file_count": 2}],
+            "skills": [{"name": "test", "library": "docs", "indexed_file_count": 2,
+                        "identity": hashlib.sha256(
+                            (skills / "test" / "manifest.json").read_bytes()
+                        ).hexdigest()}],
             "truncated": False,
         }
         assert "not-for-ipc" not in json.dumps(result)

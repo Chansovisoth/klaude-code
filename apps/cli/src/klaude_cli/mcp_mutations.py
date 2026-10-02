@@ -46,6 +46,14 @@ class MCPReload:
 
 
 @dataclass(frozen=True)
+class MCPRemove:
+    identity: str
+    session_id: str
+    name: str
+    fingerprint: str
+
+
+@dataclass(frozen=True)
 class MCPAddDisabled:
     identity: str
     session_id: str
@@ -61,7 +69,7 @@ class MCPImport:
     name: str = field(default="import", init=False)
 
 
-MCPMutation = MCPToggle | MCPEnable | MCPReload | MCPAddDisabled | MCPImport
+MCPMutation = MCPToggle | MCPEnable | MCPReload | MCPAddDisabled | MCPImport | MCPRemove
 
 
 @dataclass(frozen=True)
@@ -71,6 +79,7 @@ class MCPMutationResult:
     state: str  # saved, loaded, rejected, or unconfirmed
     catalog: Any = field(default=None, repr=False)  # private tools, never IPC/transcript
     count: int = 0
+    cleanup_failed: bool = False
 
 
 class MCPMutationWriter:
@@ -81,8 +90,9 @@ class MCPMutationWriter:
     The fixed prepare callback constructs cached tools only, never transports.
     """
 
-    def __init__(self, path: Path, emit, prepare):
+    def __init__(self, path: Path, emit, prepare, *, auth_dir: Path | None = None):
         self.path = Path(path)
+        self.auth_dir = auth_dir
         self.emit = emit
         self.prepare = prepare
         self._condition = threading.Condition()
@@ -94,11 +104,13 @@ class MCPMutationWriter:
 
     def submit(self, request: MCPMutation) -> bool:
         if (
-            not isinstance(request, (MCPToggle, MCPEnable, MCPReload, MCPAddDisabled, MCPImport))
+            not isinstance(request, (
+                MCPToggle, MCPEnable, MCPReload, MCPAddDisabled, MCPImport, MCPRemove
+            ))
             or not all(isinstance(value, str) and 0 < len(value) <= 128 for value in (
                 request.identity, request.session_id, request.name,
             ))
-            or isinstance(request, (MCPToggle, MCPEnable)) and (
+            or isinstance(request, (MCPToggle, MCPEnable, MCPRemove)) and (
                 not isinstance(request.fingerprint, str)
                 or not re.fullmatch(r"[a-f0-9]{64}", request.fingerprint)
             )
@@ -137,6 +149,7 @@ class MCPMutationWriter:
         state = "rejected"
         catalog = None
         count = 0
+        cleanup_failed = False
         try:
             servers = registry.load()
             if isinstance(request, MCPReload):
@@ -186,9 +199,18 @@ class MCPMutationWriter:
                 if request.enabled and not server.tools:
                     return MCPMutationResult(request, str(self.path), "rejected")
                 server.enabled = request.enabled
+            elif isinstance(request, MCPRemove):
+                del servers[request.name]
             saving = True
             registry.save(servers)
             state = "saved"
+            if isinstance(request, MCPRemove) and server.oauth and self.auth_dir is not None:
+                from klaude_core.mcp_client import MCPTokenStorage, mcp_auth_file
+
+                try:
+                    MCPTokenStorage(mcp_auth_file(self.auth_dir, request.name)).clear()
+                except OSError:
+                    cleanup_failed = True
             # Fresh snapshot includes unrelated changes merged by registry CAS.
             catalog = self.prepare(registry.load())
         except Exception:
@@ -196,7 +218,7 @@ class MCPMutationWriter:
             # failure happened before publication. No automatic retry.
             if saving and state != "saved":
                 state = "unconfirmed"
-        return MCPMutationResult(request, str(self.path), state, catalog, count)
+        return MCPMutationResult(request, str(self.path), state, catalog, count, cleanup_failed)
 
     def _run(self) -> None:
         while True:

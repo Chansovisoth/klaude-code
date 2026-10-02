@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -57,7 +58,17 @@ def execute(request: dict[str, Any]) -> object:
             pass
         # Definitions, arguments, env values, tools, names and conversation text
         # stay in this private worker. Never initialize/migrate session storage.
-        return {"memory_enabled": memory_enabled, "mcp_enabled": enabled, "mcp_total": total}
+        result = {"memory_enabled": memory_enabled, "mcp_enabled": enabled, "mcp_total": total}
+        if request.get("memory_file"):
+            from klaude_cli.memory_inventory import read_memory_inventory
+
+            try:
+                inventory = read_memory_inventory(Path(request["sessions_db"]),
+                                                  Path(request["memory_file"]))
+                result["memory_count"] = inventory["count"]
+            except (OSError, ValueError, TypeError, sqlite3.Error):
+                result["memory_count"] = None
+        return result
     if kind == "runtime_calibration":
         from klaude_core.runtime_calibration import calibrate_runtime_options
 
@@ -146,14 +157,21 @@ def execute(request: dict[str, Any]) -> object:
             try:
                 if manifest.stat().st_size > 256_000:
                     continue
-                data = json.loads(manifest.read_text())
+                with manifest.open("rb") as stream:
+                    raw = stream.read(256_001)
+                if len(raw) > 256_000:
+                    continue
+                data = json.loads(raw)
             except (OSError, ValueError):
                 continue
             if not isinstance(data, dict):
                 continue
+            if data.get("name") != manifest.parent.name:
+                continue
             files = data.get("indexed_files", [])
             skills.append(
                 {
+                    "identity": hashlib.sha256(raw).hexdigest(),
                     "name": re.sub(r"[\x00-\x1f\x7f-\x9f]", "", str(data.get("name", "?")))[:200],
                     "library": re.sub(
                         r"[\x00-\x1f\x7f-\x9f]",

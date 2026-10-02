@@ -17,7 +17,8 @@ def test_overview_snapshot_initial_loading_success_and_age():
     snapshot = snapshot.refreshed({"memory_enabled": False, "mcp_enabled": 1, "mcp_total": 2}, 100)
     assert snapshot.labels(loading=False, now=110) == ("off", "1/2 enabled")
     assert snapshot.labels(loading=True, now=140) == (
-        "off · cached 40s ago · refreshing…", "1/2 enabled · cached 40s ago · refreshing…"
+        "off · cached 40s ago · refreshing…",
+        "1/2 enabled · cached 40s ago · refreshing…"
     )
 
 
@@ -125,3 +126,17 @@ def test_real_owned_overview_job_reads_private_inventory_in_background(tmp_path)
     finally:
         jobs.close(wait=True)
     assert not jobs._active
+
+
+def test_overview_counts_saved_facts_without_returning_contents(tmp_path):
+    db, facts, mcp = tmp_path / "sessions.db", tmp_path / "memory.md", tmp_path / "mcp.json"
+    memory = Memory(facts, db)
+    memory.remember("Prefer a private test value", source="test")
+    memory.db.close()
+    result = execute({
+        "kind": "settings_overview", "sessions_db": str(db),
+        "memory_file": str(facts), "mcp_file": str(mcp),
+    })
+    assert result["memory_count"] == 1
+    assert "private test value" not in json.dumps(result)
+    assert SettingsOverviewSnapshot().refreshed(result, 100).memory_count == 1

@@ -22,6 +22,25 @@ class RowKind(StrEnum):
     SEPARATOR = "separator"
 
 
+class RowControl(StrEnum):
+    BACK = "back"
+    CLOSE = "close"
+    CANCEL = "cancel"
+    RESET = "reset"
+
+
+_ACTION_CONTROLS = {
+    "back": RowControl.BACK, "memory-back": RowControl.BACK,
+    "memory-list": RowControl.BACK, "skill-back": RowControl.BACK,
+    "skill-list": RowControl.BACK, "close": RowControl.CLOSE,
+    "reset": RowControl.RESET, "reset-all": RowControl.RESET,
+}
+_CONTROL_ICONS = {
+    RowControl.BACK: "←", RowControl.CLOSE: "×",
+    RowControl.CANCEL: "×", RowControl.RESET: "⏻",
+}
+
+
 @dataclass(frozen=True)
 class PanelAction:
     kind: str
@@ -45,6 +64,10 @@ class PanelRow:
     legacy_label: str = ""
     checked: bool | None = None
     value_tone: str = "neutral"
+    footer: bool = False
+    search_terms: str = ""
+    label_badge: str = ""
+    control: RowControl | None = None
 
     def __post_init__(self) -> None:
         if self.kind == RowKind.TOGGLE and type(self.checked) is not bool:
@@ -53,6 +76,17 @@ class PanelRow:
             raise ValueError("Invalid panel status tone")
         if self.value_tone not in {"neutral", "success", "warning", "error"}:
             raise ValueError("Invalid panel value tone")
+
+    @property
+    def effective_control(self) -> RowControl | None:
+        return self.control or (
+            _ACTION_CONTROLS.get(self.action.kind) if self.action is not None else None
+        )
+
+    @property
+    def display_label(self) -> str:
+        control = self.effective_control
+        return f"{_CONTROL_ICONS[control]} {self.label.upper()}" if control else self.label
 
     @property
     def effective_value(self) -> str:
@@ -67,11 +101,13 @@ class PanelRow:
             self.id,
             self.legacy_label or self.label,
             self.selectable,
-            self.navigation_target == "back" or (
+            self.effective_control in {RowControl.BACK, RowControl.CLOSE, RowControl.CANCEL}
+            or self.navigation_target == "back" or (
                 self.action is not None and self.action.kind in {"back", "close"}
             ),
             enabled=self.enabled,
-            search_text=" ".join((self.label, self.effective_value, self.description)),
+            search_text=" ".join((self.label, self.effective_value, self.description,
+                                  self.search_terms, self.label_badge)),
             section_id=self.section_id or None,
         )
 
@@ -83,6 +119,7 @@ class PanelPage:
     rows: tuple[PanelRow, ...]
     subtitle: str = ""
     legacy_actions: bool = False
+    column_headers: tuple[str, str, str] | None = None
 
     def __post_init__(self) -> None:
         ids = [row.id for row in self.rows]
@@ -106,6 +143,8 @@ class PanelState:
         self.picker = PickerController([row.picker_row() for row in page.rows], default_id)
         self.scroll_top = 0
         self.search_active = False
+        self._scroll_row_id: str | None = None
+        self._row_line_offset = 0
 
     def replace(self, page: PanelPage) -> None:
         if page.id != self.page.id:
@@ -136,6 +175,7 @@ class PanelState:
     def filter(self, query: str) -> None:
         self.picker.filter(query)
         self.scroll_top = 0
+        self._row_line_offset = 0
 
     def move(self, delta: int) -> None:
         indices = [i for i, row in enumerate(self.picker.visible) if row.selectable]
@@ -145,14 +185,35 @@ class PanelState:
         position = indices.index(current) if current in indices else 0
         self.picker.select(indices[(position + delta) % len(indices)])
 
+    def focus_line(self, body: BodyRender) -> int:
+        """Keep an oversized table row readable without changing its identity."""
+        if not self.page.column_headers:
+            return body.selected_line
+        if self._scroll_row_id != self.picker.selected_id:
+            self._scroll_row_id = self.picker.selected_id
+            self._row_line_offset = 0
+        count = sum(owner == self.picker.selected_id for owner in body.row_for_line)
+        self._row_line_offset = min(self._row_line_offset, max(0, count - 1))
+        return body.selected_line + self._row_line_offset
+
+    def scroll_row(self, delta: int, body: BodyRender) -> bool:
+        """Page through wrapped result content before moving to another result."""
+        current = self.focus_line(body)
+        count = sum(owner == self.picker.selected_id for owner in body.row_for_line)
+        target = max(body.selected_line, min(current + delta, body.selected_line + count - 1))
+        if target == current:
+            return False
+        self._row_line_offset = target - body.selected_line
+        return True
+
     def viewport(self, height: int, body: BodyRender) -> int:
         height = max(1, height)
-        selected = body.selected_line
+        selected = self.focus_line(body)
         if selected < self.scroll_top:
             self.scroll_top = selected
         elif selected >= self.scroll_top + height:
             self.scroll_top = selected - height + 1
-        if body.context_line < selected:
+        if body.context_line < selected and selected == body.selected_line:
             self.scroll_top = min(self.scroll_top, max(body.context_line, selected - height + 1))
         self.scroll_top = max(0, min(self.scroll_top, max(0, len(body.lines) - height)))
         return self.scroll_top
@@ -170,6 +231,75 @@ def _fit(value: str, width: int) -> str:
 
 def _wrapped(value: str, width: int) -> list[str]:
     return textwrap.wrap(value, width=max(1, width), break_long_words=True) or []
+
+
+def _table_widths(width: int) -> tuple[int, int, int]:
+    available = width - 7  # selector, two column gaps, unused final terminal cell
+    name = min(40, max(20, available // 3))
+    version = min(18, max(9, available // 6))
+    return name, version, available - name - version
+
+
+def _cell_lines(text: str, width: int) -> list[str]:
+    lines: list[str] = []
+    for line in _wrapped(text, width):
+        # textwrap counts characters; terminal cells can be wider than that.
+        while get_cwidth(line) > width:
+            cut = 1
+            while cut < len(line) and get_cwidth(line[:cut + 1]) <= width:
+                cut += 1
+            lines.append(line[:cut])
+            line = line[cut:]
+        if line:
+            lines.append(line)
+    return lines or [""]
+
+
+def _table_row_lines(
+    row: PanelRow, width: int, selected: bool,
+) -> list[tuple[tuple[str, str], ...]]:
+    marker = "›" if selected else " "
+    badge_width = get_cwidth(row.label_badge) + 3 if row.label_badge else 0
+    if width < 60:
+        labels = _cell_lines(row.display_label, max(2, width - 2 - badge_width))
+        lines: list[tuple[tuple[str, str], ...]] = [
+            (("class:panel.focus", marker + " "),)
+            + _label_fragments(row, labels[0], "class:panel.label")
+        ]
+        lines.extend((("class:panel.label", " " * (2 + badge_width) + line),)
+                     for line in labels[1:])
+        for text, style in ((row.value, _value_style(row)),
+                            (row.description, "class:panel.muted")):
+            lines.extend(((style, "    " + line),)
+                         for line in _cell_lines(text, max(2, width - 4)) if line)
+        return lines
+    widths = _table_widths(width)
+    cells = [_cell_lines(row.display_label, widths[0] - badge_width),
+             _cell_lines(row.value, widths[1]), _cell_lines(row.description, widths[2])]
+    lines = []
+    for index in range(max(map(len, cells))):
+        values = [cell[index] if index < len(cell) else "" for cell in cells]
+        label = _fit(values[0], widths[0] - badge_width)
+        label_parts = _label_fragments(row, label, "class:panel.label") if index == 0 else (
+            ("class:panel.label", " " * badge_width + label),
+        )
+        lines.append((("class:panel.focus", marker + " " if index == 0 else "  "),)
+                     + label_parts + (
+            (_value_style(row), "  " + _fit(values[1], widths[1])),
+            ("class:panel.muted", "  " + values[2]),
+        ))
+    return lines
+
+
+def _label_fragments(row: PanelRow, label: str, style: str) -> tuple[tuple[str, str], ...]:
+    if row.label_badge:
+        return (
+            ("class:choice.active.edge", "["),
+            ("class:choice.active.word", row.label_badge),
+            ("class:choice.active.edge", "]"),
+            (style, " " + label),
+        )
+    return ((style, label),)
 
 
 def toggle_text(checked: bool, *, unicode_blocks: bool = True) -> str:
@@ -219,7 +349,22 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
     selected_line = 0
     context_line = 0
     last_section_line = 0
+    footer_started = False
     for row in rows:
+        footer_row = row.footer or row.effective_control is not None
+        if not footer_started and footer_row:
+            if lines and any(text.strip() for _style, text in lines[-1]):
+                lines.append((("", ""),))
+                owners.append(None)
+            footer_started = True
+        if state.page.column_headers and row.kind == RowKind.NAVIGATION and not footer_row:
+            start = len(lines)
+            row_lines = _table_row_lines(row, width, row.id == state.picker.selected_id)
+            lines.extend(row_lines)
+            owners.extend([row.id] * len(row_lines))
+            if row.id == state.picker.selected_id:
+                selected_line, context_line = start, last_section_line
+            continue
         value = (
             toggle_text(row.checked is True, unicode_blocks=unicode_blocks)
             if row.kind == RowKind.TOGGLE
@@ -232,8 +377,20 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
             heading = _fit(row.label.upper(), width - 2).rstrip()
             parts = (
                 ("class:panel.heading-marker", "▪ "),
-                ("class:panel.section", heading),
+                ("class:panel.section", heading.removesuffix(":")),
             )
+            if heading.endswith(":"):
+                parts += (("class:panel.heading-marker", ":"),)
+            if row.description:
+                if get_cwidth(heading) + get_cwidth(row.description) + 4 <= width:
+                    parts += (("class:panel.muted", "  " + row.description),)
+                else:
+                    lines.append(parts)
+                    owners.append(row.id)
+                    for description in _wrapped(row.description, width - 2):
+                        lines.append((("class:panel.muted", "  " + description),))
+                        owners.append(row.id)
+                    continue
         elif row.kind == RowKind.SEPARATOR:
             parts = (("", ""),)
         elif row.kind in {RowKind.INFO, RowKind.STATUS}:
@@ -251,6 +408,7 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
         else:
             marker = "›" if row.id == state.picker.selected_id else " "
             label_style = "class:panel.disabled" if not row.enabled else "class:panel.label"
+            badge_width = get_cwidth(row.label_badge) + 3 if row.label_badge else 0
             value_style = _value_style(row)
             stacked_value = False
             stacked_description = False
@@ -262,7 +420,8 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
                 stacked_description = description_width < 12
                 parts = (
                     ("class:panel.focus", f"{marker} "),
-                    (label_style, _fit(row.label, label_width)),
+                ) + _label_fragments(
+                    row, _fit(row.display_label, max(1, label_width - badge_width)), label_style
                 ) + _value_fragments(
                     row, "  " + _fit("" if stacked_value else value, value_width),
                     value_style, unicode_blocks=unicode_blocks,
@@ -281,17 +440,17 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
                 stacked_value = get_cwidth(value) > value_width
                 parts = (
                     ("class:panel.focus", f"{marker} "),
-                    (label_style, _fit(row.label, label_width)),
+                ) + _label_fragments(
+                    row, _fit(row.display_label, max(1, label_width - badge_width)), label_style
                 ) + _value_fragments(
                     row, "  " + _fit("" if stacked_value else value, value_width).rstrip(),
                     value_style, unicode_blocks=unicode_blocks,
                 )
             else:
-                label_lines = _wrapped(row.label, width - 2)
+                label_lines = _wrapped(row.display_label, max(1, width - 2 - badge_width))
                 parts = (
                     ("class:panel.focus", f"{marker} "),
-                    (label_style, label_lines[0] if label_lines else ""),
-                )
+                ) + _label_fragments(row, label_lines[0] if label_lines else "", label_style)
         lines.append(parts)
         owners.append(row.id)
         if row.kind in {RowKind.INFO, RowKind.STATUS} and not row.value:
@@ -303,7 +462,7 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
             context_line = last_section_line
         if row.selectable and width < 55:
             for label_line in label_lines[1:]:
-                lines.append(((label_style, f"  {label_line}"),))
+                lines.append(((label_style, " " * (2 + badge_width) + label_line),))
                 owners.append(row.id)
             if value:
                 for value_line in _wrapped(value, width - 4):
@@ -319,7 +478,10 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
                     unicode_blocks=unicode_blocks,
                 ))
                 owners.append(row.id)
-        if row.selectable and row.description and (width < 90 or stacked_description):
+        if row.description and (
+            row.kind == RowKind.INFO
+            or row.selectable and (width < 90 or stacked_description)
+        ):
             for description in _wrapped(row.description, width - 4):
                 lines.append((("class:panel.muted", f"    {description}"),))
                 owners.append(row.id)
@@ -342,19 +504,34 @@ def render_header(page: PanelPage, width: int, query: str = "") -> tuple[tuple[s
         title = page.breadcrumb[-1]
     if query and get_cwidth(title) + get_cwidth(query) + 4 <= width:
         title += f"  / {query}"
-    return (
+    header: tuple[tuple[str, str], ...] = (
         ("class:panel.header", _fit(title, max(1, width)).rstrip() + "\n"),
         ("class:panel.rule", "─" * max(1, width)),
     )
+    if page.column_headers and width >= 60:
+        widths = _table_widths(width)
+        header += (("", "\n  "),)
+        for index, (label, size) in enumerate(zip(page.column_headers, widths, strict=True)):
+            if index:
+                header += (("", "  "),)
+            heading = _fit(label.upper(), size).rstrip()
+            for word_index, word in enumerate(heading.split(" ")):
+                if word_index:
+                    header += (("", " "),)
+                if word:
+                    header += (("class:panel.section", word),)
+            header += (("", " " * (size - get_cwidth(heading))),)
+    return header
 
 
 def render_footer(
-    width: int, *, search: bool, query: str = "", status: str = "", status_style: str = ""
+    width: int, *, search: bool, query: str = "", status: str = "", status_style: str = "",
+    navigation_hints: str = "",
 ) -> tuple[tuple[str, str], ...]:
     hints = (
         f"/{query} · ENTER select · ESC clear"
         if search
-        else "↑↓ move · ENTER open/apply · SPACE toggle · / search · ESC back"
+        else navigation_hints or "↑↓ move · ENTER open/apply · SPACE toggle · / search · ESC back"
     )
     status_width = min(get_cwidth(status), max(0, width // 2))
     hint_width = max(0, width - status_width - (2 if status else 0))
