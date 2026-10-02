@@ -4003,7 +4003,7 @@ class Agent:
 
     def compact_now(self) -> None:
         """Compact stale dialogue immediately using the configured context budget."""
-        self._compact_history([])
+        self._compact_history([], force=True)
 
     def _compact_history(
         self,
@@ -4011,6 +4011,7 @@ class Agent:
         *,
         system_prompt_for_budget: str | None = None,
         ollama_options: dict[str, Any] | None = None,
+        force: bool = False,
     ) -> None:
         """Keep a new request within the configured context window.
 
@@ -4078,7 +4079,11 @@ class Agent:
                 + 96
                 for message in unit
             )
-            if overflowed or (retained_units and used + cost > input_budget - recap_reserve):
+            if (
+                overflowed
+                or (force and len(retained_units) >= 2)
+                or (retained_units and used + cost > input_budget - recap_reserve)
+            ):
                 overflowed = True
                 dropped_units.append(unit)
                 continue
@@ -4115,7 +4120,11 @@ class Agent:
                     continue
                 content = " ".join(str(message.get("content", "")).split())
                 if content:
-                    recap_lines.append(f"{str(role).title()}: {content[:600]}")
+                    # End-of-message corrections and constraints are often
+                    # more useful than introductory prose in long dialogue.
+                    excerpt = (content if len(content) <= 600 else
+                               content[:350] + " … " + content[-240:])
+                    recap_lines.append(f"{str(role).title()}: {excerpt}")
         recap = "\n".join(recap_lines)
         recap_limit = max(0, min(6_000, input_budget - used - 256))
         summary_message: list[dict[str, Any]] = []

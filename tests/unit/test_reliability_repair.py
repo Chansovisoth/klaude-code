@@ -1665,3 +1665,32 @@ def test_read_pipeline_executes_under_landlock_in_dirty_workspace(tmp_path):
 @pytest.mark.parametrize("command", ["du . &>result", "du . | sort -nro result"])
 def test_combined_output_syntax_not_read_only(command):
     assert classify_command(command).risk != "read-only inspection"
+
+
+def test_manual_compact_reclaims_below_threshold_context_and_keeps_recent_protocol_units():
+    agent = make_agent(Runtime([]), [])
+    original = [{"role": "system", "content": "system"}]
+    for i in range(5):
+        original.extend([
+            {"role": "user", "content": f"Task {i}: " + "intro " * 150 + "Keep mobile support"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": f"c{i}", "function": {"name": "read_file", "arguments": {}}}
+            ]},
+            {"role": "tool", "content": f"private tool evidence {i}", "tool_call_id": f"c{i}"},
+            {"role": "assistant", "content": f"Completed task {i}"},
+        ])
+    agent.messages = deepcopy(original)
+    agent.ollama_options = {"num_ctx": 32768, "num_predict": 2048}
+    agent._compact_history([])
+    assert agent.messages == original  # automatic pressure handling remains unchanged
+    agent.compact_now()
+    assert len(agent.messages) < len(original)
+    assert agent.messages[0] == original[0]
+    assert agent.messages[-8:] == original[-8:]
+    recap = next(m["content"] for m in agent.messages if m.get("compaction_summary"))
+    assert "Keep mobile support" in recap
+    assert "read_file" in recap and "does not prove success" in recap
+    assert "private tool evidence" not in recap
+    snapshot = deepcopy(agent.messages)
+    agent.compact_now()
+    assert agent.messages == snapshot

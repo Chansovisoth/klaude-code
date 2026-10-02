@@ -15,9 +15,9 @@ from klaude_core.memory import _parse_memory_line, is_sensitive_memory
 def read_memory_inventory(database: Path, memory_file: Path) -> dict[str, object]:
     if database.is_symlink():
         raise ValueError("Unsafe memory database")
-    with contextlib.closing(sqlite3.connect(
-        database.absolute().as_uri() + "?mode=ro", uri=True, timeout=0.2
-    )) as db:
+    with contextlib.closing(
+        sqlite3.connect(database.absolute().as_uri() + "?mode=ro", uri=True, timeout=0.2)
+    ) as db:
         db.execute("PRAGMA query_only=ON")
         row = db.execute("SELECT value FROM settings WHERE key='auto_memory_enabled'").fetchone()
     try:
@@ -35,6 +35,7 @@ def read_memory_inventory(database: Path, memory_file: Path) -> dict[str, object
             text = raw.decode("utf-8", errors="replace")
     count = hidden = 0
     facts: list[str] = []
+    entries: list[dict[str, str]] = []
     for line in text.splitlines():
         entry = _parse_memory_line(line)
         if entry is None:
@@ -42,6 +43,16 @@ def read_memory_inventory(database: Path, memory_file: Path) -> dict[str, object
         count += 1
         if is_sensitive_memory(entry.fact):
             hidden += 1
-        elif len(facts) < 8:
-            facts.append(re.sub(r"[\x00-\x1f\x7f-\x9f]", "", entry.fact)[:120])
-    return {"enabled": not row or row[0] == "1", "count": count, "facts": facts, "hidden": hidden}
+        else:
+            public = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", entry.fact)
+            if len(facts) < 8:
+                facts.append(public[:120])
+            if len(entries) < 200:
+                entries.append({"id": entry.id, "fact": public[:500]})
+    return {
+        "enabled": not row or row[0] == "1",
+        "count": count,
+        "facts": facts,
+        "hidden": hidden,
+        "entries": entries,
+    }

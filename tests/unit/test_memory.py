@@ -549,3 +549,22 @@ def test_legacy_memory_lines_migrate_without_losing_facts(tmp_path):
     assert all(fact.startswith("- [memory:") for fact in facts)
     assert "User prefers local-first tools" in facts[0]
     assert "User likes concise status updates" in facts[1]
+
+
+def test_exact_memory_edits_reject_stale_ids_duplicates_and_secrets(tmp_path):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    memory.remember("Prefer uv")
+    memory.remember("Use Python")
+    entry = memory.search_facts("Prefer uv")[0]
+    before = memory.memory_file.read_bytes()
+    for replacement in ("", "Use Python", "OPENAI_API_KEY=sk-secret-value"):
+        assert not memory.update_fact(entry.id, replacement)
+        assert memory.memory_file.read_bytes() == before
+    assert not memory.update_fact("not-an-id", None)
+    assert memory.update_fact(entry.id, "Prefer uv and pytest")
+    assert not memory.update_fact(entry.id, None)
+    assert memory.search_facts("Use Python")
+    updated = memory.search_facts("Prefer uv and pytest")[0]
+    assert memory.update_fact(updated.id, None)
+    assert not memory.search_facts("Prefer uv")
+    memory.db.close()

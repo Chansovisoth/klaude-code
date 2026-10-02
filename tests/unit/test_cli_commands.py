@@ -11348,3 +11348,95 @@ def test_remote_hub_repository_inspection_does_not_become_workspace_inspection(s
     assert set(selected) == {
         "huggingface_search", "huggingface_details", "huggingface_readme", "http_probe"
     }
+
+
+@pytest.mark.parametrize("prefix", ["/cd ", "/cd ..", "/cd ~", "/cd ~/", "/cd ../"])
+def test_cd_completion_directories_and_navigation_shortcuts(tmp_path, monkeypatch, prefix):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "src").mkdir()
+    (workspace / "source.py").write_text("pass")
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / "projects").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    completer = ChatCommandCompleter(workdir_provider=lambda: workspace)
+    values = [item.text for item in completer.get_completions(Document(prefix), None)]
+    expected = {
+        "/cd ": ["../", "~/", "src/"],
+        "/cd ..": ["../"],
+        "/cd ~": ["~/"],
+        "/cd ~/": ["~/projects/"],
+        "/cd ../": ["../home/", "../workspace/"],
+    }
+    assert values == expected[prefix]
+
+
+def test_cd_completion_quotes_spaces_and_preserves_absolute_paths(tmp_path):
+    folder = tmp_path / "project notes"
+    folder.mkdir()
+    (tmp_path / "project.md").write_text("not a directory")
+    completer = ChatCommandCompleter(workdir_provider=lambda: tmp_path)
+    assert [c.text for c in completer.get_completions(Document("/cd pro"), None)] == [
+        '"project notes/"'
+    ]
+    assert [c.text for c in completer.get_completions(Document('/cd "pro'), None)] == [
+        'project notes/"'
+    ]
+    assert [c.text for c in completer.get_completions(Document(f"/cd {tmp_path}/pro"), None)] == [
+        f'"{folder}/"'
+    ]
+
+
+def test_backspace_reopens_cd_completion(monkeypatch):
+    tui = _fake_persistent_tui()
+    tui._set_input("/cd src")
+    starts = []
+    monkeypatch.setattr(tui.input.buffer, "start_completion", lambda **kw: starts.append(kw))
+    delete = next(binding.handler for binding in tui.key_bindings.bindings
+                  if tuple(binding.keys) == (Keys.Backspace,))
+    delete(None)
+    assert tui.input.text == "/cd sr"
+    assert starts == [{"select_first": False}]
+
+
+def test_memory_management_uses_ids_confirmation_and_background_write():
+    from klaude_cli.session_actions import MemoryFactUpdate
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui()
+    tui._memory_inventory = {
+        "enabled": True, "count": 1, "hidden": 0, "facts": ["Prefer uv"],
+        "entries": [{"id": "123456abcdef", "fact": "Prefer uv"}],
+    }
+    accepted = []
+    tui._session_actions.submit = lambda action: accepted.append(action) or True
+    tui._open_memory_facts()
+    assert tui._panel.picker.selected_id == "fact:123456abcdef"
+    tui._accept_choice()
+    assert tui._panel.page.breadcrumb[-1] == "Memory detail"
+    tui._apply_panel_action(PanelAction("memory-confirm", "123456abcdef"))
+    assert tui._panel.picker.selected_id == "back"
+    assert not accepted
+    tui._apply_panel_action(PanelAction("memory-delete", "123456abcdef"))
+    assert accepted == [MemoryFactUpdate(
+        tui.session_id, tui.client_id, "123456abcdef", None
+    )]
+    assert tui._memory_fact_save_state == "saving"
+    assert tui._panel.page.breadcrumb[-1] == "Manage memories"
+
+
+def test_memory_edit_input_cancel_returns_to_memory_without_chat_history():
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui()
+    tui._memory_inventory = {
+        "count": 1, "hidden": 0,
+        "entries": [{"id": "123456abcdef", "fact": "Prefer uv"}],
+    }
+    tui._open_memory_facts()
+    tui._apply_panel_action(PanelAction("memory-edit", "123456abcdef"))
+    assert tui.input.text == "Prefer uv"
+    tui._answer_settings_input(None)
+    assert tui._panel.page.breadcrumb[-1] == "Manage memories"
+    assert tui._settings_input_request is None
+    assert not tui._history

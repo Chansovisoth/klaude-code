@@ -305,7 +305,14 @@ Chat slash commands currently include:
   and visibly unconfirmed. Settings overview also marks pending/failed persistence.
   Accepted writes survive navigation and use the action lane's bounded queue and
   two-second shutdown drain. Bare `/memory` and line-oriented controls remain
-  separate synchronous compatibility paths. Skills
+  separate synchronous compatibility paths. Manage memories opens a typed,
+  searchable list of up to 200 sanitized facts with stable content IDs. Enter
+  opens edit/delete actions; deletion requires a separate confirmation that
+  initially focuses Back. Editing uses the settings input composer without
+  adding the fact to chat/history. Exact-ID mutations use the same ordered
+  action lane and cross-client file lock, reject stale IDs, duplicate or
+  sensitive replacements, and report saved/unconfirmed only after acknowledgement.
+  Sensitive facts stay hidden; the inventory ceiling is explicit. Skills
   is a read-only inventory of installed skills with their library and indexed
   file counts, plus the canonical `klaude import-skill` hint. Its optional
   manifest scan runs in an owned bounded worker without importing the knowledge
@@ -502,6 +509,12 @@ Chat slash commands currently include:
   tools and retrieval available while disabling writes and shell execution.
 - `/compact`: compact stale model context immediately while retaining visible
   and saved transcript history.
+  Manual compaction runs even below the automatic pressure threshold, retains
+  the two newest complete user-turn/tool exchanges within the existing budget,
+  and recaps older public dialogue locally. Long-message excerpts retain both
+  the beginning and ending so late corrections survive. Tool results and
+  private provider state never enter the extractive recap; automatic pressure
+  compaction retains its existing budget-driven behavior.
 - `/recap`: show a concise local recap of the current session's recent turns.
 - `/status`: available immediately even while a local or remote model turn is
   working. Show session ID and effective name, model, reasoning mode and effort,
@@ -707,6 +720,9 @@ Chat slash commands currently include:
 - `/refresh`: discard and redraw the current TUI frame without changing session state, for clearing terminal-render artifacts.
 - `/cd [PATH]`: show or change the agent workspace directory. Relative paths
   resolve from the current agent directory; the process cwd is unchanged.
+  Typing `/cd ` uses the ordinary completion box for directories only, with
+  `../` and `~/` shortcuts. Parent, home, absolute, and quoted paths retain
+  their typed form; completion never changes the workspace until submission.
 - `/pwd`: show the current agent workspace directory.
 - `/ls [OPTIONS]`: run the colorized Linux `ls` command in the current agent
   workspace (for example, `/ls -lha`); positional paths remain jailed there.

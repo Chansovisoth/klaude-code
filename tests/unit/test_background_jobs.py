@@ -68,6 +68,7 @@ def test_real_owned_worker_reads_memory_inventory_without_mutations(tmp_path):
         )
         assert result == {
             "enabled": True, "count": 1, "facts": ["Prefer concise answers"], "hidden": 0,
+            "entries": [{"id": "ab6b90a5511c", "fact": "Prefer concise answers"}],
         }
         assert memory.memory_file.read_bytes() == before
     finally:

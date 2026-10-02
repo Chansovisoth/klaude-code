@@ -152,3 +152,23 @@ def test_memory_updates_preserve_order_and_do_not_create_transcript_rows(tmp_pat
     memory.set_auto_memory_override(None)
     assert memory.auto_memory_enabled() is False
     memory.db.close()
+
+
+def test_memory_fact_updates_are_ordered_and_survive_writer_close(tmp_path):
+    from klaude_cli.session_actions import MemoryFactUpdate
+    from klaude_core.memory import Memory
+
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    memory.remember("Prefer uv")
+    entry = memory.search_facts("Prefer uv")[0]
+    results = []
+    writer = SessionActionWriter(memory, lambda kind, payload: results.append((kind, payload)))
+    edit = MemoryFactUpdate("session", "client", entry.id, "Prefer uv and pytest")
+    stale_delete = MemoryFactUpdate("session", "client", entry.id, None)
+    assert writer.submit(edit)
+    assert writer.submit(stale_delete)
+    assert not writer.close(wait=True)  # stale deletion is rejected, not acknowledged as saved
+    assert results == [("memory_fact_saved", (edit, True)),
+                       ("memory_fact_saved", (stale_delete, False))]
+    assert memory.search_facts("Prefer uv and pytest")
+    memory.db.close()

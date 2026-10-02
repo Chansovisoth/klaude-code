@@ -381,6 +381,35 @@ class Memory:
             self._write_memory_file("\n".join(lines) + "\n")
         return True
 
+    def update_fact(self, memory_id: str, replacement: str | None) -> bool:
+        """Edit/delete one exact fact under the existing cross-client lock.
+
+        IDs derive from content, so a stale selection cannot edit a newer fact.
+        None deletes; empty, sensitive, or duplicate replacements are rejected.
+        """
+        if not re.fullmatch(r"[0-9a-f]{12}", memory_id):
+            return False
+        fact = _clean_fact(replacement) if replacement is not None else None
+        if fact is not None and (not fact or is_sensitive_memory(fact)):
+            return False
+        with self._db_lock, self._memory_mutation_lock():
+            entries = self._load_entries()
+            index = next((i for i, entry in enumerate(entries) if entry.id == memory_id), None)
+            if index is None:
+                return False
+            if fact is not None and any(
+                i != index and _normalize_fact(entry.fact) == _normalize_fact(fact)
+                for i, entry in enumerate(entries)
+            ):
+                return False
+            lines = [entry.raw for entry in entries]
+            if fact is None:
+                del lines[index]
+            else:
+                lines[index] = f"- [memory:{_memory_id(fact)}] {fact}"
+            self._write_memory_file("\n".join(lines) + ("\n" if lines else ""))
+        return True
+
     def forget(self, query: str) -> ForgetResult:
         query = query.strip()
         if not query or not self.memory_file.exists():

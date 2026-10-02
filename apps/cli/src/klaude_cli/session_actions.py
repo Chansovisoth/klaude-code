@@ -22,6 +22,14 @@ class AutomaticMemoryUpdate:
     enabled: bool
 
 
+@dataclass(frozen=True)
+class MemoryFactUpdate:
+    session_id: str
+    client_id: str
+    memory_id: str
+    replacement: str | None
+
+
 class SessionActionWriter:
     """Accepted actions retain their original scope and drain on close."""
 
@@ -29,13 +37,17 @@ class SessionActionWriter:
         self.memory = memory
         self.emit = emit
         self._condition = threading.Condition()
-        self._pending: deque[SessionSettingUpdate | AutomaticMemoryUpdate] = deque()
+        self._pending: deque[SessionSettingUpdate | AutomaticMemoryUpdate | MemoryFactUpdate] = (
+            deque()
+        )
         self._closed = False
         self._failed = False
         self._unavailable = False
         self._thread: threading.Thread | None = None
 
-    def submit(self, update: SessionSettingUpdate | AutomaticMemoryUpdate) -> bool:
+    def submit(
+        self, update: SessionSettingUpdate | AutomaticMemoryUpdate | MemoryFactUpdate
+    ) -> bool:
         with self._condition:
             if self._closed or self._unavailable or len(self._pending) >= 128:
                 self._failed = True
@@ -66,20 +78,30 @@ class SessionActionWriter:
                     update = self._pending.popleft()
                 saved = False
                 try:
-                    if isinstance(update, AutomaticMemoryUpdate):
+                    if isinstance(update, MemoryFactUpdate):
+                        saved = connection.update_fact(update.memory_id, update.replacement)
+                        if not saved:
+                            with self._condition:
+                                self._failed = True
+                    elif isinstance(update, AutomaticMemoryUpdate):
                         connection.set_auto_memory(update.enabled)
+                        saved = True
                     else:
                         connection.record_session_update(
                             update.session_id, update.client_id, update.detail
                         )
-                    saved = True
+                        saved = True
                 except Exception:
                     # Never blindly retry a possibly published transaction.
                     with self._condition:
                         self._failed = True
                 self.emit(
-                    "memory_setting_saved" if isinstance(update, AutomaticMemoryUpdate)
-                    else "session_setting_saved", (update, saved)
+                    "memory_fact_saved"
+                    if isinstance(update, MemoryFactUpdate)
+                    else "memory_setting_saved"
+                    if isinstance(update, AutomaticMemoryUpdate)
+                    else "session_setting_saved",
+                    (update, saved),
                 )
         except Exception:
             with self._condition:
@@ -88,8 +110,12 @@ class SessionActionWriter:
                 self._pending.clear()
             for update in updates:
                 self.emit(
-                    "memory_setting_saved" if isinstance(update, AutomaticMemoryUpdate)
-                    else "session_setting_saved", (update, False)
+                    "memory_fact_saved"
+                    if isinstance(update, MemoryFactUpdate)
+                    else "memory_setting_saved"
+                    if isinstance(update, AutomaticMemoryUpdate)
+                    else "session_setting_saved",
+                    (update, False),
                 )
         finally:
             if connection is not None:
@@ -103,6 +129,7 @@ class SessionActionWriter:
             self._thread.join(2)
         with self._condition:
             return (
-                not self._failed and not self._pending
+                not self._failed
+                and not self._pending
                 and (self._thread is None or not self._thread.is_alive())
             )

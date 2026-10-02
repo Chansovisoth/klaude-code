@@ -190,8 +190,14 @@ from .mcp_mutations import (
     MCPReload,
     MCPToggle,
 )
+from .memory_panel import memory_detail_page, memory_list_page
 from .pickers import PickerController, PickerRow, match_score
-from .session_actions import AutomaticMemoryUpdate, SessionActionWriter, SessionSettingUpdate
+from .session_actions import (
+    AutomaticMemoryUpdate,
+    MemoryFactUpdate,
+    SessionActionWriter,
+    SessionSettingUpdate,
+)
 from .session_io import (
     SessionIOCoordinator,
     SessionIORequest,
@@ -3101,15 +3107,27 @@ class ChatCommandCompleter(Completer):
                     display=_completion_display(name, prefix), display_meta=source,
                 )
             return
+        directory_completion = prefix.startswith("/cd ")
         attachment_fragment = _inline_attachment_completion_fragment(prefix)
         attachment_fragment = (
-            prefix.removeprefix("/attach ")
+            prefix.removeprefix("/cd ")
+            if directory_completion
+            else prefix.removeprefix("/attach ")
             if prefix.startswith("/attach ")
             else attachment_fragment
         )
         if attachment_fragment is not None:
             fragment = attachment_fragment.removeprefix('"')
             quoted = attachment_fragment.startswith('"')
+            if directory_completion and fragment in {"", ".."}:
+                for value in (["../", "~/"] if not fragment else ["../"]):
+                    yield Completion(
+                        value + ('"' if quoted else ''),
+                        start_position=-len(fragment),
+                        display=_completion_display(f"🗀 {value}", fragment),
+                    )
+                if fragment:
+                    return
             if fragment == "~":
                 value = '~/' + ('"' if quoted else '')
                 yield Completion(
@@ -3129,7 +3147,11 @@ class ChatCommandCompleter(Completer):
                 if not candidate.is_absolute():
                     parent = root / parent
                 entries = sorted(
-                    parent.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())
+                    (
+                        item for item in parent.iterdir()
+                        if not directory_completion or item.is_dir()
+                    ),
+                    key=lambda item: (not item.is_dir(), item.name.lower()),
                 )
             except (OSError, RuntimeError):
                 return
@@ -3138,6 +3160,9 @@ class ChatCommandCompleter(Completer):
                     value = "~/" + os.path.relpath(entry, Path.home())
                 elif candidate.is_absolute():
                     value = str(entry)
+                elif directory_completion:
+                    value = fragment.rpartition("/")[0]
+                    value = (value + "/" if "/" in fragment else "") + entry.name
                 else:
                     value = os.path.relpath(entry, root)
                 if entry.is_dir():
@@ -8483,6 +8508,7 @@ class PersistentChatTUI:
         self._panel: PanelState | None = None
         self._panel_states: dict[str, PanelState] = {}
         self._panel_click_id: str | None = None
+        self._memory_fact_save_state = ""
         self._panel_composer_draft: tuple[str, list[ComposerPaste]] | None = None
         self._resume_choices: dict[str, str] = {}
         self._choice_index = 0
@@ -9220,6 +9246,8 @@ class PersistentChatTUI:
         if kind in {"theme settings", "theme", "text theme", "input field settings",
                     "input height"}:
             save_state = self._appearance_save_state
+        elif kind in {"memory facts", "memory fact"}:
+            save_state = self._memory_fact_save_state
         elif kind == "memory settings":
             save_state = self._memory_save_state
         elif kind in {"tools settings", "permission settings", "permission preset",
@@ -10469,7 +10497,9 @@ class PersistentChatTUI:
             prefix = buffer.document.text_before_cursor
             if (
                 prefix.startswith("/") and not any(char.isspace() for char in prefix)
-            ) or _inline_attachment_completion_fragment(prefix) is not None:
+            ) or prefix.startswith(("/attach ", "/cd ")) or (
+                _inline_attachment_completion_fragment(prefix) is not None
+            ):
                 buffer.start_completion(select_first=False)
 
         @bindings.add("c-c")
@@ -11615,6 +11645,12 @@ class PersistentChatTUI:
             "effort",
         }
         choice_kind = self._choice_kind or ""
+        if choice_kind == "memory fact":
+            self._open_memory_facts()
+            return
+        if choice_kind == "memory facts":
+            self._open_settings_category("memory", "Manage memories")
+            return
         parent = {
             "theme": "theme",
             "text theme": "theme",
@@ -12361,6 +12397,8 @@ class PersistentChatTUI:
                 _choice_section("MEMORY"),
                 toggle,
             ]
+            if inventory is not None:
+                choices.append("Manage memories")
             if self._memory_inventory_request:
                 choices.append(_choice_info("Loading memory inventory…"))
             if self._memory_inventory_error:
@@ -12711,7 +12749,29 @@ class PersistentChatTUI:
             self._apply_panel_action(row.action)
 
     def _apply_panel_action(self, action: PanelAction) -> None:
-        if action.kind == "legacy-choice":
+        if action.kind == "memory-list":
+            self._open_memory_facts()
+        elif action.kind == "memory-back":
+            self._open_settings_category("memory", "Manage memories")
+        elif action.kind.startswith("memory-"):
+            entry = next((entry for entry in (self._memory_inventory or {}).get("entries", [])
+                          if entry["id"] == action.target), None)
+            if entry is None or self._memory_fact_save_state == "saving":
+                self.status_error = "Refresh memory inventory before changing this fact"
+                return
+            if action.kind == "memory-open" or action.kind == "memory-confirm":
+                self._open_panel(memory_detail_page(
+                    entry["id"], entry["fact"], confirm=action.kind == "memory-confirm"
+                ), "memory fact", "back" if action.kind == "memory-confirm" else "edit")
+            elif action.kind == "memory-edit":
+                self._begin_settings_input(
+                    "Edit memory", "Enter the replacement fact (up to 500 characters)",
+                    ("memory-edit", entry["id"]),
+                )
+                self._set_input(entry["fact"])
+            elif action.kind == "memory-delete":
+                self._submit_memory_fact(entry["id"], None)
+        elif action.kind == "legacy-choice":
             panel = self._panel
             kind = self._choice_kind
             if panel is None or panel.picker.selected_id != action.target:
@@ -12916,6 +12976,28 @@ class PersistentChatTUI:
         getattr(self.agent.gate, "process_grants", set()).clear()
         self.status_error = ""
         self._open_settings_category("permissions", default)
+
+    def _open_memory_facts(self) -> None:
+        inventory = self._memory_inventory or {}
+        self._open_panel(memory_list_page(
+            inventory.get("entries", []), inventory.get("count", 0), inventory.get("hidden", 0)
+        ), "memory facts")
+
+    def _submit_memory_fact(self, memory_id: str, replacement: str | None) -> None:
+        if self._memory_fact_save_state == "saving":
+            return
+        if replacement is not None and (
+            not replacement.strip() or len(replacement) > 500 or is_sensitive_memory(replacement)
+        ):
+            self._open_memory_facts()
+            self.status_error = "Use a nonempty fact of at most 500 characters without secrets"
+            return
+        self._memory_fact_save_state = "saving"
+        if not self._session_actions.submit(MemoryFactUpdate(
+            self.session_id, self.client_id, memory_id, replacement
+        )):
+            self._memory_fact_save_state = "failed"
+        self._open_memory_facts()
 
     def _refresh_skills_inventory(self) -> None:
         """Load the optional knowledge package without blocking the TUI input thread."""
@@ -13125,6 +13207,15 @@ class PersistentChatTUI:
                 and type(result.get("hidden")) is int and 0 <= result["hidden"] <= result["count"]
                 and isinstance(result.get("facts"), list) and len(result["facts"]) <= 8
                 and all(isinstance(fact, str) and len(fact) <= 120 for fact in result["facts"])
+                and isinstance(result.get("entries", []), list)
+                and len(result.get("entries", [])) <= 200
+                and all(
+                    isinstance(entry, dict) and isinstance(entry.get("id"), str)
+                    and re.fullmatch(r"[0-9a-f]{12}", entry["id"])
+                    and isinstance(entry.get("fact"), str) and len(entry["fact"]) <= 500
+                    and not is_sensitive_memory(entry["fact"])
+                    for entry in result.get("entries", [])
+                )
             )
             if error or not valid:
                 self._memory_inventory_error = "unavailable"
@@ -13138,6 +13229,8 @@ class PersistentChatTUI:
                 error_before = self.status_error
                 self._open_settings_category("memory")
                 self.status_error = error_before
+            elif self._choice_kind == "memory facts":
+                self._open_memory_facts()
         elif key == "settings-overview":
             overview_request = self._settings_overview_request
             self._settings_overview_request = None
@@ -13376,6 +13469,9 @@ class PersistentChatTUI:
         self._settings_input_request = None
         self._set_input("")
         if value is None:
+            if isinstance(callback, tuple) and callback and callback[0] == "memory-edit":
+                self._open_memory_facts()
+                return
             self._mcp_setup = None
             self.activity = "setup cancelled"
             self.status_error = ""
@@ -13386,7 +13482,9 @@ class PersistentChatTUI:
             self._open_settings_category("mcp servers")
             return
         action = str(callback[0])
-        if action == "mcp_import":
+        if action == "memory-edit":
+            self._submit_memory_fact(str(callback[1]), value)
+        elif action == "mcp_import":
             self._import_mcp_configuration(value)
         elif action == "mcp_custom_name":
             self._continue_custom_mcp_name(value)
@@ -14190,6 +14288,9 @@ class PersistentChatTUI:
             self.application.invalidate()
             return
         if kind == "memory settings":
+            if selected == "Manage memories":
+                self._open_memory_facts()
+                return
             if self._status_memory_enabled is None and selected != RESET_THEME_CHOICE:
                 return
             enabled = True if selected == RESET_THEME_CHOICE else not self._status_memory_enabled
@@ -16270,6 +16371,23 @@ class PersistentChatTUI:
                     category = "theme" if self._choice_kind == "theme settings" else "input field"
                     self._open_settings_category(category, selected)
                     self.status_error = error
+            elif kind == "memory_fact_saved":
+                fact_action, saved = cast(tuple[MemoryFactUpdate, bool], payload)
+                self._background_jobs.cancel("memory-inventory")
+                self._memory_inventory_request = None
+                self._memory_inventory_loaded_at = 0
+                self._memory_inventory_error = ""
+                self._invalidate_status_metadata()
+                self._invalidate_settings_overview()
+                self._memory_fact_save_state = (
+                    "saved" if saved else "failed"
+                ) if fact_action.session_id == self.session_id else ""
+                if not saved:
+                    self._append(
+                        "\n[warning] Memory change unconfirmed or stale; reload to verify.\n"
+                    )
+                if self._choice_kind in {"memory settings", "memory facts", "memory fact"}:
+                    self._refresh_memory_inventory()
             elif kind == "memory_setting_saved":
                 memory_action, saved = cast(tuple[AutomaticMemoryUpdate, bool], payload)
                 if memory_action.revision != self._memory_save_revision:
