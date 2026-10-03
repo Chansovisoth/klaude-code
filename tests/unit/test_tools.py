@@ -46,6 +46,25 @@ def test_git_diff_tool_description_matches_worktree_diff(tmp_path):
     assert tools["git_diff"].description == "Show the current working-tree diff."
 
 
+def test_read_file_can_page_later_lines_without_changing_default_output(tmp_path):
+    source = tmp_path / "long.py"
+    source.write_text("".join(f"line {number}\n" for number in range(1, 301)))
+    workspace = Workspace(tmp_path)
+    tool = {item.name: item for item in build_tools(workspace)}["read_file"]
+
+    assert workspace.read_file("long.py").startswith("line 1\nline 2\n")
+    assert workspace.read_file("long.py", offset=299, limit=2) == (
+        "long.py: lines 299-300 of 300\n299: line 299\n300: line 300"
+    )
+    assert "offset" in tool.parameters["properties"]
+    assert "limit" in tool.parameters["properties"]
+    assert workspace.read_file("long.py", offset=301) == (
+        "long.py: offset 301 exceeds 300 lines"
+    )
+    with pytest.raises(ValueError, match="offset must"):
+        workspace.read_file("long.py", offset=0)
+
+
 def test_edits_capture_patch_before_auto_commit(tmp_path):
     _init_repo(tmp_path)
     ws = Workspace(tmp_path)

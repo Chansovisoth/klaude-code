@@ -173,6 +173,41 @@ def test_status_has_its_own_style_without_coloring_the_row():
     )
 
 
+def test_nonselectable_status_uses_its_tone_even_when_wrapped():
+    page = PanelPage("search", ("Settings", "Skills", "Search"), (
+        PanelRow("warning", RowKind.STATUS,
+                 "Search timed out while contacting the skill catalog",
+                 status_tone="warning"),
+        PanelRow("info", RowKind.INFO, "Catalog metadata is read-only"),
+    ))
+    body = render_body(PanelState(page), 24)
+    warning_lines = [line for line, owner in zip(body.lines, body.row_for_line, strict=True)
+                     if owner == "warning"]
+    assert len(warning_lines) > 1
+    assert all(style == "class:panel.status.warning" for line in warning_lines
+               for style, _ in line)
+    info_lines = [line for line, owner in zip(body.lines, body.row_for_line, strict=True)
+                  if owner == "info"]
+    assert all(style == "class:panel.muted" for line in info_lines
+               for style, _ in line)
+
+
+def test_narrow_panel_wraps_wide_unicode_by_terminal_cells_without_splitting_graphemes():
+    combined = "e\u0301"
+    page = PanelPage("unicode", ("Settings", "Skills"), (
+        PanelRow("info", RowKind.INFO, "説明" * 12,
+                 description=combined * 12),
+        PanelRow("result", RowKind.NAVIGATION, "資料" * 8,
+                 "來源" * 8, "摘要" * 12, action=PanelAction("open")),
+    ), column_headers=("SKILL", "SOURCE", "DESCRIPTION"))
+    for width in (18, 40, 80):
+        body = render_body(PanelState(page), width)
+        assert all(get_cwidth("".join(text for _, text in line)) <= width
+                   for line in body.lines)
+        assert "".join(text for line, owner in zip(body.lines, body.row_for_line, strict=True)
+                       if owner == "info" for _, text in line).count(combined) == 12
+
+
 def test_policy_value_tones_color_only_values_at_all_widths():
     page = PanelPage("policies", ("Settings", "Permissions"), (
         PanelRow("allow", RowKind.CHOICE, "Read file", "ALLOW",
@@ -382,51 +417,123 @@ def test_section_comment_is_muted_and_wraps_without_underlining(width):
 def test_installed_skill_heading_has_muted_inventory_count(count):
     from klaude_cli.skills_panel import skills_page
 
-    page = skills_page([{"name": f"skill-{index}"} for index in range(count)], "/tmp/inbox")
+    page = skills_page([{"name": f"skill-{index}"} for index in range(count)])
     heading = next(row for row in page.rows if row.id == "installed")
     assert heading.label == "SKILLS"
-    assert heading.description == f"{count} installed"
+    assert heading.description == f"{count} installed, {count} enabled"
     line = next(line for line in render_body(PanelState(page), 70).lines
                 if ("class:panel.section", "SKILLS") in line)
     assert ("class:panel.section", "SKILLS") in line
     assert ("class:panel.heading-marker", ":") not in line
-    assert ("class:panel.muted", f"  {count} installed") in line
+    assert ("class:panel.muted", f"  {count} installed, {count} enabled") in line
     assert not any(row.id == "count" for row in page.rows)
 
 
-@pytest.mark.parametrize("width", [24, 55, 100])
+@pytest.mark.parametrize("width", [24, 55, 120])
 def test_skills_page_clear_import_flow_and_compact_inventory(width):
-    from klaude_cli.skills_panel import skills_page
+    from klaude_cli.skills_panel import skills_import_page, skills_manage_page, skills_page
 
-    inbox = "/tmp/klaude/skills-inbox"
+    inbox = "/home/klaude/klaude-code/.klaude/data/skills"
     page = skills_page([
         {"name": "testing", "library": "testing", "indexed_file_count": 1, "identity": "a"},
         {"name": "frontend", "library": "shared", "indexed_file_count": 3, "identity": "b"},
-    ], inbox)
-    assert [row.id for row in page.rows[:6]] == [
-        "discovery", "search", "add", "import", "inbox", "installed",
+    ])
+    assert [row.id for row in page.rows[:5]] == [
+        "installed", "manage", "search", "import", "back",
     ]
     rows = {row.id: row for row in page.rows}
-    assert rows["inbox"].label == f"Drop ZIPs or skill files here: {inbox}, then import"
-    assert rows["inbox"].description == ""
+    assert "inbox" not in rows
     assert rows["import"].description == ""
-    assert rows["import"].action.kind == "skill-import"
-    assert rows["skill:testing"].value == "1 file"
-    assert rows["skill:testing"].description == ""
-    assert rows["skill:frontend"].description == "Library: shared"
+    assert rows["import"].action.kind == "skill-import-open"
+    assert "skill:testing" not in rows
+    assert rows["manage"].action.kind == "skill-manage"
     state = PanelState(page, "import")
     assert state.picker.selected_id == "import"
     body = render_body(state, width)
+    assert inbox not in "".join(text for line in body.lines for _, text in line)
+    body = render_body(PanelState(skills_import_page(inbox)), width)
     path_lines = [line for line, owner in zip(body.lines, body.row_for_line, strict=True)
                   if owner == "inbox"]
-    assert "".join(text for line in path_lines for _, text in line).replace(" ", "").endswith(
-        f"{inbox}, then import".replace(" ", "")
-    )
+    assert path_lines
+    path_text = "".join(text for line in path_lines for _, text in line)
+    assert f"{inbox}, then import".replace(" ", "") in path_text.replace(" ", "")
+    assert all(style == "class:panel.muted" for line in path_lines for style, text in line
+               if "Drop ZIPs" in text or inbox in text)
     assert all(get_cwidth("".join(text for _, text in line)) <= width for line in body.lines)
     assert "klaude import-skill" not in "".join(text for line in body.lines for _, text in line)
+    manage = skills_manage_page([
+        {"name": "testing", "identity": "a", "source_label": "Local ZIP",
+         "description": "Test helpers"},
+        {"name": "frontend", "identity": "b", "source_label": "GitHub · owner/repo",
+         "description": "Frontend design guidance"},
+    ])
+    state = PanelState(manage)
     state.picker.filter("frontend")
-    assert any(row.id == "installed" for row in state.picker.visible)
+    assert any(row.id == "installed-items" for row in state.picker.visible)
     assert state.picker.selected_id == "skill:frontend"
+
+
+@pytest.mark.parametrize("width", [24, 55, 70, 120])
+def test_manage_pages_keep_source_description_and_actions_separate(width):
+    from klaude_cli.mcp_management import manage_detail_page, manage_page
+    from klaude_cli.skills_panel import skill_manage_detail_page, skills_manage_page
+
+    description = "A long source description that wraps without losing its meaning"
+    skill = {"name": "guide", "identity": "reviewed", "source_label": "Local ZIP",
+             "description": description, "enabled": False, "indexed_file_count": 3}
+    server = {"name": "docs", "source_label": "Official MCP Registry",
+              "description": description, "enabled": True, "transport": "http",
+              "tool_count": 2}
+    for page, item_id, detail in (
+        (skills_manage_page([skill]), "skill:guide", skill_manage_detail_page(skill)),
+        (manage_page([server]), "server:docs", manage_detail_page(server)),
+    ):
+        rows = {row.id: row for row in page.rows}
+        assert rows[item_id].description == description
+        assert rows[item_id].action is not None
+        assert rows[item_id].action.kind.endswith("detail")
+        assert rows["update-all"].action is not None
+        assert rows["update-all"].action.kind.endswith("update-all")
+        state = PanelState(page, item_id)
+        body = render_body(state, width)
+        table_start = body.row_for_line.index("installed-items")
+        assert all(body.row_for_line.index(control) < table_start
+                   for control in ("filter", "reload", "update-all"))
+        assert table_start < body.row_for_line.index(item_id)
+        assert not rows["installed-items"].selectable
+        assert not any(style == "class:panel.section" for style, _ in render_header(page, width))
+        if width >= 60:
+            table_header = "".join(text for _, text in body.lines[table_start])
+            assert all(column in table_header for column in page.column_headers)
+            assert body.context_line == table_start
+        assert all(get_cwidth("".join(text for _, text in line)) <= width
+                   for line in body.lines)
+        assert any(owner == item_id for owner in body.row_for_line)
+        assert any("description" in row.id for row in detail.rows)
+        assert {"enabled", "update", "delete", "back"}.issubset(
+            row.id for row in detail.rows
+        )
+        assert next(row for row in detail.rows if row.id == "enabled").checked is (
+            page.id == "mcp-manage"
+        )
+        state.filter(rows[item_id].label)
+        filtered_body = render_body(state, width)
+        assert filtered_body.row_for_line.count("installed-items") == 1
+        assert filtered_body.row_for_line.index("installed-items") < (
+            filtered_body.row_for_line.index(item_id)
+        )
+        state.filter("check for updates")
+        assert "installed-items" not in render_body(state, width).row_for_line
+
+
+def test_empty_skill_import_notice_is_scoped_to_import_page():
+    from klaude_cli.skills_panel import skills_import_page
+
+    page = skills_import_page("/tmp/skills", empty_import=True)
+    assert next(row for row in page.rows if row.id == "empty").label == "No new skill file."
+    discovered = skills_import_page("/tmp/skills", empty_import=True, detected=("new.zip",))
+    assert not any(row.id == "empty" for row in discovered.rows)
+    assert next(row for row in discovered.rows if row.id == "drop:0").label == "- new.zip"
 
 
 @pytest.mark.parametrize("width", [18, 70, 110])

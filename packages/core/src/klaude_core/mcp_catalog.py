@@ -36,6 +36,55 @@ class MCPCatalogError(RuntimeError):
     """A registry response or install plan was unavailable or unsafe."""
 
 
+def github_repository_identity(url: str) -> str | None:
+    """Accept only a registry-declared GitHub repository root for enrichment."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+    if (parsed.scheme != "https" or parsed.netloc.lower() != "github.com"
+            or parsed.params or parsed.query or parsed.fragment):
+        return None
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) != 2:
+        return None
+    owner, repo = parts
+    repo = repo.removesuffix(".git")
+    if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", part)
+               for part in (owner, repo)):
+        return None
+    return f"{owner}/{repo}"
+
+
+def github_repository_stars(url: str, *, transport: httpx.BaseTransport | None = None) -> int:
+    """Read a repository metric from GitHub, never from publisher metadata."""
+    repository = github_repository_identity(url)
+    if repository is None:
+        raise MCPCatalogError("No GitHub repository available")
+    try:
+        with httpx.Client(transport=transport, trust_env=False, follow_redirects=False,
+                          timeout=httpx.Timeout(5, connect=3),
+                          headers={"Accept": "application/vnd.github+json",
+                                   "User-Agent": "klaude-code/mcp-discovery"}) as client:
+            with client.stream("GET", f"https://api.github.com/repos/{repository}") as response:
+                if response.status_code in {403, 429}:
+                    raise MCPCatalogError("GitHub rate limit or access restriction")
+                if response.status_code != 200:
+                    raise MCPCatalogError("GitHub repository metadata unavailable")
+                data = bytearray()
+                for chunk in response.iter_bytes():
+                    data.extend(chunk)
+                    if len(data) > 128_000:
+                        raise MCPCatalogError("GitHub repository metadata too large")
+        payload = json.loads(data)
+    except (httpx.HTTPError, ValueError) as exc:
+        raise MCPCatalogError("GitHub repository metadata unavailable") from exc
+    count = payload.get("stargazers_count") if isinstance(payload, dict) else None
+    if type(count) is not int or not 0 <= count <= 2_000_000_000:
+        raise MCPCatalogError("GitHub repository stars unavailable")
+    return count
+
+
 @dataclass(frozen=True)
 class MCPCatalogInput:
     key: str
@@ -72,6 +121,7 @@ class MCPInstallPlan:
     inputs: tuple[MCPCatalogInput, ...] = ()
     repository_url: str = ""
     package_sha256: str = ""
+    description: str = ""
 
     @staticmethod
     def secret_environment_name(local_name: str, item: MCPCatalogInput) -> str:
@@ -167,6 +217,7 @@ class MCPInstallPlan:
                 "version": self.source_version,
                 "repository": self.repository_url,
                 "sha256": self.package_sha256,
+                "description": self.description,
             },
         )
         server.validate()
@@ -199,7 +250,10 @@ def _safe_https_url(value: object) -> str:
 
 def _public_text(value: object, maximum: int) -> str:
     """Normalize untrusted registry prose before terminal display or persistence."""
-    text = " ".join(str(value or "").split())
+    text = str(value or "")
+    text = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", text)
+    text = re.sub(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]", "", text)
+    text = " ".join(text.split())
     return "".join(character for character in text if character.isprintable())[:maximum]
 
 
@@ -303,6 +357,7 @@ def install_plans(server: MCPCatalogServer) -> list[MCPInstallPlan]:
                     header_templates=headers,
                     inputs=tuple(inputs.values()),
                     repository_url=server.repository_url,
+                    description=server.description,
                 )
             )
     packages = server.raw.get("packages")
@@ -363,6 +418,7 @@ def install_plans(server: MCPCatalogServer) -> list[MCPInstallPlan]:
                     inputs=tuple(inputs.values()),
                     repository_url=server.repository_url,
                     package_sha256=digest,
+                    description=server.description,
                 )
             )
     return plans

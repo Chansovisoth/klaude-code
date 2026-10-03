@@ -22,6 +22,7 @@ def test_mcp_inventory_returns_metadata_only_without_connecting(tmp_path):
     assert result == {"servers": [{
         "name": "browser", "enabled": False, "transport": "stdio",
         "oauth": False, "tool_count": 0,
+        "source_label": "Local configuration", "description": "", "update_kind": "",
     }], "truncated": False}
     assert path.read_bytes() == before
 

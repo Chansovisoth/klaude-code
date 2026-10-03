@@ -293,9 +293,42 @@ unchanged, Klaude updates `checked_at` without creating a snapshot. By default i
 keeps the last 3 snapshots. Searchable chunks live in the knowledge store;
 original files stay in `docs-sources/` and `skills/`.
 
-In chat, open `/settings skills` to manage installed skills. Select a skill,
-choose **Delete skill**, then confirm to remove its installed files and indexed
-content without deleting other sources in the library.
+In chat, open `/settings skills` → **Manage installed** to review installed skills.
+Both MCPs and Skills show enabled status beside each item's source and offer an
+**All / Enabled / Disabled** filter. Open a skill to change its enabled state or
+choose **Delete skill**. Deletion requires a separate
+confirmation and removes only that skill's installed files and indexed content.
+Pinned GitHub skills can be checked for a newer source revision with **Check for update**;
+**Check for updates** opens a batch review. Its **Update all** confirmation applies
+verified updates sequentially, up to ten at once.
+Updates recheck the installed identity and do not execute skill scripts.
+
+Choose **Import skills** from Skills settings to view the drop folder and detected
+files, then explicitly start importing from that page. **Search catalog** opens
+discovery in either category. Back retains the originating page and selection.
+
+In `/settings mcps`, **Manage installed** lists configured servers with their source and
+description. Open a server to enable or disable it, check for a newer verified
+Registry package version, or choose **Remove server**. **Refresh list** reads server
+metadata; **Refresh tools** reloads cached definitions without connecting.
+Package updates are reviewed first, saved
+disabled, and require a separate enable step that rediscovers tools. **Update all**
+handles up to ten eligible servers in order. Custom and HTTP servers have no
+automatic upstream update path.
+
+**Discovery → Search** finds remote skills without installing them. Enter a query
+or choose a local suggestion. SkillsMP is the default; Source can explicitly switch
+to the provisional skills.sh catalog. Repository stars and Installs are separate
+metrics, not trust ratings. Open a result for wrapped metadata and, where a GitHub
+skill path is supplied, explicitly resolve its exact revision and available license.
+Unknown licenses and compatibility stay unknown. Search uses cancellable background
+jobs and a bounded in-process metadata cache; provider quota/offline errors are visible.
+`/` filters the current results; PageUp/PageDown scroll long metadata. After resolving
+a GitHub skill path, select **Install skill** and confirm the pinned source. Klaude
+downloads that exact commit's folder, verifies file identities, and indexes it through
+the existing skill import lane. It does not execute scripts, grant permissions, or
+replace an installed skill. Catalog entries without a verified skill path cannot be
+installed from Search.
 
 Drop skill ZIPs or text files directly into `.klaude/data/skills/` (the exact
 path is shown in Settings → Skills). Klaude detects settled new files and lists

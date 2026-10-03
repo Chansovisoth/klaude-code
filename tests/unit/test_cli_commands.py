@@ -2529,7 +2529,9 @@ def _fake_persistent_tui(appearance_path=None, chat_preferences_path=None):
         def close(self, *, wait=False):
             self.latest.clear()
 
+    tui._background_jobs.close()
     tui._background_jobs = FakeJobs()
+    tui._skill_discovery.jobs = tui._background_jobs
     class FakeSessionIO:
         def __init__(self):
             self.requests = []
@@ -2953,7 +2955,7 @@ def test_mcp_permissions_group_by_server_and_offer_scoped_bulk_controls(tmp_path
     assert not any("MCP" in row for row in tui._choice_values)
     assert not any("resolve library:" in row for row in tui._choice_values)
     tui._open_settings_category("mcp servers")
-    tui._choice_index = tui._choice_values.index("Manage permissions")
+    tui._choice_index = tui._choice_values.index("Permissions")
     tui._accept_choice()
     assert tui._choice_kind == "mcp permission servers"
     assert "context7: ASK · 2 tools" in tui._choice_values
@@ -3008,7 +3010,7 @@ def test_mcp_permissions_group_by_server_and_offer_scoped_bulk_controls(tmp_path
     tui._choice_index = tui._choice_values.index("back")
     tui._accept_choice()
     assert tui._choice_kind == "mcp settings"
-    assert tui._choice_values[tui._choice_index] == "Manage permissions"
+    assert tui._choice_values[tui._choice_index] == "Permissions"
 
 
 def test_mcp_settings_shortcut_focuses_server_permissions(tmp_path):
@@ -3024,14 +3026,14 @@ def test_mcp_settings_shortcut_focuses_server_permissions(tmp_path):
     heading = next(row for row in tui._panel.page.rows if row.label == "MCP Servers")
     assert heading.description.startswith("0 installed, 0 enabled · Configuration snapshot ")
     assert not any(row.label.startswith("Configuration snapshot ") for row in tui._panel.page.rows)
-    tui._choice_index = tui._choice_values.index("Manage permissions")
+    tui._choice_index = tui._choice_values.index("Permissions")
     tui._accept_choice()
     assert tui._choice_kind == "mcp permission servers"
     assert tui._choice_values[tui._choice_index] == "firecrawl: ASK · 1 tool"
     tui._choice_index = tui._choice_values.index("back")
     tui._accept_choice()
     assert tui._choice_kind == "mcp settings"
-    assert tui._choice_values[tui._choice_index] == "Manage permissions"
+    assert tui._choice_values[tui._choice_index] == "Permissions"
 
 
 def test_mcp_permission_groups_keep_original_server_identity(tmp_path):
@@ -3046,7 +3048,7 @@ def test_mcp_permission_groups_keep_original_server_identity(tmp_path):
         for server in servers
     }
     tui._open_settings_category("mcp servers")
-    tui._choice_index = tui._choice_values.index("Manage permissions")
+    tui._choice_index = tui._choice_values.index("Permissions")
     tui._accept_choice()
     assert all(f"{server}: ASK · 1 tool" in tui._choice_values for server in servers)
 
@@ -3441,6 +3443,8 @@ def test_memory_inventory_late_and_failed_results_preserve_scope_and_cache(tmp_p
 
 
 def test_skills_settings_show_installed_inventory_and_import_action(monkeypatch):
+    from klaude_cli.settings_panel import RowKind
+
     tui = _fake_persistent_tui()
     installed = [
             {
@@ -3455,7 +3459,7 @@ def test_skills_settings_show_installed_inventory_and_import_action(monkeypatch)
 
     assert time.monotonic() - opened_at < 0.25
     assert tui._choice_kind == "skills settings"
-    assert tui._panel.page.rows[0].label == "DISCOVERY"
+    assert tui._panel.page.rows[0].label == "SKILLS"
     assert next(row for row in tui._panel.page.rows if row.id == "installed").description == (
         "Loading installed skills…"
     )
@@ -3468,16 +3472,67 @@ def test_skills_settings_show_installed_inventory_and_import_action(monkeypatch)
     assert not tui._skills_inventory_loading
     heading = next(row for row in tui._panel.page.rows if row.id == "installed")
     assert heading.label == "SKILLS"
-    assert heading.description == "1 installed"
-    row = next(row for row in tui._panel.page.rows if row.id == "skill:crawl4ai")
-    assert row.value == "2 files"
-    assert row.description == "Library: web-tools"
+    assert heading.description == "1 installed, 1 enabled"
+    row = next(row for row in tui._panel.page.rows if row.id == "manage")
+    assert row.kind == RowKind.NAVIGATION
+    assert row.action.kind == "skill-manage"
     assert "Import skills" in tui._choice_values
     assert "reset to default" not in tui._choice_values
     assert tui._choice_values[-1] == "back"
     rendered = "".join(fragment[1] for fragment in tui._panel_body_fragments())
     assert "\0info:" not in rendered
-    assert "crawl4ai" in rendered and "Library: web-tools" in rendered
+    assert "Manage" in rendered
+    tui._skill_feedback = "No new skill file."
+    tui._open_settings_category("skills")
+    heading = next(row for row in tui._panel.page.rows if row.id == "installed")
+    assert heading.description == "1 installed, 1 enabled"
+    assert not any(row.id == "feedback" for row in tui._panel.page.rows)
+
+
+def test_skill_toggle_uses_ordered_action_and_preserves_list_navigation(tmp_path):
+    from klaude_cli.skill_actions import SkillAction
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._skill_inbox_preparation_attempted = True
+    tui._skills_inventory = [
+        {"name": "alpha", "identity": "a", "library": "alpha", "enabled": True},
+        {"name": "beta", "identity": "b", "library": "beta", "enabled": False},
+    ]
+    submitted = []
+    tui._skill_actions.submit = lambda action: submitted.append(action) or True
+    tui._open_settings_category("skills")
+    tui._panel.picker.focus("manage")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    tui._panel.picker.focus("skill:alpha")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    tui._panel.picker.focus("enabled")
+    tui._apply_picker_state()
+    tui._activate_panel_toggle()
+    assert submitted == [SkillAction("set-enabled", "alpha", "a", enabled=False)]
+    assert tui._panel.picker.selected_id == "enabled"
+    tui._events.put(("skill_action_done", (submitted[0], True, "Skill disabled")))
+    tui._before_render(tui.application)
+    tui._emit("skills_inventory", ([
+        {"name": "alpha", "identity": "a", "library": "alpha", "enabled": False},
+        {"name": "beta", "identity": "b", "library": "beta", "enabled": True},
+    ], ""))
+    tui._before_render(tui.application)
+    assert tui._panel.picker.selected_id == "enabled"
+    assert next(row for row in tui._panel.page.rows if row.id == "enabled").checked is False
+    home = tui._settings_home_page()
+    assert next(row for row in home.rows if row.id == "category:skills").value == (
+        "1/2 enabled"
+    )
+    ids = [row.id for row in home.rows]
+    assert ids.index("category:skills") < ids.index("category:memory")
+    tui._accept_choice()
+    assert submitted[-1] == SkillAction("set-enabled", "alpha", "a", enabled=True)
+    assert tui._panel.page.breadcrumb == ("Settings", "Skills", "Manage", "alpha")
+    assert tui._panel.picker.selected_id == "enabled"
+    assert not any(row.action and row.action.kind == "skill-delete"
+                   for row in tui._panel.page.rows)
 
 
 def test_tools_settings_persist_and_apply_individual_research_tool_toggles(tmp_path):
@@ -6937,7 +6992,9 @@ def test_persistent_tui_categorized_field_settings_toggle_and_reset(tmp_path):
 
 def test_tui_mcp_search_suggestions_stay_private_and_submit_only_search(monkeypatch):
     tui = _fake_persistent_tui()
-    tui._mcp_catalog_results = {"loaded": SimpleNamespace(name="io.example/context7")}
+    tui._mcp_catalog_results = {
+        "io.example/context7": SimpleNamespace(name="io.example/context7")
+    }
     tui._mcp_catalog_query = True
     tui._set_input("Context7")
     assert tui._completion_menu_position() == 0
@@ -7038,18 +7095,17 @@ def test_tui_mcp_registry_search_installs_supported_plan_disabled(monkeypatch, t
     tui._choice_index = tui._choice_values.index("Search official MCP Registry")
     tui._accept_choice()
 
-    assert tui._mcp_catalog_query is True
-    assert "official MCP Registry" in str(tui._input_title())
-    assert "official MCP Registry" in tui._composer_placeholder_text()
+    assert tui._choice_kind == "mcp registry results"
+    assert tui._panel.page.breadcrumb == ("Settings", "MCPs", "Search")
+    assert any(row.id.startswith("suggest:") for row in tui._panel.page.rows)
 
-    tui._mcp_catalog_results = {"Example Browser · 1.2.3 · remote": server}
+    tui._mcp_catalog_results = {server.name: server}
     tui._open_mcp_catalog_results()
-    tui._choice_index = tui._choice_values.index("Example Browser · 1.2.3 · remote")
+    tui._picker.focus("registry:" + server.name)
+    tui._apply_picker_state()
     tui._accept_choice()
-    blocked_choice = next(
-        value for value in tui._choice_values if value.startswith("Install disabled")
-    )
-    tui._choice_index = tui._choice_values.index(blocked_choice)
+    tui._picker.focus("plan:0")
+    tui._apply_picker_state()
     tui._accept_choice()
     assert registry.load() == {} and tui._choice_kind == "mcp registry detail"
     identity = tui._background_jobs.latest["mcp-inventory"]
@@ -7064,10 +7120,8 @@ def test_tui_mcp_registry_search_installs_supported_plan_disabled(monkeypatch, t
         "servers": [], "truncated": False,
     }, ""))
 
-    install_choice = next(
-        value for value in tui._choice_values if value.startswith("Install disabled")
-    )
-    tui._choice_index = tui._choice_values.index(install_choice)
+    tui._picker.focus("plan:0")
+    tui._apply_picker_state()
     tui._accept_choice()
 
     assert tui._mcp_mutations.close(wait=True)
@@ -7110,13 +7164,37 @@ def test_tui_mcp_registry_result_event_is_runtime_safe(monkeypatch, tmp_path):
     )[0]
     tui = _fake_persistent_tui()
     tui._mcp_catalog_request_id = "request-1"
-    tui._begin_choice("mcp registry results", ["back"], "back")
+    tui._open_mcp_catalog_results()
     tui._events.put(("mcp_catalog_results", ("request-1", [server], False, "")))
 
     tui._before_render(None)
 
-    assert any("Runtime Safe" in label for label in tui._mcp_catalog_results)
-    assert "Runtime Safe" in tui._choice_values[tui._choice_index]
+    assert server.name in tui._mcp_catalog_results
+    assert any(row.id == "registry:" + server.name for row in tui._panel.page.rows)
+
+
+def test_tui_mcp_search_query_editor_submits_owned_job_without_chat_turn(monkeypatch):
+    tui = _fake_persistent_tui()
+    submitted = []
+    monkeypatch.setattr(tui._background_jobs, "submit", lambda key, request, **_kwargs:
+                        submitted.append((key, request)) or "owned-search")
+    tui._open_settings_category("mcp servers")
+    tui._choice_index = tui._choice_values.index("Search official MCP Registry")
+    tui._accept_choice()
+    tui._picker.focus("query")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._settings_input_request["single_line"] is True
+    tui._set_input("browser automation")
+    tui._submit_settings_input_response()
+    assert [item for item in submitted if item[0] == "mcp-search"] == [(
+        "mcp-search", {"kind": "mcp_search", "query": "browser automation",
+                       "cache_file": str(tui.cfg.mcp_registry_cache_file)},
+    )]
+    assert tui._choice_kind == "mcp registry results"
+    assert tui._mcp_catalog_request_id == "owned-search"
+    assert tui._panel.row("loading") is not None
+    assert tui._settings_input_request is None
 
 
 def test_tui_mcp_registry_table_keeps_distinct_servers_and_detail_navigation():
@@ -7128,14 +7206,22 @@ def test_tui_mcp_registry_table_keeps_distinct_servers_and_detail_navigation():
     ) for name in ("first", "second")]
     tui = _fake_persistent_tui()
     tui._mcp_catalog_request_id = "table-request"
-    tui._begin_choice("mcp registry results", ["back"], "back")
+    tui._open_mcp_catalog_results()
     assert tui._panel.page.column_headers is None
     tui._events.put(("mcp_catalog_results", ("table-request", servers, False, "")))
     tui._before_render(None)
     assert len(tui._mcp_catalog_results) == 2
-    assert tui._panel.page.column_headers == ("MCP Name", "Version", "Description")
-    tui._set_input("Unique second")
-    tui._refresh_choice_filter()
+    assert tui._panel.page.column_headers == ("MCP NAME", "VERSION", "DESCRIPTION")
+    tui._picker.focus("sort")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._mcp_catalog_sort == "Name A–Z"
+    assert tui._picker.selected_id == "sort"
+    assert [row.id for row in tui._panel.page.rows if row.id.startswith("registry:")] == [
+        "registry:" + server.name for server in servers
+    ]
+    tui._panel.filter("Unique second")
+    tui._apply_picker_state()
     assert tui._panel.row().label == servers[1].name
     assert tui._panel.row().value == "1.0.0"
     identity = tui._picker.selected_id
@@ -7146,6 +7232,42 @@ def test_tui_mcp_registry_table_keeps_distinct_servers_and_detail_navigation():
     assert tui._choice_kind == "mcp registry results"
     assert tui._picker.selected_id == identity
     assert tui._picker.query == "unique second"
+
+
+def test_tui_mcp_repository_stars_are_owned_and_preserve_result_focus(monkeypatch):
+    from klaude_core.mcp_catalog import MCPCatalogServer
+
+    server = MCPCatalogServer(
+        name="io.github.example/docs", title="Docs", description="Documentation",
+        version="1.0.0", status="active",
+        repository_url="https://github.com/example/docs",
+    )
+    tui = _fake_persistent_tui()
+    submitted = []
+    monkeypatch.setattr(tui._background_jobs, "submit", lambda key, request, **_kw:
+                        submitted.append((key, request)) or "stars-request"
+                        if key == "mcp-stars" else "inventory-request")
+    monkeypatch.setattr(tui._background_jobs, "current", lambda _key, _id: True)
+    tui._mcp_catalog_results = {server.name: server}
+    tui._open_mcp_catalog_results()
+    tui._picker.focus("registry:" + server.name)
+    tui._apply_picker_state()
+    tui._open_mcp_catalog_detail(server)
+    assert ("mcp-stars", {"kind": "mcp_repository_stars",
+                            "repository_url": server.repository_url}) in submitted
+    assert tui._panel.row("repository-stars").description == "Loading…"
+    tui._apply_background_result(("mcp-stars", "wrong-request", {
+        "repository_url": server.repository_url, "stars": 1234,
+    }, ""))
+    assert server.repository_url not in tui._mcp_repository_stars
+    tui._apply_background_result(("mcp-stars", "stars-request", {
+        "repository_url": server.repository_url, "stars": 1234,
+    }, ""))
+    assert tui._panel.row("repository-stars").description == "1,234"
+    tui._open_mcp_catalog_results()
+    assert tui._picker.selected_id == "registry:" + server.name
+    assert "Repository stars: 1,234" in tui._panel.row(
+        "registry:" + server.name).description
 
 
 def test_tui_mcp_registry_table_live_resize_and_long_description_scrolling():
@@ -7175,8 +7297,10 @@ def test_tui_mcp_registry_table_live_resize_and_long_description_scrolling():
                 tui._set_input("unsent draft")
                 tui._begin_choice("settings", tui._settings_categories(), "mcp servers")
                 tui._open_settings_category("mcp servers")
-                tui._mcp_catalog_results = {"documentation-result": server}
+                tui._mcp_catalog_results = {server.name: server}
                 tui._open_mcp_catalog_results(new_results=True)
+                tui._picker.focus("registry:" + server.name)
+                tui._apply_picker_state()
                 for width in (120, 75, 36, 22, 120):
                     output.columns = width
                     tui.application._redraw()
@@ -7186,7 +7310,7 @@ def test_tui_mcp_registry_table_live_resize_and_long_description_scrolling():
                     header_height = 3 if tui._panel_width() >= 60 else 2
                     assert tui.panel_header_window.render_info.window_height == header_height
                     assert tui.panel_footer_window.render_info.window_height == 2
-                    assert tui._picker.selected_id == "registry:" + server.name
+                assert tui._picker.selected_id == "registry:" + server.name
                 output.columns = 22
                 tui.application._redraw()
                 identity = tui._picker.selected_id
@@ -10349,18 +10473,18 @@ def test_settings_permission_mcp_breadcrumb_and_parent_focus_restore():
     home.scroll_top = 2
     tui._accept_choice()
     assert tui._panel.page.breadcrumb == ("Settings", "MCPs")
-    tui._panel.picker.focus("manage permissions")
+    tui._panel.picker.focus("permissions")
     tui._apply_picker_state()
     tui._accept_choice()
-    assert tui._panel.page.breadcrumb == ("Settings", "MCPs", "Manage permissions")
+    assert tui._panel.page.breadcrumb == ("Settings", "MCPs", "Permissions")
     tui._accept_choice()
     assert tui._panel.page.breadcrumb == (
-        "Settings", "MCPs", "Manage permissions", "firecrawl"
+        "Settings", "MCPs", "Permissions", "firecrawl"
     )
     tui._cancel_choice()
     assert tui._panel.picker.selected_id == "server:firecrawl"
     tui._cancel_choice()
-    assert tui._panel.picker.selected_id == "manage permissions"
+    assert tui._panel.picker.selected_id == "permissions"
     tui._cancel_choice()
     assert tui._panel is home
     assert tui._panel.picker.selected_id == "category:mcp servers"
@@ -10992,16 +11116,19 @@ def test_mcp_settings_navigation_never_loads_registry_and_retains_focus_filter(m
     identity = tui._background_jobs.latest["mcp-inventory"]
     result = {"servers": [{
         "name": "browser", "enabled": False, "oauth": False,
-        "transport": "http", "tool_count": 0,
+        "transport": "http", "tool_count": 0, "fingerprint": "a" * 64,
+        "source_label": "Local configuration", "description": "",
     }], "truncated": False}
     tui._set_input("custom")
+    tui._panel.search_active = True
     tui._refresh_choice_filter()
     tui._apply_background_result(("mcp-inventory", identity, result, ""))
     assert tui._choice_filter_query == "custom"
     assert tui._choice_values[tui._choice_index] == "Add custom MCP server"
     tui._set_input("")
     tui._refresh_choice_filter()
-    assert any(row.startswith("browser: off") for row in tui._choice_values)
+    assert "Manage" in tui._choice_values
+    assert all(not row.startswith("browser:") for row in tui._choice_values)
     tui._mcp_inventory_loaded_at -= 31
     cached_time = tui._mcp_inventory_loaded_at
     tui._open_settings_category("mcp servers")
@@ -11034,7 +11161,7 @@ def test_live_mcp_picker_filters_while_inventory_is_pending():
             tui.application.output = DummyOutput()
             task = asyncio.create_task(tui.application.run_async())
             try:
-                pipe.send_text("custom")
+                pipe.send_text("/custom")
                 for _ in range(40):
                     if tui._choice_filter_query == "custom":
                         break
@@ -11381,7 +11508,9 @@ def test_unavailable_model_remains_inert_with_visible_reason():
     tui._accept_choice()
     assert tui._choice_kind == "model"
     assert tui._choice_values[tui._choice_index] == label
-    assert tui.status_error == label
+    assert not tui.status_error
+    assert any(style == "class:panel.status.warning" and str(label) in text
+               for style, text in tui._panel_footer_fragments())
 
 
 @pytest.mark.parametrize(
@@ -11847,11 +11976,17 @@ def test_skills_delete_confirmation_is_inert_until_confirmed_and_keeps_identity(
     }]
     requests = []
     tui._skill_actions.submit = lambda action: requests.append(action) or True
+    tui._skill_discovery.installed.add("previous-install")
     tui._open_settings_category("skills")
+    assert all(row.id != "skill:demo" for row in tui._panel.page.rows)
+    tui._apply_panel_action(PanelAction("skill-manage"))
+    assert tui._panel.page.breadcrumb == ("Settings", "Skills", "Manage")
     tui._panel.picker.focus("skill:demo")
     tui._apply_picker_state()
     tui._accept_choice()
-    assert tui._panel.page.breadcrumb == ("Settings", "Skills", "demo")
+    assert tui._panel.page.breadcrumb == ("Settings", "Skills", "Manage", "demo")
+    tui._panel.picker.focus("delete")
+    tui._apply_picker_state()
     tui._accept_choice()
     assert tui._panel.page.breadcrumb[-1] == "Confirm deletion"
     assert tui._panel.picker.selected_id == "back"
@@ -11861,11 +11996,13 @@ def test_skills_delete_confirmation_is_inert_until_confirmed_and_keeps_identity(
     tui._apply_panel_action(PanelAction("skill-delete", "demo"))
     assert requests == [SkillAction("delete", "demo", "old")]
     assert tui._skill_action_pending
+    assert tui._panel.page.breadcrumb == ("Settings", "Skills", "Manage")
     tui._cancel_choice()
     tui._events.put(("skill_action_done", (requests[0], True, "Skill deleted")))
     tui._before_render(tui.application)
-    assert tui._panel.page.breadcrumb == ("Settings",)
+    assert tui._panel.page.breadcrumb == ("Settings", "Skills")
     assert not tui._skill_action_pending
+    assert not tui._skill_discovery.installed
 
 
 def test_skills_confirmation_reopens_on_back_even_after_previous_delete_focus(tmp_path):
@@ -11874,11 +12011,16 @@ def test_skills_confirmation_reopens_on_back_even_after_previous_delete_focus(tm
     tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
     tui._skills_inventory = [{"name": "demo", "identity": "id", "library": "demo"}]
     tui._open_settings_category("skills")
-    tui._apply_panel_action(PanelAction("skill-confirm", "demo"))
+    tui._apply_panel_action(PanelAction("skill-manage"))
+    assert tui._panel.picker.selected_id == "skill:demo"
+    tui._apply_panel_action(PanelAction("skill-manage-detail", "demo"))
+    tui._apply_panel_action(PanelAction("skill-manage-delete", "demo"))
     tui._panel.picker.focus("delete")
     tui._apply_picker_state()
     tui._cancel_choice()
-    tui._apply_panel_action(PanelAction("skill-confirm", "demo"))
+    assert tui._choice_kind == "skills manage detail"
+    assert tui._skill_delete_identity == ""
+    tui._apply_panel_action(PanelAction("skill-manage-delete", "demo"))
     assert tui._panel.picker.selected_id == "back"
 
 
@@ -13026,7 +13168,7 @@ def test_settings_skills_count_loads_without_navigation_and_preserves_focus_and_
     assert panel.picker.selected_id == "category:tools"
     assert panel.picker.query == "tools"
     skills = next(row for row in panel.page.rows if row.id == "category:skills")
-    assert skills.value == "2 installed"
+    assert skills.value == "2/2 enabled"
     tui._cancel_choice()
     tui._cancel_choice()
     assert not tui._skills_inventory_loading
@@ -13039,7 +13181,7 @@ def test_settings_skills_empty_and_unavailable_counts_are_honest():
     assert next(row for row in page.rows if row.id == "category:skills").value == "Unavailable"
     tui._skills_inventory = []
     page = tui._settings_home_page()
-    assert next(row for row in page.rows if row.id == "category:skills").value == "0 installed"
+    assert next(row for row in page.rows if row.id == "category:skills").value == "0/0 enabled"
 
 
 @pytest.mark.parametrize("enabled,label", [(True, "1 saved, ON"), (False, "1 saved, OFF")])
@@ -13078,8 +13220,8 @@ def test_appearance_parent_summaries_show_defaults_and_keep_actual_choices():
     assert rows["category:divider"].value == "ON, red, accent"
 
 
-def test_settings_input_and_divider_summaries_show_live_values_without_comments():
-    tui = _fake_persistent_tui()
+def test_settings_input_and_divider_summaries_show_live_values_without_comments(tmp_path):
+    tui = _fake_persistent_tui(appearance_path=tmp_path / "appearance.json")
     tui.appearance.divider_text_color = "bright-black"
     rows = {row.id: row for row in tui._settings_home_page().rows}
     assert rows["category:input field"].value == "6-6, border"
@@ -13257,17 +13399,25 @@ def test_mcp_remove_settings_confirmation_cancel_and_submit(tmp_path, monkeypatc
     tui._mcp_mutations = SimpleNamespace(path=tui.cfg.mcp_servers_file,
                                        submit=lambda request: requests.append(request) or True)
     tui._open_settings_category("mcp servers")
-    assert "Delete MCP" in tui._choice_values
+    assert "Manage" in tui._choice_values
     tui._panel.picker.focus(next(row.id for row in tui._panel.page.rows
-                                if row.label == "Delete MCP"))
+                                if row.label == "Manage installed"))
     tui._apply_picker_state()
     tui._accept_choice()
-    assert tui._choice_kind == "mcp remove servers"
+    assert tui._choice_kind == "mcp manage list"
+    tui._panel.picker.focus("server:docs")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._choice_kind == "mcp manage detail"
+    tui._panel.picker.focus("delete")
+    tui._apply_picker_state()
     tui._accept_choice()
     assert tui._panel.picker.selected_id == "cancel"
     assert requests == []
     tui._cancel_choice()
-    assert tui._choice_kind == "mcp remove servers"
+    assert tui._choice_kind == "mcp manage detail"
+    tui._panel.picker.focus("delete")
+    tui._apply_picker_state()
     tui._accept_choice()
     assert tui._panel.picker.selected_id == "cancel"
     tui._panel.picker.focus("remove")
@@ -13276,8 +13426,11 @@ def test_mcp_remove_settings_confirmation_cancel_and_submit(tmp_path, monkeypatc
     assert len(requests) == 1
     assert isinstance(requests[0], MCPRemove)
     assert requests[0].name == "docs" and requests[0].fingerprint == "a" * 64
-    assert tui._choice_kind == "mcp settings"
-    assert "Removing" in tui.status_error
+    assert tui._choice_kind == "mcp manage list"
+    assert not tui.status_error
+    assert ("class:panel.status.neutral", "Removing MCP server docs…") in (
+        tui._panel_footer_fragments()
+    )
     published = []
     monkeypatch.setattr(tui, "_publish_mcp_tools", lambda *catalog: published.append(catalog))
     catalog = ([], None)
@@ -13290,8 +13443,299 @@ def test_mcp_remove_settings_confirmation_cancel_and_submit(tmp_path, monkeypatc
     assert "Removed MCP server docs" in tui.output.text
 
 
+def test_mcp_manage_refresh_preserves_filter_focus_and_page(tmp_path):
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    first = {"name": "docs", "enabled": True, "transport": "http", "oauth": False,
+             "tool_count": 2, "fingerprint": "a" * 64,
+             "source_label": "MCP Registry metadata", "description": "Old description"}
+    tui._mcp_inventory = {"servers": [first], "truncated": False}
+    tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
+    tui._open_settings_category("mcp servers")
+    tui._apply_panel_action(PanelAction("mcp-manage"))
+    assert tui._panel.picker.selected_id == "server:docs"
+    tui._panel.search_active = True
+    tui._set_input("docs")
+    tui._refresh_choice_filter()
+    tui._panel.picker.focus("server:docs")
+    tui._apply_picker_state()
+    identity = tui._background_jobs.latest["mcp-inventory"]
+    updated = {**first, "description": "New description"}
+    tui._apply_background_result(("mcp-inventory", identity, {
+        "servers": [updated], "truncated": False,
+    }, ""))
+    assert tui._choice_kind == "mcp manage list"
+    assert tui._panel.picker.selected_id == "server:docs"
+    assert tui._panel.picker.query == "docs"
+    assert tui._panel.row().description == "New description"
+    tui._accept_choice()
+    assert tui._panel.page.breadcrumb == ("Settings", "MCPs", "Manage", "docs")
+    tui._cancel_choice()
+    assert tui._panel.picker.selected_id == "server:docs"
+    assert tui._panel.picker.query == "docs"
+
+
+def test_mcp_manage_enable_review_returns_to_server_detail(tmp_path, monkeypatch):
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._mcp_inventory = {"servers": [{
+        "name": "docs", "enabled": False, "transport": "http", "oauth": False,
+        "tool_count": 0, "fingerprint": "a" * 64,
+        "source_label": "Local configuration", "description": "",
+    }], "truncated": False}
+    tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
+    tui._mcp_inventory_loaded_at = time.monotonic()
+    tui._open_settings_category("mcp servers")
+    tui._apply_panel_action(PanelAction("mcp-manage"))
+    tui._apply_panel_action(PanelAction("mcp-manage-detail", "docs"))
+    monkeypatch.setattr(tui, "_review_mcp_server", lambda _name: tui._begin_choice(
+        "mcp review", ["Reviewing…", "back"], "back"
+    ))
+    tui._apply_panel_action(PanelAction("mcp-manage-toggle", "docs"))
+    assert tui._choice_kind == "mcp review"
+    tui._cancel_choice()
+    assert tui._panel.page.breadcrumb == ("Settings", "MCPs", "Manage", "docs")
+    assert tui._panel.picker.selected_id == "enabled"
+
+
+def test_manage_update_controls_explain_unsupported_source_updates(tmp_path):
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._skills_inventory = [{"name": "demo", "identity": "id", "enabled": True}]
+    tui._skill_inbox_preparation_attempted = True
+    tui._open_settings_category("skills")
+    tui._apply_panel_action(PanelAction("skill-manage"))
+    tui._panel.picker.focus("update-all")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._choice_kind == "skills manage list"
+    assert not tui.status_error
+    assert ("class:panel.status.warning", "No verified upstream update sources") in (
+        tui._panel_footer_fragments()
+    )
+    tui._apply_panel_action(PanelAction("skill-manage-detail", "demo"))
+    tui._panel.picker.focus("update")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._choice_kind == "skills manage detail"
+    assert not tui.status_error
+    assert ("class:panel.status.warning", "No verified upstream update source") in (
+        tui._panel_footer_fragments()
+    )
+
+
+def test_mcp_manage_update_requires_review_then_disables_server(tmp_path):
+    from klaude_cli.mcp_mutations import MCPUpdateDisabled
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    fingerprint = "a" * 64
+    tui._mcp_inventory = {"servers": [{
+        "name": "docs", "enabled": True, "transport": "stdio", "oauth": False,
+        "tool_count": 1, "fingerprint": fingerprint,
+        "source_label": "MCP Registry metadata", "description": "Documentation MCP",
+        "update_kind": "registry-package",
+    }], "truncated": False}
+    tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
+    tui._mcp_inventory_loaded_at = time.monotonic()
+    accepted = []
+    tui._mcp_mutations = SimpleNamespace(
+        path=tui.cfg.mcp_servers_file,
+        submit=lambda request: accepted.append(request) or True,
+    )
+    tui._open_settings_category("mcp servers")
+    tui._apply_panel_action(PanelAction("mcp-manage"))
+    tui._apply_panel_action(PanelAction("mcp-manage-detail", "docs"))
+    tui._apply_panel_action(PanelAction("mcp-manage-update", "docs"))
+    assert accepted == []
+    request = tui._background_jobs.requests["mcp-update-check"]
+    assert request["fingerprint"] == fingerprint
+    identity = tui._background_jobs.latest["mcp-update-check"]
+    candidate = {"old_arg": "@example/docs@1.2.3",
+                 "new_arg": "@example/docs@1.2.4", "old_version": "1.2.3",
+                 "new_version": "1.2.4", "registry_version": "1.2.4",
+                 "description": "New documentation MCP"}
+    tui._apply_background_result(("mcp-update-check", identity, {
+        "name": "docs", "fingerprint": fingerprint,
+        "status": "available", "candidate": candidate,
+    }, ""))
+    assert tui._choice_kind == "mcp manage update"
+    assert tui._panel.picker.selected_id == "back"
+    tui._apply_panel_action(PanelAction("mcp-manage-update-confirm", "docs"))
+    assert len(accepted) == 1 and isinstance(accepted[0], MCPUpdateDisabled)
+    assert accepted[0].new_arg == "@example/docs@1.2.4"
+    assert tui._choice_kind == "mcp manage detail"
+
+
+def test_mcp_update_all_reviews_and_serializes_disabled_updates(tmp_path, monkeypatch):
+    from klaude_cli.mcp_mutations import MCPMutationResult, MCPUpdateDisabled
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    names = ("alpha", "beta")
+    tui._mcp_inventory = {"servers": [{
+        "name": name, "enabled": True, "transport": "stdio", "oauth": False,
+        "tool_count": 1, "fingerprint": char * 64,
+        "source_label": "MCP Registry metadata", "description": "Example",
+        "update_kind": "registry-package",
+    } for name, char in zip(names, "ab", strict=True)], "truncated": False}
+    tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
+    tui._mcp_inventory_loaded_at = time.monotonic()
+    accepted = []
+    tui._mcp_mutations = SimpleNamespace(
+        path=tui.cfg.mcp_servers_file,
+        submit=lambda request: accepted.append(request) or True,
+    )
+    monkeypatch.setattr(tui, "_publish_mcp_tools", lambda *_: None)
+    tui._open_settings_category("mcp servers")
+    tui._apply_panel_action(PanelAction("mcp-manage"))
+    tui._apply_panel_action(PanelAction("mcp-manage-update-all"))
+    request = tui._background_jobs.requests["mcp-update-all-check"]
+    assert [item["name"] for item in request["items"]] == list(names)
+    identity = tui._background_jobs.latest["mcp-update-all-check"]
+    result = {"items": [{
+        "name": name, "fingerprint": char * 64, "status": "available",
+        "candidate": {"old_arg": f"@example/{name}@1.2.3",
+                      "new_arg": f"@example/{name}@1.2.4",
+                      "old_version": "1.2.3", "new_version": "1.2.4",
+                      "registry_version": "1.2.4", "description": "Updated"},
+    } for name, char in zip(names, "ab", strict=True)]}
+    tui._apply_background_result(("mcp-update-all-check", identity, result, ""))
+    assert tui._choice_kind == "mcp manage update all"
+    assert tui._panel.picker.selected_id == "back"
+    tui._apply_panel_action(PanelAction("mcp-manage-update-all-confirm"))
+    assert len(accepted) == 1 and isinstance(accepted[0], MCPUpdateDisabled)
+    tui._events.put(("mcp_mutation_saved", MCPMutationResult(
+        accepted[0], str(tui.cfg.mcp_servers_file), "saved", ([], None),
+    )))
+    tui._before_render(tui.application)
+    assert [item.name for item in accepted] == list(names)
+    assert tui._mcp_mutation_pending[0] == accepted[1]
+    tui._events.put(("mcp_mutation_saved", MCPMutationResult(
+        accepted[1], str(tui.cfg.mcp_servers_file), "saved", ([], None),
+    )))
+    tui._before_render(tui.application)
+    assert tui._mcp_mutation_pending is None
+    assert tui._mcp_update_all_total == 0
+
+
+def test_skill_update_all_reviews_and_serializes_remote_updates(tmp_path):
+    from klaude_cli.settings_panel import PanelAction
+    from klaude_core.skill_catalog import SkillRecord
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._skill_inbox_preparation_attempted = True
+    names = ("alpha", "beta")
+    tui._skills_inventory = [{
+        "name": name, "identity": char * 64, "enabled": True,
+        "update_kind": "github", "source_label": "GitHub · org/repo",
+    } for name, char in zip(names, "ab", strict=True)]
+    tui._skills_inventory_loaded_at = time.monotonic()
+    accepted = []
+    tui._skill_actions.submit = lambda action: accepted.append(action) or True
+    tui._open_settings_category("skills")
+    tui._apply_panel_action(PanelAction("skill-manage"))
+    tui._apply_panel_action(PanelAction("skill-update-all"))
+    request = tui._background_jobs.requests["skill-update-all-check"]
+    assert [item["name"] for item in request["items"]] == list(names)
+    identity = tui._background_jobs.latest["skill-update-all-check"]
+    records = [SkillRecord(
+        "skillsmp", f"installed:org/repo:{name}/SKILL.md", name,
+        repository="org/repo", skill_path=f"{name}/SKILL.md",
+        source_url=f"https://github.com/org/repo/blob/{char * 40}/{name}/SKILL.md",
+        revision=char * 40,
+    ) for name, char in zip(names, "cd", strict=True)]
+    result = {"items": [{
+        "name": name, "identity": char * 64, "status": "available",
+        "current_revision": "e" * 40, "record": record.payload(),
+    } for (name, char), record in zip(zip(names, "ab", strict=True), records, strict=True)]}
+    tui._apply_background_result(("skill-update-all-check", identity, result, ""))
+    assert tui._choice_kind == "skill update all review"
+    assert tui._panel.picker.selected_id == "back"
+    tui._apply_panel_action(PanelAction("skill-update-all-confirm"))
+    assert len(accepted) == 1 and accepted[0].name == "alpha"
+    assert tui._panel.picker.selected_id == "update-all"
+    tui._events.put(("skill_action_done", (accepted[0], True, "Updated alpha")))
+    tui._before_render(tui.application)
+    assert [item.name for item in accepted] == list(names)
+    tui._events.put(("skill_action_done", (accepted[1], True, "Updated beta")))
+    tui._before_render(tui.application)
+    assert not tui._skill_action_pending
+    assert tui._skill_update_all_total == 0
+
+
+def test_skill_manage_update_checks_source_then_requires_review(tmp_path):
+    from klaude_cli.settings_panel import PanelAction
+    from klaude_core.skill_catalog import SkillRecord
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._skill_inbox_preparation_attempted = True
+    current, latest = "a" * 40, "b" * 40
+    tui._skills_inventory = [{
+        "name": "demo", "identity": "c" * 64, "enabled": True,
+        "update_kind": "github", "source_label": "GitHub · org/repo",
+    }]
+    tui._skills_inventory_loaded_at = time.monotonic()
+    accepted = []
+    tui._skill_actions.submit = lambda action: accepted.append(action) or True
+    tui._open_settings_category("skills")
+    tui._apply_panel_action(PanelAction("skill-manage"))
+    tui._apply_panel_action(PanelAction("skill-manage-detail", "demo"))
+    tui._apply_panel_action(PanelAction("skill-update", "demo"))
+    assert accepted == []
+    request = tui._background_jobs.requests["skill-update-check"]
+    assert request["name"] == "demo" and request["identity"] == "c" * 64
+    record = SkillRecord(
+        "skillsmp", "installed:org/repo:demo/SKILL.md", "demo",
+        repository="org/repo",
+        source_url=f"https://github.com/org/repo/blob/{latest}/demo/SKILL.md",
+        skill_path="demo/SKILL.md", revision=latest, license="MIT",
+    )
+    identity = tui._background_jobs.latest["skill-update-check"]
+    tui._apply_background_result(("skill-update-check", identity, {
+        "name": "demo", "identity": "c" * 64, "status": "available",
+        "current_revision": current, "record": record.payload(),
+    }, ""))
+    assert tui._panel.page.breadcrumb[-1] == "Review update"
+    assert tui._panel.picker.selected_id == "back"
+    assert accepted == []
+    tui._panel.picker.focus("confirm")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert len(accepted) == 1
+    assert accepted[0].kind == "update-remote"
+    assert accepted[0].expected_manifest_identity == "c" * 64
+    assert accepted[0].record == record
+    assert tui._choice_kind == "skills manage list"
+
+
+def test_skills_and_mcp_manage_back_restore_parent_focus():
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui()
+    tui._skill_inbox_preparation_attempted = True
+    tui._skills_inventory = [{"name": "demo", "identity": "id", "enabled": True}]
+    tui._open_settings_category("skills")
+    tui._apply_panel_action(PanelAction("skill-manage"))
+    tui._cancel_choice()
+    assert tui._panel.page.breadcrumb == ("Settings", "Skills")
+    assert tui._panel.picker.selected_id == "manage"
+
+    tui._mcp_inventory = {"servers": [], "truncated": False}
+    tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
+    tui._mcp_inventory_loaded_at = time.monotonic()
+    tui._open_settings_category("mcp servers")
+    tui._apply_panel_action(PanelAction("mcp-manage"))
+    tui._cancel_choice()
+    assert tui._panel.page.breadcrumb == ("Settings", "MCPs")
+    assert tui._panel.picker.selected_id == "manage"
+
+
 def test_mcp_actions_order_and_nonselectable_gap_before_servers():
-    from klaude_cli.settings_panel import RowKind
+    from klaude_cli.settings_panel import PanelAction
 
     tui = _fake_persistent_tui()
     tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
@@ -13303,16 +13747,184 @@ def test_mcp_actions_order_and_nonselectable_gap_before_servers():
     tui._open_settings_category("mcp servers")
     rows = tui._panel.page.rows
     start = next(index for index, row in enumerate(rows) if row.label == "MCP Servers")
-    assert [row.label for row in rows[start + 1:start + 4]] == [
-        "Reload", "Manage permissions", "Delete MCP",
+    assert [row.id for row in rows[start + 1:start + 6]] == [
+        "manage", "search", "custom", "import", "permissions",
     ]
-    server = next(index for index, row in enumerate(rows) if row.label == "docs")
-    assert rows[server - 1].kind == RowKind.SEPARATOR
-    assert not rows[server - 1].selectable
-    tui._panel.picker.focus(rows[start + 3].id)
+    assert not any(row.label == "Reload" for row in rows)
+    assert not any(row.label == "docs" for row in rows)
+    tui._apply_panel_action(PanelAction("mcp-manage"))
+    manage_rows = tui._panel.page.rows
+    assert [row.label for row in manage_rows[:5]] == [
+        "MCP SERVERS", "Filter", "Refresh list", "Refresh tools", "Check for updates",
+    ]
+
+
+def test_mcp_manage_reload_stays_near_update_all_after_ack(tmp_path, monkeypatch):
+    from klaude_cli.mcp_mutations import MCPMutationResult, MCPReload
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    tui._mcp_inventory = {"servers": [], "truncated": False}
+    tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
+    tui._mcp_inventory_loaded_at = time.monotonic()
+    requests = []
+    tui._mcp_mutations = SimpleNamespace(
+        path=tui.cfg.mcp_servers_file,
+        submit=lambda request: requests.append(request) or True,
+    )
+    monkeypatch.setattr(tui, "_publish_mcp_tools", lambda *_: None)
+    tui._open_settings_category("mcp servers")
+    tui._apply_panel_action(PanelAction("mcp-manage"))
+    tui._panel.picker.focus("reload")
     tui._apply_picker_state()
-    tui._move_choice(1)
-    assert tui._panel.row().label == "docs"
+    tui._accept_choice()
+    assert len(requests) == 1 and isinstance(requests[0], MCPReload)
+    assert tui._choice_kind == "mcp manage list"
+    assert tui._panel.picker.selected_id == "reload"
+    assert ("class:panel.status.neutral", "Reloading configured MCP tools…") in (
+        tui._panel_footer_fragments()
+    )
+    tui._events.put(("mcp_mutation_saved", MCPMutationResult(
+        requests[0], str(tui.cfg.mcp_servers_file), "loaded", ([], None),
+    )))
+    tui._before_render(tui.application)
+    assert tui._panel.picker.selected_id == "reload"
+    assert tui._mcp_mutation_pending is None
+    assert ("class:panel.saved", "Saved") in tui._panel_footer_fragments()
+
+
+@pytest.mark.parametrize("domain", ["skills", "mcp"])
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("outcome,tone", [
+    ("current", "success"), ("unavailable", "error"),
+    ("invalid", "error"), ("unsupported", "warning"),
+])
+def test_manage_update_feedback_colors_follow_outcomes(
+    tmp_path, monkeypatch, domain, batch, outcome, tone,
+):
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    monkeypatch.setattr(tui, "_panel_width", lambda: 180)
+    tui._skill_inbox_preparation_attempted = True
+    identity = "a" * 64
+    if domain == "skills":
+        tui._skills_inventory = [{
+            "name": "demo", "identity": identity, "enabled": True, "update_kind": "github",
+        }]
+        tui._skills_inventory_loaded_at = time.monotonic()
+        tui._open_skills_manage()
+        if not batch:
+            tui._open_skill_manage_detail("demo")
+        action = "skill-update-all" if batch else "skill-update"
+        key = "skill-update-all-check" if batch else "skill-update-check"
+        item = {"name": "demo", "identity": identity, "status": outcome}
+    else:
+        tui._mcp_inventory = {"servers": [{
+            "name": "demo", "fingerprint": identity, "enabled": True,
+            "transport": "stdio", "tool_count": 1, "update_kind": "registry-package",
+        }], "truncated": False}
+        tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
+        tui._mcp_inventory_loaded_at = time.monotonic()
+        tui._open_mcp_manage()
+        if not batch:
+            tui._open_mcp_manage_detail("demo")
+        action = "mcp-manage-update-all" if batch else "mcp-manage-update"
+        key = "mcp-update-all-check" if batch else "mcp-update-check"
+        item = {"name": "demo", "fingerprint": identity, "status": outcome}
+    tui._apply_panel_action(PanelAction(action, "demo"))
+    footer = tui._panel_footer_fragments()
+    assert any(style == "class:panel.status.neutral" and text.startswith("Checking")
+               for style, text in footer)
+    assert not tui.status_error
+    if outcome == "invalid":
+        item["status"] = "available"  # Missing required source/package metadata.
+    result = {"items": [item]} if batch else item
+    tui._apply_background_result((
+        key, tui._background_jobs.latest[key], result,
+        "timeout" if outcome == "unavailable" else "",
+    ))
+    footer = tui._panel_footer_fragments()
+    assert any(style == f"class:panel.status.{tone}" and text for style, text in footer)
+    assert "Checking" not in "".join(text for _, text in footer)
+    if outcome == "current" and batch:
+        expected = "All verified Skills are current" if domain == "skills" else (
+            "All verified MCP packages are current"
+        )
+        assert ("class:panel.status.success", expected) in footer
+    if domain == "skills" and not batch:
+        row = tui._panel.row("feedback")
+        assert row is not None and row.status_tone == tone
+        assert any(f"class:panel.status.{tone}" in style and row.label in text
+                   for line in tui._panel_body().lines for style, text in line)
+    if domain == "mcp":
+        if batch:
+            tui._open_mcp_manage()
+        else:
+            tui._open_mcp_manage_detail("demo")
+    else:
+        if batch:
+            tui._open_skills_manage()
+        else:
+            tui._open_skill_manage_detail("demo")
+    assert tui._panel_footer_fragments() == footer  # Same-page refresh retains the outcome.
+    tui._open_settings_category("theme")
+    assert not tui._panel_feedback
+    assert not any(style == f"class:panel.status.{tone}" and text
+                   for style, text in tui._panel_footer_fragments())
+
+
+@pytest.mark.parametrize("success,tone", [
+    (True, "success"), (False, "error"), (True, "warning"), (False, "warning"),
+])
+def test_skill_action_feedback_uses_acknowledgement_outcome(tmp_path, monkeypatch, success, tone):
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui(tmp_path / "appearance.json", tmp_path / "prefs.json")
+    monkeypatch.setattr(tui, "_panel_width", lambda: 180)
+    tui._skills_inventory = [{"name": "demo", "identity": "id", "enabled": True}]
+    tui._skills_inventory_loaded_at = time.monotonic()
+    accepted = []
+    tui._skill_actions.submit = lambda action: accepted.append(action) or True
+    tui._open_skill_manage_detail("demo")
+    tui._apply_panel_action(PanelAction("skill-toggle", "demo"))
+    assert ("class:panel.muted", "Saving…") in tui._panel_footer_fragments()
+    # Wording deliberately does not match any old success-message prefix.
+    tui._events.put(("skill_action_done", (accepted[0], success, "Operation outcome", tone)))
+    tui._before_render(tui.application)
+    assert (f"class:panel.status.{tone}", "Operation outcome") in tui._panel_footer_fragments()
+
+
+def test_panel_footer_separates_save_warning_from_error_and_neutral_text(monkeypatch):
+    tui = _fake_persistent_tui()
+    monkeypatch.setattr(tui, "_panel_width", lambda: 180)
+    tui._open_settings_category("tools")
+    tui._runtime_save_state = "failed"
+    tui.status_error = "Disk write failed"
+    footer = tui._panel_footer_fragments()
+    assert ("class:panel.warning", "Save unconfirmed") in footer
+    assert ("class:panel.error", "Disk write failed") in footer
+    tui._runtime_save_state = ""
+    assert ("class:panel.error", "Disk write failed") in tui._panel_footer_fragments()
+    tui.status_error = ""
+    tui._set_panel_feedback("Checking sources…")
+    assert ("class:panel.status.neutral", "Checking sources…") in tui._panel_footer_fragments()
+
+
+def test_panel_feedback_styles_use_semantic_colors():
+    from klaude_cli.main import DEFAULT_TEXT_THEME, _tui_style
+
+    style = _tui_style("claude", DEFAULT_TEXT_THEME)
+
+    def color(name):
+        return style.get_attrs_for_style_str(f"class:{name}").color
+
+    assert color("panel.warning") == color("panel.status.warning") == "f3c84b"
+    assert color("panel.saved") == color("panel.status.success")
+    assert color("panel.error") == color("panel.status.error")
+    assert color("panel.muted") == color("panel.status.neutral")
+    assert len({color(f"panel.status.{tone}")
+                for tone in ("neutral", "success", "warning", "error")}) == 4
 
 
 def test_skill_drop_inventory_shows_files_without_importing_and_preserves_focus():
@@ -13323,18 +13935,23 @@ def test_skill_drop_inventory_shows_files_without_importing_and_preserves_focus(
     requests = []
     tui._skill_actions.submit = lambda request: requests.append(request) or True
     tui._open_settings_category("skills")
-    tui._panel.picker.focus("skill:demo")
+    tui._panel.picker.focus("manage")
     tui._apply_picker_state()
     tui._events.put(("skill_drop_inventory", ("file.zip", "file2.zip")))
     tui._before_render(tui.application)
-    assert tui._panel.picker.selected_id == "skill:demo"
+    assert tui._panel.picker.selected_id == "manage"
     assert requests == []
+    rendered = "".join(text for line in tui._panel_body().lines for _, text in line)
+    assert "2 files ready to import" in rendered
+    assert "file.zip" not in rendered and "file2.zip" not in rendered
+    tui._panel.picker.focus("import")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._choice_kind == "skills import" and requests == []
     rendered = "".join(text for line in tui._panel_body().lines for _, text in line)
     assert "Detected 2 new skill files" in rendered
     assert "Press Import skills to start importing" in rendered
     assert "- file.zip" in rendered and "- file2.zip" in rendered
-    tui._panel.picker.focus("import")
-    tui._apply_picker_state()
     tui._accept_choice()
     assert len(requests) == 1 and requests[0].kind == "import"
 
@@ -13346,29 +13963,384 @@ def test_skills_discovery_reload_and_delete_navigation_preserve_safety():
     requests = []
     tui._skill_actions.submit = lambda action: requests.append(action) or True
     tui._open_settings_category("skills")
-    assert tui._panel.page.rows[0].label == "DISCOVERY"
+    assert tui._panel.page.rows[0].label == "SKILLS"
     tui._panel.picker.focus("search")
     tui._apply_picker_state()
     tui._accept_choice()
-    assert tui._choice_kind == "skills settings" and requests == []
-    assert not tui._panel.row().enabled
+    assert tui._choice_kind == "skill discovery" and requests == []
+    tui._cancel_choice()
+    assert tui._choice_kind == "skills settings"
+    assert not any(row.id == "reload" for row in tui._panel.page.rows)
+    tui._panel.picker.focus("manage")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._choice_kind == "skills manage list"
+    assert [row.label for row in tui._panel.page.rows[:4]] == [
+        "MANAGE SKILLS", "Filter", "Refresh list", "Check for updates",
+    ]
     tui._panel.picker.focus("reload")
     tui._apply_picker_state()
     tui._accept_choice()
     assert tui._skills_inventory_loading
     assert tui._panel.picker.selected_id == "reload"
     assert requests == []
-    tui._panel.picker.focus("delete-skills")
+    assert tui._choice_kind == "skills manage list"
+    assert tui._panel.page.breadcrumb == ("Settings", "Skills", "Manage")
+    tui._panel.picker.focus("skill:demo")
     tui._apply_picker_state()
     tui._accept_choice()
-    assert tui._choice_kind == "skill delete list"
-    assert tui._panel.page.breadcrumb == ("Settings", "Skills", "Delete skill")
+    assert tui._choice_kind == "skills manage detail"
+    tui._panel.picker.focus("delete")
+    tui._apply_picker_state()
     tui._accept_choice()
     assert tui._panel.page.breadcrumb[-1] == "Confirm deletion"
     assert tui._panel.picker.selected_id == "back"
     assert requests == []
     tui._accept_choice()
-    assert tui._choice_kind == "skill delete list"
+    assert tui._choice_kind == "skills manage detail"
     tui._cancel_choice()
-    assert tui._choice_kind == "skills settings"
-    assert tui._panel.picker.selected_id == "delete-skills"
+    assert tui._choice_kind == "skills manage list"
+    assert tui._panel.picker.selected_id == "skill:demo"
+
+
+def test_skill_discovery_jobs_are_read_only_and_back_restores_panel_state(monkeypatch):
+    from klaude_cli.settings_panel import PanelAction
+    from klaude_core.skill_catalog import CatalogStatus, SearchResult, SkillRecord
+
+    tui = _fake_persistent_tui()
+    tui._skills_inventory = []
+    tui._skills_inventory_loaded_at = time.monotonic()
+    tui._set_input("unsent draft")
+    writes = []
+    tui._skill_actions.submit = lambda action: writes.append(action) or True
+    submitted = []
+    monkeypatch.setattr(tui._background_jobs, "submit", lambda key, request, **_: (
+        submitted.append((key, request)) or str(len(submitted))))
+    monkeypatch.setattr(tui._background_jobs, "current", lambda *_: True)
+    monkeypatch.setattr(tui, "_append", lambda *_: pytest.fail("Discovery rewrote transcript"))
+    tui._open_settings_category("skills")
+    tui._panel.picker.focus("search")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._choice_kind == "skill discovery"
+    assert not submitted and not writes
+    tui._accept_choice()  # Query uses the existing private settings editor.
+    assert tui._settings_input_request["on_submit"] == ("skill-search-query",)
+    assert tui._settings_input_is_single_line()
+    tui._set_input("python")
+    tui._submit_settings_input_response()
+    assert submitted == [("skill-search", {"kind": "skill_search", "request": {
+        "query": "python", "provider": "skillsmp", "sort": "stars", "page": 1}})]
+    record = SkillRecord("skillsmp", "one", "test", "Useful source text", repository="org/repo")
+    tui._apply_background_result(("skill-search", "1", SearchResult(
+        CatalogStatus.OK, (record,), fetched_at=time.time()).payload(), ""))
+    panel = tui._panel
+    panel.picker.focus(record.identity)
+    panel.scroll_top = 2
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._choice_kind == "skill discovery detail"
+    assert "Unknown" in "".join(text for _, text in tui._panel_body_fragments())
+    tui._cancel_choice()
+    assert tui._panel is panel and panel.picker.selected_id == record.identity
+    assert panel.scroll_top == 2
+    tui._cancel_choice()
+    assert tui._choice_kind == "skills settings" and tui._panel.picker.selected_id == "search"
+    assert not writes
+    tui._cancel_choice()
+    tui._cancel_choice()
+    assert tui.input.text == "unsent draft"
+    assert len([key for key, _request in submitted if key == "skill-search"]) == 1
+    assert not tui.application.full_screen
+    assert tui._skill_discovery.action(PanelAction("unrelated")) is False
+
+
+def test_resolved_skill_install_needs_confirmation_and_keeps_discovery_open():
+    from klaude_cli.settings_panel import PanelAction
+    from klaude_cli.skill_discovery import DETAIL_KIND, INSTALL_KIND
+    from klaude_core.skill_catalog import SkillRecord
+
+    tui = _fake_persistent_tui()
+    record = SkillRecord(
+        "skillsmp", "one", "example", repository="org/repo",
+        source_url="https://github.com/org/repo/tree/main/skills/example",
+        skill_path="skills/example/SKILL.md", revision="a" * 40,
+    )
+    submitted = []
+    tui._skill_actions.submit = lambda action: submitted.append(action) or True
+    tui._skill_discovery.detail = record
+    tui._skill_discovery.show_detail()
+    tui._apply_panel_action(PanelAction("discover-install"))
+    assert tui._choice_kind == INSTALL_KIND and tui._panel.picker.selected_id == "back"
+    assert submitted == []
+    tui._apply_panel_action(PanelAction("discover-confirm-install"))
+    assert len(submitted) == 1 and submitted[0].record == record
+    assert tui._choice_kind == DETAIL_KIND
+    assert next(row for row in tui._panel.page.rows if row.id == "install-status").label == (
+        "Installing…"
+    )
+    tui._events.put(("skill_action_done", (submitted[0], True, "Installed example")))
+    tui._before_render(tui.application)
+    assert tui._choice_kind == DETAIL_KIND
+    assert next(row for row in tui._panel.page.rows if row.id == "install").label == "Installed"
+
+
+def test_skill_discovery_source_switch_keeps_focus_after_cached_return():
+    from klaude_cli.settings_panel import PanelAction
+    from klaude_core.skill_catalog import CatalogStatus, SearchResult, SkillRecord
+
+    tui = _fake_persistent_tui()
+    tui._skill_discovery.search("frontend design")
+    key = tui._background_jobs.latest["skill-search"]
+    tui._apply_background_result(("skill-search", key, SearchResult(
+        CatalogStatus.OK, (SkillRecord("skillsmp", "one", "frontend-design"),),
+        fetched_at=time.time(),
+    ).payload(), ""))
+
+    tui._apply_panel_action(PanelAction("discover-provider"))
+    assert tui._panel.picker.selected_id == "provider"
+    key = tui._background_jobs.latest["skill-search"]
+    tui._apply_background_result(("skill-search", key, SearchResult(
+        CatalogStatus.OK, (SkillRecord("skills.sh", "one", "frontend-design"),),
+        fetched_at=time.time(),
+    ).payload(), ""))
+    assert tui._panel.picker.selected_id == "provider"
+
+    tui._apply_panel_action(PanelAction("discover-provider"))
+    assert tui._panel.picker.selected_id == "provider"
+    assert tui._skill_discovery.result.records[0].provider == "skillsmp"
+
+
+@pytest.mark.parametrize("width", [24, 70, 120])
+def test_skill_discovery_live_keyboard_resize_filter_cancel_and_background_work(width, monkeypatch):
+    from klaude_core.skill_catalog import CatalogStatus, SearchResult, SkillRecord
+    from prompt_toolkit.data_structures import Size
+
+    async def exercise():
+        tui = _fake_persistent_tui()
+        tui._skills_inventory = []
+        tui._skills_inventory_loaded_at = time.monotonic()
+        tui._set_input("retained draft")
+        before = list(tui.agent.messages)
+        tui.running = True
+        tui.pending.append("queued work")
+        submitted = []
+        monkeypatch.setattr(tui._background_jobs, "submit", lambda key, request, **_: (
+            submitted.append((key, request)) or str(len(submitted))))
+        monkeypatch.setattr(tui._background_jobs, "current", lambda *_: True)
+        tui._open_settings_category("skills")
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = DummyOutput()
+            columns = [width]
+            monkeypatch.setattr(tui.application.output, "get_size", lambda: Size(
+                rows=30, columns=columns[0]))
+            task = asyncio.create_task(tui.application.run_async())
+
+            async def wait_until(predicate):
+                for _ in range(60):
+                    if predicate():
+                        return
+                    await asyncio.sleep(0.025)
+                assert predicate()
+
+            try:
+                pipe.send_text("\x1b[B\r")  # Manage installed is first; Search is next.
+                await wait_until(lambda: tui._choice_kind == "skill discovery")
+                assert tui._choice_kind == "skill discovery"
+                pipe.send_text("\rpython\r")  # Query editor, submit
+                await wait_until(lambda: bool(submitted) and submitted[-1][0] == "skill-search")
+                assert submitted[-1][0] == "skill-search"
+                record = SkillRecord("skillsmp", "one", "testing", "Long description",
+                                     repository="org/repo")
+                # Production records have normalized whitespace.
+                tui._apply_background_result(("skill-search", "1", SearchResult(
+                    CatalogStatus.OK, (record,), fetched_at=time.time()).payload(), ""))
+                tui._panel.picker.focus(record.identity)
+                tui._apply_picker_state()
+                columns[0] = 40 if width != 40 else 80
+                tui.application.invalidate()
+                pipe.send_text("/testing")
+                await wait_until(lambda: tui._panel.picker.query == "testing")
+                assert tui._panel.picker.query == "testing"
+                pipe.send_text("\x1b")  # leave local filter first
+                await wait_until(lambda: not tui._panel.search_active)
+                assert not tui._panel.search_active
+                pipe.send_text("\r")
+                await wait_until(lambda: tui._choice_kind == "skill discovery detail")
+                assert tui._choice_kind == "skill discovery detail"
+                pipe.send_text("\x1b")
+                await wait_until(lambda: tui._choice_kind == "skill discovery")
+                assert tui._choice_kind == "skill discovery"
+                assert tui._panel.picker.selected_id == record.identity
+                assert tui.running and list(tui.pending) == ["queued work"]
+                assert tui.agent.messages == before
+                assert not tui.cancel_requested.is_set()
+                assert not tui.application.full_screen
+            finally:
+                tui.application.exit()
+                await task
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("category", ["Skills", "MCPs"])
+def test_installed_filter_and_detail_back_preserve_list_state(category, monkeypatch):
+    tui = _fake_persistent_tui()
+    tui._skill_inbox_preparation_attempted = True
+    inventory = [
+        {"name": "enabled-item", "enabled": True, "identity": "one",
+         "transport": "http", "tool_count": 0, "description": "First item"},
+        {"name": "disabled-item", "enabled": False, "identity": "two",
+         "transport": "stdio", "tool_count": 0, "description": "Second item"},
+    ]
+    tui._skills_inventory = inventory
+    tui._skills_inventory_loaded_at = time.monotonic()
+    tui._mcp_inventory = {"servers": inventory, "truncated": False}
+    tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
+    tui._mcp_inventory_loaded_at = time.monotonic()
+    monkeypatch.setattr("klaude_cli.main._mcp_registry", lambda: pytest.fail("UI registry read"))
+    key = "skills" if category == "Skills" else "mcp servers"
+    prefix = "skill:" if category == "Skills" else "server:"
+    tui._open_settings_category(key)
+    assert tui._panel.picker.selected_id == "manage"
+    tui._accept_choice()
+    tui._panel.picker.focus("filter")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._panel.page.breadcrumb == ("Settings", category, "Manage", "Filter")
+    tui._panel.picker.focus("disabled")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._panel.picker.selected_id == "filter"
+    item_ids = [row.id for row in tui._panel.page.rows if row.id.startswith(prefix)]
+    assert item_ids == [prefix + "disabled-item"]
+    panel = tui._panel
+    panel.search_active = True
+    tui._set_input("disabled")
+    tui._refresh_choice_filter()
+    panel.picker.focus(prefix + "disabled-item")
+    panel.scroll_top = 2
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._panel.page.breadcrumb[-1] == "disabled-item"
+    tui._dismiss_picker()
+    assert tui._panel is panel and panel.picker.selected_id == prefix + "disabled-item"
+    assert panel.picker.query == "disabled" and panel.scroll_top == 2
+    tui._dismiss_picker()
+    assert tui._panel is panel and not panel.picker.query
+    tui._dismiss_picker()
+    assert tui._panel.page.breadcrumb == ("Settings", category)
+    assert tui._panel.picker.selected_id == "manage"
+    assert not tui._skill_action_pending and not tui._mcp_mutation_pending
+
+
+@pytest.mark.parametrize("category", ["Skills", "MCPs"])
+def test_empty_manage_search_returns_to_its_origin(category):
+    tui = _fake_persistent_tui()
+    tui._skill_inbox_preparation_attempted = True
+    tui._skills_inventory = []
+    tui._skills_inventory_loaded_at = time.monotonic()
+    tui._mcp_inventory = {"servers": [], "truncated": False}
+    tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
+    tui._mcp_inventory_loaded_at = time.monotonic()
+    key = "skills" if category == "Skills" else "mcp servers"
+    tui._open_settings_category(key)
+    tui._accept_choice()
+    tui._panel.picker.focus("search")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._panel.page.breadcrumb[-1] == "Search"
+    tui._dismiss_picker()
+    assert tui._panel.page.breadcrumb == ("Settings", category, "Manage")
+    assert tui._panel.picker.selected_id == "search"
+    tui._dismiss_picker()
+    tui._panel.picker.focus("search")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    tui._dismiss_picker()
+    assert tui._panel.page.breadcrumb == ("Settings", category)
+    assert tui._panel.picker.selected_id == "search"
+
+
+def test_skills_import_navigation_preserves_pending_work_and_draft():
+    tui = _fake_persistent_tui()
+    tui._skill_inbox_preparation_attempted = True
+    tui._skills_inventory = []
+    tui._skills_inventory_loaded_at = time.monotonic()
+    tui._set_input("unsent draft")
+    submitted = []
+    tui._skill_actions.submit = lambda action: submitted.append(action) or True
+    tui._open_settings_category("skills")
+    tui._accept_choice()
+    tui._panel.picker.focus("import")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert not submitted
+    assert tui._panel.page.breadcrumb == ("Settings", "Skills", "Manage", "Import")
+    tui._accept_choice()
+    assert len(submitted) == 1 and submitted[0].kind == "import"
+    assert tui._choice_kind == "skills import" and tui._skill_action_pending
+    assert not tui._panel.row("import").enabled
+    tui._dismiss_picker()
+    assert tui._panel.page.breadcrumb == ("Settings", "Skills", "Manage")
+    tui._dismiss_picker()
+    tui._dismiss_picker()
+    tui._dismiss_picker()
+    assert tui.input.text == "unsent draft"
+    tui._events.put(("skill_action_done", (submitted[0], True, "Imported 1 skill")))
+    tui._before_render(tui.application)
+    assert tui._choice_kind is None and not tui._skill_action_pending
+    assert tui.input.text == "unsent draft"
+
+
+def test_mcp_refresh_list_never_queues_tool_reload(monkeypatch):
+    tui = _fake_persistent_tui()
+    tui._mcp_inventory = {"servers": [], "truncated": False}
+    tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
+    tui._mcp_inventory_loaded_at = time.monotonic()
+    monkeypatch.setattr(tui._mcp_mutations, "submit", lambda *_: pytest.fail("Tool reload"))
+    tui._open_settings_category("mcp servers")
+    tui._accept_choice()
+    tui._panel.picker.focus("refresh-list")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    identity = tui._background_jobs.latest["mcp-inventory"]
+    assert tui._panel.picker.selected_id == "refresh-list"
+    tui._apply_background_result(("mcp-inventory", identity,
+                                  {"servers": [], "truncated": False}, ""))
+    assert tui._panel.picker.selected_id == "refresh-list"
+    assert not tui._mcp_mutation_pending
+
+
+def test_skill_query_editor_does_not_answer_background_prompt_or_share_query(monkeypatch):
+    from klaude_cli.settings_panel import PanelAction
+
+    async def exercise():
+        tui = _fake_persistent_tui()
+        tui._user_input_request = {"id": "waiting", "question": "Choose a strategy",
+                                   "choices": [], "remote": True}
+        replies = []
+        monkeypatch.setattr(tui, "_submit_user_input_response", lambda: replies.append(True))
+        submissions = []
+        monkeypatch.setattr(tui._background_jobs, "submit", lambda *args, **kwargs: (
+            submissions.append(args) or "request-1"))
+        tui._skill_discovery.open()
+        tui._apply_panel_action(PanelAction("discover-query"))
+        assert tui._session_io_request().draft is None
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = DummyOutput()
+            task = asyncio.create_task(tui.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+                pipe.send_text("python\r")
+                await asyncio.sleep(0.1)
+                assert len(submissions) == 1 and not replies
+                assert tui._user_input_request["id"] == "waiting"
+                assert tui._settings_input_request is None
+                assert tui._choice_kind == "skill discovery"
+                assert tui._session_io_request().draft is None
+            finally:
+                tui.application.exit()
+                await task
+    asyncio.run(exercise())

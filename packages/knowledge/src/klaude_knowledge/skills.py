@@ -167,6 +167,8 @@ def install_skill_package(
     name: str = "",
     library: str = "",
     overwrite: bool = True,
+    source_url: str = "",
+    source_revision: str = "",
 ) -> InstalledSkill:
     source_path = Path(source).expanduser()
     if not source_path.exists():
@@ -180,7 +182,7 @@ def install_skill_package(
     versions_dir = skill_root / "versions"
     manifest_path = skill_root / "manifest.json"
     previous_manifest = _read_manifest(manifest_path)
-    if previous_manifest and not overwrite:
+    if skill_root.exists() and not overwrite:
         raise FileExistsError(f"skill already exists: {skill_name}")
 
     previous_sources = list(previous_manifest.get("indexed_sources", []))
@@ -219,7 +221,8 @@ def install_skill_package(
     pending = {
         "name": skill_name,
         "library": library_name,
-        "source": str(source_path),
+        "source": source_url or str(source_path),
+        "source_revision": source_revision,
         "source_checksum": checksum,
         "state": "downloaded",
         "version_id": version_id,

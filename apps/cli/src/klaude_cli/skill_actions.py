@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import copy
 import queue
+import re
 import threading
 import time
 from dataclasses import dataclass
 
 from klaude_core import Config
+from klaude_core.skill_catalog import STATUS_TEXT, CatalogFailure, SkillRecord
 from klaude_core.skill_drop import SkillDropDetector
 
 
@@ -17,6 +19,9 @@ class SkillAction:
     kind: str
     name: str = ""
     identity: str = ""
+    record: SkillRecord | None = None
+    enabled: bool | None = None
+    expected_manifest_identity: str = ""
 
 
 class SkillActionWriter:
@@ -46,7 +51,23 @@ class SkillActionWriter:
 
     def submit(self, action: SkillAction) -> bool:
         with self._lock:
-            if self._closed or action.kind not in {"delete", "import", "prepare"}:
+            if self._closed or action.kind not in {
+                "delete", "import", "prepare", "install-remote", "update-remote", "set-enabled"
+            }:
+                return False
+            if action.kind in {"install-remote", "update-remote"} and (
+                action.record is None or action.record.identity != action.identity
+                or not action.record.canonical_identity
+            ):
+                return False
+            if action.kind == "update-remote" and (
+                not action.name or action.record is None or action.record.name != action.name
+                or not re.fullmatch(r"[a-f0-9]{64}", action.expected_manifest_identity)
+            ):
+                return False
+            if action.kind == "set-enabled" and (
+                not action.name or not action.identity or type(action.enabled) is not bool
+            ):
                 return False
             try:
                 self._queue.put_nowait(action)
@@ -89,10 +110,13 @@ class SkillActionWriter:
                 self._wake.clear()
                 continue
             message = ""
+            tone = "success"
             try:
                 from klaude_knowledge.skill_management import (
                     delete_installed_skill,
+                    import_remote_skill,
                     import_skill_inbox,
+                    set_installed_skill_enabled,
                 )
 
                 if action.kind == "prepare":
@@ -100,19 +124,62 @@ class SkillActionWriter:
                 elif action.kind == "delete":
                     delete_installed_skill(self.cfg, action.name, action.identity)
                     message = "Skill deleted"
+                elif action.kind == "set-enabled":
+                    assert action.enabled is not None
+                    set_installed_skill_enabled(
+                        self.cfg, action.name, action.identity, action.enabled
+                    )
+                    message = "Skill enabled" if action.enabled else "Skill disabled"
+                elif action.kind == "install-remote":
+                    if action.record is None or action.record.identity != action.identity:
+                        raise ValueError("Skill selection changed; review it again")
+                    installed, _count = import_remote_skill(self.cfg, action.record)
+                    message = f"Installed {installed.name}"
+                elif action.kind == "update-remote":
+                    if action.record is None or action.record.name != action.name:
+                        raise ValueError("Skill update changed; review it again")
+                    installed, _count = import_remote_skill(
+                        self.cfg, action.record, overwrite=True,
+                        expected_identity=action.expected_manifest_identity,
+                    )
+                    message = f"Updated {installed.name}"
                 else:
                     imported, failed = import_skill_inbox(self.cfg)
+                    tone = "warning" if failed else "success" if imported else "neutral"
                     message = (
                         f"Imported {imported} skills · {failed} skipped/failed (originals retained)"
                         if imported or failed else
-                        f"No new skill file. Add it to {self.cfg.skills_dir}"
+                        "No new skill file."
                     )
                 success = True
+            except CatalogFailure as exc:
+                self._failed = True
+                success = False
+                tone = "error"
+                reason = STATUS_TEXT.get(exc.status, "Source unavailable")
+                message = f"Skill update failed: {reason}" if action.kind == (
+                    "update-remote"
+                ) else f"Skill install failed: {reason}"
+            except FileExistsError:
+                self._failed = True
+                success = False
+                tone = "warning"
+                message = "Skill already installed; existing files were kept"
+            except ValueError as exc:
+                self._failed = True
+                success = False
+                tone = "error" if action.kind in {"update-remote", "install-remote"} else "warning"
+                message = f"Skill update failed: {str(exc)[:160]}" if action.kind == (
+                    "update-remote"
+                ) else f"Skill install failed: {str(exc)[:160]}" if action.kind == (
+                    "install-remote"
+                ) else "Skill change unconfirmed; refresh and review before retrying"
             except Exception:
                 self._failed = True
                 success = False
+                tone = "warning"
                 message = "Skill change unconfirmed; refresh and review before retrying"
-            self.emit("skill_action_done", (action, success, message))
+            self.emit("skill_action_done", (action, success, message, tone))
             self._queue.task_done()
 
     def close(self, *, wait: bool = False) -> bool:

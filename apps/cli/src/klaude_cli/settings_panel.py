@@ -6,6 +6,7 @@ import textwrap
 from dataclasses import dataclass
 from enum import StrEnum
 
+import regex
 from prompt_toolkit.utils import get_cwidth
 
 from .pickers import PickerController, PickerRow
@@ -20,6 +21,7 @@ class RowKind(StrEnum):
     ACTION = "action"
     STATUS = "status"
     SEPARATOR = "separator"
+    TABLE_HEADER = "table_header"
 
 
 class RowControl(StrEnum):
@@ -120,6 +122,9 @@ class PanelPage:
     subtitle: str = ""
     legacy_actions: bool = False
     column_headers: tuple[str, str, str] | None = None
+    table_section_id: str = ""
+    scroll_wrapped_rows: bool = False
+    scrollable_body: bool = False
 
     def __post_init__(self) -> None:
         ids = [row.id for row in self.rows]
@@ -187,11 +192,14 @@ class PanelState:
 
     def focus_line(self, body: BodyRender) -> int:
         """Keep an oversized table row readable without changing its identity."""
-        if not self.page.column_headers:
+        if not (self.page.column_headers or self.page.scroll_wrapped_rows
+                or self.page.scrollable_body):
             return body.selected_line
         if self._scroll_row_id != self.picker.selected_id:
             self._scroll_row_id = self.picker.selected_id
             self._row_line_offset = 0
+        if self.page.scrollable_body:
+            return max(0, min(len(body.lines) - 1, body.selected_line + self._row_line_offset))
         count = sum(owner == self.picker.selected_id for owner in body.row_for_line)
         self._row_line_offset = min(self._row_line_offset, max(0, count - 1))
         return body.selected_line + self._row_line_offset
@@ -199,6 +207,12 @@ class PanelState:
     def scroll_row(self, delta: int, body: BodyRender) -> bool:
         """Page through wrapped result content before moving to another result."""
         current = self.focus_line(body)
+        if self.page.scrollable_body:
+            target = max(0, min(current + delta, len(body.lines) - 1))
+            if target == current:
+                return False
+            self._row_line_offset = target - body.selected_line
+            return True
         count = sum(owner == self.picker.selected_id for owner in body.row_for_line)
         target = max(body.selected_line, min(current + delta, body.selected_line + count - 1))
         if target == current:
@@ -230,33 +244,60 @@ def _fit(value: str, width: int) -> str:
 
 
 def _wrapped(value: str, width: int) -> list[str]:
-    return textwrap.wrap(value, width=max(1, width), break_long_words=True) or []
+    width = max(1, width)
+    lines: list[str] = []
+    # textwrap chooses readable word boundaries; terminal cells, rather than
+    # Python string length, decide where each resulting line must end.
+    for word_line in textwrap.wrap(value, width=width, break_long_words=False,
+                                   break_on_hyphens=False):
+        line = ""
+        line_width = 0
+        for cluster in regex.findall(r"\X", word_line):
+            cluster_width = get_cwidth(cluster)
+            if line and line_width + cluster_width > width:
+                lines.append(line)
+                line = ""
+                line_width = 0
+            line += cluster
+            line_width += cluster_width
+        if line:
+            lines.append(line)
+    return lines
 
 
-def _table_widths(width: int) -> tuple[int, int, int]:
+def _table_widths(
+    width: int, headers: tuple[str, str, str] | None = None,
+) -> tuple[int, int, int]:
     available = width - 7  # selector, two column gaps, unused final terminal cell
     name = min(40, max(20, available // 3))
-    version = min(18, max(9, available // 6))
-    return name, version, available - name - version
+    value = min(18, max(9, available // 6, get_cwidth(headers[1]) if headers else 0))
+    return name, value, available - name - value
 
 
 def _cell_lines(text: str, width: int) -> list[str]:
-    lines: list[str] = []
-    for line in _wrapped(text, width):
-        # textwrap counts characters; terminal cells can be wider than that.
-        while get_cwidth(line) > width:
-            cut = 1
-            while cut < len(line) and get_cwidth(line[:cut + 1]) <= width:
-                cut += 1
-            lines.append(line[:cut])
-            line = line[cut:]
-        if line:
-            lines.append(line)
-    return lines or [""]
+    return _wrapped(text, width) or [""]
+
+
+def _table_header_fragments(
+    headers: tuple[str, str, str], width: int,
+) -> tuple[tuple[str, str], ...]:
+    fragments: tuple[tuple[str, str], ...] = (("", "  "),)
+    for index, (label, size) in enumerate(zip(headers, _table_widths(width, headers), strict=True)):
+        if index:
+            fragments += (("", "  "),)
+        heading = _fit(label.upper(), size).rstrip()
+        for word_index, word in enumerate(heading.split(" ")):
+            if word_index:
+                fragments += (("", " "),)
+            if word:
+                fragments += (("class:panel.section", word),)
+        fragments += (("", " " * (size - get_cwidth(heading))),)
+    return fragments
 
 
 def _table_row_lines(
     row: PanelRow, width: int, selected: bool,
+    headers: tuple[str, str, str] | None = None,
 ) -> list[tuple[tuple[str, str], ...]]:
     marker = "›" if selected else " "
     badge_width = get_cwidth(row.label_badge) + 3 if row.label_badge else 0
@@ -273,7 +314,7 @@ def _table_row_lines(
             lines.extend(((style, "    " + line),)
                          for line in _cell_lines(text, max(2, width - 4)) if line)
         return lines
-    widths = _table_widths(width)
+    widths = _table_widths(width, headers)
     cells = [_cell_lines(row.display_label, widths[0] - badge_width),
              _cell_lines(row.value, widths[1]), _cell_lines(row.description, widths[2])]
     lines = []
@@ -357,9 +398,21 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
                 lines.append((("", ""),))
                 owners.append(None)
             footer_started = True
-        if state.page.column_headers and row.kind == RowKind.NAVIGATION and not footer_row:
+        if row.kind == RowKind.TABLE_HEADER:
+            last_section_line = len(lines)
+            table_header_parts = _table_header_fragments(state.page.column_headers, width) \
+                if state.page.column_headers and width >= 60 else (
+                    ("class:panel.section", "  " + _fit(row.label.upper(), width - 2).rstrip()),
+                )
+            lines.append(table_header_parts)
+            owners.append(row.id)
+            continue
+        if state.page.column_headers and row.kind == RowKind.NAVIGATION and not footer_row \
+                and (not state.page.table_section_id
+                     or row.section_id == state.page.table_section_id):
             start = len(lines)
-            row_lines = _table_row_lines(row, width, row.id == state.picker.selected_id)
+            row_lines = _table_row_lines(row, width, row.id == state.picker.selected_id,
+                                         state.page.column_headers)
             lines.extend(row_lines)
             owners.extend([row.id] * len(row_lines))
             if row.id == state.picker.selected_id:
@@ -394,15 +447,19 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
         elif row.kind == RowKind.SEPARATOR:
             parts = (("", ""),)
         elif row.kind in {RowKind.INFO, RowKind.STATUS}:
+            info_style = (
+                f"class:panel.status.{row.status_tone}"
+                if row.kind == RowKind.STATUS else "class:panel.muted"
+            )
             if row.value:
                 parts = (
-                    ("class:panel.muted", f"  {_fit(row.label, max(1, width // 2)).rstrip()}"),
+                    (info_style, f"  {_fit(row.label, max(1, width // 2)).rstrip()}"),
                     (_value_style(row), f"  {row.value}"),
                 )
             else:
                 info_lines = _wrapped(row.label, width - 2)
                 parts = (
-                    (("class:panel.muted", f"  {info_lines[0]}"),)
+                    ((info_style, f"  {info_lines[0]}"),)
                     if info_lines else (("", ""),)
                 )
         else:
@@ -455,7 +512,7 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
         owners.append(row.id)
         if row.kind in {RowKind.INFO, RowKind.STATUS} and not row.value:
             for extra in info_lines[1:]:
-                lines.append((("class:panel.muted", f"  {extra}"),))
+                lines.append(((info_style, f"  {extra}"),))
                 owners.append(row.id)
         if row.id == state.picker.selected_id:
             selected_line = start
@@ -508,35 +565,32 @@ def render_header(page: PanelPage, width: int, query: str = "") -> tuple[tuple[s
         ("class:panel.header", _fit(title, max(1, width)).rstrip() + "\n"),
         ("class:panel.rule", "─" * max(1, width)),
     )
-    if page.column_headers and width >= 60:
-        widths = _table_widths(width)
-        header += (("", "\n  "),)
-        for index, (label, size) in enumerate(zip(page.column_headers, widths, strict=True)):
-            if index:
-                header += (("", "  "),)
-            heading = _fit(label.upper(), size).rstrip()
-            for word_index, word in enumerate(heading.split(" ")):
-                if word_index:
-                    header += (("", " "),)
-                if word:
-                    header += (("class:panel.section", word),)
-            header += (("", " " * (size - get_cwidth(heading))),)
+    if page.column_headers and not page.table_section_id and width >= 60:
+        header += (("", "\n"),) + _table_header_fragments(page.column_headers, width)
     return header
 
 
 def render_footer(
     width: int, *, search: bool, query: str = "", status: str = "", status_style: str = "",
-    navigation_hints: str = "",
+    navigation_hints: str = "", status_fragments: tuple[tuple[str, str], ...] = (),
 ) -> tuple[tuple[str, str], ...]:
     hints = (
         f"/{query} · ENTER select · ESC clear"
         if search
         else navigation_hints or "↑↓ move · ENTER open/apply · SPACE toggle · / search · ESC back"
     )
+    parts = status_fragments or ((status_style, status),)
+    status = "".join(text for _, text in parts)
     status_width = min(get_cwidth(status), max(0, width // 2))
     hint_width = max(0, width - status_width - (2 if status else 0))
+    clipped = _fit(status, status_width).rstrip()
+    rendered_status = [("class:panel.muted", "  ")] if status else []
+    for style, text in parts:
+        if not clipped:
+            break
+        rendered_status.append((style, clipped[:len(text)]))
+        clipped = clipped[len(text):]
     return (
         ("class:panel.rule", "─" * max(1, width) + "\n"),
         ("class:panel.muted", _fit(hints, hint_width)),
-        (status_style, f"  {_fit(status, status_width).rstrip()}" if status else ""),
-    )
+    ) + tuple(rendered_status)

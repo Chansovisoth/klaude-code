@@ -9,6 +9,13 @@ import stat
 from pathlib import Path
 
 from klaude_core.mcp_client import MAX_MCP_CONFIG_FILE_BYTES, MCPRegistry, MCPServerConfig
+from klaude_core.skill_catalog import clean_text
+
+from .mcp_updates import registry_package_source
+
+
+def _public_summary(value: object, limit: int = 240) -> str:
+    return clean_text(value, limit)
 
 
 def read_mcp_inventory(path: Path) -> dict[str, object]:
@@ -34,10 +41,17 @@ def read_mcp_inventory(path: Path) -> dict[str, object]:
         if not isinstance(definition, dict):
             continue
         server = MCPServerConfig.from_dict(str(name), definition)
+        source_name = _public_summary(server.source.get("name"), 120)
         servers.append({
             "name": server.name, "enabled": server.enabled, "transport": server.transport,
             "oauth": server.oauth, "tool_count": len(server.tools),
             "fingerprint": definition_digest(server),
+            "source_label": (
+                f"MCP Registry · {source_name}" if source_name else "MCP Registry"
+            ) if server.source.get("registry") == "official" else "Local configuration",
+            "description": _public_summary(server.source.get("description"))
+            if server.source.get("registry") == "official" else "",
+            "update_kind": "registry-package" if registry_package_source(server) else "",
         })
     return {"servers": servers, "truncated": len(raw) > 1000}
 

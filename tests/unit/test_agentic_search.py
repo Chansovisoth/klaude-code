@@ -951,6 +951,87 @@ def test_explicit_do_not_search_does_not_require_retrieval():
     ]
 
 
+@pytest.mark.parametrize("prohibition", [
+    "Do not use public web search for this turn.",
+    "Do not edit files, run shell, or use public web search.",
+])
+def test_no_public_web_search_keeps_local_and_mcp_retrieval_without_web_retry(
+    prohibition,
+):
+    from klaude_core.agent import _explicit_retrieval_tools
+
+    prompt = (
+        "Use the installed crawl4ai skill and local crawl4ai knowledge library. "
+        "Cross-check one API detail against Context7 developer docs. "
+        + prohibition
+    )
+    assert _explicit_retrieval_tools(
+        prompt, {"query_knowledge", "web_search"}
+    ) == ("query_knowledge",)
+    calls = []
+    context7 = "mcp__context7__query_docs"
+    tools = [
+        Tool("query_knowledge", "Local knowledge", {"type": "object"},
+             lambda: calls.append("local") or "Local example"),
+        Tool(context7, "Context7 docs", {"type": "object"},
+             lambda: calls.append("context7") or "AsyncWebCrawler docs"),
+        Tool("web_search", "Public web search", {"type": "object"},
+             lambda: pytest.fail("Prohibited web search ran")),
+    ]
+    runtime = ScriptedOllama([
+        tool_call("query_knowledge"),
+        tool_call(context7),
+        {"role": "assistant", "content": "The two requested sources agree."},
+    ])
+    agent = Agent(
+        runtime, "fake-model", tools,
+        PermissionGate({name.name: "allow" for name in tools}, lambda *_: "n"),
+        "system", tool_selector=lambda _message, available: list(available),
+    )
+
+    events = list(agent.run(prompt))
+
+    assert calls == ["local", "context7"]
+    assert all("web_search" not in {schema["function"]["name"] for schema in call["tools"]}
+               for call in runtime.calls)
+    assert not any(event.kind in {"retry", "error"} for event in events)
+    assert [event.payload["content"] for event in events if event.kind == "text"] == [
+        "The two requested sources agree."
+    ]
+
+
+def test_duplicate_read_is_skipped_without_retiring_a_successful_tool():
+    calls = []
+    runtime = ScriptedOllama([
+        tool_call("read_file", path="a.py"),
+        tool_call("read_file", path="a.py"),
+        tool_call("read_file", path="a.py"),
+        tool_call("read_file", path="b.py"),
+        {"role": "assistant", "content": "I read both files."},
+    ])
+    agent = Agent(
+        runtime, "fake-model",
+        [Tool("read_file", "Read a file", {
+            "type": "object", "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        }, lambda path: calls.append(path) or path)],
+        PermissionGate({"read_file": "allow"}, lambda *_: "n"),
+        "system", tool_selector=lambda _message, available: list(available),
+    )
+
+    events = list(agent.run("Read a.py and b.py, then compare them."))
+
+    assert calls == ["a.py", "b.py"]
+    assert [event.payload["metadata"].get("duplicate_call") for event in events
+            if event.kind == "tool_result"] == [None, True, True, None]
+    assert not any("retired repeatedly unsuccessful tool" in event.payload.get("reason", "")
+                   for event in events if event.kind == "retry")
+    assert "read_file" in {schema["function"]["name"] for schema in runtime.calls[3]["tools"]}
+    assert [event.payload["content"] for event in events if event.kind == "text"] == [
+        "I read both files."
+    ]
+
+
 def test_length_limited_fenced_code_is_continued_once_without_repeating_it():
     class LengthLimitedOllama:
         def __init__(self):

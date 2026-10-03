@@ -4,6 +4,7 @@ from klaude_core.intent import (
     explicit_workspace_inspection,
     explicitly_disallows_tools,
     has_nonnegated_action,
+    prohibits_web_search,
 )
 
 
@@ -28,3 +29,12 @@ def test_explicit_tool_prohibition_variants_are_recognized():
     assert explicitly_disallows_tools("Answer without calling any tools")
     assert explicitly_disallows_tools("No tools, please")
     assert not explicitly_disallows_tools("Use only read-only tools")
+
+
+def test_web_prohibition_respects_coordinated_lists_and_positive_clauses():
+    assert prohibits_web_search("Do not use public web search for this turn")
+    assert prohibits_web_search(
+        "Do not edit files, run shell, or use public web search."
+    )
+    assert prohibits_web_search("Do not use Context7 or web search")
+    assert not prohibits_web_search("Do not use Context7, use web search instead")

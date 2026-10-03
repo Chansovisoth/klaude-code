@@ -575,11 +575,27 @@ class Workspace:
         if path is not None and self._is_sensitive_path(self._jail(path)):
             raise PermissionError("file mutation of a secret path is denied")
 
-    def read_file(self, path: str) -> str:
+    def read_file(self, path: str, offset: int | None = None, limit: int | None = None) -> str:
         target = self._jail(path)
         if self._is_sensitive_path(target):
             raise PermissionError(f"access to secret file denied: {path}")
         text = target.read_text()
+        if offset is not None or limit is not None:
+            start = 1 if offset is None else offset
+            count = 200 if limit is None else limit
+            if not 1 <= start <= 1_000_000 or not 1 <= count <= 500:
+                raise ValueError("offset must be 1–1000000 and limit must be 1–500")
+            lines = text.splitlines()
+            if start > len(lines):
+                return f"{path}: offset {start} exceeds {len(lines)} lines"
+            end = min(start + count - 1, len(lines))
+            page = "\n".join(f"{number}: {lines[number - 1]}" for number in range(start, end + 1))
+            header = f"{path}: lines {start}-{end} of {len(lines)}\n"
+            result = header + page
+            bounded = result[:MAX_READ]
+            if len(result) > MAX_READ:
+                bounded += "\n...[truncated; request a smaller limit]"
+            return bounded
         return text[:MAX_READ] + ("\n...[truncated]" if len(text) > MAX_READ else "")
 
     def write_file(self, path: str, content: str) -> dict:
@@ -792,7 +808,18 @@ def build_tools(ws: Workspace) -> list[Tool]:
             storage_usage,
         ),
         Tool(
-            "read_file", "Read a file from the workspace.", obj({"path": S}, ["path"]), ws.read_file
+            "read_file",
+            "Read a workspace file. For later lines, pass 1-based offset "
+            "and optional limit (at most 500 lines); paged results include line numbers.",
+            obj(
+                {
+                    "path": S,
+                    "offset": {"type": "integer", "minimum": 1, "maximum": 1_000_000},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                },
+                ["path"],
+            ),
+            ws.read_file,
         ),
         Tool("list_dir", "List files in a workspace directory.", obj({"path": S}, []), ws.list_dir),
         Tool(

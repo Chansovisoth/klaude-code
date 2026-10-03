@@ -9,6 +9,14 @@ from klaude_core.mcp_catalog import (
 )
 
 
+def test_registry_public_text_removes_complete_terminal_sequences():
+    from klaude_core.mcp_catalog import _public_text
+
+    assert _public_text("Docs \x1b[31mred\x1b[0m \x1b]8;;https://bad\x07link", 80) == (
+        "Docs red link"
+    )
+
+
 def _entry(server: dict, *, active: bool = True, latest: bool = True) -> dict:
     return {
         "server": {
@@ -341,3 +349,45 @@ def test_cli_registry_install_saves_optional_auth_plan_disabled(monkeypatch, tmp
     configured = registry.load()["browser"]
     assert configured.enabled is False
     assert configured.headers == {}
+def test_github_repository_stars_uses_only_verified_repository_root():
+    from klaude_core.mcp_catalog import (
+        MCPCatalogError,
+        github_repository_identity,
+        github_repository_stars,
+    )
+
+    assert github_repository_identity("https://github.com/example/server.git") == "example/server"
+    for url in (
+        "https://github.com/example/server/tree/main", "https://github.com.evil/x/y",
+        "https://user@github.com/x/y", "https://github.com/x/y?token=secret",
+        "http://github.com/x/y", "https://github.com/x/../y",
+    ):
+        assert github_repository_identity(url) is None
+
+    requests = []
+
+    def respond(request):
+        requests.append(str(request.url))
+        return httpx.Response(200, json={"stargazers_count": 1234})
+
+    assert github_repository_stars(
+        "https://github.com/example/server.git", transport=httpx.MockTransport(respond)
+    ) == 1234
+    assert requests == ["https://api.github.com/repos/example/server"]
+    with pytest.raises(MCPCatalogError):
+        github_repository_stars("https://github.com.evil/x/y",
+                                transport=httpx.MockTransport(respond))
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("status,payload", [
+    (200, {"stargazers_count": True}), (200, {"stargazers_count": "123"}),
+    (200, {}), (403, {}), (200, [1, 2]),
+])
+def test_github_repository_stars_rejects_invalid_or_unavailable_data(status, payload):
+    from klaude_core.mcp_catalog import MCPCatalogError, github_repository_stars
+
+    with pytest.raises(MCPCatalogError):
+        github_repository_stars("https://github.com/example/server",
+                                transport=httpx.MockTransport(
+                                    lambda _request: httpx.Response(status, json=payload)))

@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import queue
+import sqlite3
 import subprocess
 import threading
 import time
@@ -41,6 +42,9 @@ def test_real_owned_worker_reads_only_bounded_skill_metadata(tmp_path):
         assert (kind, key, returned, error) == ("background_result", "skills", identity, "")
         assert result == {
             "skills": [{"name": "test", "library": "docs", "indexed_file_count": 2,
+                        "enabled": True,
+                        "source_label": "Source unknown", "description": "",
+                        "update_kind": "",
                         "identity": hashlib.sha256(
                             (skills / "test" / "manifest.json").read_bytes()
                         ).hexdigest()}],
@@ -50,6 +54,109 @@ def test_real_owned_worker_reads_only_bounded_skill_metadata(tmp_path):
     finally:
         jobs.close(wait=True)
     assert not jobs._active
+
+
+def test_skill_inventory_reads_persisted_disabled_state_without_importing_packages(tmp_path):
+    skills = tmp_path / "skills"
+    (skills / "test").mkdir(parents=True)
+    (skills / "test" / "manifest.json").write_text(json.dumps({
+        "name": "test", "library": "docs", "indexed_files": ["SKILL.md"],
+    }))
+    knowledge = tmp_path / "knowledge.lance"
+    knowledge.mkdir()
+    with sqlite3.connect(knowledge / "fts.db") as db:
+        db.execute("CREATE TABLE disabled_skills (name TEXT PRIMARY KEY NOT NULL)")
+        db.execute("INSERT INTO disabled_skills (name) VALUES ('test')")
+    result = execute({"kind": "skills", "skills_dir": str(skills),
+                      "knowledge_dir": str(knowledge)})
+    assert result["skills"][0]["enabled"] is False
+
+
+def test_skill_manage_metadata_is_bounded_and_does_not_expose_source_path(tmp_path):
+    root = tmp_path / "skills" / "example"
+    current = root / "versions" / "v1"
+    current.mkdir(parents=True)
+    (current / "SKILL.md").write_text(
+        '---\ndescription: "Helpful \x1b[31mprivate\x1b[0m guidance"\n---\n'
+    )
+    (root / "manifest.json").write_text(json.dumps({
+        "name": "example", "library": "example", "source": str(tmp_path / "secret.zip"),
+        "current_dir": str(current), "indexed_files": ["SKILL.md"],
+    }))
+    result = execute({"kind": "skills", "skills_dir": str(tmp_path / "skills")})
+    item = result["skills"][0]
+    assert item["source_label"] == "Local ZIP"
+    assert "secret" not in json.dumps(item)
+    assert "\x1b" not in item["description"]
+    assert len(item["description"]) <= 240
+
+
+def test_skill_update_worker_rechecks_manifest_identity_before_network(tmp_path, monkeypatch):
+    from klaude_core import skill_catalog
+
+    root = tmp_path / "skills" / "demo"
+    root.mkdir(parents=True)
+    revision = "a" * 40
+    source = f"https://github.com/org/repo/blob/{revision}/demo/SKILL.md"
+    manifest = root / "manifest.json"
+    manifest.write_text(json.dumps({
+        "name": "demo", "library": "demo", "source": source,
+        "source_revision": revision,
+    }))
+    identity = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    calls = []
+    monkeypatch.setattr(skill_catalog, "check_github_skill_update",
+                        lambda *args: calls.append(args) or {"status": "current"})
+    request = {"kind": "skill_update_check", "skills_dir": str(tmp_path / "skills"),
+               "name": "demo", "identity": identity}
+    assert execute(request) == {"name": "demo", "identity": identity,
+                                "status": "current"}
+    assert calls == [("demo", source, revision)]
+    assert execute({**request, "identity": "b" * 64}) == {
+        "name": "demo", "status": "changed"
+    }
+    assert len(calls) == 1
+
+
+def test_mcp_update_worker_checks_exact_definition_before_registry(tmp_path, monkeypatch):
+    from klaude_cli.mcp_inventory import definition_digest, read_mcp_inventory
+    from klaude_core import mcp_catalog
+    from klaude_core.mcp_client import MCPRegistry, MCPServerConfig
+
+    registry = MCPRegistry(tmp_path / "mcp.json")
+    server = MCPServerConfig(
+        "docs", "stdio", False, command="npx",
+        args=["--yes", "@example/docs@1.2.3"],
+        source={"registry": "official", "name": "io.github.example/docs",
+                "version": "1.2.3"},
+    )
+    registry.save({"docs": server})
+    assert read_mcp_inventory(registry.path)["servers"][0]["source_label"] == (
+        "MCP Registry · io.github.example/docs"
+    )
+    calls = []
+
+    def search(_self, query, **kwargs):
+        calls.append((query, kwargs))
+        return ([mcp_catalog.MCPCatalogServer(
+            "io.github.example/docs", "Docs", "Example", "1.2.4", "active",
+            raw={"packages": [{"registryType": "npm", "identifier": "@example/docs",
+                               "version": "1.2.4", "runtimeHint": "npx",
+                               "transport": {"type": "stdio"}}]},
+        )], False)
+
+    monkeypatch.setattr(mcp_catalog.MCPCatalogClient, "search", search)
+    request = {"kind": "mcp_update_check", "mcp_file": str(registry.path),
+               "cache_file": str(tmp_path / "cache.json"), "name": "docs",
+               "fingerprint": definition_digest(server)}
+    result = execute(request)
+    assert result["status"] == "available"
+    assert result["candidate"]["new_arg"] == "@example/docs@1.2.4"
+    assert calls == [("io.github.example/docs", {"limit": 50, "refresh": True})]
+    assert execute({**request, "fingerprint": "a" * 64}) == {
+        "name": "docs", "fingerprint": "a" * 64, "status": "changed"
+    }
+    assert len(calls) == 1
 
 
 def test_real_owned_worker_reads_memory_inventory_without_mutations(tmp_path):
@@ -99,10 +206,26 @@ def test_real_owned_worker_reads_mcp_public_metadata_only(tmp_path):
         assert result == {"servers": [{
             "name": "browser", "enabled": False, "transport": "stdio",
             "oauth": False, "tool_count": 0,
+            "source_label": "Local configuration", "description": "",
+            "update_kind": "",
         }], "truncated": False}
         assert "private" not in json.dumps(result).lower()
     finally:
         jobs.close(wait=True)
+
+
+def test_mcp_manage_description_strips_terminal_controls(tmp_path):
+    from klaude_cli.mcp_inventory import read_mcp_inventory
+
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({"servers": {"docs": {
+        "transport": "http", "url": "https://example.org/mcp", "enabled": False,
+        "source": {"registry": "official", "description": "Docs \x1b[31mred\x1b[0m search"},
+    }}}))
+    item = read_mcp_inventory(path)["servers"][0]
+    assert item["source_label"] == "MCP Registry"
+    assert item["description"] == "Docs red search"
+    assert "https://example.org" not in json.dumps(item)
 
 
 def test_real_owned_worker_reviews_exact_mcp_definition_without_private_values(tmp_path):

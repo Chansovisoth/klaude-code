@@ -27,7 +27,9 @@ Workspace layout:
   retrieval planning.
 - `packages/tools_local`: workspace file, grep, shell, and git tools with a
   workspace jail, dirty-tree write lockout, command risk classification, and
-  auto-commit support when writes are enabled. Shell commands prefer the active
+  auto-commit support when writes are enabled. `read_file` accepts optional
+  one-based `offset` and bounded `limit` for numbered later-line reads; an
+  unpaged read retains its existing output. Shell commands prefer the active
   workspace's `.venv/bin` and `node_modules/.bin`, then use a deterministic
   system `PATH`, without Klaude's launcher virtualenv or Python-path variables.
 - `packages/knowledge`: chunking, LanceDB vector storage, SQLite FTS5, atomic
@@ -156,7 +158,7 @@ Chat slash commands currently include:
 - `/keybinds`: print only keyboard controls directly. Slash commands belong in
   `/help` and the `/` completion popup.
 - `/settings [CATEGORY]`: configure categorized Theme, Input Field, Divider, Spinner, Models,
-  Providers, Tools, MCPs, Memory, Skills, Permissions, and Runtime controls. Its
+  Providers, Tools, MCPs, Skills, Memory, Permissions, and Runtime controls. Its
   home page is a grouped, aligned overview that shows the live value or a
   concise status for every category. Theme and Spinner parent summaries display
   Default when values match their defaults; selection pages retain actual choices.
@@ -164,12 +166,12 @@ Chat slash commands currently include:
   `ON, default, default` (live visibility and color names, with default colors
   labeled default).
   Tools shows enabled/registered counts from
-  the live tool registry and availability state. Skills shows the installed count
-  from its existing owned background inventory, with loading/unavailable states.
+  the live tool registry and availability state. Skills shows enabled/installed
+  counts from its existing owned background inventory, with loading/unavailable states.
   Memory shows the bounded saved-fact count and automatic-memory flag as
   `1 saved, ON`; its overview worker returns counts without exposing fact text.
   ASSISTANT groups Models, Providers,
-  Tools, MCPs, Memory, and Skills in that order. Inside MCPs, the MCP Servers
+  Tools, MCPs, Skills, and Memory in that order. Inside MCPs, the MCP Servers
   heading shows `2 installed, 1 enabled` beside the snapshot age, independently
   of discovered tool counts. The Settings home keeps enabled/total counts.
   MCPs retains `/mcp` and
@@ -416,16 +418,100 @@ Chat slash commands currently include:
   adding the fact to chat/history. Exact-ID mutations use the same ordered
   action lane and cross-client file lock, reject stale IDs, duplicate or
   sensitive replacements, and report saved/unconfirmed only after acknowledgement.
-  Sensitive facts stay hidden; the inventory ceiling is explicit. Skills
-  begins with Discovery and an inert Search placeholder marked unavailable.
-  Add Skills keeps an Import skills action and a Drop ZIPs or skill files here
-  row showing the full configured folder path, wrapped on narrow terminals,
-  followed by Skills with its muted installed count. Installed rows show indexed
-  file counts and a library name only when it differs from the skill name.
-  Reload refreshes the inventory asynchronously; Delete skill opens an installed
-  skill chooser and then the existing confirmation, preserving parent focus.
-  Installed rows remain directly enterable. Enter
-  opens a Delete skill action and a separate confirmation, initially on Back.
+  Sensitive facts stay hidden; the inventory ceiling is explicit. MCPs and Skills
+  use compact typed entry pages with Manage installed first, followed by Search
+  catalog and setup/import actions. Manage remains enterable while inventory loads
+  or a save is pending. MCPs retains its global Permissions entry after setup actions.
+  Both categories use stable action IDs and preserve focus, local filtering, and
+  viewport through refresh and Back. Escape clears active filtering first, then
+  follows the explicit typed Back/Cancel action where available.
+  Search and source resolution are read-only:
+  Skills → Search → Results → Skill detail. SkillsMP is the default anonymous
+  provider with Repository stars/Recent sorting and bounded pagination (20 per
+  page, at most 10 pages). skills.sh is an explicitly selected provisional
+  `/api/search` adapter with Installs metadata, relevance ordering and one page;
+  its OIDC API is not required. Sources never switch automatically on failure.
+  Empty entry shows local SUGGESTIONS rather than fabricated live popularity.
+  Search query opens the existing private single-line settings editor; `/`
+  filters displayed rows locally. Source/Sort selection remains focused while
+  their result sets change. Provider update times and verified source commit
+  times display in UTC; a source commit date is not a claim about current
+  repository activity. Queries stay out of chat history/shared drafts.
+  Source/sort/query changes cancel owned read-only jobs. Network work runs in
+  fixed-operation background workers with 3-second connect, 5-second read,
+  12-second checked request-chain budget and 15-second outer process deadline, a 1 MB response
+  bound, fixed HTTPS origins, no redirects/proxies or ambient credentials.
+  Only intentional queries/filters or an explicitly selected public source
+  identity are sent; no workspace, conversation, installed-skill or secret data.
+  Errors distinguish no matches, network failure, timeout, authentication,
+  quota/rate limits, service failure and malformed responses. Up to 64 successful
+  metadata pages are cached in process for one hour with seven-day stale fallback
+  and real cache-age/error labels. Failures never become successful cache entries.
+  Reopening Search shows the retained result's actual age, refreshes expired
+  metadata in the background, and drops results beyond the stale fallback limit.
+  Request identity and session scope reject late results. Shared PanelState
+  retains focus/filter/viewport through refresh and detail/back navigation.
+  PageUp/PageDown read wrapped results and long informational detail bodies;
+  headings and information remain non-selectable. Explicit Resolve original
+  source reads a catalog-supplied GitHub path at an exact verified commit, never
+  guesses a path from a skill name. Single-line license/compatibility frontmatter
+  is shown with its pinned source; missing or complex unsupported fields remain
+  Unknown. Repository publicness/stars are not individual-skill licensing or trust.
+  First-party/audit status remains Unknown unless established; no combined score
+  is invented. Identity is provider plus item ID, never the displayed name;
+  cross-provider grouping requires a verified repository/path and keeps metrics
+  separate. A resolved detail offers Install skill. Its confirmation initially
+  focuses Back and shows the pinned GitHub source and individual-skill license
+  state. Only explicit confirmation queues a bounded download of that exact
+  commit's skill folder. Git tree/blob identity is verified; symlinks, submodules,
+  oversized or unsafe packages are rejected. The existing ordered skill action
+  lane indexes the staged folder without executing scripts, granting permissions,
+  or replacing an installed skill. Installation records pinned source attribution
+  in the manifest and reports success only after the import/index acknowledgement.
+  Catalog entries without a verified skill path cannot offer installation.
+  Runtime compatibility is not implied by discovery or installation.
+  Skills home shows only the detected-file count beside Import skills. Opening it
+  enters a dedicated Import page containing the drop-folder instructions, detected
+  filenames, and an explicit Import skills action. Navigation never starts an import.
+  The no-files notice stays on that page. Accepted imports retain their background
+  lane and feedback; navigation or late acknowledgements do not reopen that page.
+  Both Manage lists have a Filter selector with All, Enabled, and Disabled choices.
+  This status filter is independent of the page-local text filter and survives
+  detail navigation and inventory refresh. Empty inventories offer Search catalog;
+  Skills also offers Import skills. Back returns to the actual entry point.
+  Skills Manage has Refresh list directly above Check for updates.
+  Both Skills and MCPs use Check for update on item details and Check for updates
+  on Manage lists; these actions check sources and open review before applying.
+  Both Manage page headings show installed and enabled counts from their inventories.
+  Manage lists show each item's enabled state beside its source in the
+  STATUS / SOURCE column; descriptions remain separate and wrapped.
+  Manage actions appear above the installed-item table. Column headings belong
+  directly above inventory rows in the scrolling body, never above the page's
+  Filter/refresh/update controls. Table headings are non-selectable and follow
+  matching inventory rows through local filtering; other navigation actions
+  remain outside the table layout.
+  Settings feedback uses muted text for progress, green for acknowledged saves
+  and successful checks, yellow for warnings/unconfirmed saves, and red for
+  errors. Skills and MCP update outcomes carry explicit tones; checking sources
+  is muted and all-current results are green. Same-page refreshes retain this
+  feedback; navigating to another page clears page-local notices. Skill detail
+  feedback uses the same outcome tone as the footer. A save-warning label and
+  accompanying error text retain their separate yellow/red styles.
+  Skill workers report the outcome tone explicitly: partial imports, existing
+  installations, and unconfirmed changes are warnings rather than successes.
+  Item details label removal as Remove server for MCPs and Delete skill for Skills.
+  Review confirmation actions retain their Update labels. Refresh list
+  refreshes the inventory asynchronously. The list shows
+  with each skill's name, bounded source label, and description. Selecting a skill
+  opens its detail page, where Enter or Space toggles Enabled and Delete opens a
+  separate confirmation initially focused on Back. Installed skills are no longer
+  directly selectable from the Skills home page. Update checks the original
+  GitHub source only for a pinned, verified installation; a newer exact commit
+  requires review before the existing ordered import lane replaces that skill.
+  Update all checks up to ten eligible sources, previews available revisions,
+  and applies confirmed updates one at a time with exact manifest rechecks.
+  Unsupported or unverifiable sources are never silently included. A local
+  reindex is not described as an upstream update.
   Confirmation binds the exact manifest hash; a changed package requires review
   again. Deletion removes only that skill's owner across its libraries and its
   installed directory, preserving other owners in shared libraries. Imports and
@@ -450,10 +536,14 @@ Chat slash commands currently include:
   indexing stack, so the
   picker opens immediately with a loading row and then refreshes from a short-lived
   cache without blocking input. Scans skip symlinked or oversized manifests,
-  return public inventory metadata only, and visibly report the 1,000-manifest
-  ceiling. Leaving Skills cancels its job and drops late results.
-  It does not expose a fake enable/disable control
-  because per-skill activation is not implemented.
+  return public inventory metadata and per-skill enabled state only, and visibly
+  report the 1,000-manifest ceiling. Leaving Skills cancels its job and drops
+  late results. Each installed skill has an ON/OFF toggle in its Manage detail page;
+  Enter and Space both toggle it. A disabled
+  skill remains installed and indexed but its sources are excluded from keyword
+  and vector retrieval. Activation changes run on the ordered skill action lane,
+  verify the manifest identity, persist in knowledge metadata, and do not affect
+  other owners. The Settings parent and Skills heading show enabled/installed counts.
   Runtime controls persist for
   future chats in `chat-preferences.json`: Auto and GPU-preferred leave CPU/GPU placement to Ollama,
   CPU-only sets no GPU layers, and GPU-only persists an explicit maximum-offload
@@ -534,7 +624,7 @@ Chat slash commands currently include:
   use the same writer rather than synchronous special-case writes.
 - `/permission`: open the Permissions settings page directly. It takes no
   arguments; permission changes are made and persisted through that page.
-  MCP tool permissions are managed under `/mcp` → Manage permissions, rather
+  MCP tool permissions are managed under `/mcp` → Permissions, rather
   than as a category in general Permissions. Active MCP tools appear under one
   row per server there. Entering a server shows
   its individual ask/allow/deny policies and scoped Allow all, Ask for each
@@ -549,10 +639,18 @@ Chat slash commands currently include:
   credentials. Only acknowledged saves publish the updated tool catalog; uncertain
   outcomes retain the existing queued-work hold. Packages are not uninstalled.
   It can search the official MCP Registry asynchronously, inspect supported plans, and save plans
-  as disabled definitions. Required registry inputs are collected in-place;
-  Search opens with local suggested search terms immediately; these are prompts,
-  not registry results or popularity/security endorsements. Typed searches can
-  also show live registry-name suggestions as they arrive.
+  as disabled definitions. Required registry inputs are collected in-place.
+  Search uses the typed Settings panel: query, explicit Official MCP Registry
+  source, Registry order or local name sorting, results, and a wrapped detail
+  page. Name sorting applies to at most 50 loaded results, not the whole Registry.
+  Opening a detail with an exact GitHub repository URL fetches its repository
+  star count in an owned, cancellable background job. The result is labeled
+  `Repository stars` in detail and, once fetched, in the search row; it is not
+  an MCP-specific popularity or trust score. Other repository hosts and unsafe
+  or missing URLs do not trigger a lookup. No GitHub request runs in a key handler.
+  Empty entry shows local suggested searches; these are prompts, not Registry
+  results or popularity/security endorsements. The older composer completion
+  path remains a compatibility helper, not the Settings entry point.
   Registry results use MCP Name, Version, and Description columns with fixed
   headings; all fields wrap without display truncation, and narrow terminals
   stack the fields. PageUp/PageDown scroll a focused result's wrapped content
@@ -611,13 +709,30 @@ Chat slash commands currently include:
   and warns if completion remains unconfirmed. Queued model work waits for the
   acknowledgement and stays paused after uncertain persistence, failed catalog
   preparation, or a stale-scope saved result until verified publication/reload.
-  `Reload` is a focusable MCPs settings action that runs a fixed
+  MCPs Manage separates Refresh list (metadata-only inventory refresh) from
+  Refresh tools (the existing reload operation), directly above Check for updates.
+  Refresh list does not connect or queue a tool reload; either action retains
+  the selected row and filters through acknowledgement.
+  It runs a fixed
   read-only operation on the same lane. It prepares tools without connecting,
   then verifies the complete configuration still matches its read snapshot before
   acknowledgement. Successful current reload clears the queue hold and prior
   lane uncertainty; failed/stale reload retains old tools and any existing hold.
-  Reload does not rewrite configuration or toggle a server. Ack refresh preserves
+  Refresh tools does not rewrite configuration or toggle a server. Ack refresh preserves
   the currently highlighted logical row, not a stale request's former selection.
+  MCPs settings has Manage installed and Permissions. Manage opens a searchable
+  list with each server's name, bounded Registry identity or local source label,
+  and bounded description;
+  selecting a server opens Enabled, Check for update, and Remove server controls.
+  Remove server keeps its
+  exact-definition confirmation and ordered mutation. Update is available for
+  official Registry stdio packages only when a fresh Registry plan changes one
+  exact npm/PyPI package version and keeps every other argument. It requires
+  review, exact-definition recheck, and an ordered save that disables the server
+  and clears cached tools until separately enabled. Update all checks at most ten
+  eligible servers, previews the available changes, then saves them sequentially.
+  Unsupported, changed, or unverifiable sources are not silently updated. Reload
+  is not described as an upstream version update.
   Successful current acknowledgements publish tools and retain the logical row;
   late results never reopen an unrelated picker. Registry install plans requiring
   no secret input submit private immutable definitions to a fixed disabled-add

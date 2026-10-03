@@ -26,6 +26,18 @@ _NO_TOOLS = re.compile(
     r"(?:any\s+)?tools?\b|\bno\s+tools?\b",
     re.IGNORECASE,
 )
+_NO_WEB_SEARCH = re.compile(
+    r"\b(?:do\s+not|don['’]?t|dont|never|without|no)\b"
+    r"[^,.;:!?\n]{0,70}\b(?:web[_ -]?search|search(?:ing)?\s+(?:the\s+)?"
+    r"(?:web|internet)|brows(?:e|ing)\s+(?:the\s+)?web)\b",
+    re.IGNORECASE,
+)
+_NO_WEB_SEARCH_IN_LIST = re.compile(
+    r"\b(?:do\s+not|don['’]?t|dont|never)\b"
+    r"[^.;:!?\n]{0,160}?\b(?:or\s+(?:use\s+)?(?:public\s+)?)"
+    r"(?:web[_ -]?search|search(?:ing)?\s+(?:the\s+)?(?:web|internet))\b",
+    re.IGNORECASE,
+)
 
 
 def has_nonnegated_action(text: str, action: str | Pattern[str]) -> bool:
@@ -46,6 +58,13 @@ def has_nonnegated_action(text: str, action: str | Pattern[str]) -> bool:
 def explicitly_disallows_tools(text: str) -> bool:
     """Whether the user explicitly prohibited model tool use for this request."""
     return bool(_NO_TOOLS.search(text))
+
+
+def prohibits_web_search(text: str) -> bool:
+    """A specific web prohibition must not suppress permitted local retrieval."""
+    return bool(_NO_WEB_SEARCH.search(text) or _NO_WEB_SEARCH_IN_LIST.search(text)) or bool(
+        re.search(r"\b(?:offline only|no internet)\b", text, re.IGNORECASE)
+    )
 
 
 def without_tool_use_prohibition(text: str) -> str:

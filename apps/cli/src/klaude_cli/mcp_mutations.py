@@ -18,6 +18,7 @@ from klaude_core.mcp_client import (
 )
 
 from .mcp_inventory import definition_digest
+from .mcp_updates import registry_package_source, valid_version_only_change
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,18 @@ class MCPRemove:
 
 
 @dataclass(frozen=True)
+class MCPUpdateDisabled:
+    identity: str
+    session_id: str
+    name: str
+    fingerprint: str
+    old_arg: str
+    new_arg: str
+    registry_version: str
+    description: str
+
+
+@dataclass(frozen=True)
 class MCPAddDisabled:
     identity: str
     session_id: str
@@ -69,7 +82,8 @@ class MCPImport:
     name: str = field(default="import", init=False)
 
 
-MCPMutation = MCPToggle | MCPEnable | MCPReload | MCPAddDisabled | MCPImport | MCPRemove
+MCPMutation = (MCPToggle | MCPEnable | MCPReload | MCPAddDisabled | MCPImport
+               | MCPRemove | MCPUpdateDisabled)
 
 
 @dataclass(frozen=True)
@@ -105,12 +119,13 @@ class MCPMutationWriter:
     def submit(self, request: MCPMutation) -> bool:
         if (
             not isinstance(request, (
-                MCPToggle, MCPEnable, MCPReload, MCPAddDisabled, MCPImport, MCPRemove
+                MCPToggle, MCPEnable, MCPReload, MCPAddDisabled, MCPImport, MCPRemove,
+                MCPUpdateDisabled,
             ))
             or not all(isinstance(value, str) and 0 < len(value) <= 128 for value in (
                 request.identity, request.session_id, request.name,
             ))
-            or isinstance(request, (MCPToggle, MCPEnable, MCPRemove)) and (
+            or isinstance(request, (MCPToggle, MCPEnable, MCPRemove, MCPUpdateDisabled)) and (
                 not isinstance(request.fingerprint, str)
                 or not re.fullmatch(r"[a-f0-9]{64}", request.fingerprint)
             )
@@ -128,6 +143,17 @@ class MCPMutationWriter:
                 not isinstance(request.source_path, str) or not request.source_path
                 or len(request.source_path) > 4096 or "\x00" in request.source_path
                 or not Path(request.source_path).is_absolute()
+            )
+            or isinstance(request, MCPUpdateDisabled) and (
+                not all(isinstance(value, str) and value and len(value) <= 500
+                        for value in (request.old_arg, request.new_arg,
+                                      request.registry_version))
+                or not isinstance(request.description, str)
+                or len(request.description) > 500
+                or not all(char.isprintable() for char in (
+                    request.old_arg + request.new_arg + request.registry_version
+                    + request.description
+                ))
             )
         ):
             return False
@@ -199,6 +225,20 @@ class MCPMutationWriter:
                 if request.enabled and not server.tools:
                     return MCPMutationResult(request, str(self.path), "rejected")
                 server.enabled = request.enabled
+            elif isinstance(request, MCPUpdateDisabled):
+                if not registry_package_source(server) or (
+                    server.args.count(request.old_arg) != 1
+                    or not valid_version_only_change(
+                        server.command, request.old_arg, request.new_arg
+                    )
+                ):
+                    return MCPMutationResult(request, str(self.path), "rejected")
+                server.args = [request.new_arg if arg == request.old_arg else arg
+                               for arg in server.args]
+                server.source["version"] = request.registry_version
+                server.source["description"] = request.description
+                server.enabled = False
+                server.tools = []
             elif isinstance(request, MCPRemove):
                 del servers[request.name]
             saving = True

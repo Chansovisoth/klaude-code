@@ -33,6 +33,7 @@ from .intent import (
     explicit_workspace_inspection,
     explicitly_disallows_tools,
     has_nonnegated_action,
+    prohibits_web_search,
     without_tool_use_prohibition,
 )
 from .knowledge_tool_contract import normalize_knowledge_arguments
@@ -3647,9 +3648,9 @@ def _explicit_retrieval_tools(
             "don't search",
             "without searching",
             "no search",
-            "offline only",
         )
     )
+    web_search_disabled = search_disabled or prohibits_web_search(user_message)
     required: list[str] = []
     if (
         not search_disabled
@@ -3660,7 +3661,7 @@ def _explicit_retrieval_tools(
             r"\b(?:knowledge|(?:local|learned|indexed)\b.{0,50}"
             r"\b(?:libraries|library|docs?|documentation))\b"
             r"|"
-            r"\b(?:using|from|based on|according to)\b.{0,80}"
+            r"\b(?:use|using|from|based on|according to)\b.{0,80}"
             r"\b(?:knowledge|(?:local|learned|indexed)\b.{0,50}"
             r"\b(?:libraries|library|docs?|documentation))\b"
             r")",
@@ -3678,7 +3679,7 @@ def _explicit_retrieval_tools(
     ):
         required.append("code_search")
     if (
-        not search_disabled
+        not web_search_disabled
         and "web_search" in available_tools
         and re.search(
             r"\b(?:search (?:the )?web|web search|browse (?:the )?web|"
@@ -3688,7 +3689,7 @@ def _explicit_retrieval_tools(
     ):
         required.append("web_search")
     elif (
-        not search_disabled
+        not web_search_disabled
         and "web_search" in available_tools
         and re.search(
             r"\b(?:current|latest|today|recent|real[- ]time)\b.{0,40}"
@@ -4437,6 +4438,8 @@ class Agent:
             selected_tools = {
                 name: selected_tools[name] for name in explicit_only if name in selected_tools
             }
+        if prohibits_web_search(user_message):
+            selected_tools.pop("web_search", None)
         if explicitly_disallows_tools(user_message):
             # Follow-up inheritance and mandatory-retrieval hints must not
             # reinstate schemas after an explicit user prohibition.
@@ -4457,6 +4460,7 @@ class Agent:
         )
         used_tools: set[str] = set()
         used_tool_calls: set[str] = set()
+        failed_tool_calls: set[str] = set()
         resolved_control_tools: set[str] = set()
         resolved_host_preflights: set[str] = set()
         search_queries_this_turn: list[str] = []
@@ -5113,7 +5117,11 @@ class Agent:
                     args,
                     tool,
                     f"skipped duplicate tool call '{name}'; use the previous result",
-                    {},
+                    {
+                        "duplicate_call": True,
+                        "duplicate_previous_failed": key in failed_tool_calls,
+                        "executed": False,
+                    },
                 )
             used_tool_calls.add(key)
 
@@ -5924,9 +5932,16 @@ class Agent:
                     tools_disabled_for_turn = True
                 recovery_instruction = ""
                 retired_reason = ""
-                if name not in WEB_RESEARCH_TOOLS and result.startswith(
+                if metadata.get("duplicate_call") and not metadata.get("duplicate_previous_failed"):
+                    recovery_instruction = (
+                        f"{name} already returned a result earlier in this turn. The duplicate "
+                        "was skipped, but the tool remains available. Use the earlier result or "
+                        "change the arguments to request different information."
+                    )
+                elif name not in WEB_RESEARCH_TOOLS and result.startswith(
                     ("tool error:", "permission denied:", "error:", "blocked ", "skipped ")
                 ):
+                    failed_tool_calls.add(_tool_call_key(name, args))
                     metadata = {
                         **metadata,
                         "status": "failed" if not result.startswith("skipped ") else "skipped",

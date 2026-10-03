@@ -132,6 +132,7 @@ from klaude_core.runtime_context import (
     render_runtime_context,
 )
 from klaude_core.settings_store import DELETE, settings_lock, update_settings
+from klaude_core.skill_catalog import SkillRecord
 from prompt_toolkit import Application, PromptSession
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.application.current import get_app
@@ -197,7 +198,21 @@ from .dividers import (
     divider_styles,
     validate_divider_pattern,
 )
-from .mcp_management import removal_confirmation, removal_page
+from .installed_settings import InstalledFilter, filter_page
+from .mcp_management import (
+    manage_detail_page as mcp_manage_detail_page,
+)
+from .mcp_management import (
+    manage_page as mcp_manage_page,
+)
+from .mcp_management import (
+    manage_removal_confirmation,
+    manage_update_all_review,
+    manage_update_review,
+    removal_confirmation,
+    removal_page,
+)
+from .mcp_management import settings_page as mcp_settings_page
 from .mcp_mutations import (
     MCPAddDisabled,
     MCPEnable,
@@ -208,7 +223,15 @@ from .mcp_mutations import (
     MCPReload,
     MCPRemove,
     MCPToggle,
+    MCPUpdateDisabled,
 )
+from .mcp_search_panel import SORTS as MCP_SEARCH_SORTS
+from .mcp_search_panel import (
+    InstallOption,
+    mcp_detail_page,
+    mcp_search_page,
+)
+from .mcp_updates import valid_candidate_payload
 from .memory_panel import memory_detail_page, memory_list_page
 from .pickers import PickerController, PickerRow, match_score
 from .session_actions import (
@@ -238,7 +261,17 @@ from .settings_panel import (
 )
 from .settings_writer import SettingsWriter
 from .skill_actions import SkillAction, SkillActionWriter
-from .skills_panel import skill_delete_page, skill_detail_page, skills_page
+from .skill_discovery import DETAIL_KIND, INSTALL_KIND, SEARCH_KIND, SkillDiscovery
+from .skills_panel import (
+    skill_delete_confirmation_page,
+    skill_delete_page,
+    skill_manage_detail_page,
+    skill_update_all_review_page,
+    skill_update_review_page,
+    skills_import_page,
+    skills_manage_page,
+    skills_page,
+)
 from .spinners import (
     CATALOG,
     Spinner,
@@ -1502,7 +1535,8 @@ def _tui_style(
                     "panel.focus": f"{foreground(chrome['frame.border'])} bold",
                     "panel.selected": f"bg:{panel_selection_background}",
                     "panel.saved": label_backgrounds["success"],
-                    "panel.warning": foreground(chrome["status.error"]),
+                    "panel.warning": label_backgrounds["warning"],
+                    "panel.error": foreground(chrome["status.error"]),
                     "panel.status.neutral": muted_runtime_text,
                     "panel.status.success": label_backgrounds["success"],
                     "panel.status.warning": label_backgrounds["warning"],
@@ -8631,8 +8665,26 @@ class PersistentChatTUI:
         self._session_io = SessionIOCoordinator(memory, self._emit)
         self._session_actions = SessionActionWriter(memory, self._emit)
         self._skill_actions = SkillActionWriter(cfg, self._emit)
+        self._skill_discovery = SkillDiscovery(
+            self._background_jobs, self._show_skill_discovery, self._edit_skill_search,
+            self._return_from_skill_search, lambda: self.session_id,
+            self._enqueue_remote_skill_install,
+        )
         self._skill_action_pending = False
+        self._skills_manage_filter = InstalledFilter.ALL
+        self._mcp_manage_filter = InstalledFilter.ALL
+        self._skills_import_from_manage = False
+        self._skills_search_from_manage = False
+        self._mcp_search_from_manage = False
         self._skill_feedback = ""
+        self._skill_feedback_tone = "neutral"
+        self._panel_feedback: tuple[str, str, str] | None = None
+        self._skill_update_request: tuple[str, str, str, str] | None = None
+        self._skill_update_candidate: tuple[str, str, str, SkillRecord] | None = None
+        self._skill_update_all_request: tuple[str, str, tuple[tuple[str, str], ...]] | None = None
+        self._skill_update_all_candidates: list[SkillAction] = []
+        self._skill_update_all_queue: list[SkillAction] = []
+        self._skill_update_all_total = 0
         self._skill_drop_files: tuple[str, ...] = ()
         self._skill_delete_identity = ""
         self._skill_inbox_preparation_attempted = False
@@ -8641,7 +8693,16 @@ class PersistentChatTUI:
             auth_dir=cfg.mcp_auth_dir,
         )
         self._mcp_mutation_pending: tuple[MCPMutation, float] | None = None
+        self._mcp_manage_save_state = ""
         self._mcp_remove_candidate: tuple[str, str, str, str] | None = None
+        self._mcp_update_request: tuple[str, str, str, str, str] | None = None
+        self._mcp_update_candidate: tuple[str, str, str, str, dict[str, str]] | None = None
+        self._mcp_update_all_request: (
+            tuple[str, str, str, tuple[tuple[str, str], ...]] | None
+        ) = None
+        self._mcp_update_all_candidates: list[MCPUpdateDisabled] = []
+        self._mcp_update_all_queue: list[MCPUpdateDisabled] = []
+        self._mcp_update_all_total = 0
         self._mcp_mutation_warned = False
         self._mcp_catalog_unconfirmed = False
         self._last_session_io_submit = 0.0
@@ -8690,7 +8751,12 @@ class PersistentChatTUI:
         self._mcp_catalog_request_id = ""
         self._mcp_catalog_query_text = ""
         self._mcp_catalog_cached = False
+        self._mcp_catalog_sort = MCP_SEARCH_SORTS[0]
+        self._mcp_catalog_error = ""
         self._mcp_catalog_results: dict[str, MCPCatalogServer] = {}
+        self._mcp_repository_stars: dict[str, tuple[int, float]] = {}
+        self._mcp_stars_request: tuple[str, str, str] | None = None
+        self._mcp_stars_error_url = ""
         self._mcp_suggestion_names: list[str] = []
         self._mcp_suggestion_query: str | None = None
         self._mcp_suggestion_due = 0.0
@@ -8698,6 +8764,7 @@ class PersistentChatTUI:
         self._mcp_catalog_install_choices: dict[str, MCPInstallPlan] = {}
         self._mcp_setup: dict[str, object] | None = None
         self._mcp_enable_name = ""
+        self._mcp_manage_return_name = ""
         self._text_theme_preview_original: str | None = None
         self._text_theme_preview_pending = ""
         self._height_edit = False
@@ -8929,7 +8996,8 @@ class PersistentChatTUI:
         self.composer = ConditionalContainer(
             content=self.user_input_composer,
             filter=Condition(lambda: self._user_input_request is not None
-                             and self._choice_kind is None),
+                             and self._choice_kind is None
+                             and self._settings_input_request is None),
             alternative_content=self.standard_composer,
         )
         self.composer_row = VSplit(
@@ -9400,14 +9468,39 @@ class PersistentChatTUI:
             save_state = self._runtime_save_state
         elif kind in {"model", "mode", "effort"}:
             save_state = self._model_save_state
+        elif kind in {"mcp manage list", "mcp manage detail", "mcp manage delete"}:
+            save_state = self._mcp_manage_save_state
+        elif kind in {"skills manage list", "skills manage detail", "skill detail",
+                      "skills import"}:
+            save_state = "saving" if self._skill_action_pending else ""
         else:
             save_state = ""
+        status_fragments: tuple[tuple[str, str], ...] = ()
         if save_state == "failed":
             status, style = "Save unconfirmed", "class:panel.warning"
             if self.status_error:
-                status += f" · {self.status_error}"
+                status_fragments = (
+                    (style, status), ("class:panel.muted", " · "),
+                    ("class:panel.error", self.status_error),
+                )
+            elif self._panel_feedback and self._panel_feedback[0] == self._panel.page.id:
+                _, message, tone = self._panel_feedback
+                status_fragments = (
+                    (style, status), ("class:panel.muted", " · "),
+                    (f"class:panel.status.{tone}", message),
+                )
         elif self.status_error:
-            status, style = self.status_error, "class:panel.warning"
+            status, style = self.status_error, "class:panel.error"
+        elif self._panel_feedback and self._panel_feedback[0] == self._panel.page.id:
+            _, status, tone = self._panel_feedback
+            style = f"class:panel.status.{tone}"
+        elif kind in {"skills manage list", "skills manage detail", "skill detail",
+                      "skills import"} and (
+            self._skill_feedback and self._skill_feedback != "No new skill file."
+            and not self._skill_action_pending
+        ):
+            status = self._skill_feedback
+            style = f"class:panel.status.{self._skill_feedback_tone}"
         elif save_state == "saving":
             status, style = "Saving…", "class:panel.muted"
         elif save_state == "saved":
@@ -9417,9 +9510,25 @@ class PersistentChatTUI:
         return list(render_footer(
             self._panel_width(), search=self._panel.search_active,
             query=self._panel.picker.query, status=status, status_style=style,
+            status_fragments=status_fragments,
             navigation_hints="↑↓ move · ENTER resume · / search · ESC cancel"
-            if kind == "session" else "",
+            if kind == "session" else
+            "↑↓ move · ENTER open/apply · / filter · PGUP/PGDN scroll · ESC back"
+            if kind in {SEARCH_KIND, DETAIL_KIND, INSTALL_KIND, "mcp settings",
+                        "skills settings", "skills import", "mcp manage list",
+                        "skills manage list"} else "",
         ))
+
+    def _set_panel_feedback(self, message: str, tone: str = "neutral") -> None:
+        """Keep operation feedback scoped to its page, separate from errors."""
+        self.status_error = "" if self._panel is not None else message
+        self._panel_feedback = (
+            (self._panel.page.id, message, tone) if message and self._panel is not None else None
+        )
+
+    def _set_skill_feedback(self, message: str, tone: str = "neutral") -> None:
+        self._skill_feedback = message
+        self._skill_feedback_tone = tone
 
     def _panel_selected_line(self) -> int:
         return self._panel.focus_line(self._panel_body()) if self._panel is not None else 0
@@ -9457,9 +9566,20 @@ class PersistentChatTUI:
 
     def _open_panel(self, page: PanelPage, kind: str, default_id: str = "") -> None:
         previous = self._choice_kind
+        if self._panel is None or self._panel.page.id != page.id:
+            self._panel_feedback = None
         if previous is None and self._panel_composer_draft is None:
             self._panel_composer_draft = (self.input.text, list(self._composer_pastes))
-        if previous != kind:
+        shared_inventory = (
+            {"skills settings", "skills import", "skills manage filter",
+             "skills manage list", "skills manage detail",
+             "skill detail", "skill update review", "skill update all review"},
+            {"mcp settings", "mcp manage list", "mcp manage filter", "mcp manage detail",
+             "mcp manage delete", "mcp manage update", "mcp manage update all"},
+        )
+        if previous != kind and not any(
+            previous in group and kind in group for group in shared_inventory
+        ):
             self._cancel_inventory_job(previous)
         state = self._panel_states.get(page.id)
         if state is None:
@@ -9766,6 +9886,8 @@ class PersistentChatTUI:
     def _present_legacy_choice_as_panel(self, kind: str) -> None:
         assert self._picker is not None
         page = self._legacy_panel_page(kind)
+        if self._panel_feedback and self._panel_feedback[0] != page.id:
+            self._panel_feedback = None
         self._picker.replace([row.picker_row() for row in page.rows])
         state = self._panel_states.get(page.id)
         if state is None:
@@ -10701,7 +10823,10 @@ class PersistentChatTUI:
 
         @bindings.add("pageup", filter=Condition(lambda: bool(self._choice_kind)))
         def previous_page(event) -> None:
-            if self._panel is not None and self._panel.page.column_headers:
+            if self._panel is not None and (
+                self._panel.page.column_headers or self._panel.page.scroll_wrapped_rows
+                or self._panel.page.scrollable_body
+            ):
                 height = self.panel_body_window.render_info.window_height \
                     if self.panel_body_window.render_info else 12
                 if self._panel.scroll_row(-max(1, height - 1), self._panel_body()):
@@ -10716,7 +10841,10 @@ class PersistentChatTUI:
 
         @bindings.add("pagedown", filter=Condition(lambda: bool(self._choice_kind)))
         def next_page(event) -> None:
-            if self._panel is not None and self._panel.page.column_headers:
+            if self._panel is not None and (
+                self._panel.page.column_headers or self._panel.page.scroll_wrapped_rows
+                or self._panel.page.scrollable_body
+            ):
                 height = self.panel_body_window.render_info.window_height \
                     if self.panel_body_window.render_info else 12
                 if self._panel.scroll_row(max(1, height - 1), self._panel_body()):
@@ -10751,11 +10879,11 @@ class PersistentChatTUI:
             if self._choice_kind:
                 self._submit_choice_response()
                 return
-            if self._user_input_request:
-                self._submit_user_input_response()
-                return
             if self._settings_input_request:
                 self._submit_settings_input_response()
+                return
+            if self._user_input_request:
+                self._submit_user_input_response()
                 return
             if self._secret_request:
                 self._submit_secret_response()
@@ -11912,6 +12040,72 @@ class PersistentChatTUI:
                 self._apply_picker_state()
                 self.application.invalidate()
                 return
+            if not self._panel.page.legacy_actions:
+                exit_row = next((row for row in self._panel.page.rows
+                                 if row.effective_control in {RowControl.BACK, RowControl.CANCEL}
+                                 and row.action is not None
+                                 and row.action.kind not in {"back", "close", "legacy-choice"}),
+                                None)
+                if exit_row is not None and exit_row.action is not None:
+                    self._sync_picker_selection()
+                    self._apply_panel_action(exit_row.action)
+                    return
+            if self._choice_kind in {SEARCH_KIND, DETAIL_KIND, INSTALL_KIND}:
+                self._apply_panel_action(PanelAction(
+                    "discover-install-back" if self._choice_kind == INSTALL_KIND else
+                    "discover-results" if self._choice_kind == DETAIL_KIND else "discover-back"
+                ))
+                return
+            if self._choice_kind == "mcp registry detail":
+                self._open_mcp_catalog_results()
+                return
+            if self._choice_kind == "mcp registry results":
+                self._apply_panel_action(PanelAction("mcp-search-back"))
+                return
+            page_id = self._panel.page.id
+            if page_id.startswith("skill-delete-confirm:"):
+                name = page_id.removeprefix("skill-delete-confirm:")
+                self._skill_delete_identity = ""
+                self._open_skill_manage_detail(name, "delete")
+                return
+            if page_id.startswith("skill-update:"):
+                name = page_id.removeprefix("skill-update:")
+                self._skill_update_candidate = None
+                self._open_skill_manage_detail(name, "update")
+                return
+            if page_id == "skill-update-all-review":
+                self._skill_update_all_candidates = []
+                self._open_skills_manage("update-all")
+                return
+            if page_id.startswith("skill-manage:"):
+                self._open_skills_manage("skill:" + page_id.removeprefix("skill-manage:"))
+                return
+            if page_id == "skills-manage":
+                self._open_settings_category("skills", "manage")
+                return
+            if page_id == "skills-import":
+                self._open_settings_category("skills", "import")
+                return
+            if page_id.startswith("mcp-manage-delete:"):
+                self._mcp_remove_candidate = None
+                self._open_mcp_manage_detail(page_id.removeprefix("mcp-manage-delete:"),
+                                             "delete")
+                return
+            if page_id.startswith("mcp-manage-update:"):
+                self._mcp_update_candidate = None
+                self._open_mcp_manage_detail(page_id.removeprefix("mcp-manage-update:"),
+                                             "update")
+                return
+            if page_id == "mcp-manage-update-all-review":
+                self._mcp_update_all_candidates = []
+                self._open_mcp_manage("update-all")
+                return
+            if page_id.startswith("mcp-manage:"):
+                self._open_mcp_manage("server:" + page_id.removeprefix("mcp-manage:"))
+                return
+            if page_id == "mcp-manage":
+                self._open_settings_category("mcp servers", "Manage")
+                return
             if self._panel.page.id == "settings-reset-confirmation":
                 self._begin_choice(
                     "settings", self._settings_categories(), RESET_THEME_CHOICE, restore=True
@@ -11921,7 +12115,7 @@ class PersistentChatTUI:
                 self._open_mcp_permission_servers()
                 return
             if self._panel.page.id == "mcp-permission-servers":
-                self._open_settings_category("mcp servers", "Manage permissions")
+                self._open_settings_category("mcp servers", "Permissions")
                 return
         self._sync_picker_selection()
         self._cancel_inventory_job(self._choice_kind)
@@ -11958,14 +12152,19 @@ class PersistentChatTUI:
         if choice_kind == "mcp remove confirmation":
             self._apply_panel_action(PanelAction("mcp-remove-list"))
             return
+        if choice_kind in {"mcp review", "mcp enable confirmation"} and (
+            self._mcp_manage_return_name
+        ):
+            name = self._mcp_manage_return_name
+            self._mcp_manage_return_name = ""
+            self._open_mcp_manage_detail(name, "enabled")
+            return
         if choice_kind == "mcp remove servers":
             self._open_settings_category("mcp servers", "Delete MCP")
             return
         if choice_kind == "skill detail":
-            if getattr(self, "_skill_delete_parent", False):
-                self._apply_panel_action(PanelAction("skill-delete-list"))
-                return
-            self._open_settings_category("skills")
+            self._skill_delete_identity = ""
+            self._apply_panel_action(PanelAction("skill-delete-list"))
             return
         if choice_kind == "skill delete list":
             self._open_settings_category("skills", "delete-skills")
@@ -12138,7 +12337,10 @@ class PersistentChatTUI:
             row = self._panel.row()
             if row is not None and row.selectable:
                 if not row.enabled:
-                    self.status_error = str(row.legacy_label or row.label)
+                    self._set_panel_feedback(
+                        row.description or row.status or str(row.legacy_label or row.label),
+                        "warning",
+                    )
                     self.application.invalidate()
                 elif row.action is not None:
                     self._apply_panel_action(row.action)
@@ -12204,7 +12406,11 @@ class PersistentChatTUI:
         if self._choice_kind == "mcp enable confirmation":
             name = self._mcp_enable_name
             if selected == "back":
-                self._open_settings_category("mcp servers", f"{name}:")
+                if self._mcp_manage_return_name == name:
+                    self._mcp_manage_return_name = ""
+                    self._open_mcp_manage_detail(name, "enabled")
+                else:
+                    self._open_settings_category("mcp servers", f"{name}:")
             else:
                 self._run_mcp_enable(name, expected_fingerprint=self._mcp_enable_fingerprint)
             return
@@ -12600,7 +12806,8 @@ class PersistentChatTUI:
         disabled_tools = set(getattr(self.agent, "disabled_tool_names", set()))
         tools_summary = f"{len(registered_tools - disabled_tools)}/{len(registered_tools)} enabled"
         skills_summary = (
-            f"{len(self._skills_inventory)} installed" if self._skills_inventory is not None
+            f"{sum(skill.get('enabled') is not False for skill in self._skills_inventory)}/"
+            f"{len(self._skills_inventory)} enabled" if self._skills_inventory is not None
             else "Unavailable" if self._skills_inventory_error else "Loading…"
         )
         permission_names = _permission_tool_names(self.agent)
@@ -12689,12 +12896,12 @@ class PersistentChatTUI:
                      action=PanelAction("category", "mcp servers"),
                      section_id="section:assistant", legacy_label=f"MCP servers: {mcp_detail}",
                      search_terms="MCP servers"),
-            PanelRow("category:memory", RowKind.NAVIGATION, "Memory", memory_summary,
-                     action=PanelAction("category", "memory"), section_id="section:assistant",
-                     legacy_label=f"Memory: {memory_state}"),
             PanelRow("category:skills", RowKind.NAVIGATION, "Skills", skills_summary,
                      action=PanelAction("category", "skills"), section_id="section:assistant",
                      legacy_label="Skills: installed inventory"),
+            PanelRow("category:memory", RowKind.NAVIGATION, "Memory", memory_summary,
+                     action=PanelAction("category", "memory"), section_id="section:assistant",
+                     legacy_label=f"Memory: {memory_state}"),
             PanelRow("section:capabilities", RowKind.SECTION, "CAPABILITIES & SAFETY",
                      legacy_label=_choice_section("CAPABILITIES & SAFETY")),
             PanelRow("category:permissions", RowKind.NAVIGATION, "Permissions", permission_preset,
@@ -12838,9 +13045,8 @@ class PersistentChatTUI:
             return
         if category == "skills":
             self._open_panel(skills_page(
-                self._skills_inventory, str(self.cfg.data_dir / "skills"),
-                " · ".join(filter(None, (self._skill_feedback, self._skills_inventory_error))),
-                self._skill_action_pending, detected=getattr(self, "_skill_drop_files", ()),
+                self._skills_inventory, self._skills_inventory_error,
+                detected=getattr(self, "_skill_drop_files", ()),
             ), "skills settings", default or "")
             self._refresh_skills_inventory()
             if not self._skill_inbox_preparation_attempted and not self._skill_action_pending:
@@ -12878,59 +13084,35 @@ class PersistentChatTUI:
 
         if category == "mcp servers":
             self._refresh_mcp_inventory()
-            choices = [
-                _choice_section("DISCOVER"),
-                "Search official MCP Registry",
-                _choice_section("SET UP"),
-                "Add custom MCP server",
-                "Import MCP configuration",
-                _choice_section("MCP Servers"),
-                "Reload",
-                "Manage permissions",
-                "Delete MCP",
-            ]
+            feedback = []
             inventory = self._mcp_inventory
             if self._mcp_mutation_pending:
-                choices.append(_choice_info(
+                feedback.append(
                     "Reloading configured tools…" if isinstance(
                         self._mcp_mutation_pending[0], MCPReload
                     ) else f"Saving {self._mcp_mutation_pending[0].name} — "
                     "accepted write continues if you leave this page"
-                ))
+                )
             if self._mcp_catalog_unconfirmed:
-                choices.append(_choice_info("Queued work paused; reload to verify current tools"))
+                feedback.append("Queued work paused; reload to verify current tools")
             if self._mcp_inventory_error:
-                choices.append(_choice_info(
+                feedback.append(
                     "MCP inventory unavailable; previous snapshot retained"
-                ))
-            if inventory is not None:
-                if inventory["servers"]:
-                    choices.append("")
-                for server in inventory["servers"]:
-                    auth = " · OAuth" if server["oauth"] else ""
-                    label = (
-                        f"{server['name']}: {'on' if server['enabled'] else 'off'} (toggle) · "
-                        f"{server['transport']}{auth} · {server['tool_count']} tools"
-                    )
-                    if not server["enabled"] and not server["tool_count"]:
-                        action = "sign in and enable" if server["oauth"] else "review and enable"
-                        label += f" — {action}"
-                    choices.append(label)
-                if not inventory["servers"]:
-                    choices.append(_choice_info("No MCP servers configured"))
-                if inventory["truncated"]:
-                    choices.append(_choice_info(
-                        "Showing first 1,000 servers; inventory incomplete"
-                    ))
-            choices.extend(
-                [
-                    "back",
-                    CANCEL_CHOICE,
-                ]
+                )
+            if inventory is not None and inventory["truncated"]:
+                feedback.append(
+                    "Showing first 1,000 servers; inventory incomplete"
+                )
+            page = mcp_settings_page(
+                inventory["servers"] if inventory is not None else None,
+                age=max(0, int(time.monotonic() - self._mcp_inventory_loaded_at)),
+                loading=bool(self._mcp_inventory_request),
+                truncated=bool(inventory and inventory["truncated"]),
+                feedback=tuple(feedback),
             )
-            begin_choice(
-                "mcp settings", choices, _settings_choice_default(choices, default)
-            )
+            default_id = next((row.id for row in page.rows
+                               if default in {row.id, row.label, row.legacy_label}), "")
+            self._open_panel(page, "mcp settings", default_id)
             return
 
         if category == "runtime":
@@ -13081,7 +13263,7 @@ class PersistentChatTUI:
         rows.append(PanelRow("back", RowKind.NAVIGATION, "Back",
                              action=PanelAction("back"), legacy_label="back"))
         return PanelPage("mcp-permission-servers",
-                         ("Settings", "MCPs", "Manage permissions"), tuple(rows))
+                         ("Settings", "MCPs", "Permissions"), tuple(rows))
 
     def _open_mcp_permission_servers(self, default: str = "") -> None:
         self._open_panel(self._mcp_permission_servers_page(),
@@ -13098,6 +13280,405 @@ class PersistentChatTUI:
             self._apply_panel_action(row.action)
 
     def _apply_panel_action(self, action: PanelAction) -> None:
+        if action.kind == "installed-filter-open":
+            if action.target not in {"Skills", "MCPs"}:
+                return
+            filter_current = (self._skills_manage_filter if action.target == "Skills"
+                              else self._mcp_manage_filter)
+            self._open_panel(filter_page(action.target, filter_current),
+                             "skills manage filter" if action.target == "Skills"
+                             else "mcp manage filter", filter_current.value)
+            return
+        if action.kind == "installed-filter-apply":
+            category, _, value = action.target.partition(":")
+            if category not in {"Skills", "MCPs"} or value not in {
+                item.value for item in InstalledFilter
+            }:
+                return
+            if category == "Skills":
+                self._skills_manage_filter = InstalledFilter(value)
+                self._open_skills_manage("filter")
+            else:
+                self._mcp_manage_filter = InstalledFilter(value)
+                self._open_mcp_manage("filter")
+            return
+        if action.kind == "installed-filter-back":
+            if action.target == "Skills":
+                self._open_skills_manage("filter")
+            elif action.target == "MCPs":
+                self._open_mcp_manage("filter")
+            return
+        if action.kind == "skill-import-open":
+            self._skills_import_from_manage = self._choice_kind == "skills manage list"
+            self._open_skills_import()
+            return
+        if action.kind == "skill-import-back":
+            if self._skills_import_from_manage:
+                self._open_skills_manage("import")
+            else:
+                self._open_settings_category("skills", "import")
+            return
+        if action.kind == "mcp-settings-back":
+            self._begin_choice("settings", self._settings_categories(), "mcp servers")
+            return
+        if action.kind == "mcp-settings-search":
+            self._mcp_search_from_manage = False
+            self._open_mcp_catalog_results()
+            return
+        if action.kind == "mcp-settings-custom":
+            self._begin_custom_mcp()
+            return
+        if action.kind == "mcp-settings-import":
+            self._begin_settings_input(
+                "MCP configuration",
+                "Enter a VS Code, OpenCode, or standard MCP JSON file path.",
+                ("mcp_import",),
+            )
+            return
+        if action.kind == "mcp-settings-permissions":
+            self._open_mcp_permission_servers()
+            return
+        if action.kind == "skill-manage":
+            self._open_skills_manage()
+            return
+        if action.kind == "skill-manage-search":
+            self._skills_search_from_manage = True
+            self._skill_discovery.reenter()
+            return
+        if action.kind == "skill-manage-back":
+            self._open_settings_category("skills", "manage")
+            return
+        if action.kind == "skill-manage-list":
+            self._open_skills_manage("skill:" + self._panel.page.id.removeprefix(
+                "skill-manage:") if self._panel is not None else "")
+            return
+        if action.kind == "skill-manage-detail":
+            self._open_skill_manage_detail(action.target)
+            return
+        if action.kind == "skill-manage-delete":
+            skill = next((item for item in self._skills_inventory or []
+                          if item.get("name") == action.target), None)
+            if skill is None or self._skill_action_pending or not skill.get("identity"):
+                return
+            self._skill_delete_identity = str(skill["identity"])
+            self._open_panel(skill_delete_confirmation_page(skill), "skill detail", "back")
+            if self._panel is not None:
+                self._panel.picker.focus("back")
+                self._apply_picker_state()
+            return
+        if action.kind == "skill-update":
+            skill = next((item for item in self._skills_inventory or []
+                          if item.get("name") == action.target), None)
+            if skill is None or skill.get("update_kind") != "github" or (
+                not isinstance(skill.get("identity"), str) or self._skill_action_pending
+            ):
+                return
+            self._background_jobs.cancel("skill-update-check")
+            identity = self._background_jobs.submit("skill-update-check", {
+                "kind": "skill_update_check", "skills_dir": str(self.cfg.skills_dir),
+                "name": action.target, "identity": skill["identity"],
+            }, timeout=30)
+            self._skill_update_request = (
+                identity, self.session_id, action.target, str(skill["identity"])
+            )
+            self._set_skill_feedback("Checking GitHub source…")
+            self._open_skill_manage_detail(action.target, "update")
+            return
+        if action.kind == "skill-update-all":
+            items = [(str(item["name"]), str(item["identity"]))
+                     for item in self._skills_inventory or []
+                     if item.get("update_kind") == "github"
+                     and isinstance(item.get("identity"), str)]
+            if self._skill_action_pending or not items:
+                return
+            if len(items) > 10:
+                self._set_panel_feedback(
+                    "Update all supports at most 10 verified sources; use individual updates",
+                    "warning",
+                )
+                return
+            identity = self._background_jobs.submit("skill-update-all-check", {
+                "kind": "skill_update_all_check", "skills_dir": str(self.cfg.skills_dir),
+                "items": [{"name": name, "identity": manifest_id}
+                          for name, manifest_id in items],
+            }, timeout=300)
+            self._skill_update_all_request = (identity, self.session_id, tuple(items))
+            self._set_panel_feedback("Checking verified Skill sources…")
+            return
+        if action.kind == "skill-update-all-back":
+            self._skill_update_all_candidates = []
+            self._open_skills_manage("update-all")
+            return
+        if action.kind == "skill-update-all-confirm":
+            skill_actions = list(self._skill_update_all_candidates)
+            if self._choice_kind != "skill update all review" or not skill_actions or (
+                self._skill_action_pending
+            ):
+                return
+            current = {str(item.get("name")): item.get("identity")
+                       for item in self._skills_inventory or []}
+            if any(current.get(item.name) != item.expected_manifest_identity
+                   for item in skill_actions):
+                self._set_panel_feedback("Skill inventory changed; check updates again", "warning")
+                return
+            self._skill_update_all_candidates = []
+            self.status_error = ""
+            self._skill_update_all_total = len(skill_actions)
+            self._skill_update_all_queue = skill_actions[1:]
+            self._submit_skill_action(skill_actions[0], focus="update-all")
+            if not self._skill_action_pending:
+                self._skill_update_all_queue = []
+                self._skill_update_all_total = 0
+            return
+        if action.kind == "skill-update-back":
+            self._skill_update_candidate = None
+            self._open_skill_manage_detail(action.target, "update")
+            return
+        if action.kind == "skill-update-confirm":
+            candidate = self._skill_update_candidate
+            if candidate is None or candidate[0] != self.session_id or (
+                candidate[1] != action.target or self._choice_kind != "skill update review"
+            ):
+                return
+            current_skill = next((item for item in self._skills_inventory or []
+                                  if item.get("name") == action.target), None)
+            if current_skill is None or current_skill.get("identity") != candidate[2]:
+                self._set_panel_feedback("Skill changed; check for updates again", "warning")
+                return
+            record = candidate[3]
+            self._skill_update_candidate = None
+            self._submit_skill_action(SkillAction(
+                "update-remote", action.target, record.identity, record,
+                expected_manifest_identity=candidate[2],
+            ))
+            return
+        if action.kind == "mcp-manage":
+            self._open_mcp_manage()
+            return
+        if action.kind == "mcp-manage-search":
+            self._mcp_search_from_manage = True
+            self._open_mcp_catalog_results()
+            return
+        if action.kind == "mcp-manage-refresh-list":
+            self._background_jobs.cancel("mcp-inventory")
+            self._mcp_inventory_request = None
+            self._mcp_inventory_error = ""
+            self._mcp_inventory_loaded_at = 0
+            self._open_mcp_manage("refresh-list")
+            return
+        if action.kind == "mcp-manage-back":
+            self._open_settings_category("mcp servers", "Manage")
+            return
+        if action.kind == "mcp-manage-list":
+            self._open_mcp_manage("server:" + self._panel.page.id.removeprefix(
+                "mcp-manage:") if self._panel is not None else "")
+            return
+        if action.kind == "mcp-manage-detail":
+            self._open_mcp_manage_detail(action.target)
+            return
+        if action.kind == "mcp-manage-reload":
+            self._submit_mcp_reload()
+            if self._choice_kind == "mcp manage list":
+                self._open_mcp_manage("reload")
+            return
+        if action.kind == "mcp-manage-toggle":
+            self._toggle_mcp_server(action.target)
+            return
+        if action.kind == "mcp-manage-update":
+            metadata = next((item for item in (self._mcp_inventory or {}).get("servers", [])
+                             if item.get("name") == action.target), None)
+            if metadata is None or metadata.get("update_kind") != "registry-package" or (
+                self.running or self._setup_job is not None or self._mcp_mutation_pending
+            ):
+                return
+            fingerprint = metadata.get("fingerprint", "")
+            if not isinstance(fingerprint, str) or not re.fullmatch(
+                r"[a-f0-9]{64}", fingerprint
+            ):
+                return
+            scope = str(self.cfg.mcp_servers_file)
+            identity = self._background_jobs.submit("mcp-update-check", {
+                "kind": "mcp_update_check", "mcp_file": scope,
+                "cache_file": str(self.cfg.mcp_registry_cache_file),
+                "name": action.target, "fingerprint": fingerprint,
+            }, timeout=30)
+            self._mcp_update_request = (
+                identity, self.session_id, scope, action.target, fingerprint
+            )
+            self._open_mcp_manage_detail(action.target, "update")
+            self._set_panel_feedback("Checking official MCP Registry…")
+            return
+        if action.kind == "mcp-manage-update-all":
+            items = [(str(item["name"]), str(item["fingerprint"]))
+                     for item in (self._mcp_inventory or {}).get("servers", [])
+                     if item.get("update_kind") == "registry-package"
+                     and isinstance(item.get("fingerprint"), str)]
+            if not items or self.running or self._setup_job is not None or (
+                self._mcp_mutation_pending
+            ):
+                return
+            if len(items) > 10:
+                self._set_panel_feedback(
+                    "Update all supports at most 10 verified servers; use individual updates",
+                    "warning",
+                )
+                return
+            scope = str(self.cfg.mcp_servers_file)
+            identity = self._background_jobs.submit("mcp-update-all-check", {
+                "kind": "mcp_update_all_check", "mcp_file": scope,
+                "cache_file": str(self.cfg.mcp_registry_cache_file),
+                "items": [{"name": name, "fingerprint": fingerprint}
+                          for name, fingerprint in items],
+            }, timeout=300)
+            self._mcp_update_all_request = (identity, self.session_id, scope, tuple(items))
+            self._set_panel_feedback("Checking official MCP Registry packages…")
+            return
+        if action.kind == "mcp-manage-update-all-back":
+            self._mcp_update_all_candidates = []
+            self._open_mcp_manage("update-all")
+            return
+        if action.kind == "mcp-manage-update-all-confirm":
+            mcp_actions = list(self._mcp_update_all_candidates)
+            if self._choice_kind != "mcp manage update all" or not mcp_actions or (
+                self.running or self._setup_job is not None or self._mcp_mutation_pending
+                or self._mcp_mutations.path != self.cfg.mcp_servers_file
+            ):
+                return
+            current = {str(item.get("name")): item.get("fingerprint")
+                       for item in (self._mcp_inventory or {}).get("servers", [])}
+            if any(current.get(item.name) != item.fingerprint for item in mcp_actions):
+                self._set_panel_feedback("MCP inventory changed; check updates again", "warning")
+                return
+            self._mcp_update_all_candidates = []
+            self.status_error = ""
+            self._mcp_update_all_total = len(mcp_actions)
+            self._mcp_update_all_queue = mcp_actions[1:]
+            first_update = mcp_actions[0]
+            self._mcp_mutation_pending = (first_update, time.monotonic())
+            self._mcp_mutation_warned = False
+            if not self._mcp_mutations.submit(first_update):
+                self._mcp_mutation_pending = None
+                self._mcp_update_all_queue = []
+                self._mcp_update_all_total = 0
+                self.status_error = "MCP update batch was not queued; retry later"
+                return
+            self._mcp_manage_save_state = "saving"
+            self._open_mcp_manage("update-all")
+            return
+        if action.kind == "mcp-manage-update-back":
+            self._mcp_update_candidate = None
+            self._open_mcp_manage_detail(action.target, "update")
+            return
+        if action.kind == "mcp-manage-update-confirm":
+            mcp_candidate = self._mcp_update_candidate
+            if mcp_candidate is None or mcp_candidate[:3] != (
+                self.session_id, str(self.cfg.mcp_servers_file), action.target
+            ) or self._choice_kind != "mcp manage update":
+                return
+            metadata = next((item for item in (self._mcp_inventory or {}).get("servers", [])
+                             if item.get("name") == action.target), None)
+            if metadata is None or metadata.get("fingerprint") != mcp_candidate[3]:
+                self._set_panel_feedback(
+                    "MCP definition changed; check for updates again", "warning",
+                )
+                return
+            if self.running or self._setup_job is not None or self._mcp_mutation_pending or (
+                self._mcp_mutations.path != self.cfg.mcp_servers_file
+            ):
+                self._set_panel_feedback("Finish active work before updating MCP tools", "warning")
+                return
+            update = mcp_candidate[4]
+            request = MCPUpdateDisabled(
+                uuid.uuid4().hex, self.session_id, action.target, mcp_candidate[3],
+                update["old_arg"], update["new_arg"], update["registry_version"],
+                update["description"],
+            )
+            self._mcp_mutation_pending = (request, time.monotonic())
+            self._mcp_mutation_warned = False
+            if not self._mcp_mutations.submit(request):
+                self._mcp_mutation_pending = None
+                self.status_error = "MCP update was not queued; review and retry"
+                return
+            self._mcp_update_candidate = None
+            self._mcp_manage_save_state = "saving"
+            self._open_mcp_manage_detail(action.target, "update")
+            return
+        if action.kind == "mcp-manage-delete":
+            metadata = next((item for item in (self._mcp_inventory or {}).get("servers", [])
+                             if item["name"] == action.target), None)
+            if metadata is None or not re.fullmatch(
+                r"[a-f0-9]{64}", metadata.get("fingerprint", "")
+            ):
+                self.status_error = "Refresh the MCP inventory before removing this server"
+                return
+            self._mcp_remove_candidate = (
+                self.session_id, str(self.cfg.mcp_servers_file), action.target,
+                metadata["fingerprint"],
+            )
+            self._open_panel(manage_removal_confirmation(action.target),
+                             "mcp manage delete", "cancel")
+            assert self._panel is not None
+            self._panel.picker.focus("cancel")
+            self._apply_picker_state()
+            return
+        if action.kind == "mcp-manage-delete-back":
+            self._mcp_remove_candidate = None
+            self._open_mcp_manage_detail(action.target, "delete")
+            return
+        if action.kind == "mcp-manage-delete-confirm":
+            self._confirm_mcp_removal(action.target, manage=True)
+            return
+        if action.kind == "mcp-search-query":
+            self._begin_settings_input(
+                "Search official MCP Registry", "Enter an MCP server name",
+                ("mcp-search-query",),
+            )
+            self._set_input(self._mcp_catalog_query_text)
+            return
+        if action.kind == "mcp-search-suggest":
+            self._search_mcp_catalog(action.target)
+            return
+        if action.kind == "mcp-search-sort":
+            index = MCP_SEARCH_SORTS.index(self._mcp_catalog_sort)
+            self._mcp_catalog_sort = MCP_SEARCH_SORTS[(index + 1) % len(MCP_SEARCH_SORTS)]
+            self._open_mcp_catalog_results(default="sort")
+            return
+        if action.kind == "mcp-search-retry":
+            if self._mcp_catalog_query_text:
+                self._search_mcp_catalog(self._mcp_catalog_query_text)
+            return
+        if action.kind == "mcp-search-detail":
+            server = self._mcp_catalog_results.get(action.target)
+            if server is not None:
+                self._open_mcp_catalog_detail(server)
+            return
+        if action.kind == "mcp-search-back":
+            self._background_jobs.cancel("mcp-search")
+            self._mcp_catalog_request_id = ""
+            if self._mcp_search_from_manage:
+                self._open_mcp_manage("search")
+            else:
+                self._open_settings_category("mcp servers", "search")
+            return
+        if action.kind == "mcp-search-results":
+            self._open_mcp_catalog_results()
+            return
+        if action.kind == "mcp-stars-retry":
+            self._mcp_stars_error_url = ""
+            if self._mcp_detail_server is not None:
+                self._open_mcp_catalog_detail(self._mcp_detail_server)
+            return
+        if action.kind == "mcp-search-install":
+            plan = self._mcp_catalog_install_choices.get(action.target)
+            if plan is not None:
+                self._begin_mcp_catalog_plan(plan)
+            return
+        if action.kind == "discover-open":
+            self._skills_search_from_manage = False
+            self._skill_discovery.reenter()
+            return
+        if self._skill_discovery.action(action):
+            return
         if action.kind.startswith("mcp-remove-"):
             if action.kind == "mcp-remove-back":
                 self._open_settings_category("mcp servers", "Delete MCP")
@@ -13105,7 +13686,7 @@ class PersistentChatTUI:
             if action.kind == "mcp-remove-list":
                 if self._mcp_inventory is None:
                     self._open_settings_category("mcp servers", "Delete MCP")
-                    self.status_error = "Wait for the configured server inventory"
+                    self._set_panel_feedback("Wait for the configured server inventory", "warning")
                     return
                 self._open_panel(removal_page(
                     self._mcp_inventory["servers"],
@@ -13131,30 +13712,7 @@ class PersistentChatTUI:
                 self._apply_picker_state()
                 return
             if action.kind == "mcp-remove-confirm":
-                candidate = getattr(self, "_mcp_remove_candidate", None)
-                if self._choice_kind != "mcp remove confirmation" or candidate is None or (
-                    candidate[:3] != (
-                        self.session_id, str(self.cfg.mcp_servers_file), action.target
-                    )
-                ):
-                    return
-                if self.running or self._setup_job is not None or self._mcp_mutation_pending:
-                    self.status_error = "Finish the active operation before removing MCP tools"
-                    return
-                if self._mcp_mutations.path != self.cfg.mcp_servers_file:
-                    self.status_error = "MCP configuration path changed; restart before removing it"
-                    return
-                request = MCPRemove(uuid.uuid4().hex, self.session_id,
-                                    action.target, candidate[3])
-                self._mcp_mutation_pending = (request, time.monotonic())
-                self._mcp_mutation_warned = False
-                if not self._mcp_mutations.submit(request):
-                    self._mcp_mutation_pending = None
-                    self.status_error = "MCP save lane unavailable; no removal was accepted"
-                    return
-                self._mcp_remove_candidate = None
-                self._open_settings_category("mcp servers", "Delete MCP")
-                self.status_error = f"Removing MCP server {action.target}…"
+                self._confirm_mcp_removal(action.target, manage=False)
                 return
             return
         if action.kind.startswith("spinner-"):
@@ -13244,28 +13802,32 @@ class PersistentChatTUI:
         elif action.kind in {"skill-back", "skill-list"}:
             if action.kind == "skill-back":
                 self._begin_choice("settings", self._settings_categories(), "skills")
-            elif self._choice_kind == "skill detail" and getattr(
-                self, "_skill_delete_parent", False
-            ):
-                self._apply_panel_action(PanelAction("skill-delete-list"))
+            elif self._choice_kind == "skill detail":
+                self._skill_delete_identity = ""
+                name = self._panel.page.id.removeprefix("skill-delete-confirm:") \
+                    if self._panel is not None else ""
+                self._open_skill_manage_detail(name, "delete")
             else:
                 self._open_settings_category("skills", "delete-skills"
                                              if self._choice_kind == "skill delete list" else None)
         elif action.kind == "skill-reload":
             if self._skill_action_pending:
                 return
+            in_manage = self._choice_kind == "skills manage list"
             self._background_jobs.cancel("skills")
             self._skills_inventory_loading = False
             self._skills_inventory_loaded_at = 0
-            self._skill_feedback = ""
+            self._set_skill_feedback("")
             refresh = getattr(self._skill_actions, "refresh", None)
             if refresh is not None:
                 refresh()
-            self._open_settings_category("skills", "reload")
+            if in_manage:
+                self._open_skills_manage("reload")
+            else:
+                self._open_settings_category("skills", "manage")
         elif action.kind == "skill-delete-list":
             if self._skills_inventory is None or self._skill_action_pending:
                 return
-            self._skill_delete_parent = True
             self._open_panel(skill_delete_page(self._skills_inventory), "skill delete list")
         elif action.kind == "skill-import":
             self._submit_skill_action(SkillAction("import"))
@@ -13274,18 +13836,25 @@ class PersistentChatTUI:
                           if item.get("name") == action.target), None)
             if skill is None or self._skill_action_pending or not skill.get("identity"):
                 return
-            if action.kind in {"skill-open", "skill-confirm"}:
-                if action.kind == "skill-open":
-                    self._skill_delete_parent = False
-                confirm = action.kind == "skill-confirm"
-                if confirm:
-                    self._skill_delete_identity = str(skill["identity"])
-                self._open_panel(skill_detail_page(skill, confirm=confirm),
-                                 "skill detail", "back" if confirm else "delete")
-                if confirm and self._panel is not None:
+            if action.kind == "skill-confirm":
+                if self._choice_kind != "skill delete list":
+                    return
+                self._skill_delete_identity = str(skill["identity"])
+                self._open_panel(skill_delete_confirmation_page(skill),
+                                 "skill detail", "back")
+                if self._panel is not None:
                     self._panel.picker.focus("back")
                     self._apply_picker_state()
-            elif action.kind == "skill-delete" and self._skill_delete_identity:
+            elif action.kind == "skill-toggle":
+                self._submit_skill_action(SkillAction(
+                    "set-enabled", action.target, str(skill["identity"]),
+                    enabled=skill.get("enabled") is False,
+                ), focus=f"skill:{action.target}")
+            elif (
+                action.kind == "skill-delete" and self._skill_delete_identity
+                and self._choice_kind == "skill detail" and self._panel is not None
+                and self._panel.page.id == f"skill-delete-confirm:{action.target}"
+            ):
                 self._submit_skill_action(SkillAction(
                     "delete", action.target, self._skill_delete_identity
                 ))
@@ -13360,11 +13929,13 @@ class PersistentChatTUI:
                 self._panel.picker.focus(f"tool:{name}")
                 self._apply_picker_state()
         elif action.kind in {"mcp-bulk", "mcp-tool"}:
-            server = self._permission_mcp_server or ""
-            rows = _mcp_permission_server_rows(self.agent).get(server, [])
+            server_name = self._permission_mcp_server or ""
+            rows = _mcp_permission_server_rows(self.agent).get(server_name, [])
             if not rows:
                 self._open_mcp_permission_servers()
-                self.status_error = "MCP tools changed; reopen the server permissions"
+                self._set_panel_feedback(
+                    "MCP tools changed; reopen the server permissions", "warning",
+                )
                 return
             policies = _effective_permission_policies(self.agent, self.cfg)
             if action.kind == "mcp-bulk":
@@ -13386,7 +13957,7 @@ class PersistentChatTUI:
             self.agent.gate.policies.update(changed)
             getattr(self.agent.gate, "process_grants", set()).clear()
             self.status_error = ""
-            self._open_mcp_permission_server(server)
+            self._open_mcp_permission_server(server_name)
             if self._panel is not None:
                 self._panel.picker.focus(focus_id)
                 self._apply_picker_state()
@@ -13425,7 +13996,7 @@ class PersistentChatTUI:
         rows.append(PanelRow("back", RowKind.NAVIGATION, "Back",
                              action=PanelAction("back"), legacy_label="back"))
         return PanelPage(f"mcp-permission:{server}",
-                         ("Settings", "MCPs", "Manage permissions", server), tuple(rows))
+                         ("Settings", "MCPs", "Permissions", server), tuple(rows))
 
     def _open_permission_presets(self) -> None:
         names = _permission_tool_names(self.agent)
@@ -13456,7 +14027,7 @@ class PersistentChatTUI:
         rows = _mcp_permission_server_rows(self.agent).get(server or "", [])
         if not rows:
             self._open_settings_category("permissions")
-            self.status_error = "MCP tools changed; reopen the server permissions"
+            self._set_panel_feedback("MCP tools changed; reopen the server permissions", "warning")
             return
         policies = _effective_permission_policies(self.agent, self.cfg)
         bulk = {
@@ -13540,16 +14111,99 @@ class PersistentChatTUI:
             self._memory_fact_save_state = "failed"
         self._open_memory_facts()
 
-    def _submit_skill_action(self, action: SkillAction) -> None:
+    def _submit_skill_action(self, action: SkillAction, *, focus: str = "") -> None:
         if self._skill_action_pending:
             return
         self._skill_action_pending = self._skill_actions.submit(action)
-        self._skill_feedback = (
-            "Working…" if self._skill_action_pending else "Skill change not queued; try again"
+        if self._skill_action_pending:
+            self.status_error = ""
+        self._set_skill_feedback(
+            "Working…" if self._skill_action_pending else "Skill change not queued; try again",
+            "neutral" if self._skill_action_pending else "warning",
         )
         self._background_jobs.cancel("skills")
         self._skills_inventory_loading = False
-        self._open_settings_category("skills")
+        if action.kind == "set-enabled" and self._choice_kind == "skills manage detail":
+            self._open_skill_manage_detail(action.name, "enabled")
+        elif self._choice_kind == "skills import":
+            self._open_skills_import()
+        elif action.kind == "delete" and self._choice_kind == "skill detail":
+            self._open_skills_manage()
+        elif action.kind == "update-remote":
+            self._open_skills_manage(focus or f"skill:{action.name}")
+        else:
+            self._open_settings_category("skills", focus)
+
+    def _open_skills_import(self) -> None:
+        self._open_panel(skills_import_page(
+            str(self.cfg.data_dir / "skills"),
+            detected=getattr(self, "_skill_drop_files", ()),
+            pending=self._skill_action_pending,
+            empty_import=self._skill_feedback == "No new skill file.",
+            from_manage=self._skills_import_from_manage,
+        ), "skills import")
+
+    def _open_skills_manage(self, default: str = "") -> None:
+        self._background_jobs.cancel("skill-update-check")
+        self._skill_update_request = None
+        if not default and self._skills_inventory and "skills-manage" not in self._panel_states:
+            default = "skill:" + str(self._skills_inventory[0]["name"])
+        self._open_panel(skills_manage_page(
+            self._skills_inventory, pending=self._skill_action_pending,
+            error=self._skills_inventory_error,
+            show=self._skills_manage_filter,
+        ), "skills manage list", default)
+        self._refresh_skills_inventory()
+
+    def _open_skill_manage_detail(self, name: str, default: str = "") -> None:
+        self._refresh_skills_inventory()
+        skill = next((item for item in self._skills_inventory or []
+                      if item.get("name") == name), None)
+        if skill is None:
+            self._open_skills_manage()
+            return
+        self._open_panel(skill_manage_detail_page(
+            skill, pending=self._skill_action_pending, feedback=self._skill_feedback,
+            feedback_tone=self._skill_feedback_tone,
+        ), "skills manage detail", default)
+
+    def _enqueue_remote_skill_install(self, record: SkillRecord) -> bool:
+        if self._skill_action_pending:
+            return False
+        action = SkillAction("install-remote", record.name, record.identity, record)
+        accepted = self._skill_actions.submit(action)
+        if accepted:
+            self._skill_action_pending = True
+            self._set_skill_feedback("Installing…")
+            self._background_jobs.cancel("skills")
+            self._skills_inventory_loading = False
+        return accepted
+
+    def _show_skill_discovery(self, page: PanelPage, kind: str, default: str) -> None:
+        # Query/detail IDs retain navigation state but must not grow without bound.
+        parent_id = "skill-search:" + (
+            self._skill_discovery.request.identity if self._skill_discovery.request else "empty"
+        )
+        old = [identity for identity in self._panel_states if identity.startswith(
+            ("skill-search:", "skill-search-detail:", "skill-search-install:")
+        ) and identity not in {page.id, parent_id}]
+        for identity in old[:-126]:
+            self._panel_states.pop(identity)
+        self._open_panel(page, kind, default)
+        if default and self._panel is not None:
+            self._panel.picker.focus(default)
+            self._apply_picker_state()
+            self.application.invalidate()
+
+    def _edit_skill_search(self, query: str) -> None:
+        self._begin_settings_input("Search skills", "Enter keywords", ("skill-search-query",))
+        self._set_input(query)
+
+    def _return_from_skill_search(self) -> None:
+        if self._skills_search_from_manage:
+            self._open_skills_manage("search")
+        else:
+            self._open_settings_category("skills", "search")
 
     def _refresh_skills_inventory(self) -> None:
         """Load the optional knowledge package without blocking the TUI input thread."""
@@ -13564,7 +14218,8 @@ class PersistentChatTUI:
         self._skills_inventory_loading = True
 
         self._background_jobs.submit(
-            "skills", {"kind": "skills", "skills_dir": str(self.cfg.skills_dir)}, timeout=15
+            "skills", {"kind": "skills", "skills_dir": str(self.cfg.skills_dir),
+                       "knowledge_dir": str(self.cfg.knowledge_dir)}, timeout=15
         )
 
     def _refresh_mcp_inventory(self) -> None:
@@ -13585,6 +14240,127 @@ class PersistentChatTUI:
             "kind": "mcp_inventory", "mcp_file": scope,
         }, timeout=8)
         self._mcp_inventory_request = (identity, self.session_id, scope)
+
+    def _open_mcp_manage(self, default: str = "") -> None:
+        self._refresh_mcp_inventory()
+        inventory = self._mcp_inventory
+        if not default and inventory and inventory["servers"] \
+                and "mcp-manage" not in self._panel_states:
+            default = "server:" + inventory["servers"][0]["name"]
+        self._open_panel(mcp_manage_page(
+            inventory["servers"] if inventory is not None else None,
+            pending=bool(self._mcp_mutation_pending),
+            truncated=bool(inventory and inventory["truncated"]),
+            error=self._mcp_inventory_error,
+            show=self._mcp_manage_filter,
+        ), "mcp manage list", default)
+
+    def _submit_mcp_reload(self) -> None:
+        if self.running or self._setup_job is not None or self._mcp_mutation_pending:
+            self._set_panel_feedback(
+                "Finish the active operation before reloading MCP tools", "warning",
+            )
+            return
+        if self._mcp_mutations.path != self.cfg.mcp_servers_file:
+            self._set_panel_feedback(
+                "MCP configuration path changed; restart before reloading", "warning",
+            )
+            return
+        reload_request = MCPReload(uuid.uuid4().hex, self.session_id)
+        self._mcp_mutation_pending = (reload_request, time.monotonic())
+        self._mcp_mutation_warned = False
+        if not self._mcp_mutations.submit(reload_request):
+            self._mcp_mutation_pending = None
+            self.status_error = "MCP reload was not accepted; previous tools retained"
+        else:
+            self._mcp_manage_save_state = "saving"
+            self._set_panel_feedback("Reloading configured MCP tools…")
+        self.application.invalidate()
+
+    def _open_mcp_manage_detail(self, name: str, default: str = "") -> None:
+        self._refresh_mcp_inventory()
+        server = next((item for item in (self._mcp_inventory or {}).get("servers", [])
+                       if item["name"] == name), None)
+        if server is None:
+            self._open_mcp_manage()
+            return
+        self._open_panel(mcp_manage_detail_page(
+            server, pending=bool(self._mcp_mutation_pending),
+        ), "mcp manage detail", default)
+
+    def _confirm_mcp_removal(self, name: str, *, manage: bool) -> None:
+        candidate = getattr(self, "_mcp_remove_candidate", None)
+        expected = "mcp manage delete" if manage else "mcp remove confirmation"
+        if self._choice_kind != expected or candidate is None or candidate[:3] != (
+            self.session_id, str(self.cfg.mcp_servers_file), name
+        ):
+            return
+        if self.running or self._setup_job is not None or self._mcp_mutation_pending:
+            self._set_panel_feedback(
+                "Finish the active operation before removing MCP tools", "warning",
+            )
+            return
+        if self._mcp_mutations.path != self.cfg.mcp_servers_file:
+            self._set_panel_feedback(
+                "MCP configuration path changed; restart before removing it", "warning",
+            )
+            return
+        request = MCPRemove(uuid.uuid4().hex, self.session_id, name, candidate[3])
+        self._mcp_mutation_pending = (request, time.monotonic())
+        self._mcp_mutation_warned = False
+        if not self._mcp_mutations.submit(request):
+            self._mcp_mutation_pending = None
+            self.status_error = "MCP save lane unavailable; no removal was accepted"
+            return
+        self._mcp_manage_save_state = "saving" if manage else ""
+        self._mcp_remove_candidate = None
+        if manage:
+            self._open_mcp_manage()
+        else:
+            self._open_settings_category("mcp servers", "Delete MCP")
+        self._set_panel_feedback(f"Removing MCP server {name}…")
+
+    def _toggle_mcp_server(self, name: str) -> None:
+        metadata = next((item for item in (self._mcp_inventory or {}).get("servers", [])
+                         if item["name"] == name), None)
+        if metadata is not None and not metadata["enabled"] and not metadata["tool_count"]:
+            self._mcp_manage_return_name = name if self._choice_kind == (
+                "mcp manage detail"
+            ) else ""
+            self._review_mcp_server(name)
+            return
+        if self.running or self._setup_job is not None or self._mcp_mutation_pending:
+            self._set_panel_feedback(
+                "Finish the active operation before changing MCP tools", "warning",
+            )
+            self.application.invalidate()
+            return
+        if self._mcp_mutations.path != self.cfg.mcp_servers_file:
+            self._set_panel_feedback(
+                "MCP configuration path changed; restart before changing it", "warning",
+            )
+            return
+        fingerprint = metadata.get("fingerprint", "") if metadata else ""
+        if metadata is None or not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
+            self._invalidate_mcp_inventory()
+            self._set_panel_feedback("Refreshing MCP definition; select it again when ready")
+            self._refresh_mcp_inventory()
+            return
+        request = MCPToggle(
+            uuid.uuid4().hex, self.session_id, name, fingerprint, not metadata["enabled"],
+        )
+        self._mcp_mutation_pending = (request, time.monotonic())
+        self._mcp_mutation_warned = False
+        if not self._mcp_mutations.submit(request):
+            self._mcp_mutation_pending = None
+            self.status_error = "MCP save lane unavailable; no change was accepted"
+        else:
+            if self._choice_kind == "mcp manage detail":
+                self._mcp_manage_save_state = "saving"
+            if self._choice_kind == "mcp manage detail":
+                self._open_mcp_manage_detail(name, "enabled")
+            self._set_panel_feedback(f"Saving MCP setting for {name}…")
+        self.application.invalidate()
 
     def _invalidate_mcp_inventory(self) -> None:
         self._background_jobs.cancel("mcp-inventory")
@@ -13650,13 +14426,23 @@ class PersistentChatTUI:
             )
 
     def _cancel_inventory_job(self, kind: str | None) -> None:
+        if kind in {SEARCH_KIND, DETAIL_KIND, INSTALL_KIND}:
+            self._skill_discovery.cancel()
         if kind == "mcp review":
             self._background_jobs.cancel("mcp-review")
             self._mcp_review_request = None
-        if kind in {"mcp settings", "mcp registry detail"}:
+        if kind in {"mcp settings", "mcp registry detail", "mcp manage list", "mcp manage filter",
+                    "mcp manage detail", "mcp manage delete", "mcp manage update",
+                    "mcp manage update all"}:
             self._background_jobs.cancel("mcp-inventory")
             self._mcp_inventory_request = None
             self._mcp_inventory_error = ""
+            self._background_jobs.cancel("mcp-update-check")
+            self._mcp_update_request = None
+            self._mcp_update_candidate = None
+            self._background_jobs.cancel("mcp-update-all-check")
+            self._mcp_update_all_request = None
+            self._mcp_update_all_candidates = []
         if kind == "memory settings":
             self._background_jobs.cancel("memory-inventory")
             self._memory_inventory_request = None
@@ -13671,16 +14457,253 @@ class PersistentChatTUI:
         if kind == "model":
             self._background_jobs.cancel("local-models")
             self._local_models_loading = False
-        elif kind == "skills settings":
+        elif kind in {"skills settings", "skills import", "skills manage filter",
+                      "skills manage list",
+                      "skills manage detail", "skill detail", "skill update review",
+                      "skill update all review"}:
             self._background_jobs.cancel("skills")
             self._skills_inventory_loading = False
+            self._background_jobs.cancel("skill-update-check")
+            self._skill_update_request = None
+            self._skill_update_candidate = None
+            self._background_jobs.cancel("skill-update-all-check")
+            self._skill_update_all_request = None
+            self._skill_update_all_candidates = []
         elif kind == "mcp registry results":
             self._background_jobs.cancel("mcp-search")
             self._mcp_catalog_request_id = ""
+        elif kind == "mcp registry detail":
+            self._background_jobs.cancel("mcp-stars")
+            self._mcp_stars_request = None
 
     def _apply_background_result(self, payload: object) -> None:
         key, identity, result, error = cast(tuple[str, str, Any, str], payload)
         if self.shutting_down or not self._background_jobs.current(key, identity):
+            return
+        if key in {"skill-search", "skill-source"}:
+            self._skill_discovery.accept(key, identity, result, error, self._choice_kind)
+            return
+        if key == "mcp-stars":
+            stars_request = self._mcp_stars_request
+            if stars_request is None or stars_request[:2] != (identity, self.session_id):
+                return
+            self._mcp_stars_request = None
+            url = stars_request[2]
+            stars = result.get("stars") if isinstance(result, dict) else None
+            if (not error and isinstance(result, dict)
+                    and result.get("repository_url") == url
+                    and type(stars) is int and 0 <= stars <= 2_000_000_000):
+                self._mcp_repository_stars[url] = (stars, time.monotonic())
+                if len(self._mcp_repository_stars) > 64:
+                    oldest = min(self._mcp_repository_stars,
+                                 key=lambda key: self._mcp_repository_stars[key][1])
+                    del self._mcp_repository_stars[oldest]
+                self._mcp_stars_error_url = ""
+            else:
+                self._mcp_stars_error_url = url
+            if (self._choice_kind == "mcp registry detail"
+                    and self._mcp_detail_server is not None
+                    and self._mcp_detail_server.repository_url == url):
+                self._open_mcp_catalog_detail(self._mcp_detail_server)
+            return
+        if key == "skill-update-check":
+            update_request = self._skill_update_request
+            if update_request is None or update_request[:2] != (identity, self.session_id):
+                return
+            self._skill_update_request = None
+            name, manifest_identity = update_request[2:]
+            if self._choice_kind != "skills manage detail" or self._panel is None or (
+                self._panel.page.id != f"skill-manage:{name}"
+            ):
+                return
+            if error or not isinstance(result, dict) or result.get("name") != name or (
+                result.get("identity") != manifest_identity
+            ):
+                self._set_skill_feedback("Update check unavailable; retry later", "error")
+            elif result.get("status") == "current":
+                self._set_skill_feedback("Already at the latest source revision", "success")
+            elif result.get("status") == "available":
+                try:
+                    record = SkillRecord.from_payload(result["record"])
+                    current_revision = result["current_revision"]
+                    if record.name != name or not record.canonical_identity or (
+                        not isinstance(current_revision, str)
+                        or not re.fullmatch(r"[a-f0-9]{40}", current_revision)
+                        or record.revision == current_revision
+                    ):
+                        raise ValueError("Invalid update result")
+                except (KeyError, TypeError, ValueError):
+                    self._set_skill_feedback(
+                        "Update check returned invalid source metadata", "error",
+                    )
+                else:
+                    self._skill_update_candidate = (
+                        self.session_id, name, manifest_identity, record
+                    )
+                    self._open_panel(skill_update_review_page(
+                        name, current_revision, record
+                    ), "skill update review", "back")
+                    if self._panel is not None:
+                        self._panel.picker.focus("back")
+                        self._apply_picker_state()
+                    return
+            else:
+                self._set_skill_feedback("No verified update available for this source", "warning")
+            self._open_skill_manage_detail(name, "update")
+            return
+        if key == "skill-update-all-check":
+            skill_batch = self._skill_update_all_request
+            if skill_batch is None or skill_batch[:2] != (identity, self.session_id):
+                return
+            self._skill_update_all_request = None
+            if self._choice_kind != "skills manage list" or self._panel is None:
+                return
+            items = result.get("items") if isinstance(result, dict) else None
+            if error or not isinstance(items, list) or len(items) != len(skill_batch[2]):
+                self._set_panel_feedback("Skill update check unavailable; retry later", "error")
+                return
+            skill_updates: list[tuple[str, str, SkillRecord]] = []
+            actions: list[SkillAction] = []
+            for skill_expected, item in zip(skill_batch[2], items, strict=True):
+                if not isinstance(item, dict) or (item.get("name"), item.get("identity")) != (
+                    skill_expected
+                ):
+                    self._set_panel_feedback(
+                        "Skill inventory changed; check updates again", "warning",
+                    )
+                    return
+                if item.get("status") == "current":
+                    continue
+                if item.get("status") != "available":
+                    self._set_panel_feedback(
+                        "Some Skill sources could not be verified; retry individually", "warning"
+                    )
+                    return
+                try:
+                    record = SkillRecord.from_payload(item["record"])
+                    current_revision = item["current_revision"]
+                    if record.name != skill_expected[0] or not record.canonical_identity or (
+                        not isinstance(current_revision, str)
+                        or not re.fullmatch(r"[a-f0-9]{40}", current_revision)
+                        or record.revision == current_revision
+                    ):
+                        raise ValueError("Invalid source")
+                except (KeyError, TypeError, ValueError):
+                    self._set_panel_feedback(
+                        "Skill update check returned invalid source metadata", "error",
+                    )
+                    return
+                skill_updates.append((skill_expected[0], current_revision, record))
+                actions.append(SkillAction(
+                    "update-remote", skill_expected[0], record.identity, record,
+                    expected_manifest_identity=skill_expected[1],
+                ))
+            if not skill_updates:
+                self._set_panel_feedback("All verified Skills are current", "success")
+                return
+            self._skill_update_all_candidates = actions
+            self.status_error = ""
+            self._open_panel(skill_update_all_review_page(skill_updates),
+                             "skill update all review", "back")
+            if self._panel is not None:
+                self._panel.picker.focus("back")
+                self._apply_picker_state()
+            return
+        if key == "mcp-update-check":
+            mcp_update_request = self._mcp_update_request
+            if mcp_update_request is None or mcp_update_request[:3] != (
+                identity, self.session_id, str(self.cfg.mcp_servers_file)
+            ):
+                return
+            self._mcp_update_request = None
+            name, fingerprint = mcp_update_request[3:]
+            if self._choice_kind != "mcp manage detail" or self._panel is None or (
+                self._panel.page.id != f"mcp-manage:{name}"
+            ):
+                return
+            self.status_error = ""
+            if error or not isinstance(result, dict) or result.get("name") != name:
+                self._set_panel_feedback("MCP update check unavailable; retry later", "error")
+            elif result.get("status") == "current":
+                self._set_panel_feedback(
+                    "Already at the latest Registry package version", "success",
+                )
+            elif result.get("status") == "available" and result.get("fingerprint") == (
+                fingerprint
+            ):
+                candidate = result.get("candidate")
+                if valid_candidate_payload(candidate):
+                    self._mcp_update_candidate = (
+                        self.session_id, str(self.cfg.mcp_servers_file), name,
+                        fingerprint, candidate,
+                    )
+                    self._open_panel(manage_update_review(name, candidate),
+                                     "mcp manage update", "back")
+                    if self._panel is not None:
+                        self._panel.picker.focus("back")
+                        self._apply_picker_state()
+                    return
+                self._set_panel_feedback(
+                    "MCP update check returned invalid package metadata", "error",
+                )
+            else:
+                self._set_panel_feedback(
+                    "No verified package update available for this source", "warning",
+                )
+            self._open_mcp_manage_detail(name, "update")
+            return
+        if key == "mcp-update-all-check":
+            mcp_batch = self._mcp_update_all_request
+            if mcp_batch is None or mcp_batch[:3] != (
+                identity, self.session_id, str(self.cfg.mcp_servers_file)
+            ):
+                return
+            self._mcp_update_all_request = None
+            if self._choice_kind != "mcp manage list" or self._panel is None:
+                return
+            items = result.get("items") if isinstance(result, dict) else None
+            if error or not isinstance(items, list) or len(items) != len(mcp_batch[3]):
+                self._set_panel_feedback("MCP update check unavailable; retry later", "error")
+                return
+            mcp_updates: list[tuple[str, dict[str, str]]] = []
+            requests: list[MCPUpdateDisabled] = []
+            for mcp_expected, item in zip(mcp_batch[3], items, strict=True):
+                if not isinstance(item, dict) or (item.get("name"), item.get("fingerprint")) != (
+                    mcp_expected
+                ):
+                    self._set_panel_feedback(
+                        "MCP inventory changed; check updates again", "warning",
+                    )
+                    return
+                if item.get("status") == "current":
+                    continue
+                if item.get("status") != "available":
+                    self._set_panel_feedback(
+                        "Some MCP sources could not be verified; retry individually", "warning"
+                    )
+                    return
+                candidate = item.get("candidate")
+                if not valid_candidate_payload(candidate):
+                    self._set_panel_feedback(
+                        "MCP update check returned invalid package metadata", "error",
+                    )
+                    return
+                mcp_updates.append((mcp_expected[0], candidate))
+                requests.append(MCPUpdateDisabled(
+                    uuid.uuid4().hex, self.session_id, mcp_expected[0], mcp_expected[1],
+                    candidate["old_arg"], candidate["new_arg"],
+                    candidate["registry_version"], candidate["description"],
+                ))
+            if not mcp_updates:
+                self._set_panel_feedback("All verified MCP packages are current", "success")
+                return
+            self._mcp_update_all_candidates = requests
+            self.status_error = ""
+            self._open_panel(manage_update_all_review(mcp_updates),
+                             "mcp manage update all", "back")
+            if self._panel is not None:
+                self._panel.picker.focus("back")
+                self._apply_picker_state()
             return
         if key == "mcp-review":
             review = self._mcp_review_request
@@ -13733,6 +14756,13 @@ class PersistentChatTUI:
                     and type(item.get("tool_count")) is int and 0 <= item["tool_count"] <= 100_000
                     and ("fingerprint" not in item or isinstance(item["fingerprint"], str)
                          and re.fullmatch(r"[a-f0-9]{64}", item["fingerprint"]))
+                    and isinstance(item.get("source_label"), str)
+                    and 0 < len(item["source_label"]) <= 160
+                    and isinstance(item.get("description"), str)
+                    and len(item["description"]) <= 240
+                    and all(char.isprintable() for char in (
+                        item["source_label"] + item["description"]
+                    ))
                     for item in result["servers"]
                 )
             )
@@ -13745,6 +14775,12 @@ class PersistentChatTUI:
             status_error = self.status_error
             if self._choice_kind == "mcp settings":
                 self._open_settings_category("mcp servers")
+            elif self._choice_kind == "mcp manage list":
+                self._open_mcp_manage()
+            elif self._choice_kind == "mcp manage detail" and self._panel is not None:
+                self._open_mcp_manage_detail(
+                    self._panel.page.id.removeprefix("mcp-manage:")
+                )
             elif self._choice_kind == "mcp registry detail" and self._mcp_detail_server is not None:
                 self._open_mcp_catalog_detail(self._mcp_detail_server)
             self.status_error = status_error
@@ -14008,6 +15044,7 @@ class PersistentChatTUI:
             "on_submit": callback,
             "single_line": callback in (
                 ("divider-pattern",), ("spinner-frames",), ("spinner-interval",),
+                ("skill-search-query",), ("mcp-search-query",),
             ),
         }
         self.application.layout.focus(self.input)
@@ -14033,6 +15070,35 @@ class PersistentChatTUI:
         if request is None:
             return
         callback = request.get("on_submit")
+        if callback == ("skill-search-query",):
+            if value:
+                from klaude_core.skill_catalog import SearchRequest
+
+                try:
+                    SearchRequest(value, self._skill_discovery.provider, self._skill_discovery.sort)
+                except ValueError as exc:
+                    self.status_error = str(exc)
+                    self.application.invalidate()
+                    return
+            self._settings_input_request = None
+            self._set_input("")
+            self._skill_discovery.answer_query(value)
+            return
+        if callback == ("mcp-search-query",):
+            if value is None:
+                self._settings_input_request = None
+                self._set_input("")
+                self._open_mcp_catalog_results(default="query")
+                return
+            query = value.strip()
+            if not 1 <= len(query) <= 120:
+                self.status_error = "Use a search query of 1–120 characters"
+                self.application.invalidate()
+                return
+            self._settings_input_request = None
+            self._set_input("")
+            self._search_mcp_catalog(query)
+            return
         if callback in (("spinner-frames",), ("spinner-interval",)):
             draft = self._spinner_draft
             if draft is None:
@@ -14185,7 +15251,9 @@ class PersistentChatTUI:
         bearer_token: str = "",
     ) -> None:
         if self._mcp_mutation_pending:
-            self.status_error = "Wait for the accepted MCP save before adding a server"
+            self._set_panel_feedback(
+                "Wait for the accepted MCP save before adding a server", "warning",
+            )
             return
         from klaude_core.mcp_client import MCPServerConfig
 
@@ -14243,10 +15311,14 @@ class PersistentChatTUI:
 
     def _submit_disabled_mcp_server(self, server: MCPServerConfig) -> bool:
         if self.running or self._setup_job is not None or self._mcp_mutation_pending:
-            self.status_error = "Finish the active operation before adding an MCP server"
+            self._set_panel_feedback(
+                "Finish the active operation before adding an MCP server", "warning",
+            )
             return False
         if self._mcp_mutations.path != self.cfg.mcp_servers_file:
-            self.status_error = "MCP configuration path changed; restart before adding"
+            self._set_panel_feedback(
+                "MCP configuration path changed; restart before adding", "warning",
+            )
             return False
         request = MCPAddDisabled(
             uuid.uuid4().hex, self.session_id, server.name, json.dumps(server.to_dict())
@@ -14365,17 +15437,26 @@ class PersistentChatTUI:
         def finish(message: str | None) -> None:
             if message is not None:
                 self._append(f"\n[mcp] {message}.\n")
+            return_to_detail = self._mcp_manage_return_name == name
+            if return_to_detail:
+                self._mcp_manage_return_name = ""
             if origin == (self.session_id, str(self.cfg.mcp_servers_file)):
-                self._open_settings_category("mcp servers", f"{name}:")
+                if return_to_detail:
+                    self._invalidate_mcp_inventory()
+                    self._open_mcp_manage_detail(name, "enabled")
+                else:
+                    self._open_settings_category("mcp servers", f"{name}:")
 
         self._start_setup_job(f"MCP connection: {name}", operation, finish, timeout=300)
 
     def _import_mcp_configuration(self, value: str) -> None:
         if self.running or self._setup_job is not None or self._mcp_mutation_pending:
-            self.status_error = "Finish the active operation before importing"
+            self._set_panel_feedback("Finish the active operation before importing", "warning")
             return
         if self._mcp_mutations.path != self.cfg.mcp_servers_file:
-            self.status_error = "MCP configuration path changed; restart before importing"
+            self._set_panel_feedback(
+                "MCP configuration path changed; restart before importing", "warning",
+            )
             return
         try:
             source = str(Path(value).expanduser().absolute())
@@ -14460,7 +15541,7 @@ class PersistentChatTUI:
 
     def _finish_mcp_catalog_plan(self) -> None:
         if self._mcp_mutation_pending:
-            self.status_error = "Wait for the accepted MCP save before installing"
+            self._set_panel_feedback("Wait for the accepted MCP save before installing", "warning")
             return
         from klaude_core.mcp_catalog import MCPCatalogError
 
@@ -14492,35 +15573,44 @@ class PersistentChatTUI:
 
     def _search_mcp_catalog(self, query: str) -> None:
         self._background_jobs.cancel("mcp-suggestions")
-        request_id = uuid.uuid4().hex
-        self._mcp_catalog_request_id = request_id
+        self._background_jobs.cancel("mcp-search")
+        if query != self._mcp_catalog_query_text:
+            self._mcp_catalog_results = {}
+            self._mcp_catalog_cached = False
         self._mcp_catalog_query_text = query
+        self._mcp_catalog_error = ""
         self._mcp_catalog_query = False
-        self._begin_choice(
-            "mcp registry results",
-            [_choice_info(f"Searching the official registry for {query!r}…"), "back"],
-            "back",
-        )
-
         self._mcp_catalog_request_id = self._background_jobs.submit(
             "mcp-search", {"kind": "mcp_search", "query": query,
                            "cache_file": str(self.cfg.mcp_registry_cache_file)}, timeout=20
         )
+        self._open_mcp_catalog_results()
 
-    def _open_mcp_catalog_results(self, *, new_results: bool = False) -> None:
-        choices = [_choice_section("OFFICIAL MCP REGISTRY")]
-        if self._mcp_catalog_cached:
-            choices.append(_choice_info("Showing cached registry results"))
-        choices.extend(self._mcp_catalog_results)
-        if not self._mcp_catalog_results:
-            choices.append(_choice_info("No supported active servers matched"))
-        choices.extend(["search again", "back"])
-        default = next(iter(self._mcp_catalog_results), "search again")
-        if new_results:
-            # Loading focuses Back; it must not become the results-page selection.
-            self._choice_values = []
-            self._picker_states.pop(("mcp registry results", ""), None)
-        self._begin_choice("mcp registry results", choices, default, refresh=not new_results)
+    def _open_mcp_catalog_results(self, *, new_results: bool = False,
+                                  default: str = "") -> None:
+        initial_result = (
+            new_results and self._panel is not None
+            and self._panel.page.id == "mcp-registry-search"
+            and self._panel.picker.selected_id in {"query", "sort"}
+            and not self._panel.picker.query
+            and bool(self._mcp_catalog_results)
+        )
+        page = mcp_search_page(
+            self._mcp_catalog_query_text, tuple(self._mcp_catalog_results.values()),
+            sort=self._mcp_catalog_sort, loading=bool(self._mcp_catalog_request_id),
+            cached=self._mcp_catalog_cached, error=self._mcp_catalog_error,
+            searched=bool(self._mcp_catalog_query_text),
+            repository_stars={url: count for url, (count, _at) in
+                              self._mcp_repository_stars.items()},
+        )
+        self._open_panel(page, "mcp registry results", default)
+        if initial_result:
+            first = page.column_headers and next(
+                (row.id for row in page.rows if row.id.startswith("registry:")), ""
+            )
+            if first and self._panel is not None:
+                self._panel.picker.focus(first)
+                self._apply_picker_state()
 
     @staticmethod
     def _mcp_catalog_plan_needs_input(plan: MCPInstallPlan, local_name: str) -> bool:
@@ -14536,67 +15626,60 @@ class PersistentChatTUI:
         return False
 
     def _open_mcp_catalog_detail(self, server: MCPCatalogServer) -> None:
-        from klaude_core.mcp_catalog import install_plans
+        from klaude_core.mcp_catalog import github_repository_identity, install_plans
 
         local_name = _mcp_local_name(str(getattr(server, "name", "")).rsplit("/", 1)[-1])
         self._mcp_detail_server = server
+        repository_url = server.repository_url
+        cached_stars = self._mcp_repository_stars.get(repository_url)
+        if (github_repository_identity(repository_url)
+                and (cached_stars is None or time.monotonic() - cached_stars[1] > 3600)
+                and self._mcp_stars_request is None
+                and self._mcp_stars_error_url != repository_url):
+            identity = self._background_jobs.submit(
+                "mcp-stars", {"kind": "mcp_repository_stars",
+                              "repository_url": repository_url}, timeout=10,
+            )
+            self._mcp_stars_request = (identity, self.session_id, repository_url)
         self._refresh_mcp_inventory()
         inventory = self._mcp_inventory
         configured = {item["name"] for item in inventory["servers"]} if inventory else set()
         unknown = inventory is None or bool(inventory["truncated"])
-        choices = [
-            _choice_section(str(getattr(server, "title", "MCP SERVER")).upper()),
-            _choice_info(str(getattr(server, "description", ""))),
-            _choice_info(f"Registry: {getattr(server, 'name', '')}"),
-            _choice_info(f"Version: {getattr(server, 'version', '')}"),
-        ]
-        repository = str(getattr(server, "repository_url", ""))
-        if repository:
-            choices.append(_choice_info(f"Source: {repository}"))
-        choices.extend(
-            [
-                _choice_info("Installs disabled; enabling is a separate trust decision"),
-                _choice_section("INSTALL OPTIONS"),
-            ]
-        )
+        options: list[InstallOption] = []
         self._mcp_catalog_install_choices = {}
-        if self._mcp_inventory_request:
-            choices.append(_choice_info("Checking configured servers…"))
-        if self._mcp_inventory_error:
-            choices.append(_choice_info("Configuration inventory unavailable; reopen to retry"))
+        age = None
         if inventory is not None:
             age = max(0, int(time.monotonic() - self._mcp_inventory_loaded_at))
-            choices.append(_choice_info(f"Configuration snapshot {age}s old"))
-            if inventory["truncated"]:
-                choices.append(_choice_info(
-                    "Configuration exceeds 1,000-server preview; use CLI to install"
-                ))
-        for plan in install_plans(server):
-            label = f"Install disabled · {plan.label}"
+        for index, plan in enumerate(install_plans(server)):
+            option_id = f"plan:{index}"
             unavailable = unknown or local_name in configured
-            if unknown:
-                label += " — configuration inventory not ready"
-            if local_name in configured:
-                label += f" — {local_name} already configured"
-            choice = _choice_unavailable(label) if unavailable else label
-            choices.append(choice)
             endpoint = plan.url if plan.transport == "http" else " ".join(
                 [plan.command, *plan.args]
             )
-            choices.append(_choice_info(f"Endpoint: {endpoint}"))
+            note = ("Configuration inventory not ready" if unknown else
+                    f"{local_name} already configured" if local_name in configured else "")
+            options.append(InstallOption(option_id, f"Install disabled · {plan.label}",
+                                         endpoint, not unavailable, note))
             if not unavailable:
-                self._mcp_catalog_install_choices[choice] = plan
-        if not install_plans(server):
-            choices.append(_choice_info("No supported Streamable HTTP, npm, or PyPI plan"))
-        choices.append("back")
-        self._begin_choice("mcp registry detail", choices, "back", refresh=True)
+                self._mcp_catalog_install_choices[option_id] = plan
+        self._open_panel(mcp_detail_page(
+            server, options, inventory_loading=bool(self._mcp_inventory_request),
+            inventory_error=self._mcp_inventory_error, inventory_age=age,
+            inventory_truncated=bool(inventory and inventory["truncated"]),
+            repository_stars=cached_stars[0] if cached_stars else None,
+            stars_loading=bool(self._mcp_stars_request and
+                               self._mcp_stars_request[2] == repository_url),
+            stars_error="unavailable" if self._mcp_stars_error_url == repository_url else "",
+        ), "mcp registry detail")
 
     def _install_mcp_catalog_plan(self, plan: MCPInstallPlan) -> None:
         if self.running or self._setup_job is not None or self._mcp_mutation_pending:
-            self.status_error = "Finish the active operation before installing"
+            self._set_panel_feedback("Finish the active operation before installing", "warning")
             return
         if self._mcp_mutations.path != self.cfg.mcp_servers_file:
-            self.status_error = "MCP configuration path changed; restart before installing"
+            self._set_panel_feedback(
+                "MCP configuration path changed; restart before installing", "warning",
+            )
             return
         from klaude_core.mcp_catalog import MCPCatalogError
 
@@ -14634,28 +15717,18 @@ class PersistentChatTUI:
             self._begin_choice("settings", self._settings_categories(), category)
             return
         if kind == "mcp settings":
+            if selected == "Manage":
+                self._mcp_manage_save_state = ""
+                self._open_mcp_manage()
+                return
             if selected == "Delete MCP":
                 self._apply_panel_action(PanelAction("mcp-remove-list"))
                 return
-            if selected == "Manage permissions":
+            if selected in {"Permissions", "Manage permissions"}:
                 self._open_mcp_permission_servers()
                 return
             if selected == "Reload":
-                if self.running or self._setup_job is not None or self._mcp_mutation_pending:
-                    self.status_error = "Finish the active operation before reloading MCP tools"
-                    return
-                if self._mcp_mutations.path != self.cfg.mcp_servers_file:
-                    self.status_error = "MCP configuration path changed; restart before reloading"
-                    return
-                reload_request = MCPReload(uuid.uuid4().hex, self.session_id)
-                self._mcp_mutation_pending = (reload_request, time.monotonic())
-                self._mcp_mutation_warned = False
-                if not self._mcp_mutations.submit(reload_request):
-                    self._mcp_mutation_pending = None
-                    self.status_error = "MCP reload was not accepted; previous tools retained"
-                else:
-                    self.status_error = "Reloading configured MCP tools…"
-                self.application.invalidate()
+                self._submit_mcp_reload()
                 return
             if selected == "Add custom MCP server":
                 self._begin_custom_mcp()
@@ -14668,41 +15741,9 @@ class PersistentChatTUI:
                 )
                 return
             if selected == "Search official MCP Registry":
-                self._begin_mcp_catalog_query()
+                self._open_mcp_catalog_results()
                 return
-            server_name = selected.split(":", 1)[0]
-            metadata = next((
-                item for item in (self._mcp_inventory or {}).get("servers", [])
-                if item["name"] == server_name
-            ), None)
-            if metadata is not None and not metadata["enabled"] and not metadata["tool_count"]:
-                self._review_mcp_server(server_name)
-                return
-            if self.running or self._setup_job is not None or self._mcp_mutation_pending:
-                self.status_error = "Finish the active operation before changing MCP tools"
-                self.application.invalidate()
-                return
-            if self._mcp_mutations.path != self.cfg.mcp_servers_file:
-                self.status_error = "MCP configuration path changed; restart before changing it"
-                return
-            fingerprint = metadata.get("fingerprint", "") if metadata else ""
-            if metadata is None or not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
-                self._invalidate_mcp_inventory()
-                self._open_settings_category("mcp servers", f"{server_name}:")
-                self.status_error = "Refreshing MCP definition; select it again when ready"
-                return
-            request = MCPToggle(
-                uuid.uuid4().hex, self.session_id, server_name, fingerprint,
-                not metadata["enabled"],
-            )
-            self._mcp_mutation_pending = (request, time.monotonic())
-            self._mcp_mutation_warned = False
-            if not self._mcp_mutations.submit(request):
-                self._mcp_mutation_pending = None
-                self.status_error = "MCP save lane unavailable; no change was accepted"
-            else:
-                self.status_error = f"Saving MCP setting for {server_name}…"
-            self.application.invalidate()
+            self._toggle_mcp_server(selected.split(":", 1)[0])
             return
         if kind == "theme settings":
             if selected.startswith("interface theme:"):
@@ -16877,10 +17918,10 @@ class PersistentChatTUI:
             now - self._mcp_mutation_pending[1] >= 8
         ):
             self._mcp_mutation_warned = True
-            self.status_error = (
+            self._set_panel_feedback(
                 "MCP reload still pending; queued work paused"
                 if isinstance(self._mcp_mutation_pending[0], MCPReload) else
-                "MCP save still pending; outcome unknown, not rolled back"
+                "MCP save still pending; outcome unknown, not rolled back", "warning"
             )
         sync_due = (
             not self._choice_kind
@@ -16933,6 +17974,12 @@ class PersistentChatTUI:
                 ):
                     continue
                 self._mcp_mutation_pending = None
+                # Replace progress feedback only after the matching acknowledgement.
+                self._set_panel_feedback("")
+                self._mcp_manage_save_state = (
+                    "saved" if mcp_result.state in {"saved", "loaded"} else
+                    "failed" if mcp_result.state == "unconfirmed" else ""
+                )
                 self._invalidate_mcp_inventory()
                 self._invalidate_settings_overview()
                 mcp_current = (
@@ -16960,6 +18007,8 @@ class PersistentChatTUI:
                         if isinstance(mcp_result.request, MCPEnable) else
                         f"Removed MCP server {mcp_result.request.name}"
                         if isinstance(mcp_result.request, MCPRemove) else
+                        f"Updated {mcp_result.request.name} as disabled; review and enable it"
+                        if isinstance(mcp_result.request, MCPUpdateDisabled) else
                         f"MCP setting saved for {mcp_result.request.name}"
                     )
                     if mcp_result.catalog is None:
@@ -16967,12 +18016,15 @@ class PersistentChatTUI:
                     if mcp_result.cleanup_failed:
                         message += "; local OAuth credential cleanup failed"
                     self._append(f"\n[success] {message}.\n")
-                    self.status_error = (
-                        "MCP catalog unconfirmed; reload configured MCP tools to continue"
-                        if self._mcp_catalog_unconfirmed else ""
-                    )
-                    if mcp_result.cleanup_failed and not self.status_error:
-                        self.status_error = "Server removed; local OAuth credential cleanup failed"
+                    if self._mcp_catalog_unconfirmed:
+                        self._set_panel_feedback(
+                            "MCP catalog unconfirmed; reload configured MCP tools to continue",
+                            "warning",
+                        )
+                    elif mcp_result.cleanup_failed:
+                        self._set_panel_feedback(
+                            "Server removed; local OAuth credential cleanup failed", "warning"
+                        )
                 else:
                     self.status_error = (
                         "MCP reload could not verify configuration; previous tools retained"
@@ -16990,6 +18042,30 @@ class PersistentChatTUI:
                         "inspect configuration before retrying"
                     )
                     self._append(f"\n[warning] {self.status_error}.\n")
+                    if mcp_result.state == "unconfirmed":
+                        self._set_panel_feedback(self.status_error, "warning")
+                if isinstance(mcp_result.request, MCPUpdateDisabled) and (
+                    self._mcp_update_all_total
+                ):
+                    completed = self._mcp_update_all_total - len(self._mcp_update_all_queue)
+                    if mcp_result.state == "saved" and mcp_result.catalog is not None and (
+                        mcp_current and self._mcp_update_all_queue
+                    ):
+                        next_mcp_update = self._mcp_update_all_queue.pop(0)
+                        if self._mcp_mutations.submit(next_mcp_update):
+                            self._mcp_mutation_pending = (next_mcp_update, time.monotonic())
+                            self._mcp_manage_save_state = "saving"
+                            self._mcp_mutation_warned = False
+                        else:
+                            self._set_panel_feedback(
+                                f"Updated {completed} MCPs; remaining updates were not queued",
+                                "warning",
+                            )
+                            self._mcp_update_all_queue = []
+                            self._mcp_update_all_total = 0
+                    else:
+                        self._mcp_update_all_queue = []
+                        self._mcp_update_all_total = 0
                 if mcp_current and self._choice_kind == "mcp settings":
                     error = self.status_error
                     fallback = (
@@ -17000,6 +18076,18 @@ class PersistentChatTUI:
                         self._choice_values[self._choice_index] if self._choice_values else fallback
                     )
                     self._open_settings_category("mcp servers", selected_row)
+                    self.status_error = error
+                elif mcp_current and self._choice_kind in {
+                    "mcp manage list", "mcp manage detail"
+                }:
+                    error = self.status_error
+                    self._refresh_mcp_inventory()
+                    if self._choice_kind == "mcp manage list":
+                        self._open_mcp_manage()
+                    elif self._panel is not None:
+                        self._open_mcp_manage_detail(
+                            self._panel.page.id.removeprefix("mcp-manage:")
+                        )
                     self.status_error = error
                 self._start_next()
             elif kind == "appearance_saved":
@@ -17192,17 +18280,81 @@ class PersistentChatTUI:
                 self._skill_drop_files = cast(tuple[str, ...], payload)
                 if self._choice_kind == "skills settings":
                     self._open_settings_category("skills")
+                elif self._choice_kind == "skills import":
+                    self._open_skills_import()
                 self.application.invalidate()
             elif kind == "skill_action_done":
-                _action, success, message = cast(tuple[SkillAction, bool, str], payload)
+                skill_result = cast(
+                    tuple[SkillAction, bool, str] | tuple[SkillAction, bool, str, str], payload
+                )
+                skill_action, success, message = skill_result[:3]
+                tone = skill_result[3] if len(skill_result) == 4 else (
+                    "success" if success else "error"
+                )
                 self._skill_action_pending = False
-                self._skill_feedback = str(message)
+                self._set_skill_feedback(str(message), tone)
+                if skill_action.kind == "update-remote" and self._skill_update_all_total:
+                    completed = self._skill_update_all_total - len(self._skill_update_all_queue)
+                    if success and self._skill_update_all_queue:
+                        next_skill_update = self._skill_update_all_queue.pop(0)
+                        self._skill_action_pending = self._skill_actions.submit(
+                            next_skill_update
+                        )
+                        if self._skill_action_pending:
+                            self._set_skill_feedback(
+                                f"Updated {completed}/{self._skill_update_all_total} Skills…"
+                            )
+                        else:
+                            self._set_skill_feedback(
+                                f"Updated {completed} Skills; remaining updates were not queued",
+                                "warning",
+                            )
+                            self._append(f"\n[warning] {self._skill_feedback}.\n")
+                            self._skill_update_all_queue = []
+                            self._skill_update_all_total = 0
+                    else:
+                        if not success:
+                            self._set_skill_feedback(
+                                f"Skill update stopped at {skill_action.name}: {message}", tone
+                            )
+                        else:
+                            self._set_skill_feedback(
+                                f"Updated {self._skill_update_all_total} Skills", "success"
+                            )
+                        self._append(
+                            f"\n[{'success' if success else 'warning'}] "
+                            f"{self._skill_feedback}.\n"
+                        )
+                        self._skill_update_all_queue = []
+                        self._skill_update_all_total = 0
                 self._background_jobs.cancel("skills")
                 self._skills_inventory_loading = False
                 self._skills_inventory_loaded_at = 0
-                self._skills_inventory = None
+                if skill_action.kind == "set-enabled":
+                    if success and self._skills_inventory is not None:
+                        for item in self._skills_inventory:
+                            if item.get("name") == skill_action.name and (
+                                item.get("identity") == skill_action.identity
+                            ):
+                                item["enabled"] = skill_action.enabled
+                else:
+                    self._skills_inventory = None
+                if skill_action.kind == "install-remote":
+                    self._skill_discovery.install_done(
+                        skill_action.identity, success, str(message), self._choice_kind
+                    )
+                elif skill_action.kind == "delete" and success:
+                    self._skill_discovery.installed.clear()
                 if self._choice_kind in {"skills settings", "skill detail"}:
                     self._open_settings_category("skills")
+                elif self._choice_kind == "skills import":
+                    self._open_skills_import()
+                elif self._choice_kind == "skills manage list":
+                    self._open_skills_manage()
+                elif self._choice_kind == "skills manage detail" and self._panel is not None:
+                    self._open_skill_manage_detail(
+                        self._panel.page.id.removeprefix("skill-manage:")
+                    )
                 self.application.invalidate()
             elif kind == "skills_inventory":
                 installed, error = cast(
@@ -17217,6 +18369,12 @@ class PersistentChatTUI:
                 )
                 if self._choice_kind == "skills settings":
                     self._open_settings_category("skills")
+                elif self._choice_kind == "skills manage list":
+                    self._open_skills_manage()
+                elif self._choice_kind == "skills manage detail" and self._panel is not None:
+                    self._open_skill_manage_detail(
+                        self._panel.page.id.removeprefix("skill-manage:")
+                    )
                 elif self._choice_kind == "settings":
                     self._begin_choice(
                         "settings", self._settings_categories(), "skills", refresh=True
@@ -17227,18 +18385,14 @@ class PersistentChatTUI:
                 )
                 if request_id != self._mcp_catalog_request_id:
                     continue
+                self._mcp_catalog_request_id = ""
                 self._mcp_catalog_results = {}
                 self._mcp_catalog_cached = cached
+                self._mcp_catalog_error = error
                 for server in results:
-                    title = getattr(server, "title", getattr(server, "name", "MCP server"))
-                    label = (
-                        f"{title} · {getattr(server, 'version', '?')} · {server.name}"
-                    )
-                    self._mcp_catalog_results[label] = server
+                    self._mcp_catalog_results[server.name] = server
                 if self._choice_kind == "mcp registry results":
                     self._open_mcp_catalog_results(new_results=True)
-                    if error:
-                        self.status_error = f"MCP Registry search failed: {error}"
             elif kind == "codex_auth_status":
                 authenticated, error = cast(tuple[bool | None, str], payload)
                 self._codex_auth_checking = False

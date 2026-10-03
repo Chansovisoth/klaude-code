@@ -92,6 +92,11 @@ class KnowledgeStore:
             )"""
         )
         self.fts.execute(
+            """CREATE TABLE IF NOT EXISTS disabled_skills (
+                name TEXT PRIMARY KEY NOT NULL
+            )"""
+        )
+        self.fts.execute(
             """CREATE VIRTUAL TABLE IF NOT EXISTS chunks_v2 USING fts5(
                 id UNINDEXED,
                 library UNINDEXED,
@@ -474,12 +479,18 @@ class KnowledgeStore:
         if owner:
             row = self.fts.execute(
                 """SELECT 1 FROM active_sources
-                   WHERE library=? AND owner=? AND source=? LIMIT 1""",
+                   WHERE library=? AND owner=? AND source=?
+                     AND NOT EXISTS (SELECT 1 FROM disabled_skills
+                                     WHERE active_sources.owner='skill:' || name)
+                   LIMIT 1""",
                 (collection, owner, source),
             ).fetchone()
             return row is not None
         row = self.fts.execute(
-            "SELECT 1 FROM active_sources WHERE library=? AND source=? LIMIT 1",
+            """SELECT 1 FROM active_sources WHERE library=? AND source=?
+               AND NOT EXISTS (SELECT 1 FROM disabled_skills
+                               WHERE active_sources.owner='skill:' || name)
+               LIMIT 1""",
             (collection, source),
         ).fetchone()
         return row is not None
@@ -506,7 +517,9 @@ class KnowledgeStore:
 
     def _active_versions(self, collection: str) -> set[str]:
         rows = self.fts.execute(
-            "SELECT version_id FROM active_sources WHERE library=?",
+            """SELECT version_id FROM active_sources WHERE library=?
+               AND NOT EXISTS (SELECT 1 FROM disabled_skills
+                               WHERE active_sources.owner='skill:' || name)""",
             (collection,),
         ).fetchall()
         return {row["version_id"] for row in rows}
@@ -623,13 +636,20 @@ class KnowledgeStore:
         legacy = set(self._library_tables())
         active = {
             row["library"]
-            for row in self.fts.execute("SELECT DISTINCT library FROM active_sources").fetchall()
+            for row in self.fts.execute(
+                """SELECT DISTINCT library FROM active_sources
+                   WHERE NOT EXISTS (SELECT 1 FROM disabled_skills
+                                     WHERE active_sources.owner='skill:' || name)"""
+            ).fetchall()
         }
         return sorted(legacy | active)
 
     def library_sources(self, collection: str) -> list[str]:
         rows = self.fts.execute(
-            "SELECT DISTINCT source FROM active_sources WHERE library=? ORDER BY source",
+            """SELECT DISTINCT source FROM active_sources WHERE library=?
+               AND NOT EXISTS (SELECT 1 FROM disabled_skills
+                               WHERE active_sources.owner='skill:' || name)
+               ORDER BY source""",
             (collection,),
         ).fetchall()
         return [row["source"] for row in rows]
