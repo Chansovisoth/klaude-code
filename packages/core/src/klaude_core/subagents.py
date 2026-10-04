@@ -30,6 +30,7 @@ _ROLE_TOOLS: dict[SubagentRole, frozenset[str]] = {
     SubagentRole.READ_RESEARCH: frozenset(
         {
             "read_file",
+            "read_skill",
             "list_dir",
             "grep",
             "workspace_info",
@@ -53,6 +54,7 @@ _ROLE_TOOLS: dict[SubagentRole, frozenset[str]] = {
     SubagentRole.TEST_DIAGNOSTIC: frozenset(
         {
             "read_file",
+            "read_skill",
             "list_dir",
             "grep",
             "workspace_info",
@@ -350,12 +352,11 @@ def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> Subagen
         + f"Maximum reported provider tokens: {assignment.max_total_tokens}.\n"
         + "</subagent_contract>"
     )
-    parent_selector = parent.tool_selector
-    child_selector = (
-        None
-        if parent_selector is None
-        else lambda _message, tools: parent_selector(assignment.task.objective, tools)
-    )
+    # The supervisor has already intersected the child role, this parent
+    # turn's callable tools, requested tools, and effective permissions.
+    # Running the parent's intent router again can hide those tools when the
+    # bounded objective uses different wording (for example a bare filename).
+    child_selector = None
     try:
         child = Agent(
             child_runtime,

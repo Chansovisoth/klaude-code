@@ -101,6 +101,9 @@ class TurnGovernor:
         self.token_usage_unknown_requests = 0
         self.stop_reason = ""
         self._successful_outcomes: set[str] = set()
+        self._progress_group: int | None = None
+        self._group_failed = False
+        self._group_succeeded = False
 
     def begin_model_step(self) -> str:
         """Record a safe-boundary model request or return a reason to finalize."""
@@ -120,6 +123,8 @@ class TurnGovernor:
         tool: str,
         result: str,
         metadata: dict[str, Any] | None = None,
+        *,
+        progress_group: int | None = None,
     ) -> str:
         """Record a completed tool boundary and return a reason to stop tools."""
         self.tool_calls_used += 1
@@ -131,17 +136,29 @@ class TurnGovernor:
                 metadata.get("found") is False
                 or metadata.get("status") in {"failed", "skipped", "no_results"}
                 or (metadata.get("result_count") == 0 and tool in {"web_search", "query_knowledge"})
+                or (isinstance(metadata.get("edit"), dict)
+                    and metadata["edit"].get("changed") is False)
             )
         ) or bool(NO_EVIDENCE_RE.match(normalized))
         outcome = f"{tool}:{normalized}"
         duplicate_outcome = outcome in self._successful_outcomes
         executed = (metadata or {}).get("executed") is not False
 
+        if progress_group != self._progress_group:
+            self._progress_group = progress_group
+            self._group_failed = False
+            self._group_succeeded = False
         if failed or no_evidence or duplicate_outcome or not executed:
-            self.no_progress_streak += 1
+            # Parallel calls from one model response are one recovery attempt.
+            # A batch of bad paths must leave room for directory discovery on
+            # the next request. Every call still consumes the hard call budget.
+            if progress_group is None or not (self._group_failed or self._group_succeeded):
+                self.no_progress_streak += 1
+            self._group_failed = True
         else:
             self.no_progress_streak = 0
             self._successful_outcomes.add(outcome)
+            self._group_succeeded = True
 
         if self.tool_calls_used >= self.max_tool_calls:
             self.stop_reason = "tool-call budget reached"
@@ -150,6 +167,11 @@ class TurnGovernor:
         elif self.elapsed_seconds >= self.max_elapsed_seconds:
             self.stop_reason = "turn wall-time budget reached"
         return self.stop_reason
+
+    def forget_tool_result(self, tool: str, result: str) -> None:
+        """A result omitted from working context may need a real fresh read."""
+        normalized = " ".join(result.casefold().split())[:2_000]
+        self._successful_outcomes.discard(f"{tool}:{normalized}")
 
     def charge_delegated_usage(
         self,

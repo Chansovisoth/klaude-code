@@ -297,6 +297,70 @@ def test_openrouter_stream_assembles_text_tools_and_usage(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+def test_openrouter_malformed_tool_arguments_are_private_and_recoverable(
+    monkeypatch, streaming
+):
+    runtime = OpenRouterRuntime("sk-or-test")
+    fragments = [{"choices": [{"finish_reason": "tool_calls", "delta": {
+        "tool_calls": [{"index": 0, "id": "call-1", "function": {
+            "name": "write_file", "arguments": '{"path":"private.txt","content":',
+        }}],
+    }}]}]
+    monkeypatch.setattr(runtime, "_stream", lambda *_args, **_kwargs: iter(fragments))
+
+    if streaming:
+        result = list(runtime.chat_stream("test", [], tools=[{"function": {
+            "name": "write_file"}}]))[-1]
+    else:
+        result = runtime.chat("test", [], tools=[{"function": {"name": "write_file"}}])
+
+    assert result["tool_calls"][0]["parse_status"] == "malformed"
+    assert "private.txt" not in str(result)
+    assert "write_file" not in str(result["tool_calls"])
+
+
+def test_openrouter_malformed_call_retries_once_without_executing_it(monkeypatch):
+    from klaude_core import Agent, PermissionGate, Tool
+
+    runtime = OpenRouterRuntime("sk-or-test")
+    calls = []
+    responses = iter([
+        [{"choices": [{"finish_reason": "tool_calls", "delta": {
+            "tool_calls": [{"index": 0, "id": "bad-1", "function": {
+                "name": "write_file", "arguments": '{"path":"leak.txt","content":',
+            }}],
+        }}]}],
+        [{"choices": [{"finish_reason": "tool_calls", "delta": {
+            "tool_calls": [{"index": 0, "id": "good-1", "function": {
+                "name": "write_file", "arguments": '{"path":"ok.txt","content":"ok"}',
+            }}],
+        }}]}],
+        [{"choices": [{"finish_reason": "stop", "delta": {"content": "Done."}}]}],
+    ])
+    monkeypatch.setattr(runtime, "_stream", lambda *_args, **_kwargs: iter(next(responses)))
+    tool = Tool(
+        "write_file", "Write a workspace file",
+        {"type": "object", "properties": {
+            "path": {"type": "string"}, "content": {"type": "string"}},
+         "required": ["path", "content"]},
+        lambda path, content: calls.append((path, content)) or "written",
+    )
+    agent = Agent(
+        runtime, "openrouter/test", [tool],
+        PermissionGate({"write_file": "allow"}, lambda *_args: "n"), "system",
+    )
+
+    events = list(agent.run("Write ok.txt"))
+
+    assert calls == [("ok.txt", "ok")]
+    assert any(event.kind == "retry" and "invalid" in event.payload["reason"]
+               for event in events)
+    assert any(event.kind == "text" and "Done." in event.payload["content"]
+               for event in events)
+    assert "leak.txt" not in str(agent.messages)
+
+
 def test_openrouter_history_drops_orphaned_tool_protocol_items():
     messages = OpenRouterRuntime._messages(
         [

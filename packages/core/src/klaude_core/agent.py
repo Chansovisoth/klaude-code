@@ -29,10 +29,12 @@ from .context_compaction import build_recap
 from .entities import structured_domains_for_text
 from .execution import TurnGovernor
 from .intent import (
+    explicit_local_file_read_request,
     explicit_only_tool_names,
     explicit_workspace_inspection,
     explicitly_disallows_tools,
     has_nonnegated_action,
+    prohibits_skill_read,
     prohibits_web_search,
     without_tool_use_prohibition,
 )
@@ -40,9 +42,11 @@ from .knowledge_tool_contract import normalize_knowledge_arguments
 from .model_runtime import ModelInfo, ModelRuntime, normalize_token_usage
 from .ollama import Ollama
 from .permissions import PermissionDenied, PermissionGate
+from .request_context import select_request_prompt
 from .research_receipts import recovery_receipts, research_receipt
 from .response_constraints import code_quote_limit, limit_code_quotes
 from .source_use import AnswerSourceIndex, asks_what_was_used, prior_answer_source_note
+from .workspace_execution import WorkspaceExecution, bound_working_dialogue
 
 ToolFn = Callable[..., Any]
 ToolSelector = Callable[[str, dict[str, "Tool"]], list[str]]
@@ -812,11 +816,49 @@ def tool_aliases() -> dict[str, str]:
     return dict(TOOL_ALIASES)
 
 
-def _parse_text_tool_calls(content: str, known_tools: set[str]) -> list[dict[str, Any]]:
+def _parse_text_tool_calls(
+    content: str, known_tools: set[str], *, recover_json: bool = False
+) -> list[dict[str, Any]]:
     """Accept the text tool-call format some local models emit."""
     stripped = content.strip()
     if not stripped:
         return []
+    if recover_json:
+        # Some tool-capable local models print a whole call as JSON instead of
+        # using the provider protocol. Never execute that ambiguous text. Ask
+        # once for a native call, using the same recovery path as invalid XML.
+        # Explanations containing examples and ordinary JSON stay public text.
+        envelope = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n```", stripped, re.DOTALL)
+        candidate = envelope.group(1) if envelope else stripped
+        try:
+            value = json.loads(candidate) if candidate.startswith("{") else None
+        except json.JSONDecodeError:
+            value = None
+            # A truncated or incorrectly escaped *whole* call envelope is a
+            # protocol failure too. Never execute or repair its arguments.
+            malformed_name = re.match(
+                r'^\s*\{\s*"name"\s*:\s*"([\w-]+)"\s*,\s*"arguments"\s*:',
+                candidate,
+            )
+            if malformed_name and canonical_tool_name(
+                malformed_name.group(1), known_tools
+            ) in known_tools:
+                return [{
+                    "function": {"name": malformed_name.group(1), "arguments": {}},
+                    "parse_status": "malformed", "raw_span": stripped,
+                }]
+        if isinstance(value, dict) and set(value) == {"name", "arguments"}:
+            name = value.get("name")
+            if (
+                isinstance(name, str)
+                and canonical_tool_name(name, known_tools) in known_tools
+                and isinstance(value.get("arguments"), dict)
+            ):
+                return [{
+                    "function": {"name": name, "arguments": {}},
+                    "parse_status": "malformed",
+                    "raw_span": stripped,
+                }]
     if "<function=" not in stripped:
         # Detect unsupported protocol, without interpreting HTML/XML as executable code.
         tags = re.findall(r"<([A-Za-z_][\w-]*)\s+[^>]*=", stripped)
@@ -869,6 +911,10 @@ def _parse_text_tool_calls(content: str, known_tools: set[str]) -> list[dict[str
             }
         ]
     return calls
+
+
+class ToolArgumentError(ValueError):
+    """Canonical argument validation failed before permission or execution."""
 
 
 def _validate_tool_arguments(value: Any, schema: dict, path: str = "arguments") -> None:
@@ -2975,6 +3021,16 @@ def _needs_contextual_tool_route(text: str, selected_names: list[str]) -> bool:
     # local knowledge is not silently omitted from a multi-source request.
     if _is_multi_source_followup(text):
         return True
+    # Generic lookup and Skill hints can be selected for capitalized short
+    # replies. They must not replace the task the user explicitly continues.
+    if len(text.split()) <= 10 and re.fullmatch(
+        r"(?:please\s+)?(?:go\s+ahead|proceed|continue|resume|finish|complete|"
+        r"do\s+(?:it|that|so))"
+        r"(?:\s+(?:with|it|that|this|the|your|our|previous|same|proposed|"
+        r"implementation|plan|task|work|changes|fixes|from|where|you|left|off))*",
+        normalized,
+    ):
+        return True
     # Generic execution wording can select only a workspace location and shell
     # hint before recent context is considered. Those are not evidence for
     # resolving "run them", so let the preceding diagnostic turn supply its
@@ -3652,6 +3708,18 @@ def _explicit_retrieval_tools(
     )
     web_search_disabled = search_disabled or prohibits_web_search(user_message)
     required: list[str] = []
+    if "read_file" in available_tools and explicit_local_file_read_request(user_message):
+        required.append("read_file")
+    if (
+        "read_skill" in available_tools
+        and not prohibits_skill_read(user_message)
+        and has_nonnegated_action(
+            user_message,
+            r"\b(?:use|using|apply|follow)\b.{0,80}"
+            r"\b(?:skills?|installed guidance)\b",
+        )
+    ):
+        required.append("read_skill")
     if (
         not search_disabled
         and "query_knowledge" in available_tools
@@ -3735,6 +3803,7 @@ def _promises_unprovided_code(content: str) -> bool:
 
 _REVIEW_SCOPE_TOOLS = {
     "read_file",
+    "read_skill",
     "list_dir",
     "grep",
     "workspace_info",
@@ -3802,6 +3871,8 @@ class Agent:
         self.model = model
         self.model_info = model_info or ModelInfo("ollama", model, model)
         self.tools = {t.name: t for t in tools}
+        self.skill_reader: Any = None
+        self.installed_skills_available: bool | None = None
         # Chat clients may persistently hide selected retrieval tools. Keep
         # the canonical registry intact for aliases and diagnostics, but never
         # expose or execute a disabled tool in a turn.
@@ -3815,6 +3886,8 @@ class Agent:
         self.max_code_repairs = max(0, min(3, max_code_repairs))
         self.tool_selector = tool_selector
         self.ollama_options = dict(ollama_options or {})
+        self._last_request_options: dict[str, Any] = {}
+        self._last_request_model: tuple[str, str] | None = None
         self.ollama_think = ollama_think
         self.ollama_code_options = dict(ollama_code_options or {})
         self.ollama_code_think = ollama_code_think
@@ -3824,6 +3897,7 @@ class Agent:
         self.web_research_budget = (web_research_budget or WebResearchBudget()).bounded()
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         self._restored_unfinished_task = ""
+        self._workspace_task_goal = ""
         self._restored_source_use_note = ""
         self._answer_sources = AnswerSourceIndex()
         self._restored_research_receipts = ""
@@ -3832,6 +3906,7 @@ class Agent:
         self.last_web_research_state: AgenticSearchState | None = None
         self.last_turn_budget: dict[str, Any] = {}
         self.last_turn_capabilities: dict[str, Any] = {}
+        self.last_request_usage: tuple[int, int] | None = None
         self.injected_instruction_paths: tuple[str, ...] = ()
         self.injected_instructions_truncated = False
         self.detected_instruction_paths: tuple[str, ...] = ()
@@ -3909,7 +3984,9 @@ class Agent:
         """Restore saved dialogue while keeping this runtime's system prompt."""
         self.messages = [m for m in self.messages if m.get("role") == "system"][:1]
         self._restored_unfinished_task = ""
+        self._workspace_task_goal = ""
         self._restored_source_use_note = prior_answer_source_note(turns)
+        self.last_request_usage = None
         self._answer_sources = AnswerSourceIndex()
         self._answer_sources.remember(turns)
         self._restored_research_receipts = ""
@@ -4004,8 +4081,25 @@ class Agent:
             self._restored_research_receipts = recovery_receipts(synthetic, len(synthetic) - 1)
 
     def compact_now(self) -> None:
-        """Compact stale dialogue immediately using the configured context budget."""
-        self._compact_history([], force=True)
+        """Compact dialogue using this model's most recent request budget."""
+        options = self._last_request_options if self._last_request_model == (
+            self.model_info.backend, self.model_info.model_id,
+        ) else None
+        self._compact_history([], force=True, ollama_options=options)
+
+    @property
+    def request_context_window(self) -> int | None:
+        """The most recent request's allocation, scoped to its provider/model."""
+        discovered = self.model_info.capabilities.context_window
+        if self.model_info.backend != "ollama":
+            return discovered
+        options = self._last_request_options if self._last_request_model == (
+            self.model_info.backend, self.model_info.model_id,
+        ) else self.ollama_options
+        allocated = options.get("num_ctx")
+        if not isinstance(allocated, int) or allocated <= 0:
+            return None
+        return min(allocated, discovered) if discovered else allocated
 
     def _compact_history(
         self,
@@ -4036,10 +4130,11 @@ class Agent:
             if backend == "ollama"
             else min(16_384, max(4_096, num_ctx // 8))
         )
-        # Source code, tool schemas, and chat-template tokens routinely use
-        # substantially fewer than four characters per token.  A two-character
-        # estimate deliberately leaves output headroom instead of relying on
-        # Ollama to silently discard old messages at the context boundary.
+        # Source code and tool schemas get a conservative two-character
+        # estimate on Ollama. Natural-language system instructions get three:
+        # counting that prose like dense code can exhaust the estimated budget
+        # before any dialogue and erase the objective of a short continuation.
+        # These remain estimates, with the output reserve providing headroom.
         chars_per_token = 2 if backend == "ollama" else 3
         input_budget = max(
             6_000,
@@ -4049,7 +4144,7 @@ class Agent:
         budget_prompt = system_prompt_for_budget
         if budget_prompt is None:
             budget_prompt = str(fixed.get("content", ""))
-        used = len(budget_prompt) + len(str(tool_schemas))
+        used = (len(budget_prompt) * chars_per_token + 2) // 3 + len(str(tool_schemas))
         # Reserve dialogue space before admitting large complete tool exchanges.
         # Otherwise one retained exchange can consume all recap headroom and
         # silently erase the earlier request that a short follow-up refers to.
@@ -4167,6 +4262,7 @@ class Agent:
         turn_scope: TurnScope = TurnScope.STANDARD,
     ):
         """Generator of AgentEvent — clients iterate and render."""
+        self.last_request_usage = None
         source_use_note = self._restored_source_use_note or prior_answer_source_note(self.messages)
         previous_user = next(
             (
@@ -4191,6 +4287,7 @@ class Agent:
             yield AgentEvent("done", {"turn_capabilities": self.last_turn_capabilities})
             return
         continuation_note = ""
+        approved_implementation = False
         if self._restored_unfinished_task and re.match(
             r"(?i)^\s*(?:please\s+)?(?:continue|resume|pick\s+up|finish)\b",
             user_message,
@@ -4217,6 +4314,12 @@ class Agent:
         unavailable_reasons.update(
             {name: "disabled in settings" for name in self.disabled_tool_names}
         )
+        if self.installed_skills_available is False:
+            available_tools.pop("read_skill", None)
+            unavailable_reasons["read_skill"] = "no enabled installed Skills"
+        if getattr(self.user_input_broker, "available", True) is False:
+            available_tools.pop("request_user_input", None)
+            unavailable_reasons["request_user_input"] = "client has no interactive input handler"
         workspace = getattr(self, "workspace", None)
         if workspace is not None and not workspace.write_enabled:
             for name in ("write_file", "edit_file", "git_commit"):
@@ -4264,15 +4367,10 @@ class Agent:
                 continuation_mutation = bool(
                     re.search(
                         r"(?i)\b(?:continue|resume|proceed|finish|finali[sz]e|complete|"
-                        r"clean\s*up)\b",
+                        r"clean\s*up|go\s+ahead|do\s+(?:it|that|so))\b",
                         user_message,
                     )
                 )
-                if continuation_mutation:
-                    # The user is continuing an already-authorized workspace task. Inherit
-                    # normal edit/execution capabilities from that task, but never infer Git
-                    # mutation from a vague continuation.
-                    safe_context_tools.update({"write_file", "edit_file", "run_shell"})
                 prior_messages = [
                     previous
                     for previous in reversed(self.messages[:-1])
@@ -4286,12 +4384,19 @@ class Agent:
                         index
                         for index, previous in enumerate(prior_messages)
                         if previous.get("role") == "user"
+                        and not _needs_contextual_tool_route(
+                            str(previous.get("content", "")), []
+                        )
                     ),
                     None,
                 )
                 if nearest_user is not None:
                     prior_messages.insert(0, prior_messages.pop(nearest_user))
                 for previous in prior_messages:
+                    if previous.get("role") == "user" and _needs_contextual_tool_route(
+                        str(previous.get("content", "")), []
+                    ):
+                        continue
                     inherited = self.tool_selector(
                         str(previous.get("content", "")), available_tools
                     )
@@ -4302,13 +4407,27 @@ class Agent:
                         # workspace or retrieval hints found in the same prose.
                         selected_names = ["storage_usage"]
                     else:
-                        inherited_names = [name for name in inherited if name in safe_context_tools]
+                        inherited_names = [
+                            name for name in inherited
+                            if name in safe_context_tools or (
+                                continuation_mutation
+                                and previous.get("role") == "user"
+                                and name in {"write_file", "edit_file", "run_shell"}
+                            )
+                        ]
                         selected_names = (
                             list(dict.fromkeys([*selected_names, *inherited_names]))
                             if multi_source_followup
                             else inherited_names
                         )
                     if selected_names:
+                        approved_implementation = (
+                            previous.get("role") == "user"
+                            and bool({"edit_file", "write_file"} & set(selected_names))
+                            and has_nonnegated_action(
+                                user_message, r"\b(?:go\s+ahead|proceed|do\s+(?:it|that))\b"
+                            )
+                        )
                         break
             previous_assistant = next(
                 (
@@ -4440,6 +4559,8 @@ class Agent:
             }
         if prohibits_web_search(user_message):
             selected_tools.pop("web_search", None)
+        if prohibits_skill_read(user_message):
+            selected_tools.pop("read_skill", None)
         if explicitly_disallows_tools(user_message):
             # Follow-up inheritance and mandatory-retrieval hints must not
             # reinstate schemas after an explicit user prohibition.
@@ -4459,18 +4580,25 @@ class Agent:
             )
         )
         used_tools: set[str] = set()
-        used_tool_calls: set[str] = set()
+        used_tool_calls: dict[str, str] = {}
+        read_execution_keys: dict[str, str] = {}
         failed_tool_calls: set[str] = set()
+        lookup_failure_types: dict[str, str] = {}
         resolved_control_tools: set[str] = set()
         resolved_host_preflights: set[str] = set()
         search_queries_this_turn: list[str] = []
         web_stop_instruction_sent = False
         empty_response_retried = False
         code_continuations = 0
+        workspace_output_retried = False
         code_repair_retried = False
         code_validation_repairs = 0
         tool_parser_retried = False
         tool_recovery_attempted = False
+        structured_action_protocol = False
+        planning_request = False
+        workspace_planning_attempted = False
+        response_callable_names: set[str] = set()
         failed_action_signatures: set[str] = set()
         failed_action_counts: dict[str, int] = {}
         retired_tools: set[str] = set()
@@ -4483,6 +4611,7 @@ class Agent:
         self.active_turn_governor = governor
         self.last_turn_budget = governor.snapshot().to_dict()
         gpu_fallback_retried = False
+        workspace_transport_retried = False
         retrieval_requirement_retries: set[str] = set()
         source_reference_retried = False
         capability_claim_retried = False
@@ -4491,6 +4620,32 @@ class Agent:
         continued_content: list[str] = []
         request_options = dict(self.ollama_options)
         code_request = _code_work_request(user_message)
+        request_objective = user_message
+        if _needs_contextual_tool_route(user_message, []):
+            request_objective = self._workspace_task_goal or next(
+                (str(message.get("content", "")) for message in reversed(self.messages[:-1])
+                 if message.get("role") == "user"
+                 and not _needs_contextual_tool_route(str(message.get("content", "")), [])),
+                "",
+            )
+            code_request = code_request or _code_work_request(request_objective)
+        else:
+            self._workspace_task_goal = ""
+        execution_state = (
+            WorkspaceExecution(workspace_root=str(getattr(workspace, "root", "")))
+            if code_request and len(request_objective) >= 600
+            and workspace is not None and workspace.write_enabled
+            and {"write_file", "edit_file"}.intersection(selected_tools)
+            and "run_shell" in selected_tools and turn_scope == TurnScope.STANDARD
+            and (approved_implementation or not re.search(
+                r"(?i)\b(?:do\s+not|don't|never|without|no)\s+"
+                r"(?:run(?:ning)?|execut(?:e|ing)|shell|commands?|tests?)\b",
+                request_objective,
+            ))
+            else None
+        )
+        if execution_state is not None and len(request_objective) <= 12_000:
+            self._workspace_task_goal = request_objective
         code_answer_expected = (
             validate_code_answer
             and quote_limit is None
@@ -4505,6 +4660,8 @@ class Agent:
                 request_options.setdefault("temperature", 0.2)
                 request_options.setdefault("top_p", 0.9)
                 request_options.setdefault("presence_penalty", 0.0)
+        self._last_request_options = dict(request_options)
+        self._last_request_model = (self.model_info.backend, self.model_info.model_id)
         request_think = (
             self.ollama_code_think
             if code_request and self.ollama_code_think is not None
@@ -4519,7 +4676,8 @@ class Agent:
         self.last_web_research_state = research
 
         def active_schemas() -> list[dict[str, Any]]:
-            if tools_disabled_for_turn or not self.model_info.capabilities.supports_tools:
+            if (tools_disabled_for_turn or planning_request
+                    or not self.model_info.capabilities.supports_tools):
                 return []
             schemas: list[dict[str, Any]] = []
             for name, tool in selected_tools.items():
@@ -4542,7 +4700,15 @@ class Agent:
                 ):
                     continue
                 schemas.append(tool.schema())
+            if structured_action_protocol and execution_state is not None:
+                schemas = execution_state.recovery_schemas(schemas)
             return schemas
+
+        def structured_recovery_supported() -> bool:
+            supports = getattr(self.ollama, "supports_structured_tool_recovery", None)
+            return bool(self.model_info.backend == "ollama" and callable(supports)
+                        and callable(getattr(self.ollama, "chat_structured_action", None))
+                        and supports(self.model, active_schemas()))
 
         def capability_snapshot() -> TurnCapabilities:
             callable_names = {item["function"]["name"] for item in active_schemas()}
@@ -4585,10 +4751,14 @@ class Agent:
                     reason = "web-fetch budget exhausted"
                 if reason is None and name in WEB_RESEARCH_TOOLS and research.web_activity_stopped:
                     reason = "web activity stopped"
+                if reason is None and structured_action_protocol and name in selected_tools:
+                    reason = ("temporary execution-plan response" if planning_request else
+                              "temporarily deferred during constrained project exploration")
                 unavailable[name] = reason or "turn routing"
 
             hard_constraints = [
-                "Use only supplied schemas; never invent tool-call markup",
+                "Use only supplied tool names and argument schemas; follow the provider's "
+                "function-call format, without Markdown fences",
                 "Permissions never override workspace, transport, command-safety, or "
                 "destructive-action boundaries",
                 "Never stage, commit, stash, reset, clean, or revert user-owned changes "
@@ -4625,7 +4795,9 @@ class Agent:
                 provider_backend=self.model_info.backend,
                 provider_model=self.model_info.model_id,
                 provider_supports_tools=self.model_info.capabilities.supports_tools,
-                provider_context_window=self.model_info.capabilities.context_window,
+                provider_context_window=(
+                    self.request_context_window or self.model_info.capabilities.context_window
+                ),
                 provider_effort_levels=self.model_info.capabilities.effort_levels,
                 injected_instructions=self.injected_instruction_paths,
                 instructions_truncated=self.injected_instructions_truncated,
@@ -4642,6 +4814,13 @@ class Agent:
 
         def model_messages() -> list[dict[str, Any]]:
             snapshot = capability_snapshot()
+            workspace_execution = code_request and bool(
+                {"write_file", "edit_file"}.intersection(selected_tools)
+            ) and not _needs_full_product_context(user_message)
+            request_prompt = select_request_prompt(
+                self.messages[0]["content"], snapshot.callable_tools,
+                workspace_execution=workspace_execution,
+            )
             dialogue = [*self.messages[1:]]
             if continuation_note and dialogue and dialogue[-1].get("role") == "user":
                 dialogue[-1] = {
@@ -4669,7 +4848,20 @@ class Agent:
                     {"role": "system", "content": compact_prompt},
                     *dialogue,
                 ]
-            context = "\n\n" + snapshot.render_for_model()
+            context = "\n\n" + (
+                snapshot.render_execution_for_model() if workspace_execution
+                else snapshot.render_for_model()
+            )
+            if approved_implementation and {"edit_file", "write_file"}.intersection(
+                snapshot.callable_tools
+            ):
+                context += (
+                    "\nThe latest user approval asks you to implement the preceding plan. "
+                    "An earlier request to review without editing yet was a temporary planning "
+                    "step; act on this approval with the supplied workspace tools and validate "
+                    "the changes, instead of repeating the plan. Retain the user's other "
+                    "constraints and all current permission and workspace boundaries."
+                )
             if "web_search" in selected_tools:
                 context += (
                     "\nWhen the user asks to find or look something up, that is already a "
@@ -4713,8 +4905,47 @@ class Agent:
                     "follow-ups and possible pronoun typos against those commands; ask only "
                     "if the intended action remains ambiguous. All current safety checks apply."
                 )
+            if execution_state is not None:
+                context += "\n\n" + execution_state.render()
+                if self._workspace_task_goal and not any(
+                    m.get("role") == "user"
+                    and self._workspace_task_goal in str(m.get("content", ""))
+                    for m in dialogue
+                ):
+                    context += (
+                        "\nOriginal user objective retained for this continuation; the latest "
+                        "user corrections and current permissions take precedence:\n"
+                        + self._workspace_task_goal
+                    )
+                window = self.request_context_window
+                if window:
+                    output_reserve = request_options.get("num_predict", 2048)
+                    if not isinstance(output_reserve, int) or output_reserve <= 0:
+                        output_reserve = 2048
+                    fixed_tokens = (
+                        len(request_prompt + context) // 3
+                        + len(json.dumps(active_schemas())) // 2 + 500
+                    )
+                    limit = max(2000, (window - output_reserve - fixed_tokens) * 2)
+                    dialogue, omitted = bound_working_dialogue(dialogue, limit)
+                    # A duplicate guard cannot point at evidence omitted from
+                    # the request. Allow a needed fresh read without admitting
+                    # repeated writes or stateless retrieval loops.
+                    for omitted_message in omitted:
+                        metadata = omitted_message.get("metadata", {})
+                        if isinstance(metadata, dict):
+                            key = read_execution_keys.get(str(metadata.get("execution_id", "")))
+                            if key:
+                                used_tool_calls.pop(key, None)
+                                failed_tool_calls.discard(key)
+                                lookup_failure_types.pop(key, None)
+                                if omitted_message.get("role") == "tool":
+                                    governor.forget_tool_result(
+                                        str(omitted_message.get("tool_name", "")),
+                                        str(omitted_message.get("content", "")),
+                                    )
             return [
-                {**self.messages[0], "content": self.messages[0]["content"] + context},
+                {**self.messages[0], "content": request_prompt + context},
                 *dialogue,
             ]
 
@@ -4795,9 +5026,15 @@ class Agent:
                 payload["web_research"] = research.to_dict()
             return payload
 
-        def observe_runtime_usage() -> str:
+        def observe_runtime_usage(*, failed: bool = False) -> str:
+            metadata = getattr(self.ollama, "last_chat_metadata", {})
+            usage = normalize_token_usage(metadata)
+            if failed and metadata is request_metadata_before:
+                usage = None  # unchanged metadata belongs to an earlier request
+            if usage is not None:
+                self.last_request_usage = usage
             reason = governor.observe_model_usage(
-                normalize_token_usage(getattr(self.ollama, "last_chat_metadata", {}))
+                usage
             )
             self.last_turn_budget = governor.snapshot().to_dict()
             return reason
@@ -4873,7 +5110,12 @@ class Agent:
                     f"skipped execution governor: {governor.stop_reason}",
                     {"execution_governor_stopped": True, "executed": False},
                 )
-            current_callable_names = {item["function"]["name"] for item in active_schemas()}
+            # A response was generated against one schema snapshot. Phase
+            # changes caused by an earlier call in its batch apply to the next
+            # request. Live denials, retirements and budgets still take effect.
+            current_callable_names = (response_callable_names - retired_tools
+                                      - resolved_control_tools - resolved_host_preflights
+                                      - self.disabled_tool_names)
             if tool is not None and name not in current_callable_names:
                 reason = dict(capability_snapshot().unavailable_tools).get(
                     name, "not callable in this request"
@@ -5121,9 +5363,11 @@ class Agent:
                         "duplicate_call": True,
                         "duplicate_previous_failed": key in failed_tool_calls,
                         "executed": False,
+                        **({"error_type": lookup_failure_types[key]}
+                           if key in lookup_failure_types else {}),
                     },
                 )
-            used_tool_calls.add(key)
+            used_tool_calls[key] = name
 
             if call.get("parse_status") == "malformed":
                 if name in WEB_RESEARCH_TOOLS:
@@ -5200,12 +5444,16 @@ class Agent:
                 start_payload["metadata"]["web_research"] = research.to_dict()
             yield AgentEvent("tool_start", start_payload)
             executed = False
+            error_type = ""
             try:
                 validated_args = dict(args)
                 for key in ("purpose", "missing_information"):
                     if key not in tool.parameters.get("properties", {}):
                         validated_args.pop(key, None)
-                _validate_tool_arguments(validated_args, tool.parameters)
+                try:
+                    _validate_tool_arguments(validated_args, tool.parameters)
+                except ValueError as exc:
+                    raise ToolArgumentError(str(exc)) from exc
                 if turn_scope == TurnScope.INIT and name in {"write_file", "edit_file"}:
                     root = Path(getattr(self, "workdir", None) or Path.cwd()).resolve()
                     raw_path = Path(str(validated_args.get("path", ""))).expanduser()
@@ -5228,6 +5476,7 @@ class Agent:
             except PermissionDenied as e:
                 result = f"permission denied: {e}"
             except Exception as e:
+                error_type = type(e).__name__
                 result = f"tool error: {type(e).__name__}: {e}"
 
             metadata: dict[str, Any] = {}
@@ -5236,6 +5485,8 @@ class Agent:
                 metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
                 result = result.get("content", "")
             metadata.update({"execution_id": execution_id, "executed": executed})
+            if error_type:
+                metadata["error_type"] = error_type
             if name == "request_user_input" and executed:
                 # A user decision is single-use within a turn. Removing the
                 # schema after an answer prevents local models from reopening
@@ -5260,6 +5511,10 @@ class Agent:
                 if result_urls:
                     research.result_sets.append(result_urls)
             result = str(result)
+            if name == "run_shell" and (exit_match := re.match(r"exit=(-?\d+)(?:\n|$)", result)):
+                metadata["exit_code"] = int(exit_match.group(1))
+                if metadata["exit_code"] != 0:
+                    metadata["status"] = "failed"
             if name == "fetch_url":
                 result = _bounded_fetched_evidence(result, user_message)
             elif len(result) > 12000:  # keep small-model context healthy
@@ -5399,22 +5654,46 @@ class Agent:
                     "metadata": preflight_metadata,
                 }
             )
+        # Complex local work starts with the smaller declared protocol instead
+        # of paying for an observed unreliable native prelude. Simple turns and
+        # runtimes without format support keep the existing native path.
+        if execution_state is not None and structured_recovery_supported():
+            structured_action_protocol = True
         for _step in range(self.max_steps):
             streamed_this_response = False
             governor_reason = governor.begin_model_step()
             self.last_turn_budget = governor.snapshot().to_dict()
-            if governor_reason and not governor_stop_instruction_sent:
-                governor_stop_instruction_sent = True
+            if governor_reason:
                 tools_disabled_for_turn = True
-                self.messages.append(
-                    _controller_message(
-                        f"Execution governor stopped tool activity: {governor_reason}. Do not "
-                        "call another tool. Give the user a concise factual final report from "
-                        "completed results and state unfinished work honestly."
+                if execution_state is not None and execution_state.missing_completion():
+                    report = execution_state.incomplete_report(governor_reason)
+                    self.messages.append({'role': 'assistant', 'content': report})
+                    yield AgentEvent('text', {'content': report})
+                    yield AgentEvent('error', {'message': 'Workspace task remains incomplete.'})
+                    yield AgentEvent('done', finish_payload())
+                    return
+                if not governor_stop_instruction_sent:
+                    governor_stop_instruction_sent = True
+                    self.messages.append(
+                        _controller_message(
+                            f"Execution governor stopped tool activity: {governor_reason}. Do not "
+                            "call another tool. Give the user a concise factual final report from "
+                            "completed results and state unfinished work honestly."
+                        )
                     )
-                )
+            request_metadata_before = getattr(self.ollama, "last_chat_metadata", None)
+            workspace_planner = getattr(self.ollama, "chat_workspace_plan", None)
+            planning_request = bool(
+                execution_state is not None
+                and execution_state.exploration_ready and not execution_state.plan
+                and not workspace_planning_attempted and not tools_disabled_for_turn
+                and callable(workspace_planner) and structured_recovery_supported()
+            )
+            if planning_request:
+                workspace_planning_attempted = True
             try:
                 schemas = active_schemas()
+                response_callable_names = {s['function']['name'] for s in schemas}
                 request_messages = model_messages()
                 if self.capability_observer is not None:
                     try:
@@ -5428,7 +5707,21 @@ class Agent:
                 # adapters can stream public text while assembling structured
                 # calls from the same response.
                 stream_with_tools = bool(schemas) and self.model_info.backend != "ollama"
-                if callable(stream_chat) and (not schemas or stream_with_tools):
+                structured_chat = getattr(self.ollama, "chat_structured_action", None)
+                if planning_request and callable(workspace_planner):
+                    msg = workspace_planner(
+                        self.model, request_messages, options=request_options, think=request_think,
+                    )
+                elif structured_action_protocol and callable(structured_chat):
+                    msg = structured_chat(
+                        self.model, request_messages, tools=schemas,
+                        options=request_options, think=request_think,
+                        allow_finish=bool(not execution_state or execution_state.exploration_ready
+                                          or execution_state.permission_blocked or not schemas),
+                    )
+                elif (callable(stream_chat) and (not schemas or stream_with_tools)
+                      and not (execution_state is not None
+                               and execution_state.missing_completion())):
                     streamed_parts: list[str] = []
                     streamed_metadata: dict[str, Any] = {}
                     validation_language = (
@@ -5525,6 +5818,7 @@ class Agent:
                         tools=schemas,
                     )
             except Exception as e:  # surface, don't crash the session
+                observe_runtime_usage(failed=True)
                 # Ollama starts a separate runner for every option set. On a
                 # hybrid model, a CUDA worker can abort while auto-placement
                 # is evaluating a long prompt, even though the same request
@@ -5539,10 +5833,29 @@ class Agent:
                 ):
                     gpu_fallback_retried = True
                     request_options["num_gpu"] = 0
+                    # Native parsers may buffer a whole large call while the
+                    # CPU runner generates it. Declared action JSON streams
+                    # continuously and reaches a detectable output cutoff.
+                    if execution_state is not None and structured_recovery_supported():
+                        structured_action_protocol = True
                     yield AgentEvent(
                         "progress",
                         {"stage": "GPU runner failed; retrying safely on CPU"},
                     )
+                    continue
+                if (execution_state is not None and not workspace_transport_retried
+                        and not structured_action_protocol and active_schemas()
+                        and "timed out" in str(e).lower() and structured_recovery_supported()):
+                    workspace_transport_retried = True
+                    structured_action_protocol = True
+                    self.messages.append(_controller_message(
+                        "The native request timed out without a complete call; no pending call "
+                        "executed. Use the constrained response schema for one smaller action. "
+                        "Completed edits are preserved; do not repeat them."
+                    ))
+                    yield AgentEvent("retry", {
+                        "reason": "incomplete native request; smaller action",
+                    })
                     continue
                 if (
                     not tool_parser_retried
@@ -5550,19 +5863,44 @@ class Agent:
                     and _recoverable_tool_parser_error(e)
                 ):
                     tool_parser_retried = True
-                    tools_disabled_for_turn = True
+                    structured_action_protocol = structured_recovery_supported()
+                    tools_disabled_for_turn = not structured_action_protocol
                     self.messages.append(
                         _controller_message(
+                            "The native parser rejected the previous call; no call executed. "
+                            "Choose a fresh action using the constrained response schema."
+                            if structured_action_protocol else
                             "The previous tool-call syntax was invalid. Do not call tools again "
                             "this turn. Answer the user's request directly and completely."
                         )
                     )
+                    continue
+                if planning_request:
+                    planning_request = False
+                    self.messages.append(_controller_message(
+                        'The optional execution plan could not be produced. Continue the '
+                        'original task with available tools; inspect, implement, validate '
+                        'and report actual outcomes. Do not repeat the plan request.'
+                    ))
+                    yield AgentEvent('retry', {'reason': 'optional execution plan unavailable'})
                     continue
                 yield AgentEvent("error", {"message": _runtime_error_message(e)})
                 return
 
             observe_runtime_usage()
             self.messages.append(msg)
+            if planning_request and execution_state is not None:
+                execution_state.set_plan(msg['workspace_plan'])
+                structured_action_protocol = True
+                msg.pop('workspace_plan')
+                msg['content'] = 'Execution plan:\n' + '\n'.join(
+                    f"{i + 1}. {step['goal']}" for i, step in enumerate(execution_state.plan)
+                )
+                yield AgentEvent('text', {'content': msg['content']})
+                planning_request = False
+                continue
+            if execution_state is not None and msg.pop('completed_step', False) is True:
+                execution_state.complete_step()
             content = msg.get("content", "")
             raw_tool_calls = msg.get("tool_calls")
             tool_calls: list[dict[str, Any]] = (
@@ -5571,6 +5909,7 @@ class Agent:
                 else _parse_text_tool_calls(
                     content,
                     set(self.tools),
+                    recover_json=bool(active_schemas()) and not streamed_this_response,
                 )
             )
 
@@ -5600,11 +5939,19 @@ class Agent:
                     )
                     return
                 tool_recovery_attempted = True
+                structured_action_protocol = structured_recovery_supported()
                 self.messages.append(
                     _controller_message(
+                        "Use the declared constrained action response format for this retry. "
+                        "Select a supplied tool with its arguments, or answer if blocked. "
+                        "Do not print Markdown. This is the final protocol recovery attempt."
+                        if structured_action_protocol else
                         "Your tool call was invalid or unavailable. Use a native structured call "
-                        "matching a supplied schema, or explain the limitation. Do not print tool "
-                        "markup or claim execution. This is the final protocol recovery attempt."
+                        "in the provider's function-call format supplied with the tool schemas, "
+                        "using an exact "
+                        "tool name and its declared argument fields. Do not wrap a call in "
+                        "prose, Markdown, or code fences. Do not claim execution. This is the "
+                        "final protocol recovery attempt; explain the limitation if unable."
                     )
                 )
                 yield AgentEvent("retry", {"reason": "invalid or unavailable tool call"})
@@ -5632,6 +5979,37 @@ class Agent:
                     )
 
             if not tool_calls:
+                if (
+                    code_request
+                    and {"write_file", "edit_file"}.intersection(
+                        item["function"]["name"] for item in active_schemas()
+                    )
+                    and _stopped_at_output_limit(
+                        getattr(self.ollama, "last_chat_metadata", None)
+                    )
+                ):
+                    # A provider may discard an unfinished native call entirely.
+                    # Its arguments are not visible here, so prose continuation
+                    # cannot recover the edit. Request a fresh smaller call.
+                    if workspace_output_retried:
+                        yield AgentEvent("error", {"message": (
+                            "The model repeatedly exhausted its output budget before a "
+                            "complete workspace action. Completed edits are preserved; "
+                            "continue with smaller changes or select a more capable model."
+                        )})
+                        return
+                    workspace_output_retried = True
+                    if structured_recovery_supported():
+                        structured_action_protocol = True
+                    self.messages.append(_controller_message(
+                        "The response hit the output limit without a complete tool call. "
+                        "No edit from that response executed. Make one small coherent file "
+                        "change per call, then proceed to the remaining work. Split large "
+                        "files/tests into smaller edits. Use the supplied function-call "
+                        "format; do not continue truncated arguments or print code as an answer."
+                    ))
+                    yield AgentEvent("retry", {"reason": "workspace action exceeded output budget"})
+                    continue
                 if not content.strip() and not empty_response_retried:
                     completion_metadata = getattr(self.ollama, "last_chat_metadata", None)
                     if _stopped_at_output_limit(completion_metadata):
@@ -5778,6 +6156,40 @@ class Agent:
                     )
                     continue
                 combined_content = "".join([*continued_content, content])
+                if execution_state is not None:
+                    execution_state.finish_plan()
+                if (
+                    execution_state is not None and not tools_disabled_for_turn
+                    and {"write_file", "edit_file"}.intersection(
+                        n for n in selected_tools if self.gate.policies.get(n) != 'deny'
+                    )
+                    and 'run_shell' in selected_tools
+                    and self.gate.policies.get('run_shell') != 'deny'
+                    and (missing_work := execution_state.missing_completion())
+                ):
+                    if execution_state.completion_retries:
+                        yield AgentEvent("error", {"message": (
+                            "Workspace task remains incomplete: " + missing_work
+                            + " Completed edits are preserved."
+                        )})
+                        return
+                    execution_state.completion_retries += 1
+                    # A tool-free implementation answer is also a protocol
+                    # failure: a fresh declared action can recover models that
+                    # describe commands instead of issuing native calls.
+                    if structured_recovery_supported():
+                        structured_action_protocol = True
+                    if not streamed_any and self.messages[-1] is msg:
+                        self.messages.pop()
+                    self.messages.append(_controller_message(
+                        missing_work + " Keep the entire user objective and its constraints. "
+                        "Use the existing project commands and supplied tools, then report "
+                        "actual outcomes. This is the final completion recovery attempt."
+                    ))
+                    yield AgentEvent("retry", {
+                        "reason": "workspace implementation or validation missing",
+                    })
+                    continue
                 false_claim = false_unavailable_claim(combined_content)
                 if false_claim and not streamed_any:
                     if capability_claim_retried:
@@ -5899,6 +6311,13 @@ class Agent:
                 if streamed_any:
                     text_payload["metadata"] = {"streamed": True}
                 yield AgentEvent("text", text_payload)
+                if execution_state is not None and (
+                    unfinished := execution_state.missing_completion()
+                ):
+                    yield AgentEvent("error", {"message": (
+                        "Workspace task remains incomplete: " + unfinished
+                        + " Completed edits and tool results are preserved."
+                    )})
                 if _stopped_at_output_limit(completion_metadata):
                     yield AgentEvent(
                         "error",
@@ -5915,6 +6334,9 @@ class Agent:
 
             for call in tool_calls:
                 name, args, tool, result, metadata = yield from execute_tool_call(call)
+                if name in {"read_file", "list_dir", "grep", "workspace_info",
+                            "git_status", "git_diff"} and metadata.get("execution_id"):
+                    read_execution_keys[str(metadata["execution_id"])] = _tool_call_key(name, args)
                 if name == "web_search":
                     providers = metadata.get("successful_providers")
                     if isinstance(providers, list):
@@ -5926,7 +6348,9 @@ class Agent:
                 receipt = research_receipt(name, args, metadata, result)
                 if receipt is not None and len(self._turn_research_receipts) < 8:
                     self._turn_research_receipts.append(receipt)
-                governor_reason = governor.observe_tool_result(name, result, metadata)
+                governor_reason = governor.observe_tool_result(
+                    name, result, metadata, progress_group=_step,
+                )
                 self.last_turn_budget = governor.snapshot().to_dict()
                 if governor_reason:
                     tools_disabled_for_turn = True
@@ -5938,8 +6362,10 @@ class Agent:
                         "was skipped, but the tool remains available. Use the earlier result or "
                         "change the arguments to request different information."
                     )
-                elif name not in WEB_RESEARCH_TOOLS and result.startswith(
-                    ("tool error:", "permission denied:", "error:", "blocked ", "skipped ")
+                elif name not in WEB_RESEARCH_TOOLS and (
+                    metadata.get("status") == "failed" or result.startswith(
+                        ("tool error:", "permission denied:", "error:", "blocked ", "skipped ")
+                    )
                 ):
                     failed_tool_calls.add(_tool_call_key(name, args))
                     metadata = {
@@ -5949,10 +6375,36 @@ class Agent:
                     failure_signature = (
                         f"{_tool_call_key(name, args)}:" + " ".join(result.casefold().split())[:500]
                     )
-                    failed_action_counts[name] = failed_action_counts.get(name, 0) + 1
                     repeated_failure = failure_signature in failed_action_signatures
                     failed_action_signatures.add(failure_signature)
-                    if repeated_failure or failed_action_counts[name] >= 2:
+                    recoverable_lookup = (
+                        name in {"read_file", "list_dir", "grep"}
+                        and metadata.get("error_type") in {
+                            "FileNotFoundError", "NotADirectoryError", "IsADirectoryError",
+                        }
+                    )
+                    recoverable_command = (
+                        name == "run_shell" and metadata.get("executed") is True
+                        and isinstance(metadata.get("exit_code"), int)
+                    )
+                    recoverable_path = (name == 'run_shell'
+                                        and metadata.get('error_type') == 'WorkspacePathError')
+                    recoverable_edit = (name == 'edit_file'
+                                        and metadata.get('error_type') == 'EditConflict')
+                    recoverable_arguments = metadata.get('error_type') == 'ToolArgumentError'
+                    recoverable_failure = (recoverable_lookup or recoverable_command
+                                           or recoverable_path or recoverable_edit
+                                           or recoverable_arguments)
+                    if not recoverable_failure:
+                        failed_action_counts[name] = failed_action_counts.get(name, 0) + 1
+                    if (recoverable_lookup or recoverable_path or recoverable_edit
+                            or recoverable_arguments):
+                        lookup_failure_types[_tool_call_key(name, args)] = str(
+                            metadata["error_type"]
+                        )
+                    if not recoverable_failure and (
+                        repeated_failure or failed_action_counts.get(name, 0) >= 2
+                    ):
                         retired_tools.add(name)
                         metadata["bounded_recovery"] = True
                         recovery_instruction = (
@@ -5962,12 +6414,86 @@ class Agent:
                             "concise factual final report from completed results."
                         )
                         retired_reason = f"retired repeatedly unsuccessful tool {name}"
+                    elif recoverable_lookup:
+                        recovery_instruction = (
+                            f"{name} could not resolve that file or directory. Discover the "
+                            "actual workspace-relative paths with list_dir or grep before "
+                            "retrying. Do not guess another path or repeat the failed call. "
+                            "File tools remain available; all workspace restrictions still apply."
+                        )
+                    elif recoverable_command:
+                        recovery_instruction = (
+                            f"The command exited with code {metadata['exit_code']}. This is "
+                            "failed validation. Inspect the diagnostics, use the project's "
+                            "documented commands and available executables, and repair the "
+                            "cause before rerunning. Do not claim the check passed."
+                        )
+                    elif recoverable_path:
+                        recovery_instruction = (
+                            'The command was not executed because a path leaves the workspace. '
+                            'Use actual workspace-relative paths, including temporary test '
+                            'files. Shell remains available within the same jail and permissions; '
+                            'do not retry the outside path or bypass the restriction.'
+                        )
+                    elif recoverable_edit:
+                        recovery_instruction = (
+                            'The exact edit anchor is absent or ambiguous; no edit occurred. '
+                            'Read current file contents and choose a smaller unique anchor. '
+                            'File tools remain available within existing permissions.'
+                        )
+                        for key, called_name in list(used_tool_calls.items()):
+                            if called_name != 'read_file':
+                                continue
+                            read_args = json.loads(key.split(':', 1)[1])
+                            same_path = read_args.get('path') == args.get('path')
+                            if execution_state is not None:
+                                same_path = (
+                                    execution_state.relative_path(str(read_args.get('path')))
+                                    == execution_state.relative_path(str(args.get('path')))
+                                )
+                            if same_path:
+                                used_tool_calls.pop(key, None)
+                                for message in self.messages:
+                                    mid = str(message.get('metadata', {}).get('execution_id', ''))
+                                    if read_execution_keys.get(mid) == key:
+                                        governor.forget_tool_result(
+                                            'read_file', str(message.get('content', '')),
+                                        )
+                    elif recoverable_arguments:
+                        recovery_instruction = (
+                            'Argument validation rejected the call before permission or execution. '
+                            'Use the declared required fields and types, correct the arguments, '
+                            'and keep protocol controls outside tool arguments. The tool remains '
+                            'available within the same permissions and execution budget.'
+                        )
                     else:
                         recovery_instruction = (
                             f"{name} did not execute successfully. Do not repeat equivalent calls "
                             "or modify user-owned Git changes to bypass a restriction. Choose a "
                             "permitted alternative or explain the specific limitation."
                         )
+                edit_metadata = metadata.get("edit")
+                if (
+                    name in {"edit_file", "write_file", "run_shell", "git_commit"}
+                    and metadata.get("executed") is True
+                    and (name == "run_shell" or metadata.get("status") != "failed")
+                    and (not isinstance(edit_metadata, dict)
+                         or edit_metadata.get("changed") is not False)
+                ):
+                    # Local reads and validation depend on workspace state.
+                    # Edits (and even failed commands) can change it. Preserve
+                    # the current call's guard while permitting fresh reads and
+                    # a test-command rerun after an intervening mutation.
+                    current_key = _tool_call_key(name, args)
+                    dependent_tools = {
+                        "read_file", "list_dir", "grep", "workspace_info", "git_status",
+                        "git_diff", "run_shell", "edit_file", "write_file", "git_commit",
+                    }
+                    for key, called_name in list(used_tool_calls.items()):
+                        if called_name in dependent_tools and key != current_key:
+                            used_tool_calls.pop(key)
+                            failed_tool_calls.discard(key)
+                            lookup_failure_types.pop(key, None)
                 if tool is not None and tool.return_direct:
                     self.messages.append({"role": "assistant", "content": result})
                     direct_payload: dict[str, Any] = {"content": result}
@@ -5976,6 +6502,8 @@ class Agent:
                     yield AgentEvent("text", direct_payload)
                     yield AgentEvent("done", finish_payload())
                     return
+                if execution_state is not None:
+                    execution_state.observe(name, args, result, metadata)
                 yield AgentEvent(
                     "tool_result",
                     {"tool": name, "args": args, "result": result, "metadata": metadata},
@@ -6014,6 +6542,14 @@ class Agent:
                     # executing calls beyond the non-expandable turn budget.
                     break
 
+        if execution_state is not None and execution_state.missing_completion():
+            report = execution_state.incomplete_report(
+                f'The {self.max_steps}-step execution limit was reached')
+            self.messages.append({'role': 'assistant', 'content': report})
+            yield AgentEvent('text', {'content': report})
+            yield AgentEvent('error', {'message': 'Workspace task remains incomplete.'})
+            yield AgentEvent('done', finish_payload())
+            return
         if research.web_actions_used:
             research.exhausted_reason = research.exhausted_reason or "max_agent_steps"
             research.add_gap(
@@ -6053,6 +6589,7 @@ class Agent:
                 yield AgentEvent("error", {"message": _runtime_error_message(error)})
                 return
         elif used_tools:
+            tools_disabled_for_turn = True
             self.messages.append(
                 _controller_message(
                     f"The {self.max_steps}-step tool safety limit has been reached. Do not call "
@@ -6066,7 +6603,10 @@ class Agent:
                     synthesis_kwargs["options"] = request_options
                 if request_think is not None:
                     synthesis_kwargs["think"] = request_think
-                final_msg = self.ollama.chat(self.model, self.messages, **synthesis_kwargs)
+                structured_synthesis = getattr(self.ollama, "chat_structured_action", None)
+                synthesis_chat = (structured_synthesis if structured_action_protocol
+                                  and callable(structured_synthesis) else self.ollama.chat)
+                final_msg = synthesis_chat(self.model, model_messages(), **synthesis_kwargs)
                 observe_runtime_usage()
                 self.messages.append(final_msg)
                 final_content = str(final_msg.get("content", "")).strip()
@@ -6077,6 +6617,13 @@ class Agent:
                     final_msg["content"] = final_content
                     record_finish(final_content, best_effort=True)
                     yield AgentEvent("text", {"content": final_content})
+                    if execution_state is not None and (
+                        unfinished := execution_state.missing_completion()
+                    ):
+                        yield AgentEvent("error", {"message": (
+                            "Workspace task remains incomplete: " + unfinished
+                            + " Completed edits and tool results are preserved."
+                        )})
                     yield AgentEvent("done", finish_payload())
                     return
             except Exception as error:

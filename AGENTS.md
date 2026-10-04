@@ -96,7 +96,14 @@ Top-level commands currently include:
 - `klaude`: interactive agent session in the current directory; `klaude chat`
   remains a compatibility alias. `klaude chat --no-tui` uses a simple
   line-oriented mode for terminal-native text selection/copying.
-- `klaude ask`: one-shot question with tools enabled.
+- `klaude ask`: one-shot question with tools enabled. Model/runtime failure
+  returns exit code 1 after saving available session records and releasing
+  resources; a completed answer returns 0. A request to read a
+  named local file such as `challenge1.md` exposes `read_file` even when the
+  prompt does not say "file". A request to follow that file's instructions
+  also exposes permission-gated workspace tools for the same turn; an explicit
+  read-only constraint keeps write and shell tools out. An explicit named-file
+  read gets one bounded retry if the model answers without reading it.
 - `klaude learn`: ingest a URL or local file into a knowledge library.
 - `klaude crawl`: same-domain documentation crawl into a refreshable library.
 - `klaude docs add/update/list`: manage refreshable docs sources.
@@ -1495,6 +1502,12 @@ tuning. Host-level Ollama daemon settings such as model storage path, keepalive,
 parallelism, and daemon context length belong to the Ollama systemd service,
 Docker service, or whatever launcher the user chose.
 
+Ollama chat cancellation tracks the connection through HTTPX's trace extension
+before response headers arrive, so queued requests and model-loading waits can
+be cancelled without waiting for the 600-second transport deadline. Cancellation
+shuts down the owned socket and guards response attachment/cleanup by request
+identity; a cancelled request cannot reattach or clear a newer request.
+
 Cloud runtime requests are stateless: OpenAI Responses calls set `store=false`
 and surface refusal and failed-stream events instead of silently producing an
 empty reply. Streaming OpenAI and Codex requests require an explicit completed
@@ -1563,6 +1576,10 @@ plugins are not enabled. Streamed function-call fragments are validated and
 assembled locally, and complete `reasoning_details` sequences are preserved
 privately and in order for provider tool continuations without rendering private
 reasoning in the transcript.
+Malformed OpenRouter function arguments become a private, non-executable
+invalid-call marker so the agent can request one corrected native call with the
+same tools. A repeated invalid call ends with an explicit error; malformed raw
+arguments never enter model history or the public transcript.
 
 OpenRouter requests map a positive configured `num_predict` to `max_tokens`;
 unset, invalid, or Ollama-only unlimited values use a bounded 2,048-token default.
@@ -1571,6 +1588,58 @@ Credit-limit errors report the budget remedy without SDK account IDs or response
 bodies; other HTTP rejections expose their status rather than the raw body.
 
 ## Agent And Tool Routing
+
+Resource constraints such as `Use only the standard library` do not restrict
+tool schemas. Explicit named tool-only requests still fail closed for unknown
+tool identifiers. Knowledge-ingestion intent keeps actions and source targets
+within the same bounded clause; CSV imports, source-code changes, and README
+updates do not imply persistent knowledge ingestion. Implementation requests
+that also name a file for inspection retain the requested edit and
+execution tools; the named-file read shortcut cannot discard those actions.
+Explicit read-only requests retain the read-only path.
+Workspace implementation requests expose web discovery only when research,
+a URL, or current information
+is requested; relevant Skills and configured MCP matching remain available.
+Preserving current project behavior does not imply external freshness research.
+Short continuations such as `Go ahead with that plan` resolve the nearest
+substantive user objective before generic lookup hints or earlier continuation
+replies. They retain that objective's code request overrides and ordinary
+implementation tools when already selected by the objective; they never widen
+scope, disabled tools, dirty-worktree rules, or Git mutation permissions.
+The footer, per-request capability snapshot, and manual compaction use the
+most recent request's actual local context allocation, including code overrides,
+scoped to the provider/model. General configuration summaries retain the general
+request setting; switching providers/models cannot reuse an old allocation.
+When the user explicitly approves a prior plan and mutation tools are actually
+callable, request context identifies the transition from temporary review to
+implementation. It retains the user's other constraints and does not override
+plan mode or permission boundaries.
+Workspace-only model requests omit the bundled detailed web-research policy
+when no web or MCP schema is callable, retaining universal safety rules and
+the global capability inventory. The canonical saved prompt remains intact.
+Context compaction estimates natural-language system prose at three characters
+per token and Ollama dialogue/tool schemas at two, reserving code output space
+without letting the prose estimate erase a continuation's objective or plan.
+Whole-response JSON objects containing a known tool name and argument object
+are treated as a protocol failure when tools are callable and the response has
+not streamed. They never execute as text; one native-call retry is allowed,
+then an explicit failure. Embedded examples and tool-free JSON answers remain
+ordinary text.
+Line-oriented streamed answers suppress repeated progress traces once public
+text starts, so progress does not interrupt code or prose mid-line.
+Missing-file, directory-as-file, and non-directory lookup errors keep file tools
+available and instruct the model to discover actual paths before retrying.
+They do not retire the entire reader after two unrelated missing filenames.
+The no-progress governor counts unsuccessful batches by model response while
+charging every tool call against the existing hard ceiling; three unsuccessful
+responses still stop. Permission and other operational failures retain their
+bounded retirement rules.
+Nonzero local shell exits carry typed failed-status/exit-code metadata and count
+as failed validation in the governor. The model receives corrective diagnostics;
+an ordinary failing command does not retire the shell tool across repair attempts.
+Workspace mutations invalidate earlier local read/validation duplicate guards,
+permitting fresh reads and the same test command after an edit. The current
+call remains guarded, and stateless retrieval duplicate limits remain effective.
 
 The system prompt is `packages/core/src/klaude_core/prompts/system.md`.
 
@@ -1636,6 +1705,91 @@ The agent loop in `packages/core/src/klaude_core/agent.py` handles:
 - if an Ollama CUDA runner aborts while placement is automatic, retry the
   request once with `num_gpu = 0` and emit only a high-level fallback activity.
   Never override an explicit CPU-only or GPU-only runtime choice.
+
+Complex workspace execution uses `klaude_core.workspace_execution` when the
+resolved coding objective is at least 600 characters, writes and shell are
+available, and the user has not prohibited execution. Simple requests and
+read-only/plan scopes retain their direct path. The bounded state records
+observed paths, file-tool edits, typed command exits, validation revisions, and
+recent failures; assistant claims cannot establish success. A failing check or
+missing implementation/validation receives one completion recovery attempt.
+Known incomplete work still emits an error after a governor's factual final
+report or the step limit, allowing `ask` to return nonzero while preserving
+completed work without another unverified model finalization request.
+Passing a recognized check is execution evidence, not proof that every requested
+behavior was implemented. Unknown custom commands retain their exact outcomes
+without being accepted as passing project checks. A successful wrapper command
+alone cannot authorize task completion.
+
+Supported local Ollama runtimes use constrained actions for these complex turns
+from the start. Discovery allows up to four independent read actions per response.
+Once workspace mutation or shell tools are callable, the response grammar limits
+execution to one action and normalization rejects oversized batches before
+returning any calls. This prevents an appended edit/test rewrite from truncating
+the earlier action. Execution binds each tool name to its canonical argument
+schema, preventing arguments from a different tool from entering that action.
+It avoids repeating the full catalog beside those schemas. Discovery retains
+its shared field grammar. Simple native turns keep their existing behavior.
+After observed implementation/test inspection, one optional
+model-authored public plan divides remaining work into at most six steps. Actual
+file-tool changes and current passing checks gate implementation/validation step
+completion. A failed optional plan does not prevent ordinary tool execution.
+The cursor also follows actual edits to later scoped files and current passing
+checks; the model need not correctly send a protocol completion flag. A final
+answer can complete review bookkeeping only when actual edit/check prerequisites
+are met. Missing scoped edits and stale checks still block completion.
+The plan remains turn-local; it is not a durable requirements proof. Simple turns
+and other providers keep their existing native path and do not incur this call.
+
+`klaude_core.request_context` selects policy modules from the canonical prompt
+using the actual callable schemas. Workspace implementation omits unrelated
+configuration/runtime and standalone-answer detail, retaining host boundaries,
+applicable repository guidance, and enabled Skill metadata. A separate request
+projection bounds long in-turn dialogue in whole assistant/tool exchanges while
+retaining the current objective and newest exchange. Canonical session payloads
+remain intact. Omitted file results are unavailable evidence; their read guards
+and governor outcome entries are released so necessary fresh reads can execute.
+The original complex objective survives short continuations. The newest single
+exchange is never partially truncated by this projection; it can still exceed
+the estimated budget and needs an explicit smaller action.
+
+After a native protocol failure, other eligible local turns can also use this
+declared JSON action response format with reference-free tool schemas. It is separate from
+ordinary printed JSON, which is never executed. The adapter normalizes only
+responses to its explicit constrained requests; core argument validation,
+permissions, workspace restrictions, and budgets still apply. A single object
+grammar avoids observed ambiguous-union runner failures. Up to four independent
+reads can share one response; edits/checks should remain small coherent actions.
+The callable schema snapshot remains fixed while executing a response's batch,
+while live permissions, availability controls, and budgets remain effective.
+Constrained recovery
+initially offers directory/file exploration until observed implementation and
+existing test paths have been read, then restores the normal tool choices.
+Exploration's response grammar enforces observed path choices and excludes
+premature finalization until inspection or an actual permission block. This
+does not replace canonical argument validation or workspace boundaries.
+Actual callable snapshots describe these temporary restrictions. Empty installed
+Skills inventories omit `read_skill`; clients without an input handler omit
+`request_user_input`. Ollama streams require a completion marker, and partial
+calls are discarded on EOF or stream error. An unfinished workspace call at the
+output limit gets one fresh smaller-action retry, never a continuation of unseen
+arguments. Cloud Ollama and schemas containing `$ref` retain native recovery.
+Exact-edit conflicts allow a fresh target-file read and corrected unique anchor;
+wrong outside shell paths remain blocked but do not retire valid in-workspace
+validation. Duplicate failures retain their typed recovery cause. Dirty-tree,
+secret-path, command-risk, and permission restrictions never receive this retry
+exemption. All retries retain the existing governor limits.
+Canonical argument errors are typed separately from operational and permission
+failures. They do not retire an otherwise valid tool; the model must correct its
+declared fields and types, and the ordinary no-progress and hard budgets still
+bound retries. Recoverable failures do not consume the unrelated tool-retirement
+counter. Constrained argument grammars restrict fields to the declared schemas;
+individual canonical schemas remain authoritative for required fields and types.
+
+The TUI publishes normalized actual model usage after requests. A failed request
+with unavailable counts retains the last known counters with an explicit
+previous-request marker; it does not charge the earlier request again or invent
+the failed request's usage.
 
 Do not use tools for greetings, thanks, introductions, ordinary casual
 conversation, or basic identity questions. Answer identity questions directly as
@@ -1758,14 +1912,18 @@ schema subset before preflight and approval. Repeated non-web tool failures stop
 the approach; skipped duplicate calls render SKIPPED rather than RAN.
 
 Explicit requests for a subagent, delegation, an independent review, or a second
-opinion may route `delegate_task`; ordinary turns do not receive it automatically.
+opinion route `delegate_task` first and tell the model to use it before direct
+inspection; ordinary turns do not receive it automatically. Independent tasks
+may be batched through `additional_tasks` or sent as separate bounded calls.
 The tool defaults to ask and accepts one primary task plus at most two genuinely
 independent additional tasks. Children receive only a bounded objective/context
 handoff, never the parent transcript. Host-defined
 read/research and test/diagnostic roles intersect the current parent-callable tools
 with effective user policies: allow and active process grants may pass through,
 deny always wins, and unresolved ask policies are omitted rather than prompting
-inside a child. Children cannot write, run shell, mutate Git, ask the user, remember,
+inside a child. The child receives that prepared tool set directly; the parent
+intent router must not hide a permitted read tool based on wording in the
+short child objective. Children cannot write, run shell, mutate Git, ask the user, remember,
 learn, crawl, or delegate. Their successful and failed usage is charged to the
 parent governor. Model steps and tool calls have both per-child and aggregate
 caps; delegation preserves a parent tool-result slot, and a provider response
@@ -1831,6 +1989,9 @@ Workspace tools are jailed to the workspace root. `read_file`, `list_dir`,
 `grep`, `workspace_info`, `git_status`, and `git_diff` are read-only. Write
 tools include `write_file`, `edit_file`, `run_shell` when classified as
 non-read-only, and `git_commit`.
+If a model omits the leading slash from an otherwise exact workspace path,
+file tools resolve it to the same workspace file instead of creating a nested
+`home/...` directory. Other outside paths remain blocked by the workspace jail.
 
 `klaude chat` calls `Workspace.ensure_work_branch()` at startup. If the worktree
 is clean, Klaude works on a `klaude/<timestamp>` branch and file writes can be
@@ -1997,6 +2158,22 @@ hidden files, binary files, `__MACOSX`, and files above the indexing byte limit.
 ZIP extraction rejects unsafe paths and symlink entries, with ceilings of
 2,000 entries and 64 MiB expanded content. Re-imports create content-addressed
 versions and finalize the manifest only after knowledge indexing succeeds.
+At agent startup, the configuration snapshot names enabled installed Skills and
+their short descriptions alongside the available tool registry, external MCP
+count, and bounded read-only delegation capability. Full Skill instructions are
+loaded only when the model calls `read_skill` with an exact installed name.
+The tool returns at most 2,000 characters by default, supports bounded offset
+reads and supporting files, and never follows symlinks or reads outside that
+Skill's current package. Disabled or unreadable Skills are omitted. Skill text
+is untrusted guidance and cannot grant permissions or override the user's task.
+Current request schemas, not the startup snapshot, determine callable tools.
+Explicit requests to use a Skill or any installed guidance require a successful
+`read_skill` call before a final answer; the agent gives one model retry if it
+tries to answer without that call. A request not to read a Skill removes the
+tool schema for that turn. Unknown catalog descriptions must remain Unknown
+until the Skill is read. Code review findings must name actual identifiers,
+expressions, or behavior in the inspected file, and unsupported issue counts
+must not be invented.
 
 ## Web Search
 

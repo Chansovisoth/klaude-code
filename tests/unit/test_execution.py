@@ -44,6 +44,31 @@ def test_turn_governor_resets_no_progress_after_new_evidence():
     assert governor.snapshot().no_progress_streak == 0
 
 
+def test_one_failed_batch_leaves_room_for_discovery_but_charges_every_call():
+    governor = TurnGovernor(20, max_tool_calls=20, max_no_progress=3)
+    for _ in range(3):
+        assert governor.observe_tool_result(
+            "read_file", "tool error: FileNotFoundError", progress_group=0,
+        ) == ""
+    assert governor.snapshot().no_progress_streak == 1
+    assert governor.snapshot().tool_calls_used == 3
+    assert governor.observe_tool_result("list_dir", "stockroom/", progress_group=1) == ""
+    assert governor.snapshot().no_progress_streak == 0
+
+
+def test_three_failed_response_groups_still_stop_and_call_budget_cannot_expand():
+    governor = TurnGovernor(20, max_tool_calls=20)
+    for group in range(3):
+        reason = governor.observe_tool_result("read_file", "tool error: missing",
+                                              progress_group=group)
+    assert reason == "tool activity stopped making progress"
+    governor = TurnGovernor(20, max_tool_calls=2)
+    assert governor.observe_tool_result("read_file", "error: missing", progress_group=0) == ""
+    assert governor.observe_tool_result("read_file", "error: missing", progress_group=0) == (
+        "tool-call budget reached"
+    )
+
+
 def test_different_queries_with_no_evidence_are_one_nonprogress_strategy():
     governor = TurnGovernor(20, max_tool_calls=20, max_no_progress=3)
     for query in ("Godot movement", "Godot player control", "Godot movement code"):

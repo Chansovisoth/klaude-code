@@ -540,6 +540,31 @@ def test_typo_tolerant_detection_does_not_intercept_unrelated_questions():
     assert not is_complete_command_reference_request("what programming language should I use")
     assert not is_complete_command_reference_request("what database commands should my app support")
     assert not is_complete_command_reference_request("how should I design a command pattern")
+    assert not is_complete_command_reference_request(
+        "Use run_shell only to run this read-only command: cat /tmp/probe.txt. "
+        "Report the tool result and do not use other tools."
+    )
+
+
+def test_named_prompt_file_routes_read_and_one_shot_workspace_tools():
+    names = ("read_file", "list_dir", "workspace_info", "grep", "write_file",
+             "edit_file", "run_shell", "git_status", "git_diff", "read_skill")
+    tools = {name: Tool(name, name, {"type": "object"}, lambda **_kw: "")
+             for name in names}
+
+    assert _select_tool_names("Can you read xhallenge1.md?", tools) == [
+        "read_file", "list_dir", "workspace_info", "grep"
+    ]
+    selected = _select_tool_names(
+        "Read challenge1.md and follow the instructions inside", tools
+    )
+    assert {"read_file", "write_file", "edit_file", "run_shell"} <= set(selected)
+    assert "read_skill" not in selected
+    read_only = _select_tool_names(
+        "Read challenge1.md and follow the instructions inside. Do not edit files.", tools
+    )
+    assert "read_file" in read_only
+    assert not {"write_file", "edit_file", "run_shell"}.intersection(read_only)
 
 
 def test_focused_model_help_matches_actual_model_behavior():
@@ -6113,6 +6138,24 @@ def test_shared_model_metadata_is_secret_free_and_bounded():
     }
 
 
+def test_failed_request_retains_last_known_usage_without_claiming_new_counts():
+    from klaude_cli.main import _agent_model_metadata
+
+    agent = SimpleNamespace(
+        ollama=SimpleNamespace(last_chat_metadata={}), last_request_usage=(6510, 120),
+    )
+    metadata = _agent_model_metadata(agent)
+    assert metadata == {
+        'usage': {'input_tokens': 6510, 'output_tokens': 120},
+        'usage_from_previous_request': True,
+    }
+    agent.ollama.last_chat_metadata = {'prompt_eval_count': 6200, 'eval_count': 75}
+    metadata = _agent_model_metadata(agent)
+    assert metadata['prompt_eval_count'] == 6200
+    assert metadata['eval_count'] == 75
+    assert 'usage_from_previous_request' not in metadata
+
+
 def test_prompt_cache_status_ignores_malformed_provider_counters():
     agent = SimpleNamespace(
         ollama=SimpleNamespace(
@@ -7507,7 +7550,10 @@ def test_render_streams_code_and_logs_only_the_completed_assistant_turn(monkeypa
         model = "small-coder"
 
         def run(self, user_msg, *, scope=None):
+            yield AgentEvent("progress", {"stage": "drafting code"})
+            yield AgentEvent("progress", {"stage": "drafting code"})
             yield AgentEvent("text_delta", {"content": "```python\n"})
+            yield AgentEvent("progress", {"stage": "drafting code"})
             yield AgentEvent("text_delta", {"content": "print('ok')\n```"})
             yield AgentEvent(
                 "text",
@@ -7527,6 +7573,7 @@ def test_render_streams_code_and_logs_only_the_completed_assistant_turn(monkeypa
 
     assert assistant_text == completed
     assert "```python\nprint('ok')\n```" in output.getvalue()
+    assert output.getvalue().count("drafting code...") == 1
     assert turns == [
         ("session-1", "user", "write code"),
         ("session-1", "assistant", completed),
@@ -7866,11 +7913,11 @@ def test_tool_selector_routes_explicit_delegation_without_mutation_tools():
     )
 
     assert selected == [
+        "delegate_task",
         "read_file",
         "list_dir",
         "grep",
         "workspace_info",
-        "delegate_task",
     ]
     assert not {"write_file", "run_shell", "git_commit"}.intersection(selected)
 
@@ -8221,6 +8268,9 @@ def test_knowledge_ingestion_intent_requires_explicit_persistence_language(messa
         "What does the Obsidian documentation say?",
         "Remember that I use Obsidian",
         "Learn from this answer and explain it back to me",
+        "Implement CSV import using only the standard library",
+        "Add a CSV import command. Update README documentation and use the standard library.",
+        "Implement CSV stock adjustments. Save stock atomically. Use only the standard library.",
     ],
 )
 def test_knowledge_ingestion_intent_rejects_temporary_or_personal_memory_requests(message):
@@ -14344,3 +14394,53 @@ def test_skill_query_editor_does_not_answer_background_prompt_or_share_query(mon
                 tui.application.exit()
                 await task
     asyncio.run(exercise())
+
+
+def test_implementation_resource_constraints_retain_workspace_tools():
+    names = ("read_file", "write_file", "edit_file", "run_shell", "list_dir", "grep",
+             "workspace_info", "learn_source", "web_search", "fetch_url", "read_skill")
+    tools = {name: Tool(name, name, {}, lambda: "") for name in names}
+    prompt = (
+        "Implement CSV import in this project. Inspect the code and tests first. "
+        "Add `python3 -m stockroom import-csv INPUT`. Save stock atomically in the same store. "
+        "Use only the standard library. Add tests and update README documentation."
+    )
+    selected = _select_tool_names(prompt, tools)
+    assert {"read_file", "write_file", "edit_file", "run_shell"} <= set(selected)
+    assert "learn_source" not in selected
+
+
+
+def test_oneshot_renderer_reports_failure_after_persisting_session(tmp_path, monkeypatch):
+    from typer import Exit
+
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    class FailedAgent:
+        model = "broken-provider"
+        def run(self, _message, *, scope=None):
+            yield AgentEvent("error", {"message": "Malformed function call"})
+    monkeypatch.setattr("klaude_cli.main.console", Console(file=StringIO()))
+    with pytest.raises(Exit) as failure:
+        _render(FailedAgent(), memory, "failure-session", "Fix this project", raise_on_error=True)
+    assert failure.value.exit_code == 1
+    assert memory.session_live_state("failure-session")["state"] == "failed"
+    assert any(turn["role"] == "system" and "Malformed function call" in str(turn["content"])
+               for turn in memory.load_session("failure-session"))
+
+
+
+def test_current_project_behavior_does_not_imply_current_external_research():
+    names = ("read_file", "write_file", "edit_file", "run_shell", "web_search", "fetch_url",
+             "query_knowledge", "code_search")
+    tools = {name: Tool(name, name, {}, lambda: "") for name in names}
+    local = _select_tool_names(
+        "Review the Python code in this project to plan atomic persistence, keeping the "
+        "current CLI behavior. Propose a plan for the implementation.", tools,
+    )
+    assert {"read_file", "edit_file"} <= set(local)
+    assert not {"web_search", "fetch_url", "code_search"} & set(local)
+    fresh = _select_tool_names(
+        "Update this project to use the current stable Python API, inspecting documentation.",
+        tools,
+    )
+    assert "web_search" in fresh

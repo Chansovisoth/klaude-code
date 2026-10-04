@@ -13,6 +13,7 @@ from klaude_core import (
     SubagentSupervisor,
     SubagentTask,
     SubagentWorkerOutput,
+    Tool,
     supervise_agent_tasks,
 )
 from klaude_core.execution import TurnGovernor
@@ -599,6 +600,38 @@ def test_agent_adapter_uses_isolated_context_and_subagent_scope():
     assert runtime.children[0] is not runtime
     assert runtime.children[0].closed is True
     assert output.unknown_token_requests == 1
+
+
+def test_child_receives_prepared_read_tool_even_when_parent_router_misses_filename():
+    runtime = _ChildRuntime([
+        {"role": "assistant", "content": "", "tool_calls": [{"function": {
+            "name": "read_file", "arguments": {"path": "delegation-note.txt"},
+        }}]},
+        {"role": "assistant", "content": "Marker SABLE-47; retry limit three."},
+    ])
+    tool = Tool(
+        "read_file", "Read workspace file",
+        {"type": "object", "properties": {"path": {"type": "string"}},
+         "required": ["path"]},
+        lambda path: "Marker SABLE-47; retry limit three.",
+    )
+    parent = Agent(
+        runtime, "test-model", [tool],
+        PermissionGate({"read_file": "allow"}, lambda *_args: "n"),
+        "parent system", tool_selector=lambda _message, _tools: [],
+    )
+    assignment = SubagentSupervisor(
+        parent_callable_tools={"read_file"},
+        effective_permissions={"read_file": "allow"},
+        worker=lambda _assignment: SubagentWorkerOutput("", 0),
+    ).prepare(SubagentTask("Inspect delegation-note.txt", requested_tools=("read_file",)))
+
+    output = run_agent_assignment(parent, assignment)
+
+    assert runtime.calls[0]["tools"][0]["function"]["name"] == "read_file"
+    assert output.summary == "Marker SABLE-47; retry limit three."
+    assert output.tools_used == ("read_file",)
+    assert output.tool_calls == 1
 
 
 def test_agent_adapter_fails_closed_without_an_isolated_runtime_factory():

@@ -381,6 +381,16 @@ class OllamaRuntime:
     def chat_stream(self, *args: Any, **kwargs: Any):
         return self.ollama.chat_stream(*args, **kwargs)
 
+    def supports_structured_tool_recovery(self, model: str, tools: list[dict]) -> bool:
+        supports = getattr(self.ollama, "supports_structured_tool_recovery", None)
+        return bool(callable(supports) and supports(model, tools))
+
+    def chat_structured_action(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self.ollama.chat_structured_action(*args, **kwargs)
+
+    def chat_workspace_plan(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self.ollama.chat_workspace_plan(*args, **kwargs)
+
     def cancel_active(self) -> bool:
         return self.ollama.cancel_active()
 
@@ -986,6 +996,25 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         return getattr(value, name, default)
 
     @staticmethod
+    def _validated_calls(calls: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+        """Let the agent retry a bad provider call without exposing its arguments."""
+        assembled = [calls[index] for index in sorted(calls)]
+        for call in assembled:
+            function = call["function"]
+            if not call["id"] or not function["name"]:
+                return [{"function": {"name": "", "arguments": "{}"},
+                         "parse_status": "malformed"}]
+            try:
+                arguments = json.loads(function["arguments"] or "{}")
+            except json.JSONDecodeError:
+                return [{"function": {"name": "", "arguments": "{}"},
+                         "parse_status": "malformed"}]
+            if not isinstance(arguments, dict):
+                return [{"function": {"name": "", "arguments": "{}"},
+                         "parse_status": "malformed"}]
+        return assembled
+
+    @staticmethod
     def _reasoning_details(value: Any) -> list[dict[str, Any]]:
         details: list[dict[str, Any]] = []
         for item in value or []:
@@ -1099,16 +1128,7 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
             self._clear_active_response(response_stream)
         if not completed:
             raise RuntimeError("OpenRouter stream ended without a completion reason.")
-        assembled_calls = [calls[index] for index in sorted(calls)]
-        for call in assembled_calls:
-            if not call["id"] or not call["function"]["name"]:
-                raise RuntimeError("OpenRouter returned a malformed function call.")
-            try:
-                arguments = json.loads(call["function"]["arguments"] or "{}")
-            except json.JSONDecodeError as exc:
-                raise RuntimeError("OpenRouter returned malformed function arguments.") from exc
-            if not isinstance(arguments, dict):
-                raise RuntimeError("OpenRouter returned non-object function arguments.")
+        assembled_calls = self._validated_calls(calls)
         self.last_chat_metadata = {
             "provider": self.backend,
             **({"response_id": response_id} if response_id else {}),
@@ -1172,16 +1192,7 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
                             current["function"]["name"] += str(name)
                         if arguments := self._attribute(function, "arguments", ""):
                             current["function"]["arguments"] += str(arguments)
-            assembled_calls = [calls[index] for index in sorted(calls)]
-            for call in assembled_calls:
-                if not call["id"] or not call["function"]["name"]:
-                    raise RuntimeError("OpenRouter returned a malformed function call.")
-                try:
-                    arguments = json.loads(call["function"]["arguments"] or "{}")
-                except json.JSONDecodeError as exc:
-                    raise RuntimeError("OpenRouter returned malformed function arguments.") from exc
-                if not isinstance(arguments, dict):
-                    raise RuntimeError("OpenRouter returned non-object function arguments.")
+            assembled_calls = self._validated_calls(calls)
             if reasoning_details:
                 yield {
                     "role": "assistant",

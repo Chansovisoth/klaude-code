@@ -180,3 +180,31 @@ class TurnCapabilities:
             "Only supplied schemas are callable; turn routing is not global unavailability."
             "</turn_capabilities>"
         )
+
+    def render_execution_for_model(self) -> str:
+        """Request-relevant policies; the complete snapshot remains auditable."""
+        policies = dict(self.effective_permissions)
+        unavailable = {
+            name: reason for name, reason in self.unavailable_tools
+            if reason != "turn routing"
+        }
+        return (
+            "<turn_capabilities>\n"
+            f"Turn scope: {self.scope.value}. Provider: {self.provider_backend}/"
+            f"{self.provider_model}; context={self.provider_context_window}.\n"
+            f"Globally enabled registry: {', '.join(self.globally_enabled_tools)}.\n"
+            f"Callable this request: {', '.join(self.callable_tools) or '(none)'}.\n"
+            "Only supplied schemas are callable. Other enabled tools are omitted by "
+            "turn routing, not globally unavailable. "
+            f"Restrictions: {json.dumps(unavailable, sort_keys=True)}.\n"
+            + "; ".join(
+                f"{policy.upper()}=" + (", ".join(
+                    n for n in self.callable_tools if policies.get(n) == policy
+                ) or "(none)") for policy in ("allow", "ask", "deny")
+            )
+            + ". ASK invokes the host approval UI. Hard constraints: "
+            + " ".join(self.hard_constraints)
+            + f"\nBudget: {self.budget.model_steps_used}/{self.budget.max_model_steps} "
+            f"model steps; {self.budget.tool_calls_used}/{self.budget.max_tool_calls} "
+            "tool calls.\n</turn_capabilities>"
+        )

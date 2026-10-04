@@ -32,6 +32,10 @@ GIT_TIMEOUT = 60
 GIT_ERROR_OUTPUT_LIMIT = 2_000
 
 
+class WorkspacePathError(PermissionError):
+    """A proposed shell argument left the jail; correcting the path is safe."""
+
+
 def _edit_result(path: str, before: str, after: str, message: str) -> dict:
     """Capture operation-local changes before auto-commit clears the Git diff."""
     old, new = before.splitlines(keepends=True), after.splitlines(keepends=True)
@@ -363,10 +367,24 @@ class Workspace:
         return Path(top).resolve() if top else None
 
     def _jail(self, rel: str) -> Path:
+        # Some models omit the leading slash from an otherwise exact workspace
+        # path. Treat that one spelling as the intended absolute path instead
+        # of creating a nested home/... tree inside the workspace.
+        workspace_without_slash = str(self.root).lstrip("/")
+        if rel == workspace_without_slash or rel.startswith(workspace_without_slash + "/"):
+            rel = "/" + rel
         p = (self.root / rel).resolve()
         if not p.is_relative_to(self.root):
             raise PermissionError(f"path escapes workspace: {rel}")
         return p
+
+    def _display_path(self, supplied: str, resolved: Path) -> str:
+        workspace_without_slash = str(self.root).lstrip("/")
+        if supplied == workspace_without_slash or supplied.startswith(
+            workspace_without_slash + "/"
+        ):
+            return str(resolved.relative_to(self.root))
+        return supplied
 
     def _git(self, *args: str) -> str:
         argv = ["git", *args]
@@ -554,11 +572,11 @@ class Workspace:
                 path = Path(candidate).resolve()
                 if path in SAFE_EXTERNAL_PATHS or path.is_relative_to(self.root):
                     continue
-                raise PermissionError(f"shell path escapes workspace: {candidate}")
+                raise WorkspacePathError(f"shell path escapes workspace: {candidate}")
             if candidate == ".." or candidate.startswith("../") or "/../" in candidate:
                 path = (self.root / candidate).resolve()
                 if not path.is_relative_to(self.root):
-                    raise PermissionError(f"shell path escapes workspace: {candidate}")
+                    raise WorkspacePathError(f"shell path escapes workspace: {candidate}")
             if any(char in candidate for char in "*?["):
                 for match in glob.iglob(str(self.root / candidate)):
                     path = Path(match).resolve()
@@ -602,6 +620,7 @@ class Workspace:
         with self._mutation_lock():
             self._require_clean_repo()
             p = self._jail(path)
+            path = self._display_path(path, p)
             before = p.read_text() if p.exists() else ""
             if p.exists() and before == content:
                 return _edit_result(path, before, content, f"unchanged {path}")
@@ -614,12 +633,17 @@ class Workspace:
         with self._mutation_lock():
             self._require_clean_repo()
             p = self._jail(path)
+            path = self._display_path(path, p)
             text = p.read_text()
             n = text.count(old_str)
             if n == 0:
-                return "error: old_str not found in file"
+                return {"content": "error: old_str not found in file; read current contents "
+                        "and use a smaller unique anchor", "metadata": {
+                            "status": "failed", "error_type": "EditConflict",
+                        }}
             if n > 1:
-                return f"error: old_str appears {n} times — make it unique"
+                return {"content": f"error: old_str appears {n} times — make it unique",
+                        "metadata": {"status": "failed", "error_type": "EditConflict"}}
             if old_str == new_str:
                 return _edit_result(path, text, text, f"unchanged {path}")
             p.write_text(text.replace(old_str, new_str, 1))
@@ -821,7 +845,9 @@ def build_tools(ws: Workspace) -> list[Tool]:
             ),
             ws.read_file,
         ),
-        Tool("list_dir", "List files in a workspace directory.", obj({"path": S}, []), ws.list_dir),
+        Tool("list_dir", "List actual workspace-relative paths: d = directory, f = file. "
+             "List a directory's contents before reading its files; do not guess filenames.",
+             obj({"path": S}, []), ws.list_dir),
         Tool(
             "workspace_info",
             "Show only the current working directory and repository root. "

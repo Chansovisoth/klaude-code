@@ -652,6 +652,7 @@ DEFAULT_PERMISSIONS = {
     "git_commit": "ask",
     # read-only tools are always allowed
     "read_file": "allow",
+    "read_skill": "allow",
     "list_dir": "allow",
     "workspace_info": "allow",
     "grep": "allow",

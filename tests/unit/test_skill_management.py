@@ -305,7 +305,7 @@ def test_remote_install_is_an_ordered_explicit_skill_action(tmp_path, monkeypatc
     assert writer.submit(SkillAction("install-remote", record.name, record.identity, record))
     assert writer.close(wait=True)
     assert seen == [record]
-    assert events[0][1][1:] == (True, "Installed demo")
+    assert events[0][1][1:] == (True, "Installed demo", "success")
 
 
 def test_failed_indexing_never_publishes_active_manifest(tmp_path):

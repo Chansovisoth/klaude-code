@@ -65,6 +65,26 @@ def test_read_file_can_page_later_lines_without_changing_default_output(tmp_path
         workspace.read_file("long.py", offset=0)
 
 
+def test_missing_leading_slash_on_exact_workspace_path_does_not_nest_files(tmp_path):
+    workspace = Workspace(tmp_path)
+    intended = tmp_path / "data" / "cities" / "one.json"
+    missing_slash = str(intended).lstrip("/")
+
+    result = workspace.write_file(missing_slash, '{"city":"one"}\n')
+
+    assert intended.read_text() == '{"city":"one"}\n'
+    assert workspace.read_file(missing_slash) == intended.read_text()
+    assert result["metadata"]["edit"]["path"] == "data/cities/one.json"
+    assert result["content"].endswith("data/cities/one.json")
+    edited = workspace.edit_file(missing_slash, '"one"', '"two"')
+    assert isinstance(edited, dict)
+    assert edited["metadata"]["edit"]["path"] == "data/cities/one.json"
+    assert '"two"' in intended.read_text()
+    assert not (tmp_path / missing_slash).exists()
+    with pytest.raises(PermissionError, match="path escapes workspace"):
+        workspace.write_file(str(tmp_path).lstrip("/") + "/../outside.json", "bad")
+
+
 def test_edits_capture_patch_before_auto_commit(tmp_path):
     _init_repo(tmp_path)
     ws = Workspace(tmp_path)

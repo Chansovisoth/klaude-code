@@ -38,6 +38,12 @@ _NO_WEB_SEARCH_IN_LIST = re.compile(
     r"(?:web[_ -]?search|search(?:ing)?\s+(?:the\s+)?(?:web|internet))\b",
     re.IGNORECASE,
 )
+_NO_SKILL_READ = re.compile(
+    r"\b(?:do\s+not|don['’]?t|dont|never|without)\b"
+    r"[^,.;:!?\n]{0,70}\b(?:read(?:ing)?|open(?:ing)?|load(?:ing)?|consult(?:ing)?)\s+"
+    r"(?:(?:the|any|an|installed|that)\s+){0,3}(?:skill\b|SKILL\.md\b)",
+    re.IGNORECASE,
+)
 
 
 def has_nonnegated_action(text: str, action: str | Pattern[str]) -> bool:
@@ -60,11 +66,35 @@ def explicitly_disallows_tools(text: str) -> bool:
     return bool(_NO_TOOLS.search(text))
 
 
+def explicit_local_file_read_request(text: str) -> bool:
+    """Recognize a request to open a named workspace file without requiring 'file'."""
+    without_urls = re.sub(r"https?://\S+", " ", text, flags=re.IGNORECASE)
+    named_file = re.search(
+        r"(?<![\w.])(?:/?[\w.-]+/)*[\w.-]+\."
+        r"(?:md|txt|py|js|jsx|ts|tsx|json|toml|ya?ml|sh|html|css|csv|xml|"
+        r"rs|go|java|c|cpp|h|sql|ipynb)\b",
+        without_urls,
+        re.IGNORECASE,
+    )
+    if named_file is None:
+        return False
+    return has_nonnegated_action(
+        without_urls,
+        r"\b(?:read|open|inspect|review|check|analy[sz]e|follow|"
+        r"carry\s+out|implement|execute)\b",
+    )
+
+
 def prohibits_web_search(text: str) -> bool:
     """A specific web prohibition must not suppress permitted local retrieval."""
     return bool(_NO_WEB_SEARCH.search(text) or _NO_WEB_SEARCH_IN_LIST.search(text)) or bool(
         re.search(r"\b(?:offline only|no internet)\b", text, re.IGNORECASE)
     )
+
+
+def prohibits_skill_read(text: str) -> bool:
+    """Respect an explicit request to answer without opening Skill instructions."""
+    return bool(_NO_SKILL_READ.search(text))
 
 
 def without_tool_use_prohibition(text: str) -> str:
@@ -88,7 +118,14 @@ def explicit_only_tool_names(text: str, available_names: set[str]) -> list[str] 
         if (found := re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", clause, re.IGNORECASE))
         is not None
     ]
-    return [name for _position, name in sorted(positions)]
+    if positions:
+        return [name for _position, name in sorted(positions)]
+    # "Use only the standard library" and similar implementation constraints
+    # name resources, not tool permissions. Unknown explicit tool identifiers
+    # still fail closed rather than widening an intended tool-only boundary.
+    if re.search(r"\btools?\b|\b[a-z][a-z0-9]*_[a-z0-9_]+\b", clause, re.IGNORECASE):
+        return []
+    return None
 
 
 def explicit_workspace_inspection(text: str) -> bool:

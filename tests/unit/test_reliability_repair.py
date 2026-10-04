@@ -1022,6 +1022,79 @@ def test_cross_tool_no_progress_forces_tool_free_finalization():
     assert "blocked" in events[-2].payload["content"]
 
 
+def test_missing_file_batch_can_discover_correct_paths_and_read_them(tmp_path):
+    (tmp_path / "stockroom").mkdir()
+    (tmp_path / "stockroom" / "store.py").write_text("class StockStore: pass\n")
+    workspace = Workspace(tmp_path)
+    runtime = Runtime([
+        {"role": "assistant", "content": "", "tool_calls": [
+            call("read_file", path=path)["tool_calls"][0]
+            for path in ("store.py", "tests/test_store.py", "cli.py")
+        ]},
+        call("list_dir", path="."),
+        call("read_file", path="stockroom/store.py"),
+        {"role": "assistant", "content": "Found the actual StockStore implementation."},
+    ])
+    agent = make_agent(runtime, build_tools(workspace))
+    events = list(agent.run("Inspect the project stock storage"))
+    assert events[-1].kind == "done"
+    assert any(event.kind == "tool_result" and "class StockStore" in event.payload["result"]
+               for event in events)
+    assert all(any(schema["function"]["name"] == "read_file" for schema in request[1])
+               for request in runtime.requests)
+    assert agent.last_turn_budget["no_progress_streak"] == 0
+    assert "actual workspace-relative paths" in str(runtime.requests[1][0])
+
+
+def test_failed_shell_validation_can_rerun_the_same_command_after_an_edit(tmp_path):
+    (tmp_path / "status.txt").write_text("broken")
+    command = (
+        "python3 -c 'import pathlib,sys; "
+        'sys.exit(pathlib.Path("status.txt").read_text() != "good")\''
+    )
+    runtime = Runtime([
+        call("run_shell", command=command),
+        call("edit_file", path="status.txt", old_str="broken", new_str="good"),
+        call("run_shell", command=command),
+        {"role": "assistant", "content": "Repaired and validated."},
+    ])
+    agent = make_agent(runtime, build_tools(Workspace(tmp_path)))
+    events = list(agent.run("Repair the project and validate it"))
+    shell = [event for event in events
+             if event.kind == "tool_result" and event.payload["tool"] == "run_shell"]
+    assert [event.payload["metadata"]["exit_code"] for event in shell] == [1, 0]
+    assert shell[0].payload["metadata"]["status"] == "failed"
+    assert "failed validation" in str(runtime.requests[1][0])
+    assert all(event.payload["metadata"]["executed"] for event in shell)
+    assert agent.last_turn_budget["no_progress_streak"] == 0
+
+
+def test_read_file_can_be_read_again_after_mutation_in_the_same_turn(tmp_path):
+    (tmp_path / "status.txt").write_text("broken")
+    runtime = Runtime([
+        call("read_file", path="status.txt"),
+        call("edit_file", path="status.txt", old_str="broken", new_str="good"),
+        call("read_file", path="status.txt"),
+        {"role": "assistant", "content": "Verified the edited file."},
+    ])
+    events = list(make_agent(runtime, build_tools(Workspace(tmp_path))).run("Fix this file"))
+    reads = [event.payload["result"] for event in events
+             if event.kind == "tool_result" and event.payload["tool"] == "read_file"]
+    assert reads == ["broken", "good"]
+
+
+def test_three_nonzero_shell_responses_still_stop_as_no_progress():
+    runtime = Runtime([
+        call("run_shell", command=command) for command in ("missing-a", "missing-b", "missing-c")
+    ] + [{"role": "assistant", "content": "Validation is blocked."}])
+    tool = Tool("run_shell", "shell", {"type": "object", "properties": {
+        "command": {"type": "string"}}}, lambda command: "exit=127\ncommand not found")
+    agent = make_agent(runtime, [tool])
+    list(agent.run("Validate the implementation"))
+    assert runtime.requests[-1][1] == []
+    assert agent.last_turn_budget["no_progress_streak"] == 3
+
+
 def test_request_user_input_is_removed_after_one_answer():
     responses = [
         call("request_user_input", question="Which fruit?"),
