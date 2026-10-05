@@ -1,0 +1,68 @@
+{
+  "scope": "Isolated helpers; no app, model calls, Chroma, MCP, or real memory store",
+  "budgets": {
+    "unknown_auto": 6000,
+    "8k_auto": 6963,
+    "16k_auto": 13926,
+    "explicit_4096": 4096
+  },
+  "keyword_tools": {
+    "hello": [
+      "ask_user",
+      "manage_memory",
+      "update_plan"
+    ],
+    "remember my preferred language is Python": [
+      "ask_user",
+      "manage_memory",
+      "update_plan"
+    ],
+    "open https://example.com": [
+      "ask_user",
+      "manage_memory",
+      "update_plan",
+      "web_fetch",
+      "web_search"
+    ],
+    "save this address for Alex": [
+      "ask_user",
+      "manage_contact",
+      "resolve_contact",
+      "update_plan"
+    ],
+    "summarize my inbox every morning": [
+      "archive_email",
+      "ask_user",
+      "bulk_email",
+      "delete_email",
+      "list_email_accounts",
+      "list_emails",
+      "manage_memory",
+      "manage_tasks",
+      "mark_email_read",
+      "read_email",
+      "reply_to_email",
+      "resolve_contact",
+      "scan_email_unsubscribes",
+      "send_email",
+      "ui_control",
+      "unsubscribe_email",
+      "update_plan"
+    ]
+  },
+  "pinned_memory_selection": [
+    "identity",
+    "postgres"
+  ],
+  "full_plan_retained": true,
+  "teacher_classifier": {
+    "explicit_tool_error": [
+      "failure",
+      "tool returned error: 'missing file'"
+    ],
+    "nonzero_test_exit_without_error_words": [
+      "ok",
+      null
+    ]
+  }
+}

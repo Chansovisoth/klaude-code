@@ -1,0 +1,4 @@
+# Keep upstream research checkouts and runtime caches out of Klaude's checks.
+odysseus/
+__pycache__/
+.pytest_cache/

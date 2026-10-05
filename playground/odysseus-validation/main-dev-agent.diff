@@ -1,0 +1,9 @@
+diff --git a/src/agent_loop.py b/src/agent_loop.py
+index 178443b..b6fa5f2 100644
+--- a/src/agent_loop.py
++++ b/src/agent_loop.py
+@@ -612 +612,3 @@ Read a file and return its contents.""",
+-Write content to a file. First line is the path, rest is the content.""",
++Write content to a file. First line is the path, rest is the content. An empty body is
++refused when the target already holds data — to clear a file on purpose, send
++`{"path": "<file path>", "content": ""}` instead.""",

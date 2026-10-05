@@ -1,0 +1,21 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /tmp/klaude-odysseus-audit/venv/bin/python
+rootdir: /home/klaude/klaude-code/playground/odysseus
+configfile: pyproject.toml
+plugins: anyio-4.15.1, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 5 items
+
+tests/test_history_compact_tool_calls.py::test_manual_compact_tolerates_chatmessage_with_none_content PASSED [ 20%]
+tests/test_history_compact_tool_calls.py::test_manual_compact_tolerates_dict_message_with_none_content PASSED [ 40%]
+tests/test_history_compact_tool_calls.py::test_registered_manual_compact_route_tolerates_none_content PASSED [ 60%]
+tests/test_history_compact_tool_calls.py::test_registered_manual_compact_route_uses_session_owner PASSED [ 80%]
+tests/test_history_compact_tool_calls.py::test_registered_manual_compact_route_rejects_active_agent_run PASSED [100%]
+
+=============================== warnings summary ===============================
+core/database.py:20
+  /home/klaude/klaude-code/playground/odysseus/core/database.py:20: MovedIn20Warning: The ``declarative_base()`` function is now available as sqlalchemy.orm.declarative_base(). (deprecated since: 2.0) (Background on SQLAlchemy 2.0 at: https://sqlalche.me/e/b8d9)
+    Base = declarative_base()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+========================= 5 passed, 1 warning in 0.53s =========================
