@@ -203,17 +203,19 @@ from .dividers import (
 )
 from .installed_settings import InstalledFilter, filter_page
 from .mcp_management import (
-    manage_detail_page as mcp_manage_detail_page,
-)
-from .mcp_management import (
-    manage_page as mcp_manage_page,
-)
-from .mcp_management import (
+    install_result_page,
     manage_removal_confirmation,
     manage_update_all_review,
     manage_update_review,
     removal_confirmation,
     removal_page,
+    setup_review_page,
+)
+from .mcp_management import (
+    manage_detail_page as mcp_manage_detail_page,
+)
+from .mcp_management import (
+    manage_page as mcp_manage_page,
 )
 from .mcp_management import settings_page as mcp_settings_page
 from .mcp_mutations import (
@@ -233,6 +235,7 @@ from .mcp_search_panel import (
     InstallOption,
     mcp_detail_page,
     mcp_search_page,
+    mcp_sort_page,
 )
 from .mcp_updates import valid_candidate_payload
 from .memory_panel import memory_detail_page, memory_list_page
@@ -8823,12 +8826,15 @@ class PersistentChatTUI:
             self._background_jobs, self._show_skill_discovery, self._edit_skill_search,
             self._return_from_skill_search, lambda: self.session_id,
             self._enqueue_remote_skill_install,
+            self._open_installed_skill_from_catalog,
         )
         self._skill_action_pending = False
         self._skills_manage_filter = InstalledFilter.ALL
         self._mcp_manage_filter = InstalledFilter.ALL
+        self._mcp_manage_open_target = ""
         self._skills_import_from_manage = False
         self._skills_search_from_manage = False
+        self._skills_manage_open_target = ""
         self._mcp_search_from_manage = False
         self._skill_feedback = ""
         self._skill_feedback_tone = "neutral"
@@ -8896,6 +8902,8 @@ class PersistentChatTUI:
         self._permission_preview_visible = False
         self._permission_custom_snapshot: dict[str, str] | None = None
         self._permission_mcp_server: str | None = None
+        self._mcp_permission_origin = "mcps"
+        self._mcp_permission_return_detail = ""
         self._provider_key_label = ""
         self._skills_inventory: list[dict[str, object]] | None = None
         self._skills_inventory_loading = False
@@ -8905,6 +8913,8 @@ class PersistentChatTUI:
         self._mcp_catalog_request_id = ""
         self._mcp_catalog_query_text = ""
         self._mcp_catalog_cached = False
+        self._mcp_catalog_cache_age_seconds: int | None = None
+        self._mcp_catalog_cache_loaded_at = 0.0
         self._mcp_catalog_sort = MCP_SEARCH_SORTS[0]
         self._mcp_catalog_error = ""
         self._mcp_catalog_results: dict[str, MCPCatalogServer] = {}
@@ -9590,6 +9600,7 @@ class PersistentChatTUI:
             width = self._panel_width()
             return 2 + max(1, (preview_width + width - 1) // width)
         return 3 if self._panel is not None and self._panel.page.column_headers \
+            and not self._panel.page.table_section_id \
             and self._panel_width() >= 60 else 2
 
     def _panel_body_fragments(self):
@@ -9661,13 +9672,19 @@ class PersistentChatTUI:
             status, style = "Saved", "class:panel.saved"
         else:
             status, style = "", ""
+        panel_width = self._panel_width()
+        concise_hints = (
+            "↑↓ · ENTER · / filter · ESC back" if panel_width < 55 else
+            "↑↓ move · ENTER open · / filter · ESC back" if panel_width < 90 else
+            "↑↓ move · ENTER open/apply · / filter · PGUP/PGDN scroll · ESC back"
+        )
         return list(render_footer(
-            self._panel_width(), search=self._panel.search_active,
+            panel_width, search=self._panel.search_active,
             query=self._panel.picker.query, status=status, status_style=style,
             status_fragments=status_fragments,
             navigation_hints="↑↓ move · ENTER resume · / search · ESC cancel"
             if kind == "session" else
-            "↑↓ move · ENTER open/apply · / filter · PGUP/PGDN scroll · ESC back"
+            concise_hints
             if kind in {SEARCH_KIND, DETAIL_KIND, INSTALL_KIND, "mcp settings",
                         "skills settings", "skills import", "mcp manage list",
                         "skills manage list"} else "",
@@ -12236,6 +12253,7 @@ class PersistentChatTUI:
                 self._open_skills_manage("skill:" + page_id.removeprefix("skill-manage:"))
                 return
             if page_id == "skills-manage":
+                self._skills_manage_open_target = ""
                 self._open_settings_category("skills", "manage")
                 return
             if page_id == "skills-import":
@@ -12267,10 +12285,10 @@ class PersistentChatTUI:
                 )
                 return
             if self._panel.page.id.startswith("mcp-permission:"):
-                self._open_mcp_permission_servers()
+                self._return_from_mcp_tool_permissions()
                 return
             if self._panel.page.id == "mcp-permission-servers":
-                self._open_settings_category("mcp servers", "Permissions")
+                self._return_from_mcp_permission_servers()
                 return
         self._sync_picker_selection()
         self._cancel_inventory_job(self._choice_kind)
@@ -12554,7 +12572,12 @@ class PersistentChatTUI:
             return
         if self._choice_kind == "mcp remote authentication":
             if selected == "back":
-                self._open_settings_category("mcp servers")
+                self._begin_settings_input(
+                    "MCP endpoint",
+                    "Enter the HTTPS Streamable HTTP endpoint (localhost may use HTTP).",
+                    ("mcp_custom_endpoint",),
+                )
+                self._set_input(str((self._mcp_setup or {}).get("endpoint") or ""))
             else:
                 self._finish_custom_mcp_remote(selected)
             return
@@ -12802,9 +12825,6 @@ class PersistentChatTUI:
                 selected = default_model
             elif self._choice_kind == "effort":
                 selected = "medium"
-            elif self._choice_kind == "input height":
-                self.appearance.input_height = DEFAULT_INPUT_HEIGHT
-                self.appearance.input_max_height = DEFAULT_INPUT_MAX_HEIGHT
         if self._choice_kind == "model":
             info = getattr(self, "_model_choices", {}).get(
                 selected, ModelInfo("ollama", selected, selected)
@@ -12836,9 +12856,13 @@ class PersistentChatTUI:
                     f"{self.appearance.input_height} {self.appearance.input_max_height}"
                 )
                 return
-            selected_height = int(selected.split()[0])
-            self.appearance.input_height = selected_height
-            self.appearance.input_max_height = selected_height
+            if selected == RESET_THEME_CHOICE:
+                self.appearance.input_height = DEFAULT_INPUT_HEIGHT
+                self.appearance.input_max_height = DEFAULT_INPUT_MAX_HEIGHT
+            else:
+                selected_height = int(selected.split()[0])
+                self.appearance.input_height = selected_height
+                self.appearance.input_max_height = selected_height
             self._choice_kind = None
             self._choice_values = []
             self._set_input("")
@@ -13364,6 +13388,13 @@ class PersistentChatTUI:
                      action=PanelAction("preset"), section_id="preset-heading",
                      legacy_label=f"Current configuration: {preset.upper()}"),
         ]
+        rows.extend((
+            PanelRow("mcp-heading", RowKind.SECTION, "MCP TOOLS"),
+            PanelRow("mcp-tools", RowKind.NAVIGATION, "MCP tool permissions",
+                     description="Manage access by server",
+                     action=PanelAction("permission-mcp-servers"),
+                     section_id="mcp-heading"),
+        ))
         grouped = _permission_group_rows(names)
         for group, tools in grouped:
             if group == "MCP SERVERS":
@@ -13415,10 +13446,15 @@ class PersistentChatTUI:
                                  legacy_label=_choice_info(
                                      "Enable an MCP server to configure its tools"
                                  )))
-        rows.append(PanelRow("back", RowKind.NAVIGATION, "Back",
-                             action=PanelAction("back"), legacy_label="back"))
+        rows.append(PanelRow("back", RowKind.NAVIGATION, "Back", footer=True,
+                             control=RowControl.BACK,
+                             action=PanelAction("mcp-permission-servers-back"),
+                             legacy_label="back"))
+        breadcrumb = ("Settings", "Permissions", "MCP tools") \
+            if self._mcp_permission_origin == "permissions" else \
+            ("Settings", "MCPs", "Permissions")
         return PanelPage("mcp-permission-servers",
-                         ("Settings", "MCPs", "Permissions"), tuple(rows))
+                         breadcrumb, tuple(rows))
 
     def _open_mcp_permission_servers(self, default: str = "") -> None:
         self._open_panel(self._mcp_permission_servers_page(),
@@ -13435,6 +13471,48 @@ class PersistentChatTUI:
             self._apply_panel_action(row.action)
 
     def _apply_panel_action(self, action: PanelAction) -> None:
+        if action.kind == "mcp-install-open":
+            self._mcp_manage_open_target = action.target
+            self._open_mcp_manage("server:" + action.target)
+            self._open_pending_mcp_detail()
+            return
+        if action.kind == "mcp-install-back":
+            self._mcp_manage_open_target = ""
+            self._open_settings_category("mcp servers", "manage")
+            return
+        if action.kind == "mcp-setup-back":
+            setup = self._mcp_setup or {}
+            if self._choice_kind != "mcp setup review" or not setup:
+                return
+            if setup.get("kind") == "registry":
+                self._back_mcp_catalog_input()
+            elif setup.get("transport") == "http":
+                auth = str(setup.get("authentication") or "No authentication")
+                self._begin_choice(
+                    "mcp remote authentication",
+                    ["No authentication", "OAuth", "Bearer token", "back"], auth,
+                )
+            else:
+                self._begin_settings_input(
+                    "MCP command", "Enter a command and arguments.",
+                    ("mcp_custom_endpoint",),
+                )
+                self._set_input(str(setup.get("endpoint") or ""))
+            return
+        if action.kind == "mcp-setup-confirm":
+            setup = self._mcp_setup or {}
+            if self._choice_kind != "mcp setup review" or not setup:
+                return
+            if setup.get("kind") == "registry":
+                self._finish_mcp_catalog_plan()
+            else:
+                self._save_custom_mcp(
+                    command=str(setup.get("command") or ""),
+                    args=[str(arg) for arg in cast(list[str], setup.get("args") or [])],
+                    oauth=setup.get("authentication") == "OAuth",
+                    bearer_token=str(setup.get("bearer_token") or ""),
+                )
+            return
         if action.kind == "installed-filter-open":
             if action.target not in {"Skills", "MCPs"}:
                 return
@@ -13491,7 +13569,25 @@ class PersistentChatTUI:
             )
             return
         if action.kind == "mcp-settings-permissions":
+            self._mcp_permission_origin = "mcps"
+            self._mcp_permission_return_detail = ""
             self._open_mcp_permission_servers()
+            return
+        if action.kind == "permission-mcp-servers":
+            self._mcp_permission_origin = "permissions"
+            self._mcp_permission_return_detail = ""
+            self._open_mcp_permission_servers()
+            return
+        if action.kind == "mcp-permission-servers-back":
+            self._return_from_mcp_permission_servers()
+            return
+        if action.kind == "mcp-permission-detail-back":
+            self._return_from_mcp_tool_permissions()
+            return
+        if action.kind == "mcp-manage-permissions":
+            self._mcp_permission_origin = "mcps"
+            self._mcp_permission_return_detail = action.target
+            self._open_mcp_permission_server(action.target)
             return
         if action.kind == "skill-manage":
             self._open_skills_manage()
@@ -13501,6 +13597,7 @@ class PersistentChatTUI:
             self._skill_discovery.reenter()
             return
         if action.kind == "skill-manage-back":
+            self._skills_manage_open_target = ""
             self._open_settings_category("skills", "manage")
             return
         if action.kind == "skill-manage-list":
@@ -13516,9 +13613,9 @@ class PersistentChatTUI:
             if skill is None or self._skill_action_pending or not skill.get("identity"):
                 return
             self._skill_delete_identity = str(skill["identity"])
-            self._open_panel(skill_delete_confirmation_page(skill), "skill detail", "back")
+            self._open_panel(skill_delete_confirmation_page(skill), "skill detail", "cancel")
             if self._panel is not None:
-                self._panel.picker.focus("back")
+                self._panel.picker.focus("cancel")
                 self._apply_picker_state()
             return
         if action.kind == "skill-update":
@@ -13622,6 +13719,7 @@ class PersistentChatTUI:
             self._open_mcp_manage("refresh-list")
             return
         if action.kind == "mcp-manage-back":
+            self._mcp_manage_open_target = ""
             self._open_settings_category("mcp servers", "Manage")
             return
         if action.kind == "mcp-manage-list":
@@ -13794,8 +13892,16 @@ class PersistentChatTUI:
             self._search_mcp_catalog(action.target)
             return
         if action.kind == "mcp-search-sort":
-            index = MCP_SEARCH_SORTS.index(self._mcp_catalog_sort)
-            self._mcp_catalog_sort = MCP_SEARCH_SORTS[(index + 1) % len(MCP_SEARCH_SORTS)]
+            self._open_panel(mcp_sort_page(self._mcp_catalog_sort),
+                             "mcp search sort", f"sort:{self._mcp_catalog_sort}")
+            return
+        if action.kind == "mcp-search-sort-apply":
+            if action.target not in MCP_SEARCH_SORTS:
+                return
+            self._mcp_catalog_sort = action.target
+            self._open_mcp_catalog_results(default="sort")
+            return
+        if action.kind == "mcp-search-sort-back":
             self._open_mcp_catalog_results(default="sort")
             return
         if action.kind == "mcp-search-retry":
@@ -13996,9 +14102,9 @@ class PersistentChatTUI:
                     return
                 self._skill_delete_identity = str(skill["identity"])
                 self._open_panel(skill_delete_confirmation_page(skill),
-                                 "skill detail", "back")
+                                 "skill detail", "cancel")
                 if self._panel is not None:
-                    self._panel.picker.focus("back")
+                    self._panel.picker.focus("cancel")
                     self._apply_picker_state()
             elif action.kind == "skill-toggle":
                 self._submit_skill_action(SkillAction(
@@ -14070,6 +14176,7 @@ class PersistentChatTUI:
         elif action.kind == "preset":
             self._open_permission_presets()
         elif action.kind == "mcp-server":
+            self._mcp_permission_return_detail = ""
             self._open_mcp_permission_server(action.target)
         elif action.kind == "reset":
             self._reset_permission_settings()
@@ -14148,10 +14255,15 @@ class PersistentChatTUI:
                 legacy_label=f"{label}: {policies[name].upper()}",
                 value_tone=PERMISSION_VALUE_TONES.get(policies[name], "neutral"),
             ))
-        rows.append(PanelRow("back", RowKind.NAVIGATION, "Back",
-                             action=PanelAction("back"), legacy_label="back"))
+        rows.append(PanelRow("back", RowKind.NAVIGATION, "Back", footer=True,
+                             control=RowControl.BACK,
+                             action=PanelAction("mcp-permission-detail-back"),
+                             legacy_label="back"))
+        breadcrumb = ("Settings", "Permissions", "MCP tools", server) \
+            if self._mcp_permission_origin == "permissions" else \
+            ("Settings", "MCPs", "Permissions", server)
         return PanelPage(f"mcp-permission:{server}",
-                         ("Settings", "MCPs", "Permissions", server), tuple(rows))
+                         breadcrumb, tuple(rows))
 
     def _open_permission_presets(self) -> None:
         names = _permission_tool_names(self.agent)
@@ -14176,6 +14288,23 @@ class PersistentChatTUI:
         self._permission_mcp_server = server
         default_id = next((row.id for row in page.rows if row.legacy_label == default), "")
         self._open_panel(page, "mcp permission tools", default_id)
+
+    def _return_from_mcp_tool_permissions(self) -> None:
+        if self._mcp_permission_return_detail:
+            name = self._mcp_permission_return_detail
+            self._mcp_permission_return_detail = ""
+            self._open_mcp_manage_detail(name, "permissions")
+        else:
+            self._open_mcp_permission_servers(self._permission_mcp_server or "")
+
+    def _return_from_mcp_permission_servers(self) -> None:
+        if self._mcp_permission_origin == "permissions":
+            self._open_settings_category("permissions")
+            if self._panel is not None:
+                self._panel.picker.focus("mcp-tools")
+                self._apply_picker_state()
+        else:
+            self._open_settings_category("mcp servers", "Permissions")
 
     def _change_mcp_server_permissions(self, selected: str) -> None:
         server = self._permission_mcp_server
@@ -14322,6 +14451,15 @@ class PersistentChatTUI:
             feedback_tone=self._skill_feedback_tone,
         ), "skills manage detail", default)
 
+    def _open_installed_skill_from_catalog(self, name: str) -> None:
+        skill = next((item for item in self._skills_inventory or []
+                      if item.get("name") == name and item.get("identity")), None)
+        if skill is not None:
+            self._open_skill_manage_detail(name)
+            return
+        self._skills_manage_open_target = name
+        self._open_skills_manage("skill:" + name)
+
     def _enqueue_remote_skill_install(self, record: SkillRecord) -> bool:
         if self._skill_action_pending:
             return False
@@ -14410,6 +14548,17 @@ class PersistentChatTUI:
             show=self._mcp_manage_filter,
         ), "mcp manage list", default)
 
+    def _open_pending_mcp_detail(self) -> None:
+        name = self._mcp_manage_open_target
+        if not name or self._choice_kind != "mcp manage list":
+            return
+        if any(item["name"] == name for item in (self._mcp_inventory or {}).get("servers", [])):
+            self._mcp_manage_open_target = ""
+            self._open_mcp_manage_detail(name)
+
+    def _open_mcp_install_result(self, name: str) -> None:
+        self._open_panel(install_result_page(name), "mcp install result", "open")
+
     def _submit_mcp_reload(self) -> None:
         if self.running or self._setup_job is not None or self._mcp_mutation_pending:
             self._set_panel_feedback(
@@ -14441,6 +14590,7 @@ class PersistentChatTUI:
             return
         self._open_panel(mcp_manage_detail_page(
             server, pending=bool(self._mcp_mutation_pending),
+            permissions_available=name in _mcp_permission_server_rows(self.agent),
         ), "mcp manage detail", default)
 
     def _confirm_mcp_removal(self, name: str, *, manage: bool) -> None:
@@ -14932,6 +15082,7 @@ class PersistentChatTUI:
                 self._open_settings_category("mcp servers")
             elif self._choice_kind == "mcp manage list":
                 self._open_mcp_manage()
+                self._open_pending_mcp_detail()
             elif self._choice_kind == "mcp manage detail" and self._panel is not None:
                 self._open_mcp_manage_detail(
                     self._panel.page.id.removeprefix("mcp-manage:")
@@ -15131,7 +15282,9 @@ class PersistentChatTUI:
             )
             self._events.put(("mcp_catalog_results", (
                 identity, results,
-                bool(result.get("cached")) if isinstance(result, dict) else False, error
+                bool(result.get("cached")) if isinstance(result, dict) else False,
+                result.get("cache_age_seconds") if isinstance(result, dict) else None,
+                error,
             )))
         elif key.startswith("models:"):
             backend = key.removeprefix("models:")
@@ -15291,6 +15444,26 @@ class PersistentChatTUI:
             if isinstance(callback, tuple) and callback and callback[0] == "memory-edit":
                 self._open_memory_facts()
                 return
+            if callback == ("mcp_custom_name",):
+                transport = str((self._mcp_setup or {}).get("transport") or "http")
+                self._begin_choice(
+                    "mcp transport",
+                    ["Remote · Streamable HTTP", "Local · stdio command", "back"],
+                    "Remote · Streamable HTTP" if transport == "http"
+                    else "Local · stdio command",
+                )
+                return
+            if callback == ("mcp_custom_endpoint",):
+                self._begin_settings_input(
+                    "MCP server name",
+                    "Enter a unique name using letters, numbers, '.', '_' or '-'.",
+                    ("mcp_custom_name",),
+                )
+                self._set_input(str((self._mcp_setup or {}).get("name") or ""))
+                return
+            if callback == ("mcp_plan_input",):
+                self._back_mcp_catalog_input()
+                return
             self._mcp_setup = None
             self.activity = "setup cancelled"
             self.status_error = ""
@@ -15378,7 +15551,9 @@ class PersistentChatTUI:
             )
             self.status_error = f"invalid MCP command: {exc}"
             return
-        self._save_custom_mcp(command=parts[0], args=parts[1:])
+        self._mcp_setup["command"] = parts[0]
+        self._mcp_setup["args"] = parts[1:]
+        self._open_mcp_setup_review()
 
     def _finish_custom_mcp_remote(self, authentication: str) -> None:
         if authentication == "Bearer token":
@@ -15395,7 +15570,17 @@ class PersistentChatTUI:
             self.activity = "waiting for masked input"
             self.application.invalidate()
             return
-        self._save_custom_mcp(oauth=authentication == "OAuth")
+        assert self._mcp_setup is not None
+        self._mcp_setup["authentication"] = authentication
+        self._open_mcp_setup_review()
+
+    def _open_mcp_setup_review(self) -> None:
+        if self._mcp_setup is None:
+            return
+        self._open_panel(setup_review_page(self._mcp_setup), "mcp setup review", "back")
+        if self._panel is not None:
+            self._panel.picker.focus("back")
+            self._apply_picker_state()
 
     def _save_custom_mcp(
         self,
@@ -15462,7 +15647,8 @@ class PersistentChatTUI:
             f"\n[success] Added {name} as disabled. Review it before enabling.\n"
         )
         self._invalidate_mcp_inventory()
-        self._open_settings_category("mcp servers", f"{name}:")
+        self._invalidate_settings_overview()
+        self._open_mcp_install_result(name)
 
     def _submit_disabled_mcp_server(self, server: MCPServerConfig) -> bool:
         if self.running or self._setup_job is not None or self._mcp_mutation_pending:
@@ -15674,14 +15860,14 @@ class PersistentChatTUI:
                 return
             self._begin_settings_input(item.label, prompt, ("mcp_plan_input",))
             return
-        self._finish_mcp_catalog_plan()
+        self._open_mcp_setup_review()
 
     def _accept_mcp_plan_input(self, value: str | None) -> None:
         setup = self._mcp_setup or {}
         inputs = cast(list[Any], setup.get("inputs", []))
         index = int(str(setup.get("input_index", 0)))
         if index >= len(inputs):
-            self._finish_mcp_catalog_plan()
+            self._open_mcp_setup_review()
             return
         item = inputs[index]
         if not value and item.required and not item.default:
@@ -15689,10 +15875,43 @@ class PersistentChatTUI:
             self._prompt_next_mcp_plan_input()
             self.status_error = f"{item.label} is required"
             return
+        answers = cast(dict[str, str], setup["answers"])
         if value:
-            cast(dict[str, str], setup["answers"])[item.key] = value
+            answers[item.key] = value
+        else:
+            answers.pop(item.key, None)
         setup["input_index"] = index + 1
         self._prompt_next_mcp_plan_input()
+
+    def _back_mcp_catalog_input(self) -> None:
+        setup = self._mcp_setup or {}
+        inputs = cast(list[Any], setup.get("inputs", []))
+        index = int(str(setup.get("input_index", 0))) - 1
+        plan = cast("MCPInstallPlan", setup.get("plan"))
+        while index >= 0:
+            item = inputs[index]
+            if not item.secret and item.default and not item.required:
+                index -= 1
+                continue
+            if item.secret and os.environ.get(plan.secret_environment_name(
+                str(setup["name"]), item
+            )):
+                index -= 1
+                continue
+            break
+        if index < 0:
+            self._mcp_setup = None
+            if self._mcp_detail_server is not None:
+                self._open_mcp_catalog_detail(self._mcp_detail_server)
+            else:
+                self._open_mcp_catalog_results()
+            return
+        setup["input_index"] = index
+        self._prompt_next_mcp_plan_input()
+        item = inputs[index]
+        if not item.secret and self._settings_input_request is not None:
+            answers = cast(dict[str, str], setup.get("answers", {}))
+            self._set_input(answers.get(item.key, ""))
 
     def _finish_mcp_catalog_plan(self) -> None:
         if self._mcp_mutation_pending:
@@ -15724,7 +15943,8 @@ class PersistentChatTUI:
             f"\n[success] Installed {name} as disabled. Review it before enabling.\n"
         )
         self._invalidate_mcp_inventory()
-        self._open_settings_category("mcp servers", f"{name}:")
+        self._invalidate_settings_overview()
+        self._open_mcp_install_result(name)
 
     def _search_mcp_catalog(self, query: str) -> None:
         self._background_jobs.cancel("mcp-suggestions")
@@ -15732,6 +15952,8 @@ class PersistentChatTUI:
         if query != self._mcp_catalog_query_text:
             self._mcp_catalog_results = {}
             self._mcp_catalog_cached = False
+            self._mcp_catalog_cache_age_seconds = None
+            self._mcp_catalog_cache_loaded_at = 0.0
         self._mcp_catalog_query_text = query
         self._mcp_catalog_error = ""
         self._mcp_catalog_query = False
@@ -15754,6 +15976,12 @@ class PersistentChatTUI:
             self._mcp_catalog_query_text, tuple(self._mcp_catalog_results.values()),
             sort=self._mcp_catalog_sort, loading=bool(self._mcp_catalog_request_id),
             cached=self._mcp_catalog_cached, error=self._mcp_catalog_error,
+            cache_age_seconds=(
+                self._mcp_catalog_cache_age_seconds
+                + max(0, int(time.monotonic() - self._mcp_catalog_cache_loaded_at))
+                if self._mcp_catalog_cached
+                and self._mcp_catalog_cache_age_seconds is not None else None
+            ),
             searched=bool(self._mcp_catalog_query_text),
             repository_stars={url: count for url, (count, _at) in
                               self._mcp_repository_stars.items()},
@@ -17988,18 +18216,21 @@ class PersistentChatTUI:
         handler = str(request.get("handler") or "")
         if handler == "mcp_plan_input":
             if cancelled:
-                self._mcp_setup = None
-                self.activity = "secret entry cancelled"
-                self._open_settings_category("mcp servers")
+                self._back_mcp_catalog_input()
             else:
                 self._accept_mcp_plan_input(value)
         elif handler == "mcp_custom_bearer":
             if value:
-                self._save_custom_mcp(bearer_token=value)
+                if self._mcp_setup is not None:
+                    self._mcp_setup["authentication"] = "Bearer token"
+                    self._mcp_setup["bearer_token"] = value
+                    self._open_mcp_setup_review()
             else:
-                self._mcp_setup = None
-                self.activity = "secret entry cancelled"
-                self._open_settings_category("mcp servers")
+                self._begin_choice(
+                    "mcp remote authentication",
+                    ["No authentication", "OAuth", "Bearer token", "back"],
+                    "Bearer token",
+                )
         elif isinstance(callback, tuple) and len(callback) == 3:
             return_model_backend = str(request.get("return_model_backend") or "")
             if value:
@@ -18196,7 +18427,8 @@ class PersistentChatTUI:
                         "MCP save unconfirmed; queued work paused — "
                         "inspect configuration before retrying"
                     )
-                    self._append(f"\n[warning] {self.status_error}.\n")
+                    tone = "warning" if mcp_result.state == "unconfirmed" else "error"
+                    self._append(f"\n[{tone}] {self.status_error}.\n")
                     if mcp_result.state == "unconfirmed":
                         self._set_panel_feedback(self.status_error, "warning")
                 if isinstance(mcp_result.request, MCPUpdateDisabled) and (
@@ -18223,14 +18455,20 @@ class PersistentChatTUI:
                         self._mcp_update_all_total = 0
                 if mcp_current and self._choice_kind == "mcp settings":
                     error = self.status_error
-                    fallback = (
-                        "Reload" if isinstance(mcp_result.request, MCPReload)
-                        else f"{mcp_result.request.name}:"
-                    )
-                    selected_row = (
-                        self._choice_values[self._choice_index] if self._choice_values else fallback
-                    )
-                    self._open_settings_category("mcp servers", selected_row)
+                    if isinstance(mcp_result.request, MCPAddDisabled) and (
+                        mcp_result.state == "saved" and mcp_result.catalog is not None
+                    ):
+                        self._open_mcp_install_result(mcp_result.request.name)
+                    else:
+                        fallback = (
+                            "Reload" if isinstance(mcp_result.request, MCPReload)
+                            else f"{mcp_result.request.name}:"
+                        )
+                        selected_row = (
+                            self._choice_values[self._choice_index]
+                            if self._choice_values else fallback
+                        )
+                        self._open_settings_category("mcp servers", selected_row)
                     self.status_error = error
                 elif mcp_current and self._choice_kind in {
                     "mcp manage list", "mcp manage detail"
@@ -18525,7 +18763,17 @@ class PersistentChatTUI:
                 if self._choice_kind == "skills settings":
                     self._open_settings_category("skills")
                 elif self._choice_kind == "skills manage list":
-                    self._open_skills_manage()
+                    name = self._skills_manage_open_target
+                    self._skills_manage_open_target = ""
+                    if name and any(item.get("name") == name and item.get("identity")
+                                    for item in self._skills_inventory or []):
+                        self._open_skill_manage_detail(name)
+                    else:
+                        self._open_skills_manage("skill:" + name if name else "")
+                        if name:
+                            self._set_panel_feedback(
+                                "Installed skill is not in the current inventory", "warning"
+                            )
                 elif self._choice_kind == "skills manage detail" and self._panel is not None:
                     self._open_skill_manage_detail(
                         self._panel.page.id.removeprefix("skill-manage:")
@@ -18535,14 +18783,19 @@ class PersistentChatTUI:
                         "settings", self._settings_categories(), "skills", refresh=True
                     )
             elif kind == "mcp_catalog_results":
-                request_id, results, cached, error = cast(
-                    tuple[str, list[Any], bool, str], payload
+                request_id, results, cached, cache_age, error = cast(
+                    tuple[str, list[Any], bool, int | None, str], payload
                 )
                 if request_id != self._mcp_catalog_request_id:
                     continue
                 self._mcp_catalog_request_id = ""
                 self._mcp_catalog_results = {}
                 self._mcp_catalog_cached = cached
+                self._mcp_catalog_cache_age_seconds = (
+                    cache_age if cached and type(cache_age) is int
+                    and 0 <= cache_age <= 7 * 86_400 else None
+                )
+                self._mcp_catalog_cache_loaded_at = time.monotonic()
                 self._mcp_catalog_error = error
                 for server in results:
                     self._mcp_catalog_results[server.name] = server

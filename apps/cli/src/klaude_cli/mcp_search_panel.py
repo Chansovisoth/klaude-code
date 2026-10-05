@@ -5,12 +5,30 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from klaude_core.mcp_catalog import MCPCatalogServer, github_repository_identity
+from klaude_core.mcp_catalog import (
+    REGISTRY_CACHE_TTL_SECONDS,
+    MCPCatalogServer,
+    github_repository_identity,
+)
 
+from .installed_settings import list_preview
 from .mcp_suggestions import SUGGESTED_SEARCHES
 from .settings_panel import PanelAction, PanelPage, PanelRow, RowControl, RowKind
 
 SORTS = ("Registry order", "Name A–Z", "Name Z–A")
+
+
+def mcp_sort_page(current: str) -> PanelPage:
+    rows = [PanelRow("sorts", RowKind.SECTION, "SORT LOADED RESULTS")]
+    rows.extend(PanelRow(f"sort:{sort}", RowKind.CHOICE, sort,
+                         "Current" if sort == current else "",
+                         action=PanelAction("mcp-search-sort-apply", sort),
+                         section_id="sorts") for sort in SORTS)
+    rows.append(PanelRow("back", RowKind.NAVIGATION, "Back", footer=True,
+                         control=RowControl.BACK,
+                         action=PanelAction("mcp-search-sort-back")))
+    return PanelPage("mcp-search-sort", ("Settings", "MCPs", "Search", "Sort"),
+                     tuple(rows))
 
 
 def _safe_text(value: str, maximum: int = 500) -> str:
@@ -42,6 +60,7 @@ def sorted_servers(
 def mcp_search_page(
     query: str, servers: Sequence[MCPCatalogServer], *, sort: str = SORTS[0],
     loading: bool = False, cached: bool = False, error: str = "",
+    cache_age_seconds: int | None = None,
     searched: bool = False, repository_stars: dict[str, int] | None = None,
 ) -> PanelPage:
     """Keep query and source context fixed while result rows scroll and filter."""
@@ -70,12 +89,20 @@ def mcp_search_page(
             rows.append(PanelRow("loading", RowKind.STATUS, "Searching…",
                                  section_id="results"))
         if cached:
-            rows.append(PanelRow("cached", RowKind.STATUS, "Cached registry results",
-                                 section_id="results"))
+            age = f" · {cache_age_seconds}s old" if cache_age_seconds is not None else ""
+            rows.append(PanelRow(
+                "cached", RowKind.STATUS, "Cached registry results" + age,
+                status_tone="warning" if cache_age_seconds is not None
+                and cache_age_seconds > REGISTRY_CACHE_TTL_SECONDS else "neutral",
+                section_id="results",
+            ))
         if error:
             rows.append(PanelRow("error", RowKind.STATUS, "Search unavailable",
-                                 description=_safe_text(error, 200), status_tone="warning",
+                                 description=_safe_text(error, 200),
+                                 status_tone="warning" if servers else "error",
                                  section_id="results"))
+        if servers:
+            rows.append(PanelRow("results-table", RowKind.TABLE_HEADER, "MCP SERVERS"))
         for server in sorted_servers(servers, sort):
             stars = (repository_stars or {}).get(server.repository_url)
             description = _safe_text(server.description)
@@ -85,23 +112,26 @@ def mcp_search_page(
                 description += " · Repository stars: open detail"
             rows.append(PanelRow(
                 "registry:" + server.name, RowKind.NAVIGATION, _safe_text(server.name),
-                _safe_text(server.version), description,
+                _safe_text(server.version), list_preview(description, width=64),
                 action=PanelAction("mcp-search-detail", server.name),
-                section_id="results", search_terms=_safe_text(server.title),
+                section_id="results", search_terms=" ".join((
+                    _safe_text(server.title), description)),
             ))
         if searched and not servers and not loading and not error:
             rows.append(PanelRow("empty", RowKind.INFO,
                                  "No supported active servers matched",
                                  section_id="results"))
         if query:
-            rows.append(PanelRow("retry", RowKind.ACTION, "Search again",
+            rows.append(PanelRow("retry", RowKind.ACTION,
+                                 "Retry search" if error else "Refresh results",
                                  enabled=not loading,
                                  action=PanelAction("mcp-search-retry")))
     rows.append(PanelRow("back", RowKind.NAVIGATION, "Back", footer=True,
                          control=RowControl.BACK, action=PanelAction("mcp-search-back")))
     return PanelPage("mcp-registry-search", ("Settings", "MCPs", "Search"), tuple(rows),
                      column_headers=("MCP NAME", "VERSION", "DESCRIPTION")
-                     if servers else None, scroll_wrapped_rows=True)
+                     if servers else None, table_section_id="results",
+                     scroll_wrapped_rows=True)
 
 
 def mcp_detail_page(

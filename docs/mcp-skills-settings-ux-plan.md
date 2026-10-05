@@ -1,7 +1,12 @@
 # MCPs and Skills settings UI/UX plan
 
 Date: 2026-10-04
-Status: First entry-page and Manage navigation milestone implemented and validated.
+Status: Core MCPs/Skills presentation and navigation milestones implemented;
+remaining workflow refinements are listed below.
+
+Current assessment and recommended next sequence:
+[Whole Settings UX audit](settings-ux-audit.md). The original assessment below
+predates the recorded implementation milestones.
 
 ## Objective and scope
 
@@ -17,7 +22,7 @@ interactive terminal walkthrough has not yet been performed. Existing dirty
 working-tree changes were left untouched during analysis. The user subsequently
 authorized implementation; completed work and remaining gaps are tracked below.
 
-## Current assessment
+## Original assessment
 
 | Area | Current behavior | UX problem |
 | --- | --- | --- |
@@ -390,8 +395,65 @@ validation results, and remaining gaps in this document as implementation procee
   and was interrupted; it is not a passing full suite. No manual live-terminal
   walkthrough was performed.
 
-### Next task
+### 2026-10-04: Whole Settings audit and Input Field height reset
 
-Improve installed-item details, starting with MCP Tools & permissions and an
-origin-aware return path. Preserve the enabled-versus-connected distinction and
-existing setup, permission, transport, and exact-definition checks.
+- Saved the category-by-category review and implementation sequence in
+  [settings-ux-audit.md](settings-ux-audit.md), including representative renders
+  at 40, 70, and 120 cells and navigation/interaction findings.
+- Fixed the reported Height Reset crash: the reset label previously fell through
+  to integer parsing. Reset now saves the default 6–6 range, preserves Border,
+  and returns to Input Field with Height selected.
+- Validation: 17 focused height/reset/appearance tests passed, including mouse
+  and Enter regression coverage. The audit also passed 54 panel/picker and 40
+  selected navigation checks. Ruff and production mypy (79 source files) passed.
+  No full suite or manual live-terminal walkthrough was performed.
+
+### 2026-10-04: Shared layout and end-to-end navigation pass
+
+- Moved MCP and Skill Search headers into the results section, below search
+  controls. Corrected the fixed-header height and adjusted medium-width controls
+  so short descriptions sit on the same row. Search result and Manage summaries
+  are bounded previews with a short source type; complete bounded text and source attribution remain in
+  details and local filtering.
+- Manage tables use clear SKILL/MCP, STATUS, SUMMARY columns. Installed details
+  lead with description and primary actions. MCP detail links directly to its
+  active tool permissions. General Permissions also links to MCP tool policies;
+  both paths return to their origin. Skill and MCP deletion use focused Cancel.
+- Skill Search Source/Sort and MCP Search Sort show visible choice pages. Search
+  uses Refresh results or Retry search according to the outcome. Failed searches
+  without usable results and failed source resolution use red error feedback.
+- Skill catalog detail begins with decision information and lets users expand
+  Source details. An acknowledged install offers Open installed skill, including
+  a pending-inventory handoff. MCP setup Back/Escape restores previous nonsecret
+  name, endpoint, authentication and catalog-input steps.
+- Custom and Registry MCP setup now end in a disabled-install review with Back
+  focused. Registry secrets show only masked presence. Optional Registry answers
+  can be cleared after returning from review. A successful save opens a result
+  page with Open installed server; that link waits for fresh inventory when
+  needed. Failed saves stay in setup or show failure without a success page.
+- Cached MCP Registry results now show their actual age in seconds; age advances
+  when the page reopens. Results older than the one-hour fresh-cache window
+  use warning color.
+- A read-only render against the installed inventory (2 MCPs, 5 Skills) exposed
+  awkward mid-word wrapping at 70 columns. Table cells now break at hyphens,
+  and MCPs with no description show the concise Official MCP Registry source
+  type; the exact source remains in detail and local filtering. Both real
+  Manage lists render without horizontal overflow at 40, 70, and 120 columns.
+- Rendered representative pages at 40, 70, and 120 columns. In the seeded
+  70-column preview, Skills Manage shrank from 28 to about 13 body lines and
+  Skill catalog detail from 41 to 14. Actual Prompt Toolkit VT100 screens with
+  seeded inventories were inspected at all three widths. Width overflow was
+  checked in panel tests; live keyboard and resize paths were exercised in
+  selected CLI tests.
+- Validation: 240 focused MCP/Skill/Settings/appearance CLI tests and 107 panel,
+  discovery, MCP search, and catalog tests passed. Ruff, production mypy
+  (79 source files), and `git diff --check` passed.
+  The review and result pages rendered without width overflow at 40, 70, and
+  120 columns. No live network or full repository suite.
+
+### Remaining workflow refinements
+
+- Add a preview and per-item outcome view for Skills import; allow choosing a
+  subset in batch update review.
+- Keep setup answers editable through review. Complete an interactive terminal
+  walkthrough before final visual sign-off; the VT100 preview uses seeded data.

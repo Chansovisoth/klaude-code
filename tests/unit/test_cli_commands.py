@@ -2977,7 +2977,7 @@ def test_mcp_permissions_group_by_server_and_offer_scoped_bulk_controls(tmp_path
     tui.agent.tools = tools
     tui._open_settings_category("permissions")
 
-    assert not any("MCP" in row for row in tui._choice_values)
+    assert "MCP tool permissions" in tui._choice_values
     assert not any("resolve library:" in row for row in tui._choice_values)
     tui._open_settings_category("mcp servers")
     tui._choice_index = tui._choice_values.index("Permissions")
@@ -3059,6 +3059,61 @@ def test_mcp_settings_shortcut_focuses_server_permissions(tmp_path):
     tui._accept_choice()
     assert tui._choice_kind == "mcp settings"
     assert tui._choice_values[tui._choice_index] == "Permissions"
+
+
+def test_mcp_permissions_return_to_their_actual_entry_page(tmp_path):
+    from klaude_cli.settings_panel import PanelAction
+    from klaude_core.mcp_client import namespaced_tool_name
+
+    tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "preferences.json")
+    tui.agent.tools = {
+        namespaced_tool_name("docs", "search"): SimpleNamespace(
+            description="MCP server docs: search"
+        )
+    }
+    tui._mcp_inventory = {"servers": [{
+        "name": "docs", "enabled": True, "transport": "stdio", "tool_count": 1,
+        "source_label": "Local configuration", "fingerprint": "a" * 64,
+    }], "truncated": False}
+    tui._mcp_inventory_scope = str(tui.cfg.mcp_servers_file)
+    tui._mcp_inventory_loaded_at = time.monotonic()
+
+    tui._open_mcp_manage_detail("docs")
+    row = next(row for row in tui._panel.page.rows if row.id == "permissions")
+    assert row.enabled
+    tui._apply_panel_action(row.action)
+    assert tui._panel.page.id == "mcp-permission:docs"
+    tui._cancel_choice()
+    assert tui._panel.page.id == "mcp-manage:docs"
+    assert tui._panel.picker.selected_id == "permissions"
+
+    tui._open_settings_category("permissions")
+    tui._apply_panel_action(PanelAction("permission-mcp-servers"))
+    assert tui._panel.page.id == "mcp-permission-servers"
+    assert tui._panel.page.breadcrumb == ("Settings", "Permissions", "MCP tools")
+    tui._apply_panel_action(PanelAction("mcp-server", "docs"))
+    tui._cancel_choice()
+    assert tui._panel.page.id == "mcp-permission-servers"
+    assert tui._panel.picker.selected_id == "server:docs"
+    tui._cancel_choice()
+    assert tui._panel.page.id == "permissions"
+    assert tui._panel.picker.selected_id == "mcp-tools"
+
+
+def test_mcp_search_sort_options_preserve_results_page(tmp_path):
+    from klaude_cli.mcp_search_panel import SORTS
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "preferences.json")
+    tui._open_mcp_catalog_results()
+    tui._apply_panel_action(PanelAction("mcp-search-sort"))
+    assert tui._panel.page.id == "mcp-search-sort"
+    assert [row.label for row in tui._panel.page.rows if row.id.startswith("sort:")] \
+        == list(SORTS)
+    tui._apply_panel_action(PanelAction("mcp-search-sort-apply", SORTS[1]))
+    assert tui._mcp_catalog_sort == SORTS[1]
+    assert tui._panel.page.id == "mcp-registry-search"
+    assert tui._panel.picker.selected_id == "sort"
 
 
 def test_mcp_permission_groups_keep_original_server_identity(tmp_path):
@@ -7100,6 +7155,7 @@ def test_mcp_typeahead_debounces_discards_stale_results_and_cancels_on_exit():
 
 
 def test_tui_mcp_registry_search_installs_supported_plan_disabled(monkeypatch, tmp_path):
+    from klaude_cli.settings_panel import PanelAction
     from klaude_core.mcp_catalog import _parse_servers
     from klaude_core.mcp_client import MCPRegistry
 
@@ -7166,6 +7222,9 @@ def test_tui_mcp_registry_search_installs_supported_plan_disabled(monkeypatch, t
     tui._picker.focus("plan:0")
     tui._apply_picker_state()
     tui._accept_choice()
+    assert tui._panel.page.id == "mcp-setup-review"
+    assert registry.load() == {}
+    tui._apply_panel_action(PanelAction("mcp-setup-confirm"))
 
     assert tui._mcp_mutations.close(wait=True)
     tui._before_render(None)
@@ -7174,6 +7233,7 @@ def test_tui_mcp_registry_search_installs_supported_plan_disabled(monkeypatch, t
     assert installed.enabled is False
     assert installed.url == "https://mcp.example.com/mcp"
     assert installed.source["name"] == "io.github.example/browser"
+    assert tui._panel.page.id == "mcp-install-result"
 
 
 def test_tui_mcp_registry_result_event_is_runtime_safe(monkeypatch, tmp_path):
@@ -7208,12 +7268,35 @@ def test_tui_mcp_registry_result_event_is_runtime_safe(monkeypatch, tmp_path):
     tui = _fake_persistent_tui()
     tui._mcp_catalog_request_id = "request-1"
     tui._open_mcp_catalog_results()
-    tui._events.put(("mcp_catalog_results", ("request-1", [server], False, "")))
+    tui._events.put(("mcp_catalog_results", ("request-1", [server], False, None, "")))
 
     tui._before_render(None)
 
     assert server.name in tui._mcp_catalog_results
     assert any(row.id == "registry:" + server.name for row in tui._panel.page.rows)
+
+
+def test_tui_mcp_cached_result_keeps_its_actual_age():
+    from klaude_core.mcp_catalog import MCPCatalogServer
+
+    tui = _fake_persistent_tui()
+    server = MCPCatalogServer(
+        name="io.github.example/docs", title="Docs", description="Search documentation",
+        version="1.0.0", status="active",
+    )
+    tui._mcp_catalog_request_id = "cached-request"
+    tui._mcp_catalog_query_text = "docs"
+    tui._open_mcp_catalog_results()
+    tui._events.put(("mcp_catalog_results", (
+        "cached-request", [server], True, 120, "",
+    )))
+    tui._before_render(None)
+    cached = next(row for row in tui._panel.page.rows if row.id == "cached")
+    first_age = int(cached.label.split(" · ", 1)[1].split("s old", 1)[0])
+    assert first_age >= 120
+    tui._open_mcp_catalog_results()
+    cached = next(row for row in tui._panel.page.rows if row.id == "cached")
+    assert int(cached.label.split(" · ", 1)[1].split("s old", 1)[0]) >= first_age
 
 
 def test_tui_mcp_search_query_editor_submits_owned_job_without_chat_turn(monkeypatch):
@@ -7251,11 +7334,15 @@ def test_tui_mcp_registry_table_keeps_distinct_servers_and_detail_navigation():
     tui._mcp_catalog_request_id = "table-request"
     tui._open_mcp_catalog_results()
     assert tui._panel.page.column_headers is None
-    tui._events.put(("mcp_catalog_results", ("table-request", servers, False, "")))
+    tui._events.put(("mcp_catalog_results", ("table-request", servers, False, None, "")))
     tui._before_render(None)
     assert len(tui._mcp_catalog_results) == 2
     assert tui._panel.page.column_headers == ("MCP NAME", "VERSION", "DESCRIPTION")
     tui._picker.focus("sort")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._panel.page.id == "mcp-search-sort"
+    tui._panel.picker.focus("sort:Name A–Z")
     tui._apply_picker_state()
     tui._accept_choice()
     assert tui._mcp_catalog_sort == "Name A–Z"
@@ -7350,7 +7437,7 @@ def test_tui_mcp_registry_table_live_resize_and_long_description_scrolling():
                     assert tui.application.layout.current_control is tui.panel_control
                     info = tui.panel_body_window.render_info
                     assert tui._panel_selected_line() in info.displayed_lines
-                    header_height = 3 if tui._panel_width() >= 60 else 2
+                    header_height = 2
                     assert tui.panel_header_window.render_info.window_height == header_height
                     assert tui.panel_footer_window.render_info.window_height == 2
                 assert tui._picker.selected_id == "registry:" + server.name
@@ -7383,6 +7470,7 @@ def test_tui_mcp_registry_table_live_resize_and_long_description_scrolling():
 
 
 def test_tui_registry_install_collects_required_secret_in_settings(monkeypatch, tmp_path):
+    from klaude_cli.settings_panel import PanelAction
     from klaude_core.mcp_catalog import MCPCatalogInput, MCPInstallPlan
     from klaude_core.mcp_client import MCPRegistry
 
@@ -7415,6 +7503,13 @@ def test_tui_registry_install_collects_required_secret_in_settings(monkeypatch, 
     assert tui._secret_request is not None
     tui._set_input("top-secret-token")
     tui._submit_secret_response()
+    assert tui._panel.page.id == "mcp-setup-review"
+    assert tui._panel.picker.selected_id == "back"
+    assert registry.load() == {} and not saved
+    assert "top-secret-token" not in "".join(
+        text for line in tui._panel_body().lines for _, text in line
+    )
+    tui._apply_panel_action(PanelAction("mcp-setup-confirm"))
 
     server = registry.load()["secure"]
     assert server.enabled is False
@@ -7423,7 +7518,93 @@ def test_tui_registry_install_collects_required_secret_in_settings(monkeypatch, 
     assert "top-secret-token" not in tui.output.text
 
 
+def test_custom_mcp_setup_back_restores_previous_nonsecret_answer(monkeypatch, tmp_path):
+    from klaude_core.mcp_client import MCPRegistry
+
+    registry = MCPRegistry(tmp_path / "mcp-servers.json")
+    monkeypatch.setattr("klaude_cli.main._mcp_registry", lambda: registry)
+    tui = _fake_persistent_tui()
+    tui._begin_custom_mcp()
+    tui._accept_choice()  # Remote transport.
+    tui._set_input("docs")
+    tui._submit_settings_input_response()
+    assert tui._settings_input_request["on_submit"] == ("mcp_custom_endpoint",)
+    tui._set_input("https://mcp.example.com/mcp")
+    tui._submit_settings_input_response()
+    assert tui._choice_kind == "mcp remote authentication"
+
+    tui._panel.picker.focus("back")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._settings_input_request["on_submit"] == ("mcp_custom_endpoint",)
+    assert tui.input.text == "https://mcp.example.com/mcp"
+    tui._answer_settings_input(None)
+    assert tui._settings_input_request["on_submit"] == ("mcp_custom_name",)
+    assert tui.input.text == "docs"
+    tui._answer_settings_input(None)
+    assert tui._choice_kind == "mcp transport"
+    assert registry.load() == {}
+
+
+def test_catalog_mcp_input_back_restores_prior_answer():
+    from klaude_core.mcp_catalog import MCPCatalogInput, MCPInstallPlan
+
+    tui = _fake_persistent_tui()
+    plan = MCPInstallPlan(
+        label="remote", source_name="io.github.example/docs", source_version="1.0.0",
+        transport="http", url="https://mcp.example.com/mcp",
+        inputs=(MCPCatalogInput(key="region", label="Region", required=True),
+                MCPCatalogInput(key="tenant", label="Tenant", required=True)),
+    )
+    tui._begin_mcp_catalog_plan(plan)
+    tui._set_input("west")
+    tui._submit_settings_input_response()
+    assert tui._settings_input_request["label"] == "Tenant"
+    tui._answer_settings_input(None)
+    assert tui._settings_input_request["label"] == "Region"
+    assert tui.input.text == "west"
+    tui._answer_settings_input(None)
+    assert tui._panel.page.id == "mcp-registry-search"
+
+
+def test_catalog_mcp_review_can_clear_optional_answer():
+    from klaude_cli.settings_panel import PanelAction
+    from klaude_core.mcp_catalog import MCPCatalogInput, MCPInstallPlan
+
+    tui = _fake_persistent_tui()
+    plan = MCPInstallPlan(
+        label="remote", source_name="io.github.example/docs", source_version="1.0.0",
+        transport="http", url="https://mcp.example.com/mcp",
+        inputs=(MCPCatalogInput(key="region", label="Region"),),
+    )
+    tui._begin_mcp_catalog_plan(plan)
+    tui._set_input("west")
+    tui._submit_settings_input_response()
+    assert tui._panel.page.id == "mcp-setup-review"
+
+    tui._apply_panel_action(PanelAction("mcp-setup-back"))
+    assert tui.input.text == "west"
+    tui._set_input("")
+    tui._submit_settings_input_response()
+    assert tui._panel.page.id == "mcp-setup-review"
+    assert tui._mcp_setup["answers"] == {}
+
+
+def test_catalog_mcp_without_inputs_still_requires_review():
+    from klaude_core.mcp_catalog import MCPInstallPlan
+
+    tui = _fake_persistent_tui()
+    plan = MCPInstallPlan(
+        label="remote", source_name="io.github.example/docs", source_version="1.0.0",
+        transport="http", url="https://mcp.example.com/mcp",
+    )
+    tui._begin_mcp_catalog_plan(plan)
+    assert tui._panel.page.id == "mcp-setup-review"
+    assert tui._panel.picker.selected_id == "back"
+
+
 def test_tui_custom_remote_mcp_setup_stays_inside_settings(monkeypatch, tmp_path):
+    from klaude_cli.settings_panel import PanelAction
     from klaude_core.mcp_client import MCPRegistry
 
     registry = MCPRegistry(tmp_path / "mcp-servers.json")
@@ -7442,13 +7623,26 @@ def test_tui_custom_remote_mcp_setup_stays_inside_settings(monkeypatch, tmp_path
     tui._submit_settings_input_response()
     tui._choice_index = tui._choice_values.index("No authentication")
     tui._accept_choice()
+    assert tui._panel.page.id == "mcp-setup-review"
+    assert tui._panel.picker.selected_id == "back"
+    assert registry.load() == {}
+    tui._apply_panel_action(PanelAction("mcp-setup-confirm"))
     assert tui._mcp_mutations.close(wait=True)
     tui._before_render(None)
 
     server = registry.load()["context-docs"]
     assert server.url == "https://mcp.example.com/mcp"
     assert server.enabled is False
-    assert tui._choice_kind == "mcp settings"
+    assert tui._panel.page.id == "mcp-install-result"
+    tui._apply_panel_action(PanelAction("mcp-install-open", "context-docs"))
+    assert tui._choice_kind == "mcp manage list"
+    identity = tui._background_jobs.latest["mcp-inventory"]
+    tui._apply_background_result(("mcp-inventory", identity, {
+        "servers": [{"name": "context-docs", "enabled": False, "transport": "http",
+                     "oauth": False, "tool_count": 0, "source_label": "Local configuration",
+                     "description": ""}], "truncated": False,
+    }, ""))
+    assert tui._panel.page.id == "mcp-manage:context-docs"
 
 
 def test_picker_text_fuzzy_filters_to_closest_option():
@@ -7491,6 +7685,44 @@ def test_persistent_tui_input_height_picker_persists_and_resets(tmp_path):
 
     assert _load_tui_appearance(path).input_height == DEFAULT_INPUT_HEIGHT
     assert _load_tui_appearance(path).input_max_height == 6
+
+
+@pytest.mark.parametrize("activation", ["enter", "mouse"])
+def test_input_height_reset_restores_only_height_and_returns_to_parent(tmp_path, activation):
+    path = tmp_path / "appearance.json"
+    tui = _fake_persistent_tui(path, tmp_path / "preferences.json")
+    tui.appearance.input_height = 2
+    tui.appearance.input_max_height = 10
+    tui.appearance.input_border = False
+    _save_tui_appearance(path, tui.appearance)
+    tui._set_input("Unsent draft")
+    tui._begin_choice("settings", tui._settings_categories(), "input field")
+    tui._open_settings_category("input field")
+    tui._panel.picker.focus("height")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._choice_kind == "input height"
+    reset_row = next(row for row in tui._panel.page.rows
+                     if row.legacy_label == RESET_THEME_CHOICE)
+    if activation == "mouse":
+        line = tui._panel_body().row_for_line.index(reset_row.id)
+        tui._click_panel_line(line)
+        assert _load_tui_appearance(path).input_height == 2  # First click focuses.
+        tui._click_panel_line(line)
+    else:
+        tui._panel.picker.focus(reset_row.id)
+        tui._apply_picker_state()
+        tui._accept_choice()
+    assert tui._choice_kind == "input field settings"
+    assert tui._panel.picker.selected_id == "height"
+    saved = _load_tui_appearance(path)
+    assert (saved.input_height, saved.input_max_height) == (6, 6)
+    assert saved.input_border is False
+    assert not tui._height_edit
+    tui._cancel_choice()
+    assert tui._choice_kind == "settings"
+    tui._cancel_choice()
+    assert tui.input.text == "Unsent draft"
 
 
 def test_trace_print_preserves_provider_brackets(monkeypatch):
@@ -12039,7 +12271,7 @@ def test_skills_delete_confirmation_is_inert_until_confirmed_and_keeps_identity(
     tui._apply_picker_state()
     tui._accept_choice()
     assert tui._panel.page.breadcrumb[-1] == "Confirm deletion"
-    assert tui._panel.picker.selected_id == "back"
+    assert tui._panel.picker.selected_id == "cancel"
     assert not requests
     # A refresh after confirmation cannot silently authorize a different definition.
     tui._skills_inventory[0]["identity"] = "new"
@@ -12071,7 +12303,7 @@ def test_skills_confirmation_reopens_on_back_even_after_previous_delete_focus(tm
     assert tui._choice_kind == "skills manage detail"
     assert tui._skill_delete_identity == ""
     tui._apply_panel_action(PanelAction("skill-manage-delete", "demo"))
-    assert tui._panel.picker.selected_id == "back"
+    assert tui._panel.picker.selected_id == "cancel"
 
 
 def test_skills_open_prepares_drop_folder_once_without_importing(tmp_path):
@@ -13518,7 +13750,7 @@ def test_mcp_manage_refresh_preserves_filter_focus_and_page(tmp_path):
     assert tui._choice_kind == "mcp manage list"
     assert tui._panel.picker.selected_id == "server:docs"
     assert tui._panel.picker.query == "docs"
-    assert tui._panel.row().description == "New description"
+    assert tui._panel.row().description == "MCP Registry metadata · New description"
     tui._accept_choice()
     assert tui._panel.page.breadcrumb == ("Settings", "MCPs", "Manage", "docs")
     tui._cancel_choice()
@@ -14044,7 +14276,7 @@ def test_skills_discovery_reload_and_delete_navigation_preserve_safety():
     tui._apply_picker_state()
     tui._accept_choice()
     assert tui._panel.page.breadcrumb[-1] == "Confirm deletion"
-    assert tui._panel.picker.selected_id == "back"
+    assert tui._panel.picker.selected_id == "cancel"
     assert requests == []
     tui._accept_choice()
     assert tui._choice_kind == "skills manage detail"
@@ -14148,6 +14380,9 @@ def test_skill_discovery_source_switch_keeps_focus_after_cached_return():
     ).payload(), ""))
 
     tui._apply_panel_action(PanelAction("discover-provider"))
+    assert tui._panel.page.id == "skill-search-source"
+    assert tui._panel.picker.selected_id == "skillsmp"
+    tui._apply_panel_action(PanelAction("discover-provider-apply", "skills.sh"))
     assert tui._panel.picker.selected_id == "provider"
     key = tui._background_jobs.latest["skill-search"]
     tui._apply_background_result(("skill-search", key, SearchResult(
@@ -14157,8 +14392,31 @@ def test_skill_discovery_source_switch_keeps_focus_after_cached_return():
     assert tui._panel.picker.selected_id == "provider"
 
     tui._apply_panel_action(PanelAction("discover-provider"))
+    assert tui._panel.page.id == "skill-search-source"
+    tui._apply_panel_action(PanelAction("discover-provider-apply", "skillsmp"))
     assert tui._panel.picker.selected_id == "provider"
     assert tui._skill_discovery.result.records[0].provider == "skillsmp"
+
+
+def test_completed_skill_install_opens_detail_after_inventory_arrives():
+    from klaude_cli.settings_panel import PanelAction
+    from klaude_core.skill_catalog import SkillRecord
+
+    tui = _fake_persistent_tui()
+    record = SkillRecord("skillsmp", "one", "guide", "Useful guidance")
+    tui._skill_discovery.detail = record
+    tui._skill_discovery.installed.add(record.identity)
+    tui._skill_discovery.show_detail()
+    tui._apply_panel_action(PanelAction("discover-open-installed"))
+    assert tui._choice_kind == "skills manage list"
+    assert tui._skills_manage_open_target == "guide"
+    tui._events.put(("skills_inventory", ([{
+        "name": "guide", "identity": "a" * 64, "enabled": True,
+        "source_label": "GitHub · example/repo", "indexed_file_count": 2,
+    }], "")))
+    tui._before_render(None)
+    assert tui._panel.page.id == "skill-manage:guide"
+    assert tui._skills_manage_open_target == ""
 
 
 @pytest.mark.parametrize("width", [24, 70, 120])

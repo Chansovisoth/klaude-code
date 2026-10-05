@@ -16,6 +16,7 @@ import glob
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -588,6 +589,17 @@ class Workspace:
                         raise PermissionError("shell glob includes a protected or outside path")
 
     # --- tool implementations ---------------------------------------------
+    def source_version(self, path: str) -> tuple[str, tuple[int, ...]]:
+        """Cheap identity check for an already-authorized source excerpt."""
+        target = self._jail(path)
+        if self._is_sensitive_path(target):
+            raise PermissionError(f"access to secret file denied: {path}")
+        info = target.stat()
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError('source is not a regular file')
+        return (str(target.relative_to(self.root)),
+                (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+
     def preflight_mutation(self, path: str | None = None) -> None:
         self._require_clean_repo()
         if path is not None and self._is_sensitive_path(self._jail(path)):

@@ -402,27 +402,139 @@ def test_incomplete_or_failed_stream_is_not_a_completed_model_answer(streaming, 
     assert client._active_client is None
 
 
+def test_unfinished_assembled_tool_call_has_a_typed_failure_and_returns_no_calls():
+    from klaude_core.ollama import OllamaIncompleteResponse
+
+    body = json.dumps({'message': {'tool_calls': [{'function': {
+        'name': 'write_file', 'arguments': {'path': 'app.py', 'content': 'partial'},
+    }}]}, 'done': False}) + '\n'
+    client = Ollama('http://ollama.test')
+    client._chat_client_factory = lambda: httpx.Client(
+        base_url=client.base_url, transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, text=body)))
+    with pytest.raises(OllamaIncompleteResponse, match='partial calls discarded'):
+        client.chat('small', [{'role': 'user', 'content': 'Implement the feature.'}])
+    assert client.last_chat_metadata == {}
+    assert client._active_client is None
+
+
 def test_workspace_plan_request_is_constrained_public_data_without_callable_tools():
-    steps = [
-        {'goal': 'Implement current source', 'kind': 'implement', 'files': ['app.py']},
-        {'goal': 'Run project checks', 'kind': 'validate', 'files': []},
-    ]
+    changes = [{'goal': 'Implement current source', 'files': ['app.py'],
+                'request_refs': ['r1']}]
     requests = []
 
     def handler(request):
         payload = json.loads(request.content)
         requests.append(payload)
         return httpx.Response(200, text=json.dumps({
-            'message': {'content': json.dumps({'steps': steps})}, 'done': True,
+            'message': {'content': json.dumps({'changes': changes})}, 'done': True,
         }) + '\n')
 
     client = Ollama('http://ollama.test')
     client._chat_client_factory = lambda: httpx.Client(
         base_url=client.base_url, transport=httpx.MockTransport(handler))
-    result = client.chat_workspace_plan('small', [{'role': 'system', 'content': 'system'}])
-    assert result['workspace_plan'] == steps
+    result = client.chat_workspace_plan('small', [{'role': 'system', 'content': 'system'}],
+                                        request_refs=['r1', 'r2'])
+    assert result['workspace_plan'][0] == {**changes[0], 'kind': 'implement'}
+    assert [step['kind'] for step in result['workspace_plan']] == [
+        'implement', 'validate', 'review']
     assert 'tools' not in requests[0]
-    assert requests[0]['format']['properties']['steps']['maxItems'] == 6
+    assert requests[0]['format']['properties']['changes']['maxItems'] == 4
+    assert 'kind' not in requests[0]['format']['properties']['changes']['items']['properties']
+
+
+def test_constrained_batch_read_bodies_keep_their_paths_without_changing_history():
+    from copy import deepcopy
+
+    messages = [{'role': 'system', 'content': 'system'},
+                {'role': 'assistant', 'content': '', 'tool_calls': [
+                    {'id': key, 'function': {'name': 'read_file', 'arguments': {'path': path}}}
+                    for key, path in [('entry', 'pkg/__main__.py'), ('cli', 'pkg/cli.py'),
+                                      ('failed', 'missing.py')]
+                ]},
+                *[{'role': 'tool', 'tool_call_id': key, 'tool_name': 'read_file', 'content': body}
+                  for key, body in [('entry', 'from .cli import main\nmain()\n'),
+                                    ('cli', 'def main(): return 2\n'),
+                                    ('failed', 'tool error: FileNotFoundError')]]]
+    original = deepcopy(messages)
+    requests = []
+    client = Ollama()
+
+    def chat(model, outgoing, **kwargs):
+        requests.append(outgoing)
+        return {'content': json.dumps({'actions': [
+            {'tool': '__finish__', 'arguments': {'answer': 'Observed results.'}},
+        ]})}
+
+    client.chat = chat
+    client.chat_structured_action('small', messages, tools=[{'function': {
+        'name': 'read_file', 'parameters': {'type': 'object', 'properties': {
+            'path': {'type': 'string'}}, 'required': ['path']},
+    }}])
+    for outgoing, path, body in zip(requests[0][2:],
+                                   ['pkg/__main__.py', 'pkg/cli.py', 'missing.py'],
+                                   [m['content'] for m in messages[2:]], strict=True):
+        assert outgoing['content'].startswith('read_file result for requested arguments ')
+        assert json.dumps({'path': path}) in outgoing['content']
+        assert outgoing['content'].endswith(body)
+    assert messages == original
+
+
+@pytest.mark.parametrize(('arguments', 'expected'), [
+    ({'path': 'app.py'}, {'path': 'app.py', 'limit': 100}),
+    ({'path': 'app.py', 'offset': 151}, {'path': 'app.py', 'offset': 151, 'limit': 100}),
+    ({'path': 'app.py', 'offset': 151, 'limit': 5},
+     {'path': 'app.py', 'offset': 151, 'limit': 5}),
+])
+def test_local_read_default_is_paged_and_explicit_ranges_stay_unchanged(
+    tmp_path, arguments, expected,
+):
+    from copy import deepcopy
+
+    from klaude_tools import Workspace, build_tools
+
+    workspace = Workspace(tmp_path)
+    (tmp_path / 'app.py').write_text('\n'.join(f'VALUE_{i}={i}' for i in range(1, 251)))
+    tool = next(t for t in build_tools(workspace) if t.name == 'read_file')
+    original_schema, original_arguments = deepcopy(tool.schema()), deepcopy(arguments)
+    requests = []
+    client = Ollama()
+
+    def chat(model, messages, **kwargs):
+        requests.append(messages)
+        assert kwargs['response_format']['properties']['actions']['items']['properties'][
+            'arguments']['properties']['limit']['default'] == 100
+        return {'content': json.dumps({'actions': [
+            {'tool': 'read_file', 'arguments': arguments},
+        ]})}
+
+    client.chat = chat
+    response = client.chat_structured_action('small', [{'role': 'system', 'content': 'system'}],
+                                            tools=[tool.schema()], allow_finish=False)
+    actual = response['tool_calls'][0]['function']['arguments']
+    assert actual == expected and arguments == original_arguments
+    assert tool.schema() == original_schema
+    page = tool.fn(**actual)
+    start = expected.get('offset', 1)
+    end = min(start + expected['limit'] - 1, 250)
+    assert page.startswith(f'app.py: lines {start}-{end} of 250\n')
+    assert page.endswith(f'{end}: VALUE_{end}={end}')
+    assert 'VALUE_250=250' in tool.fn(path='app.py')  # Native unpaged compatibility.
+
+
+@pytest.mark.parametrize(('files', 'reference'), [
+    (['app.py'], 'made_up'), (['app.py'], 1), (['app.py', 'tests/test_app.py'], 'r1'),
+])
+def test_workspace_plan_rejects_invalid_links_or_collapsed_file_changes(files, reference):
+    from klaude_core.ollama import OllamaError
+
+    client = Ollama()
+    client.chat = lambda *a, **kw: {'content': json.dumps({'changes': [
+        {'goal': 'Change code', 'files': files, 'request_refs': [reference]},
+    ]})}
+    with pytest.raises(OllamaError, match='invalid workspace plan'):
+        client.chat_workspace_plan('small', [{'role': 'system', 'content': 'system'}],
+                                   request_refs=['r1'])
 
 
 def test_constrained_batch_rejects_unknown_action_before_returning_any_calls():
@@ -481,7 +593,8 @@ def test_constrained_execution_enforces_one_action_without_losing_discovery_batc
         client.close()
 
 
-def test_execution_discriminator_binds_canonical_arguments_without_catalog_duplication():
+@pytest.mark.parametrize('completed_step', [False, True])
+def test_execution_discriminator_binds_arguments_and_preserves_completion(completed_step):
     requests = []
     tools = [
         {'function': {'name': 'edit_file', 'parameters': {
@@ -511,8 +624,18 @@ def test_execution_discriminator_binds_canonical_arguments_without_catalog_dupli
     client._chat_client_factory = lambda: httpx.Client(
         base_url=client.base_url, transport=httpx.MockTransport(handler))
     try:
-        result = client.chat_structured_action('small', [{'role': 'system', 'content': ''}],
-                                              tools=tools)
+        prior = {'role': 'assistant', 'content': '', 'completed_step': completed_step,
+                 'tool_calls': [{'id': 'prior', 'function': {
+                     'name': 'edit_file', 'arguments': {
+                         'path': 'app.py', 'old_str': 'VALUE=0', 'new_str': 'VALUE=2',
+                     },
+                 }}]}
+        messages = [{'role': 'system', 'content': ''}, prior,
+                    {'role': 'tool', 'tool_call_id': 'prior', 'content': 'edited'}]
+        result = client.chat_structured_action('small', messages, tools=tools)
+        converted = json.loads(requests[0]['messages'][1]['content'])
+        assert converted['completed_step'] is completed_step
+        assert messages[1] is prior and prior['completed_step'] is completed_step
         assert result['tool_calls'][0]['function']['name'] == 'edit_file'
         variants = requests[0]['format']['properties']['actions']['items']['oneOf']
         by_name = {v['properties']['tool']['enum'][0]: v for v in variants}

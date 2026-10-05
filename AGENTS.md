@@ -172,6 +172,9 @@ Chat slash commands currently include:
   Input Field shows `6-6, border` by default (live min/max and border state); Divider shows
   `ON, default, default` (live visibility and color names, with default colors
   labeled default).
+  The Height subpage's Reset to default restores only the 6–6 height range,
+  persists both height fields and returns to Input Field with Height selected;
+  the border setting is retained.
   Tools shows enabled/registered counts from
   the live tool registry and availability state. Skills shows enabled/installed
   counts from its existing owned background inventory, with loading/unavailable states.
@@ -440,8 +443,11 @@ Chat slash commands currently include:
   its OIDC API is not required. Sources never switch automatically on failure.
   Empty entry shows local SUGGESTIONS rather than fabricated live popularity.
   Search query opens the existing private single-line settings editor; `/`
-  filters displayed rows locally. Source/Sort selection remains focused while
-  their result sets change. Provider update times and verified source commit
+  filters displayed rows locally. Source and Sort open explicit choice pages;
+  applying a choice returns with its control focused, while Back leaves the
+  choice unchanged. Search result column headings appear directly above result
+  rows in the scrolling body. Refresh results reruns a successful query; Retry
+  search appears after a failure. Provider update times and verified source commit
   times display in UTC; a source commit date is not a claim about current
   repository activity. Queries stay out of chat history/shared drafts.
   Source/sort/query changes cancel owned read-only jobs. Network work runs in
@@ -467,7 +473,9 @@ Chat slash commands currently include:
   First-party/audit status remains Unknown unless established; no combined score
   is invented. Identity is provider plus item ID, never the displayed name;
   cross-provider grouping requires a verified repository/path and keeps metrics
-  separate. A resolved detail offers Install skill. Its confirmation initially
+  separate. Skill catalog details lead with description, repository, license,
+  resolution and installation actions; Source details expands the full bounded
+  metadata. A resolved detail offers Install skill. Its confirmation initially
   focuses Back and shows the pinned GitHub source and individual-skill license
   state. Only explicit confirmation queues a bounded download of that exact
   commit's skill folder. Git tree/blob identity is verified; symlinks, submodules,
@@ -475,6 +483,9 @@ Chat slash commands currently include:
   lane indexes the staged folder without executing scripts, granting permissions,
   or replacing an installed skill. Installation records pinned source attribution
   in the manifest and reports success only after the import/index acknowledgement.
+  A completed catalog install offers Open installed skill; when inventory is
+  still loading, that action waits for the owned inventory result before opening
+  the installed detail.
   Catalog entries without a verified skill path cannot offer installation.
   Runtime compatibility is not implied by discovery or installation.
   Skills home shows only the detected-file count beside Import skills. Opening it
@@ -490,8 +501,12 @@ Chat slash commands currently include:
   Both Skills and MCPs use Check for update on item details and Check for updates
   on Manage lists; these actions check sources and open review before applying.
   Both Manage page headings show installed and enabled counts from their inventories.
-  Manage lists show each item's enabled state beside its source in the
-  STATUS / SOURCE column; descriptions remain separate and wrapped.
+  Manage tables show SKILL/MCP, STATUS, and SUMMARY columns. Summary previews
+  show the source type and are bounded for scanning; full bounded descriptions
+  and source labels remain
+  in item details and in local filtering. Medium-width table controls show
+  concise inline descriptions, and table pages reserve their rendered
+  fixed-header height.
   Manage actions appear above the installed-item table. Column headings belong
   directly above inventory rows in the scrolling body, never above the page's
   Filter/refresh/update controls. Table headings are non-selectable and follow
@@ -506,7 +521,16 @@ Chat slash commands currently include:
   accompanying error text retain their separate yellow/red styles.
   Skill workers report the outcome tone explicitly: partial imports, existing
   installations, and unconfirmed changes are warnings rather than successes.
+  Search failures without usable results and source-resolution failures are
+  errors; stale results retained after a failed refresh use warnings.
   Item details label removal as Remove server for MCPs and Delete skill for Skills.
+  Both destructive confirmations focus Cancel initially. Installed details lead
+  with description, Enabled and update actions, then source/content information
+  and removal. MCP details offer Tools & permissions when tools are loaded;
+  Back returns to that server detail. General Permissions also links to MCP
+  tool permissions and returns to General Permissions when entered from there.
+  Setup Back/Escape follows the preceding MCP transport, name, endpoint,
+  authentication or catalog-input step and restores entered nonsecret answers.
   Review confirmation actions retain their Update labels. Refresh list
   refreshes the inventory asynchronously. The list shows
   with each skill's name, bounded source label, and description. Selecting a skill
@@ -631,12 +655,12 @@ Chat slash commands currently include:
   use the same writer rather than synchronous special-case writes.
 - `/permission`: open the Permissions settings page directly. It takes no
   arguments; permission changes are made and persisted through that page.
-  MCP tool permissions are managed under `/mcp` → Permissions, rather
-  than as a category in general Permissions. Active MCP tools appear under one
-  row per server there. Entering a server shows
+  MCP tool permissions are available under `/mcp` → Permissions, directly from
+  an installed MCP detail, and through a link in general Permissions. Active
+  MCP tools appear under one row per server there. Entering a server shows
   its individual ask/allow/deny policies and scoped Allow all, Ask for each
   tool, and Deny all actions. Server-wide changes save only that server's tool
-  policies and preserve unrelated permissions. Back returns to MCPs settings.
+  policies and preserve unrelated permissions. Back returns to the entry path.
   General permission presets and reset retain their existing policy scope.
 - `/mcp`: open the external MCP server settings page directly. Its
   `Delete MCP` action lists configured servers, including disabled servers, and
@@ -649,7 +673,9 @@ Chat slash commands currently include:
   as disabled definitions. Required registry inputs are collected in-place.
   Search uses the typed Settings panel: query, explicit Official MCP Registry
   source, Registry order or local name sorting, results, and a wrapped detail
-  page. Name sorting applies to at most 50 loaded results, not the whole Registry.
+  page. Cached results show their actual age in seconds, which advances on
+  reopening; results older than the one-hour fresh cache window use warning
+  color. Name sorting applies to at most 50 loaded results, not the whole Registry.
   Opening a detail with an exact GitHub repository URL fetches its repository
   star count in an owned, cancellable background job. The result is labeled
   `Repository stars` in detail and, once fetched, in the search row; it is not
@@ -666,6 +692,11 @@ Chat slash commands currently include:
   Secrets use the masked composer and private `config/.env` references. The same
   settings page can add custom Streamable HTTP or stdio servers, import VS Code,
   OpenCode, or standard MCP JSON, and review then connect/enable a saved server.
+  Custom and Registry setup show a final review before saving; Back restores
+  previous nonsecret answers, and secret values appear only as masked presence.
+  The review starts with Back focused. After a successful save, the result page
+  confirms the server is disabled and links to its installed detail, including
+  while a fresh inventory loads. A failed save never shows that success page.
   Settings and registry-detail navigation read configured names/status through an
   owned eight-second read-only inventory job, not synchronous registry loads.
   It parses at most 16 MB of regular, non-symlink configuration and previews at
@@ -730,7 +761,9 @@ Chat slash commands currently include:
   MCPs settings has Manage installed and Permissions. Manage opens a searchable
   list with each server's name, bounded Registry identity or local source label,
   and bounded description;
-  selecting a server opens Enabled, Check for update, and Remove server controls.
+  selecting a server opens Enabled, Tools & permissions when available,
+  Check for update, and Remove server controls. Cached tool counts do not imply
+  a live connection.
   Remove server keeps its
   exact-definition confirmation and ordered mutation. Update is available for
   official Registry stdio packages only when a fresh Registry plan changes one
@@ -1720,6 +1753,26 @@ Passing a recognized check is execution evidence, not proof that every requested
 behavior was implemented. Unknown custom commands retain their exact outcomes
 without being accepted as passing project checks. A successful wrapper command
 alone cannot authorize task completion.
+For Python, empty/docstring/import-only modules and simple imported entry
+forwarders do not alone establish implementation inspection while other
+observed source candidates remain unread. A fully inspected import-only project
+still permits new implementation. A numbered page containing only imports does
+not count as a complete file; such partial sources remain available in discovery
+choices until useful implementation or the complete file is inspected. Read
+coverage comes from the executed result, independently of excerpt-cache eviction
+or alias resolution. Empty files remain valid complete inspections. This is an exploration guard, not a code
+quality or semantic coverage verdict. Next-action guidance remains inspection
+until that discovery state permits implementation.
+
+An assembled Ollama response ending without its completion marker returns a
+typed failure and no tool calls. When tools remain callable and no public text
+was streamed, one fresh action may be retried within the same turn budget and
+transport-recovery allowance. Cancellation takes precedence. Completed calls
+are retained, partial calls never execute, and a second failure remains an error.
+Healthy responses incur no retry; runtime/model choices stay unchanged.
+Recovery, protocol, and governor instructions expire when their turn completes,
+fails, or is cancelled. Follow-ups retain actual dialogue and complete tool
+exchanges without inheriting the previous turn's temporary response format.
 
 Supported local Ollama runtimes use constrained actions for these complex turns
 from the start. Discovery allows up to four independent read actions per response.
@@ -1730,28 +1783,104 @@ the earlier action. Execution binds each tool name to its canonical argument
 schema, preventing arguments from a different tool from entering that action.
 It avoids repeating the full catalog beside those schemas. Discovery retains
 its shared field grammar. Simple native turns keep their existing behavior.
-After observed implementation/test inspection, one optional
-model-authored public plan divides remaining work into at most six steps. Actual
+The local action protocol declares a 100-line default when a paged `read_file`
+schema is available and the model omits `limit`. The copied local schema carries
+this default without changing canonical schemas. Normalized calls record that
+actual range; explicit offsets/limits are retained. Native unpaged reads keep
+their original output. This bounds ordinary generated-file reads without adding
+automatic file reads or raising context allocation; long lines and explicitly
+large pages can still exceed the conservative request estimate.
+After observed implementation/test inspection, one optional model request
+proposes one to four coherent changes, one target file per change. The adapter appends project-check
+execution and final review, rather than asking the model to classify application
+requirements as implementation or validation. Up to sixteen exact request spans
+provide stable navigation references; a long tail remains one span, and the
+original objective is retained verbatim. Plan links are advisory. Unlinked spans
+remain visible, and review sees every span; linking or editing never proves
+semantic coverage. Discovery omits reference excerpts until planning needs them.
+Actual
 file-tool changes and current passing checks gate implementation/validation step
 completion. A failed optional plan does not prevent ordinary tool execution.
-The cursor also follows actual edits to later scoped files and current passing
-checks; the model need not correctly send a protocol completion flag. A final
+During constrained local implementation, write/edit path choices follow the
+active plan's files. Canonical arguments and the immutable response scope are
+validated before permission or execution. Failed checks and review reopen file
+choices for recovery without changing permissions or workspace boundaries.
+Once the active file has an actual edit since planning, the next planned
+implementation file is also offered. A successful action on it can express
+subtask movement through the existing inferred cursor handling, even when the
+model left its completion flag false. This neither completes unedited steps
+nor proves semantic coverage, and the response scope stays immutable.
+A scope-rejected, unexecuted call may be retried if its exact arguments become
+valid under a later response scope; completed-call guards remain intact.
+Mutation/check responses require the completion flag in their declared grammar;
+normalization still accepts older compatible adapters that omit it. Completion
+applies after successful execution to the subtask that produced that response.
+The local history adapter preserves this flag in previous JSON actions instead
+of presenting incomplete protocol examples to the next request.
+The same adapter attributes read results to the actual paired read's requested
+path/range before presenting batched bodies. It preserves the body and canonical
+call/result history, includes failed results, and never guesses a missing pair.
+A passing check's inferred cursor movement cannot also consume the following
+review step. The cursor follows actual edits and current passing checks. A final
 answer can complete review bookkeeping only when actual edit/check prerequisites
 are met. Missing scoped edits and stale checks still block completion.
+Constrained execution omits the final-answer choice until this existing gate
+permits it, avoiding an inference request for an answer the host would reject.
 The plan remains turn-local; it is not a durable requirements proof. Simple turns
 and other providers keep their existing native path and do not incur this call.
 
 `klaude_core.request_context` selects policy modules from the canonical prompt
 using the actual callable schemas. Workspace implementation omits unrelated
 configuration/runtime and standalone-answer detail, retaining host boundaries,
-applicable repository guidance, and enabled Skill metadata. A separate request
+applicable repository guidance, and enabled Skill metadata. Coding tasks do not
+admit product configuration merely because they mention tools or commands.
+Initial compaction uses the selected execution contract without
+provider admission; admission happens inside the guarded loop after compaction.
+This keeps an initial context constraint on the same clean failure path as a
+later oversized result. A separate request
 projection bounds long in-turn dialogue in whole assistant/tool exchanges while
 retaining the current objective and newest exchange. Canonical session payloads
-remain intact. Omitted file results are unavailable evidence; their read guards
-and governor outcome entries are released so necessary fresh reads can execute.
-The original complex objective survives short continuations. The newest single
-exchange is never partially truncated by this projection; it can still exceed
-the estimated budget and needs an explicit smaller action.
+remain intact. Complex execution also keeps an ephemeral, bounded source store
+from successful permission-approved built-in file reads. Each excerpt records
+its actual workspace-relative path, line coverage, truncation, execution ID and
+filesystem identity. Identity is checked before request reuse; changed, removed,
+secret, or escaped paths lose their excerpts. Active-step source has priority,
+and source already retained in tool exchanges is not duplicated. Paged
+excerpts retain literal code without their display line numbers for edit anchors.
+Excerpts appear as attributed untrusted context, never as new tool executions
+or restored audit evidence. Normal tool exchanges remain intact while they fit;
+snapshots are admitted only when budget pressure would otherwise omit source.
+Eager replacement was rejected after both small models stopped implementing
+and reread already-visible files. Missing excerpts and omitted read guards
+permit fresh reads; fully admitted current excerpts retain duplicate guards.
+Read guards track the actual source path, including reads through workspace
+symlinks, so an external source change permits an authorized fresh read.
+File edits invalidate their target excerpts, except confirmed no-ops and typed
+anchor conflicts; shell execution invalidates all excerpts even on failure.
+External changes and unclassified shell commands also stale previous checks.
+The store holds at most eight excerpts and 32,000 characters, with at most 8,000
+characters admitted within the current request's remaining estimated budget.
+It is turn-local, does not read files automatically, and adds no model call or
+larger context allocation. Simple/read-only turns retain their direct path.
+The original complex objective survives short continuations. Exchanges are never
+partially truncated by this projection. Under pressure, constrained local
+execution may omit the entire latest successful built-in edit exchange rather
+than retain its large historical arguments. A host-owned changed marker and
+exact call/result pairing establish eligibility; mixed batches, failures, no-ops,
+unexecuted edits, reads, shell results and corrective feedback remain protected.
+Execution state retains the actual edit status, and a notice states that omitted
+arguments are unavailable as current source. Canonical history and completed-edit
+duplicate guards remain intact; fresh paged reads can recover needed contents.
+Native and other-provider paths retain their latest exchange. Estimated request
+admission accounts for policy/task context, schemas, protocol overhead and output
+reserve before projecting complete dialogue exchanges and optional excerpts.
+Projection reserves its own omission notice before choosing retained exchanges;
+an optional older exchange must not cause an avoidable admission failure.
+If essential dialogue still cannot fit, a typed host failure stops before the
+provider request, reports the constraint, retains actual history, and adds no
+fabricated provider usage. The allocation is not raised. This conservative
+character estimate is not a tokenizer-level guarantee; oversized essential
+results currently require a smaller paged action or explicit narrower task.
 
 After a native protocol failure, other eligible local turns can also use this
 declared JSON action response format with reference-free tool schemas. It is separate from

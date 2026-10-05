@@ -410,10 +410,10 @@ def execute(request: dict[str, Any]) -> object:
     if kind == "mcp_search":
         from klaude_core.mcp_catalog import MCPCatalogClient
 
-        results, cached = MCPCatalogClient(Path(request["cache_file"])).search(
-            request["query"], limit=50
-        )
-        return {"servers": [asdict(server) for server in results], "cached": cached}
+        client = MCPCatalogClient(Path(request["cache_file"]))
+        results, cached = client.search(request["query"], limit=50)
+        return {"servers": [asdict(server) for server in results], "cached": cached,
+                "cache_age_seconds": client.last_cache_age_seconds}
     if kind == "mcp_repository_stars":
         from klaude_core.mcp_catalog import github_repository_stars
 

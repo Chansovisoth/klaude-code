@@ -74,6 +74,20 @@ def test_empty_entry_is_local_suggestions_and_controls_only():
     assert panels.current.picker.selected_id == "query"
 
 
+def test_completed_skill_install_offers_open_installed_action():
+    jobs, panels, opened = Jobs(), Panels(), []
+    discovery = SkillDiscovery(jobs, panels.show, lambda _query: None, lambda: None,
+                               lambda: "session-1", open_installed=opened.append)
+    record = result().records[0]
+    discovery.detail = record
+    discovery.installed.add(record.identity)
+    discovery.show_detail()
+    row = next(row for row in panels.current.page.rows if row.id == "open-installed")
+    assert row.action == PanelAction("discover-open-installed")
+    discovery.action(row.action)
+    assert opened == [record.name]
+
+
 def test_search_source_sort_pagination_are_explicit_and_bounded():
     discovery, jobs, panels, *_ = setup()
     discovery.action(PanelAction("discover-search", "python"))
@@ -83,9 +97,14 @@ def test_search_source_sort_pagination_are_explicit_and_bounded():
     discovery.action(PanelAction("discover-page", "2"))
     assert discovery.request.page == 2
     discovery.action(PanelAction("discover-sort"))
+    assert panels.current.page.id == "skill-search-sort"
+    assert panels.current.picker.selected_id == "stars"
+    discovery.action(PanelAction("discover-sort-apply", "recent"))
     assert discovery.request.sort == "recent" and discovery.request.page == 1
     assert panels.current.picker.selected_id == "sort"
     discovery.action(PanelAction("discover-provider"))
+    assert panels.current.page.id == "skill-search-source"
+    discovery.action(PanelAction("discover-provider-apply", "skills.sh"))
     assert discovery.request.provider == "skills.sh" and discovery.request.sort == "relevance"
     assert panels.current.picker.selected_id == "provider"
     assert jobs.requests[-1][2] == 15
@@ -97,6 +116,8 @@ def test_source_focus_survives_live_reply_and_cached_return():
     deliver(discovery, panels, result())
 
     discovery.action(PanelAction("discover-provider"))
+    assert panels.current.picker.selected_id == "skillsmp"
+    discovery.action(PanelAction("discover-provider-apply", "skills.sh"))
     assert panels.current.picker.selected_id == "provider"
     deliver(discovery, panels, SearchResult(CatalogStatus.OK, (
         SkillRecord("skills.sh", "one", "frontend-design", repository="anthropics/skills"),
@@ -104,6 +125,8 @@ def test_source_focus_survives_live_reply_and_cached_return():
     assert panels.current.picker.selected_id == "provider"
 
     discovery.action(PanelAction("discover-provider"))
+    assert panels.current.picker.selected_id == "skills.sh"
+    discovery.action(PanelAction("discover-provider-apply", "skillsmp"))
     assert len(jobs.requests) == 2  # SkillsMP comes from the successful cache.
     assert panels.current.picker.selected_id == "provider"
 
@@ -111,7 +134,8 @@ def test_source_focus_survives_live_reply_and_cached_return():
 @pytest.mark.parametrize("width", [18, 40, 80, 120])
 def test_wrapping_footer_gap_and_missing_license(width):
     record = result().records[0]
-    state = PanelState(detail_page(record))
+    assert not any(row.label == "Source commit" for row in detail_page(record).rows)
+    state = PanelState(detail_page(record, show_source=True))
     assert any(row.label == "Source commit" for row in state.page.rows)
     body = render_body(state, width)
     text = "\n".join("".join(t for _, t in line) for line in body.lines)
@@ -242,18 +266,18 @@ def test_search_and_resolution_feedback_use_semantic_status_tones():
     discovery.search("python")
     deliver(discovery, panels, SearchResult(CatalogStatus.TIMEOUT))
     error = next(row for row in panels.current.page.rows if row.id == "error")
-    assert error.status_tone == "warning"
+    assert error.status_tone == "error"
     body = render_body(panels.current, 80)
     warning_line = next(line for line, owner in zip(
         body.lines, body.row_for_line, strict=True,
     ) if owner == "error")
-    assert warning_line[0][0] == "class:panel.status.warning"
+    assert warning_line[0][0] == "class:panel.status.error"
 
     record = result().records[0]
     assert next(row for row in detail_page(record, status=CatalogStatus.OK).rows
                 if row.id == "status").status_tone == "success"
     assert next(row for row in detail_page(record, status=CatalogStatus.NETWORK).rows
-                if row.id == "status").status_tone == "warning"
+                if row.id == "status").status_tone == "error"
 
 
 def test_success_cache_and_stale_fallback_with_real_age():
@@ -370,7 +394,7 @@ def test_opening_cached_result_cancels_refresh_and_rejects_late_reply():
 
 
 def test_long_detail_pages_scroll_without_making_info_selectable():
-    state = PanelState(detail_page(result().records[0]), "resolve")
+    state = PanelState(detail_page(result().records[0], show_source=True), "resolve")
     body = render_body(state, 40)
     selected = state.picker.selected_id
     assert not any(r.selectable for r in state.page.rows if r.id.startswith("field:"))
@@ -410,7 +434,7 @@ def test_malformed_worker_response_and_deadline_are_visible_and_not_cached():
 
 
 @pytest.mark.parametrize("width", [24, 70, 120])
-def test_result_table_wraps_full_descriptions_without_ellipsis(width):
+def test_result_table_has_bounded_preview_and_full_detail(width):
     discovery, _, panels, *_ = setup()
     discovery.search("python")
     deliver(discovery, panels, result())
@@ -418,6 +442,8 @@ def test_result_table_wraps_full_descriptions_without_ellipsis(width):
     record = discovery.result.records[0]
     lines = ["".join(text for _, text in line) for line, owner in zip(
         body.lines, body.row_for_line, strict=True) if owner == record.identity]
-    assert "…" not in "".join(lines)
-    assert sum(line.count("description") for line in lines) == 30
+    assert "…" in "".join(lines)
+    assert len(lines) < 8
+    assert record.description == next(row for row in detail_page(record).rows
+                                      if row.id == "description").description
     assert panels.current.page.column_headers == ("SKILL", "SOURCE", "DESCRIPTION")

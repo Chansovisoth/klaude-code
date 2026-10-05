@@ -61,7 +61,10 @@ def test_catalog_search_uses_official_latest_filter_and_private_cache(tmp_path):
     )
 
     first, first_cached = client.search("browser", limit=10)
+    assert client.last_cache_age_seconds is None
     second, second_cached = client.search("browser", limit=10)
+    assert client.last_cache_age_seconds is not None
+    assert client.last_cache_age_seconds >= 0
 
     assert [item.name for item in first] == ["io.github.example/browser"]
     assert first_cached is False
@@ -108,6 +111,7 @@ def test_catalog_uses_recent_stale_cache_when_registry_is_temporarily_unavailabl
     assert cached is False
     assert fallback == first
     assert fallback_cached is True
+    assert client.last_cache_age_seconds is not None
 
 
 def test_remote_plan_collects_secret_as_environment_reference():

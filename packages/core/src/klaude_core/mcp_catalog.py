@@ -448,6 +448,7 @@ class MCPCatalogClient:
             raise ValueError("MCP Registry URL must be a credential-free HTTPS origin")
         self.timeout_seconds = timeout_seconds
         self.transport = transport
+        self.last_cache_age_seconds: int | None = None
 
     def _cache_key(self, query: str, limit: int) -> str:
         return json.dumps([query.casefold(), limit], separators=(",", ":"))
@@ -556,6 +557,7 @@ class MCPCatalogClient:
                     # Cache persistence is optional. Preserve fresh discovery
                     # without following/replacing an unsafe cache symlink.
                     pass
+        self.last_cache_age_seconds = max(0, int(age)) if from_cache else None
         return _parse_servers(payload), from_cache
 
     def get(self, name: str, *, refresh: bool = False) -> MCPCatalogServer:

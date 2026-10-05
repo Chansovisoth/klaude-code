@@ -6,7 +6,7 @@ from collections.abc import Mapping
 
 from klaude_core.skill_catalog import SkillRecord
 
-from .installed_settings import InstalledFilter
+from .installed_settings import InstalledFilter, inventory_summary
 from .settings_panel import PanelAction, PanelPage, PanelRow, RowControl, RowKind
 
 
@@ -99,11 +99,11 @@ def skills_manage_page(installed: list[dict[str, object]] | None,
         PanelRow("filter", RowKind.CHOICE, "Filter", show.label,
                  action=PanelAction("installed-filter-open", "Skills"), section_id="manage"),
         PanelRow("reload", RowKind.ACTION, "Refresh list", legacy_label="Reload",
-                 description="Refresh installed skill inventory",
+                 description="Re-read installed skills",
                  enabled=not pending, action=PanelAction("skill-reload"),
                  section_id="manage"),
         PanelRow("update-all", RowKind.ACTION, "Check for updates",
-                 description="Check verified GitHub sources and review available updates"
+                 description="Review verified updates"
                  if any(skill.get("update_kind") == "github" for skill in installed or [])
                  else "No verified upstream update sources",
                  enabled=not pending and any(
@@ -117,12 +117,13 @@ def skills_manage_page(installed: list[dict[str, object]] | None,
             rows.append(PanelRow("installed-items", RowKind.TABLE_HEADER, "INSTALLED SKILLS"))
         rows.extend(PanelRow(
             f"skill:{skill['name']}", RowKind.NAVIGATION, str(skill["name"]),
-            ("Enabled" if skill.get("enabled") is not False else "Disabled") + " · "
-            + str(skill.get("source_label") or "Source unknown"),
-            str(skill.get("description") or "Description unavailable"),
+            "Enabled" if skill.get("enabled") is not False else "Disabled",
+            inventory_summary(skill.get("description"), skill.get("source_label")),
             enabled=bool(skill.get("identity")),
             action=PanelAction("skill-manage-detail", str(skill["name"])),
             section_id="installed-items",
+            search_terms=" ".join((str(skill.get("description") or ""),
+                                   str(skill.get("source_label") or ""))),
         ) for skill in visible)
         if not installed:
             rows.append(PanelRow("empty", RowKind.INFO, "No skills installed"))
@@ -140,7 +141,7 @@ def skills_manage_page(installed: list[dict[str, object]] | None,
                          action=PanelAction("skill-manage-back"), footer=True,
                          control=RowControl.BACK))
     return PanelPage("skills-manage", ("Settings", "Skills", "Manage"), tuple(rows),
-                     column_headers=("SKILL", "STATUS / SOURCE", "DESCRIPTION")
+                     column_headers=("SKILL", "STATUS", "SUMMARY")
                      if visible else None, table_section_id="installed-items",
                      scroll_wrapped_rows=True)
 
@@ -151,14 +152,11 @@ def skill_manage_detail_page(skill: Mapping[str, object], *, pending: bool = Fal
     raw_files = skill.get("indexed_file_count")
     files = raw_files if type(raw_files) is int else 0
     rows = [
-        PanelRow("detail", RowKind.SECTION, "SKILL"),
-        PanelRow("source", RowKind.INFO, "Source",
-                 description=str(skill.get("source_label") or "Source unknown"),
-                 section_id="detail"),
+        PanelRow("detail", RowKind.SECTION, name,
+                 description="Installed skill"),
         PanelRow("description", RowKind.INFO, "Description",
                  description=str(skill.get("description") or "Description unavailable"),
                  section_id="detail"),
-        PanelRow("files", RowKind.INFO, "Indexed files", str(files), section_id="detail"),
         PanelRow("enabled", RowKind.TOGGLE, "Enabled",
                  enabled=bool(skill.get("identity")) and not pending,
                  checked=skill.get("enabled") is not False,
@@ -169,9 +167,15 @@ def skill_manage_detail_page(skill: Mapping[str, object], *, pending: bool = Fal
                  "No verified upstream update source",
                  enabled=skill.get("update_kind") == "github" and not pending,
                  action=PanelAction("skill-update", name), section_id="detail"),
+        PanelRow("source-heading", RowKind.SECTION, "SOURCE & CONTENT"),
+        PanelRow("source", RowKind.INFO, "Source",
+                 description=str(skill.get("source_label") or "Source unknown"),
+                 section_id="source-heading"),
+        PanelRow("files", RowKind.INFO, "Indexed files", str(files),
+                 section_id="source-heading"),
         PanelRow("delete", RowKind.ACTION, "Delete skill",
                  enabled=bool(skill.get("identity")) and not pending,
-                 action=PanelAction("skill-manage-delete", name), section_id="detail"),
+                 action=PanelAction("skill-manage-delete", name)),
     ]
     if feedback:
         rows.append(PanelRow("feedback", RowKind.STATUS, feedback, status_tone=feedback_tone))
@@ -265,7 +269,8 @@ def skill_delete_confirmation_page(skill: Mapping[str, object]) -> PanelPage:
             action=PanelAction("skill-delete", name),
         ),
     ]
-    rows.append(PanelRow("back", RowKind.NAVIGATION, "Back", action=PanelAction("skill-list")))
+    rows.append(PanelRow("cancel", RowKind.NAVIGATION, "Cancel", footer=True,
+                         control=RowControl.CANCEL, action=PanelAction("skill-list")))
     return PanelPage(
         f"skill-delete-confirm:{name}",
         ("Settings", "Skills", "Manage", name, "Confirm deletion"),

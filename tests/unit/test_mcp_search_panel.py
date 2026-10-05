@@ -66,6 +66,14 @@ def test_remote_error_and_metadata_cannot_insert_terminal_control_text():
         assert "\x1b" not in _text(PanelState(page), 50)
 
 
+def test_cached_registry_results_show_age_and_stale_warning():
+    page = mcp_search_page("docs", (_server("docs"),), cached=True,
+                           cache_age_seconds=3_601, searched=True)
+    row = next(row for row in page.rows if row.id == "cached")
+    assert row.label == "Cached registry results · 3601s old"
+    assert row.status_tone == "warning"
+
+
 def test_github_repository_stars_are_labeled_as_repository_metric():
     from dataclasses import replace
 

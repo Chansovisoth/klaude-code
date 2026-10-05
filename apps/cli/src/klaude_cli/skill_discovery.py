@@ -19,6 +19,7 @@ from klaude_core.skill_catalog import (
 )
 
 from .background_jobs import OwnedBackgroundJobs
+from .installed_settings import list_preview
 from .settings_panel import PanelAction, PanelPage, PanelRow, RowControl, RowKind
 
 SEARCH_KIND = "skill discovery"
@@ -32,6 +33,33 @@ STALE_TTL = 7 * 86400
 def back_row(action: str) -> PanelRow:
     return PanelRow("back", RowKind.NAVIGATION, "Back", footer=True,
                     control=RowControl.BACK, action=PanelAction(action))
+
+
+def source_page(current: str) -> PanelPage:
+    rows = [PanelRow("sources", RowKind.SECTION, "SEARCH SOURCE")]
+    for identity, label, description in (
+        ("skillsmp", "SkillsMP", "Repository stars and recent sorting"),
+        ("skills.sh", "skills.sh", "Provisional search · relevance order"),
+    ):
+        rows.append(PanelRow(identity, RowKind.CHOICE, label,
+                             "Current" if identity == current else "",
+                             description, action=PanelAction("discover-provider-apply", identity),
+                             section_id="sources"))
+    rows.append(back_row("discover-provider-back"))
+    return PanelPage("skill-search-source", ("Settings", "Skills", "Search", "Source"),
+                     tuple(rows))
+
+
+def sort_page(current: str) -> PanelPage:
+    rows = [PanelRow("sorts", RowKind.SECTION, "SORT RESULTS")]
+    for identity, label in (("stars", "Repository stars"), ("recent", "Recent")):
+        rows.append(PanelRow(identity, RowKind.CHOICE, label,
+                             "Current" if identity == current else "",
+                             action=PanelAction("discover-sort-apply", identity),
+                             section_id="sorts"))
+    rows.append(back_row("discover-sort-back"))
+    return PanelPage("skill-search-sort", ("Settings", "Skills", "Search", "Sort"),
+                     tuple(rows))
 
 
 def search_page(request: SearchRequest | None, provider: str, sort: str,
@@ -69,20 +97,28 @@ def search_page(request: SearchRequest | None, provider: str, sort: str,
                                  section_id="results"))
         if error is not None:
             rows.append(PanelRow("error", RowKind.STATUS, STATUS_TEXT.get(error, "Unavailable"),
-                                 status_tone="warning", section_id="results"))
+                                 status_tone="warning" if result else "error",
+                                 section_id="results"))
         if result is not None:
+            if result.records:
+                rows.append(PanelRow("results-table", RowKind.TABLE_HEADER, "SKILLS"))
             for record in result.records:
                 metric = (f"{record.popularity.metric}: {record.popularity.value:,}"
                           if record.popularity else "")
                 rows.append(PanelRow(record.identity, RowKind.NAVIGATION, record.name,
-                                     record.repository or "Source not resolved",
-                                     " · ".join(filter(None, (record.description, metric,
-                                                              record.provider))),
+                                     list_preview(record.repository or "Source not resolved",
+                                                  width=28),
+                                     list_preview(" · ".join(filter(None, (
+                                         record.description, metric, record.provider))), width=64),
                                      action=PanelAction("discover-detail", record.identity),
-                                     section_id="results"))
+                                     section_id="results",
+                                     search_terms=" ".join((record.repository,
+                                                            record.description))))
             if result.status == CatalogStatus.EMPTY:
                 rows.append(PanelRow("empty", RowKind.INFO, "No matches", section_id="results"))
-        rows.append(PanelRow("retry", RowKind.ACTION, "Search again", enabled=not loading,
+        rows.append(PanelRow("retry", RowKind.ACTION,
+                             "Retry search" if error is not None else "Refresh results",
+                             enabled=not loading,
                              action=PanelAction("discover-retry")))
         if request.page > 1:
             rows.append(PanelRow("previous", RowKind.ACTION, "Previous page", enabled=not loading,
@@ -94,13 +130,14 @@ def search_page(request: SearchRequest | None, provider: str, sort: str,
     return PanelPage("skill-search:" + (request.identity if request else "empty"),
                      ("Settings", "Skills", "Search"), tuple(rows),
                      column_headers=("SKILL", "SOURCE", "DESCRIPTION")
-                     if result and result.records else None, scroll_wrapped_rows=True)
+                     if result and result.records else None, table_section_id="results",
+                     scroll_wrapped_rows=True)
 
 
 def detail_page(record: SkillRecord, *, loading: bool = False,
                 status: CatalogStatus | None = None, install_pending: bool = False,
                 install_busy: bool = False, installed: bool = False,
-                install_feedback: str = "") -> PanelPage:
+                install_feedback: str = "", show_source: bool = False) -> PanelPage:
     fields = (
         ("Repository", record.repository or "Not resolved"),
         ("Source URL", record.source_url or "Not resolved"),
@@ -119,7 +156,15 @@ def detail_page(record: SkillRecord, *, loading: bool = False,
         ("Metadata fetched", datetime.fromtimestamp(record.fetched_at, UTC).isoformat()
          if record.fetched_at else "Unknown"),
     )
-    rows = [PanelRow("detail", RowKind.SECTION, "SKILL")]
+    rows = [
+        PanelRow("detail", RowKind.SECTION, "SKILL", description=record.name),
+        PanelRow("description", RowKind.INFO, "Description",
+                 description=record.description or "Not supplied", section_id="detail"),
+        PanelRow("repository", RowKind.INFO, "Repository",
+                 description=record.repository or "Not resolved", section_id="detail"),
+        PanelRow("license", RowKind.INFO, "Skill license",
+                 description=record.license or "Unknown", section_id="detail"),
+    ]
     location = github_location(record.source_url)
     resolvable = bool(location and location[1] and location[2])
     rows.append(PanelRow(
@@ -138,17 +183,23 @@ def detail_page(record: SkillRecord, *, loading: bool = False,
         "Download the pinned skill folder after confirmation",
         action=PanelAction("discover-install"),
     ))
-    # Put long metadata in descriptions: the renderer wraps them without clipping values.
-    rows.extend(PanelRow("field:" + label, RowKind.INFO, label, description=value,
-                         section_id="detail") for label, value in fields)
+    if installed:
+        rows.append(PanelRow("open-installed", RowKind.NAVIGATION,
+                             "Open installed skill",
+                             action=PanelAction("discover-open-installed")))
     if record.popularity:
         rows.append(PanelRow("metric", RowKind.INFO, record.popularity.metric,
                              str(record.popularity.value), section_id="detail"))
-    rows.extend((
-        PanelRow("scope", RowKind.INFO, "Compatibility",
-                 description="Catalog metadata does not establish support for a skill's runtime "
-                 "dependencies or execution model. Installing never executes skill scripts."),
-    ))
+    rows.append(PanelRow("source-details", RowKind.ACTION,
+                         "Hide source details" if show_source else "Source details",
+                         action=PanelAction("discover-source-details")))
+    if show_source:
+        rows.append(PanelRow("source-heading", RowKind.SECTION, "SOURCE DETAILS"))
+        rows.extend(PanelRow("field:" + label, RowKind.INFO, label, description=value,
+                             section_id="source-heading") for label, value in fields)
+        rows.append(PanelRow("scope", RowKind.INFO, "Compatibility",
+                             description="Catalog metadata does not establish support for "
+                             "runtime dependencies. Installation does not execute scripts."))
     if loading or status is not None:
         status_label = (
             "Resolving…" if loading else
@@ -157,7 +208,7 @@ def detail_page(record: SkillRecord, *, loading: bool = False,
         )
         rows.append(PanelRow("status", RowKind.STATUS, status_label,
                              status_tone="neutral" if loading else
-                             "success" if status == CatalogStatus.OK else "warning"))
+                             "success" if status == CatalogStatus.OK else "error"))
     if install_pending or install_feedback:
         rows.append(PanelRow(
             "install-status", RowKind.STATUS,
@@ -198,9 +249,11 @@ class SkillDiscovery:
                  show: Callable[[PanelPage, str, str], None],
                  edit: Callable[[str], None], parent: Callable[[], None],
                  scope: Callable[[], str],
-                 install: Callable[[SkillRecord], bool] | None = None):
+                 install: Callable[[SkillRecord], bool] | None = None,
+                 open_installed: Callable[[str], None] | None = None):
         self.jobs, self.show, self.edit, self.parent, self.scope = jobs, show, edit, parent, scope
         self.install = install
+        self.open_installed = open_installed
         self.provider = "skillsmp"
         self.sort = "stars"
         self.request: SearchRequest | None = None
@@ -215,6 +268,7 @@ class SkillDiscovery:
         self.install_identity = ""
         self.install_feedback = ""
         self.installed: set[str] = set()
+        self.detail_expanded = False
 
     def show_detail(self, default: str = "") -> None:
         if self.detail is None:
@@ -225,6 +279,7 @@ class SkillDiscovery:
             install_busy=self.install_pending,
             installed=self.detail.identity in self.installed,
             install_feedback=self.install_feedback,
+            show_source=self.detail_expanded,
         ), DETAIL_KIND, default)
 
     def cancel(self) -> None:
@@ -288,17 +343,32 @@ class SkillDiscovery:
             self.edit(self.request.query if self.request else "")
         elif kind == "discover-search":
             self.search(action.target)
-        elif kind in {"discover-provider", "discover-sort"}:
-            if kind == "discover-provider":
-                self.provider = "skills.sh" if self.provider == "skillsmp" else "skillsmp"
-                self.sort = "relevance" if self.provider == "skills.sh" else "stars"
-            elif self.provider == "skillsmp":
-                self.sort = "recent" if self.sort == "stars" else "stars"
-            if self.request:
-                self.search(self.request.query, focus="provider" if kind ==
-                            "discover-provider" else "sort")
+        elif kind == "discover-provider":
+            self.cancel()
+            self.show(source_page(self.provider), "skill discovery source", self.provider)
+        elif kind == "discover-sort" and self.provider == "skillsmp":
+            self.cancel()
+            self.show(sort_page(self.sort), "skill discovery sort", self.sort)
+        elif kind in {"discover-provider-apply", "discover-sort-apply"}:
+            if kind == "discover-provider-apply":
+                if action.target not in {"skillsmp", "skills.sh"}:
+                    return True
+                changed = action.target != self.provider
+                self.provider = action.target
+                if changed:
+                    self.sort = "relevance" if self.provider == "skills.sh" else "stars"
+                focus = "provider"
             else:
-                self.open()
+                if self.provider != "skillsmp" or action.target not in {"stars", "recent"}:
+                    return True
+                self.sort = action.target
+                focus = "sort"
+            if self.request:
+                self.search(self.request.query, focus=focus)
+            else:
+                self.open(focus)
+        elif kind in {"discover-provider-back", "discover-sort-back"}:
+            self.open("provider" if kind == "discover-provider-back" else "sort")
         elif kind == "discover-retry" and self.request:
             self.search(self.request.query, page=self.request.page, refresh=True)
         elif kind == "discover-page" and self.request:
@@ -308,8 +378,12 @@ class SkillDiscovery:
             if record:
                 self.cancel()
                 self.detail, self.detail_status = record, None
+                self.detail_expanded = False
                 self.install_feedback = ""
                 self.show_detail("resolve")
+        elif kind == "discover-source-details" and self.detail:
+            self.detail_expanded = not self.detail_expanded
+            self.show_detail("source-details")
         elif kind == "discover-resolve" and self.detail:
             self.cancel()
             identity = self.jobs.submit("skill-source", {
@@ -325,6 +399,9 @@ class SkillDiscovery:
                 self.detail.identity not in self.installed
             ):
                 self.show(install_confirmation_page(self.detail), INSTALL_KIND, "back")
+        elif kind == "discover-open-installed" and self.detail and self.open_installed:
+            if self.detail.identity in self.installed:
+                self.open_installed(self.detail.name)
         elif kind == "discover-install-back":
             self.show_detail("install")
         elif kind == "discover-confirm-install" and self.detail and self.install is not None:

@@ -243,13 +243,13 @@ def _fit(value: str, width: int) -> str:
     return value + "…" if value else "…"
 
 
-def _wrapped(value: str, width: int) -> list[str]:
+def _wrapped(value: str, width: int, *, break_on_hyphens: bool = False) -> list[str]:
     width = max(1, width)
     lines: list[str] = []
     # textwrap chooses readable word boundaries; terminal cells, rather than
     # Python string length, decide where each resulting line must end.
     for word_line in textwrap.wrap(value, width=width, break_long_words=False,
-                                   break_on_hyphens=False):
+                                   break_on_hyphens=break_on_hyphens):
         line = ""
         line_width = 0
         for cluster in regex.findall(r"\X", word_line):
@@ -270,12 +270,16 @@ def _table_widths(
 ) -> tuple[int, int, int]:
     available = width - 7  # selector, two column gaps, unused final terminal cell
     name = min(40, max(20, available // 3))
-    value = min(18, max(9, available // 6, get_cwidth(headers[1]) if headers else 0))
+    source_column = headers is not None and headers[1].upper() == "SOURCE"
+    value = min(26 if source_column else 18,
+                max(14 if source_column else 9,
+                    available // (4 if source_column else 6),
+                    get_cwidth(headers[1]) if headers else 0))
     return name, value, available - name - value
 
 
 def _cell_lines(text: str, width: int) -> list[str]:
-    return _wrapped(text, width) or [""]
+    return _wrapped(text, width, break_on_hyphens=True) or [""]
 
 
 def _table_header_fragments(
@@ -469,7 +473,7 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
             value_style = _value_style(row)
             stacked_value = False
             stacked_description = False
-            if width >= 90:
+            if width >= 90 or (state.page.table_section_id and width >= 60):
                 label_width = min(28, max(12, width // 3))
                 value_width = min(max(8, get_cwidth(value)), width - label_width - 6)
                 description_width = max(0, width - label_width - value_width - 7)
@@ -492,7 +496,9 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
                     ),
                 )
             elif width >= 55:
-                label_width = max(14, width - min(20, max(8, width // 3)) - 4)
+                label_width = (min(28, max(14, width // 3))
+                               if state.page.table_section_id else
+                               max(14, width - min(20, max(8, width // 3)) - 4))
                 value_width = max(1, width - label_width - 4)
                 stacked_value = get_cwidth(value) > value_width
                 parts = (
@@ -537,7 +543,10 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
                 owners.append(row.id)
         if row.description and (
             row.kind == RowKind.INFO
-            or row.selectable and (width < 90 or stacked_description)
+            or row.selectable and (
+                (width < 90 and not (state.page.table_section_id and width >= 60))
+                or stacked_description
+            )
         ):
             for description in _wrapped(row.description, width - 4):
                 lines.append((("class:panel.muted", f"    {description}"),))

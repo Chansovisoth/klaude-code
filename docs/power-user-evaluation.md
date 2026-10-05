@@ -5,6 +5,14 @@ in [Small-model implementation follow-up](small-model-evaluation.md). It reuses
 this pass's exact CSV task and both small models; this original reliability
 evaluation remains the baseline.
 
+The next architecture pass is recorded in
+[Agent source-context evaluation](agent-source-context-evaluation.md), with
+fresh runs of the unchanged fixture and the first source-context improvement.
+
+The subsequent Phase 1 task-state work is recorded in
+[Agent task-state evaluation](agent-task-state-evaluation.md), covering request
+references, scoped execution and estimated request admission.
+
 Date: 2026-10-04. Evaluated the real CLI and Prompt Toolkit chat against local
 Ollama, then traced observed defects into the implementation. This is a product
 evaluation, not a claim that the tested local models completed the coding task.

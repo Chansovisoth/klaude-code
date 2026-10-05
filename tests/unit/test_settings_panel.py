@@ -489,7 +489,12 @@ def test_manage_pages_keep_source_description_and_actions_separate(width):
         (manage_page([server]), "server:docs", manage_detail_page(server)),
     ):
         rows = {row.id: row for row in page.rows}
-        assert rows[item_id].description == description
+        assert rows[item_id].description.startswith(
+            "Local ZIP" if page.id == "skills-manage" else "Official MCP Registry"
+        )
+        assert description in rows[item_id].search_terms
+        assert next(row for row in detail.rows if row.id == "description").description \
+            == description
         assert rows[item_id].action is not None
         assert rows[item_id].action.kind.endswith("detail")
         assert rows["update-all"].action is not None
@@ -526,6 +531,29 @@ def test_manage_pages_keep_source_description_and_actions_separate(width):
         assert "installed-items" not in render_body(state, width).row_for_line
 
 
+def test_manage_table_breaks_long_names_at_hyphens_and_keeps_registry_source_short():
+    from klaude_cli.mcp_management import manage_page
+    from klaude_cli.skills_panel import skills_manage_page
+
+    skill = {"name": "frontend-design-direction", "identity": "reviewed",
+             "source_label": "Local ZIP", "enabled": True}
+    skill_body = render_body(PanelState(skills_manage_page([skill])), 70)
+    skill_lines = ["".join(text for _, text in line) for line, row in zip(
+        skill_body.lines, skill_body.row_for_line, strict=True
+    ) if row == "skill:frontend-design-direction"]
+    assert "frontend-design-" in skill_lines[0]
+    assert "direction" in skill_lines[1]
+
+    server = {"name": "firecrawl-mcp-server", "enabled": False,
+              "source_label": "MCP Registry · io.github.firecrawl/firecrawl-mcp-server",
+              "transport": "http", "tool_count": 0}
+    page = manage_page([server])
+    row = next(row for row in page.rows if row.id == "server:firecrawl-mcp-server")
+    assert row.description == "Official MCP Registry"
+    assert "io.github.firecrawl/firecrawl-mcp-server" in row.search_terms
+    assert sum(item == row.id for item in render_body(PanelState(page), 70).row_for_line) == 1
+
+
 def test_empty_skill_import_notice_is_scoped_to_import_page():
     from klaude_cli.skills_panel import skills_import_page
 
@@ -534,6 +562,34 @@ def test_empty_skill_import_notice_is_scoped_to_import_page():
     discovered = skills_import_page("/tmp/skills", empty_import=True, detected=("new.zip",))
     assert not any(row.id == "empty" for row in discovered.rows)
     assert next(row for row in discovered.rows if row.id == "drop:0").label == "- new.zip"
+
+
+@pytest.mark.parametrize("width", [40, 70, 120])
+def test_mcp_and_skill_search_tables_follow_controls_at_each_width(width):
+    from klaude_cli.mcp_search_panel import mcp_search_page
+    from klaude_cli.skill_discovery import search_page
+    from klaude_core.mcp_catalog import MCPCatalogServer
+    from klaude_core.skill_catalog import CatalogStatus, SearchRequest, SearchResult, SkillRecord
+
+    skill = SkillRecord("skillsmp", "one", "guide", "A useful guide",
+                        repository="example/skills")
+    server = MCPCatalogServer("org.example/docs", "Docs", "Useful docs",
+                              "1.2.3", "active")
+    pages = (
+        search_page(SearchRequest("guide"), "skillsmp", "stars",
+                    SearchResult(CatalogStatus.OK, (skill,))),
+        mcp_search_page("docs", (server,), searched=True),
+    )
+    for page in pages:
+        state = PanelState(page)
+        body = render_body(state, width)
+        header = "".join(text for _, text in render_header(page, width))
+        assert page.table_section_id == "results"
+        assert "DESCRIPTION" not in header
+        assert body.row_for_line.index("query") < body.row_for_line.index("sort")
+        assert body.row_for_line.index("sort") < body.row_for_line.index("results-table")
+        assert all(get_cwidth("".join(text for _, text in line)) <= width
+                   for line in body.lines)
 
 
 @pytest.mark.parametrize("width", [18, 70, 110])

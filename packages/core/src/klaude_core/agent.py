@@ -40,13 +40,18 @@ from .intent import (
 )
 from .knowledge_tool_contract import normalize_knowledge_arguments
 from .model_runtime import ModelInfo, ModelRuntime, normalize_token_usage
-from .ollama import Ollama
+from .ollama import Ollama, OllamaIncompleteResponse
 from .permissions import PermissionDenied, PermissionGate
 from .request_context import select_request_prompt
 from .research_receipts import recovery_receipts, research_receipt
 from .response_constraints import code_quote_limit, limit_code_quotes
 from .source_use import AnswerSourceIndex, asks_what_was_used, prior_answer_source_note
-from .workspace_execution import WorkspaceExecution, bound_working_dialogue
+from .working_sources import WorkingSources
+from .workspace_execution import (
+    WorkspaceContextOverflow,
+    WorkspaceExecution,
+    bound_working_dialogue,
+)
 
 ToolFn = Callable[..., Any]
 ToolSelector = Callable[[str, dict[str, "Tool"]], list[str]]
@@ -915,6 +920,10 @@ def _parse_text_tool_calls(
 
 class ToolArgumentError(ValueError):
     """Canonical argument validation failed before permission or execution."""
+
+
+class ToolScopeError(ToolArgumentError):
+    """Canonical arguments are valid, but outside this response's task scope."""
 
 
 def _validate_tool_arguments(value: Any, schema: dict, path: str = "arguments") -> None:
@@ -3314,9 +3323,13 @@ def _recoverable_tool_parser_error(error: Exception) -> bool:
     )
 
 
+class _TurnControl(dict[str, str]):
+    """In-band guidance with turn-local lifetime and ordinary wire fields."""
+
+
 def _controller_message(content: str) -> dict[str, str]:
     """Return valid in-band guidance, never a fabricated tool result."""
-    return {"role": "system", "content": content}
+    return _TurnControl(role="system", content=content)
 
 
 def _stopped_at_output_limit(metadata: object) -> bool:
@@ -4248,6 +4261,10 @@ class Agent:
                 turn_scope=effective_scope,
             )
         finally:
+            # Recovery and governor instructions describe only this turn's
+            # protocol/state. Keep real dialogue and tool pairs for follow-ups,
+            # without carrying a discarded response format into a new request.
+            self.messages = [m for m in self.messages if not isinstance(m, _TurnControl)]
             self.tools = original_tools
             self.messages[0]["content"] = original_prompt
             self.active_turn_scope = prior_scope
@@ -4582,6 +4599,7 @@ class Agent:
         used_tools: set[str] = set()
         used_tool_calls: dict[str, str] = {}
         read_execution_keys: dict[str, str] = {}
+        read_source_paths: dict[str, str] = {}
         failed_tool_calls: set[str] = set()
         lookup_failure_types: dict[str, str] = {}
         resolved_control_tools: set[str] = set()
@@ -4599,6 +4617,7 @@ class Agent:
         planning_request = False
         workspace_planning_attempted = False
         response_callable_names: set[str] = set()
+        response_arguments: dict[str, dict[str, Any]] = {}
         failed_action_signatures: set[str] = set()
         failed_action_counts: dict[str, int] = {}
         retired_tools: set[str] = set()
@@ -4632,7 +4651,11 @@ class Agent:
         else:
             self._workspace_task_goal = ""
         execution_state = (
-            WorkspaceExecution(workspace_root=str(getattr(workspace, "root", "")))
+            WorkspaceExecution(
+                workspace_root=str(getattr(workspace, "root", "")),
+                objective=request_objective,
+                sources=WorkingSources(getattr(workspace, "source_version", None)),
+            )
             if code_request and len(request_objective) >= 600
             and workspace is not None and workspace.write_enabled
             and {"write_file", "edit_file"}.intersection(selected_tools)
@@ -4812,11 +4835,11 @@ class Agent:
             self.last_turn_capabilities = snapshot.to_dict()
             return snapshot
 
-        def model_messages() -> list[dict[str, Any]]:
+        def model_messages(*, admit: bool = True) -> list[dict[str, Any]]:
             snapshot = capability_snapshot()
             workspace_execution = code_request and bool(
                 {"write_file", "edit_file"}.intersection(selected_tools)
-            ) and not _needs_full_product_context(user_message)
+            )
             request_prompt = select_request_prompt(
                 self.messages[0]["content"], snapshot.callable_tools,
                 workspace_execution=workspace_execution,
@@ -4906,7 +4929,22 @@ class Agent:
                     "if the intended action remains ambiguous. All current safety checks apply."
                 )
             if execution_state is not None:
-                context += "\n\n" + execution_state.render()
+                stale_paths = execution_state.refresh_sources()
+                if stale_paths:
+                    for old in dialogue:
+                        metadata = old.get('metadata', {})
+                        execution_id = str(metadata.get('execution_id', ''))
+                        key = read_execution_keys.get(execution_id)
+                        if key and old.get('tool_name') == 'read_file':
+                            old_args = json.loads(key.partition(':')[2])
+                            source_path = read_source_paths.get(execution_id) or (
+                                execution_state.relative_path(str(old_args.get('path', '')))
+                            )
+                            if source_path in stale_paths:
+                                used_tool_calls.pop(key, None)
+                                governor.forget_tool_result(
+                                    'read_file', str(old.get('content', '')))
+                context += "\n\n" + execution_state.render(planning=planning_request)
                 if self._workspace_task_goal and not any(
                     m.get("role") == "user"
                     and self._workspace_task_goal in str(m.get("content", ""))
@@ -4918,7 +4956,7 @@ class Agent:
                         + self._workspace_task_goal
                     )
                 window = self.request_context_window
-                if window:
+                if window and admit:
                     output_reserve = request_options.get("num_predict", 2048)
                     if not isinstance(output_reserve, int) or output_reserve <= 0:
                         output_reserve = 2048
@@ -4926,14 +4964,69 @@ class Agent:
                         len(request_prompt + context) // 3
                         + len(json.dumps(active_schemas())) // 2 + 500
                     )
-                    limit = max(2000, (window - output_reserve - fixed_tokens) * 2)
-                    dialogue, omitted = bound_working_dialogue(dialogue, limit)
+                    limit = max(0, (window - output_reserve - fixed_tokens) * 2)
+                    user_index = max((i for i, m in enumerate(dialogue)
+                                      if m.get('role') == 'user'), default=-1)
+                    last_exchange = max((i for i, m in enumerate(dialogue)
+                                         if i > user_index and m.get('role') == 'assistant'),
+                                        default=len(dialogue))
+                    essential = sum(len(json.dumps(m, default=str)) for m in
+                                    [*dialogue[:user_index + 1], *dialogue[last_exchange:]])
+                    preferred = [key.partition(':')[2] for key in execution_state.failures
+                                 if key.startswith(('edit_file:', 'read_file:', 'write_file:'))]
+                    preferred += (execution_state.plan[execution_state.plan_cursor]['files']
+                                 if execution_state.plan_cursor < len(execution_state.plan)
+                                 else execution_state.changed[-4:])
+                    omit_completed_edits = (structured_action_protocol
+                                            and self.model_info.backend == 'ollama')
+                    projected, omitted = bound_working_dialogue(
+                        dialogue, limit, omit_completed_edits=omit_completed_edits)
+                    if dialogue and dialogue[-1] in omitted:
+                        # A large completed edit can leave only the goal/notice.
+                        # Its removed arguments no longer consume excerpt space.
+                        essential = sum(len(json.dumps(m, default=str)) for m in projected)
+                    execution_state.sources.admitted_execution_ids.clear()
+                    if omitted:
+                        # Keep normal tool exchanges while they fit. Eagerly
+                        # replacing them with snapshots made both small models
+                        # reread instead of implementing. Restore only evidence
+                        # that this budget projection would otherwise lose.
+                        source_context = execution_state.sources.render(
+                            min(8000, max(0, (limit - essential - 500) // 2)), preferred,
+                            exclude_execution_ids={
+                                str(m.get('metadata', {}).get('execution_id', ''))
+                                for m in projected if m.get('role') == 'tool'
+                            })
+                        if source_context:
+                            context += '\n\n' + source_context
+                            limit = max(0, limit - len(source_context) - 2)
+                            projected, omitted = bound_working_dialogue(
+                                dialogue, limit, omit_completed_edits=omit_completed_edits)
+                    dialogue = projected
+                    required_chars = sum(len(json.dumps(m, default=str)) for m in dialogue)
+                    if required_chars > limit:
+                        # Projection already removed optional complete exchanges.
+                        # Never send an oversized essential user goal/tool pair
+                        # and rely on the backend silently truncating constraints.
+                        raise WorkspaceContextOverflow(
+                            'The next request exceeds the estimated allocated context: '
+                            f'essential dialogue needs {required_chars} characters, '
+                            f'{limit} remain after policies, task state, schemas/protocol '
+                            'and output reserve. Narrow the task or use smaller paged reads; '
+                            'context allocation was not increased.'
+                        )
                     # A duplicate guard cannot point at evidence omitted from
                     # the request. Allow a needed fresh read without admitting
                     # repeated writes or stateless retrieval loops.
                     for omitted_message in omitted:
                         metadata = omitted_message.get("metadata", {})
                         if isinstance(metadata, dict):
+                            if str(metadata.get('execution_id', '')) in (
+                                execution_state.sources.admitted_execution_ids
+                            ):
+                                # This exact read remains visible as current
+                                # source. Omitting its wrapper is not lost evidence.
+                                continue
                             key = read_execution_keys.get(str(metadata.get("execution_id", "")))
                             if key:
                                 used_tool_calls.pop(key, None)
@@ -5057,7 +5150,13 @@ class Agent:
                 detail=research.exhausted_reason,
             )
 
-        initial_model_messages = model_messages()
+        # Initial compaction needs the projected policy, not request admission.
+        # Activate the actual local discovery contract before budgeting it;
+        # admission runs inside the guarded model loop after old dialogue has
+        # had its ordinary compaction opportunity.
+        if execution_state is not None and structured_recovery_supported():
+            structured_action_protocol = True
+        initial_model_messages = model_messages(admit=False)
         direct_code_prompt = (
             initial_model_messages[0]["content"]
             if code_answer_expected and not selected_tools
@@ -5353,12 +5452,37 @@ class Agent:
                 research.web_actions_used += 1
                 research.fetch_calls_used += 1
             key = _tool_call_key(name, args if isinstance(args, dict) else {})
+            if lookup_failure_types.get(key) == 'ToolScopeError' and name in response_arguments:
+                # A changed task scope may make the exact rejected arguments
+                # valid. Completed actions keep their guards; this action never
+                # reached permission or execution under the previous scope.
+                scope_args = dict(args)
+                for field in ('purpose', 'missing_information'):
+                    if field not in response_arguments[name].get('properties', {}):
+                        scope_args.pop(field, None)
+                try:
+                    _validate_tool_arguments(scope_args, response_arguments[name])
+                except ValueError:
+                    pass
+                else:
+                    used_tool_calls.pop(key, None)
+                    failed_tool_calls.discard(key)
+                    lookup_failure_types.pop(key, None)
             if key in used_tool_calls:
+                duplicate_notice = (
+                    f"skipped duplicate tool call '{name}'; use the previous result"
+                )
+                if (execution_state is not None and name == 'read_file'
+                        and execution_state.sources.admitted_execution_ids):
+                    duplicate_notice += (
+                        '. Current version-checked excerpts are in working_sources; '
+                        'use their literal content or read an uncovered range.'
+                    )
                 return (
                     name,
                     args,
                     tool,
-                    f"skipped duplicate tool call '{name}'; use the previous result",
+                    duplicate_notice,
                     {
                         "duplicate_call": True,
                         "duplicate_previous_failed": key in failed_tool_calls,
@@ -5445,6 +5569,7 @@ class Agent:
             yield AgentEvent("tool_start", start_payload)
             executed = False
             error_type = ""
+            source_before = None
             try:
                 validated_args = dict(args)
                 for key in ("purpose", "missing_information"):
@@ -5454,6 +5579,13 @@ class Agent:
                     _validate_tool_arguments(validated_args, tool.parameters)
                 except ValueError as exc:
                     raise ToolArgumentError(str(exc)) from exc
+                if (structured_action_protocol and execution_state is not None
+                        and name in {'write_file', 'edit_file'}):
+                    try:
+                        _validate_tool_arguments(validated_args, response_arguments.get(
+                            name, tool.parameters))
+                    except ValueError as exc:
+                        raise ToolScopeError(str(exc)) from exc
                 if turn_scope == TurnScope.INIT and name in {"write_file", "edit_file"}:
                     root = Path(getattr(self, "workdir", None) or Path.cwd()).resolve()
                     raw_path = Path(str(validated_args.get("path", ""))).expanduser()
@@ -5472,6 +5604,9 @@ class Agent:
                 execution_args.pop("purpose", None)
                 execution_args.pop("missing_information", None)
                 executed = True
+                if (execution_state is not None and name == 'read_file'
+                        and getattr(tool.fn, '__self__', None) is workspace):
+                    source_before = execution_state.sources.version(str(args.get('path', '')))
                 result = tool.fn(**execution_args)
             except PermissionDenied as e:
                 result = f"permission denied: {e}"
@@ -5519,6 +5654,13 @@ class Agent:
                 result = _bounded_fetched_evidence(result, user_message)
             elif len(result) > 12000:  # keep small-model context healthy
                 result = result[:12000] + "\n...[truncated]"
+            if (source_before is not None and execution_state is not None
+                    and not error_type and metadata.get('status') != 'failed'):
+                execution_state.sources.remember(
+                    args, result, execution_id, source_before,
+                    execution_state.sources.version(str(args.get('path', ''))),
+                )
+                read_source_paths[execution_id] = source_before[0]
             if name in WEB_RESEARCH_TOOLS:
                 failed, failure_reason = _tool_result_failed(name, result, metadata)
                 purpose = _research_purpose(name, args)
@@ -5654,11 +5796,6 @@ class Agent:
                     "metadata": preflight_metadata,
                 }
             )
-        # Complex local work starts with the smaller declared protocol instead
-        # of paying for an observed unreliable native prelude. Simple turns and
-        # runtimes without format support keep the existing native path.
-        if execution_state is not None and structured_recovery_supported():
-            structured_action_protocol = True
         for _step in range(self.max_steps):
             streamed_this_response = False
             governor_reason = governor.begin_model_step()
@@ -5694,6 +5831,8 @@ class Agent:
             try:
                 schemas = active_schemas()
                 response_callable_names = {s['function']['name'] for s in schemas}
+                response_arguments = {s['function']['name']: s['function']['parameters']
+                                      for s in schemas}
                 request_messages = model_messages()
                 if self.capability_observer is not None:
                     try:
@@ -5711,13 +5850,15 @@ class Agent:
                 if planning_request and callable(workspace_planner):
                     msg = workspace_planner(
                         self.model, request_messages, options=request_options, think=request_think,
+                        request_refs=[ref['id'] for ref in execution_state.request_refs]
+                        if execution_state is not None else [],
                     )
                 elif structured_action_protocol and callable(structured_chat):
                     msg = structured_chat(
                         self.model, request_messages, tools=schemas,
                         options=request_options, think=request_think,
-                        allow_finish=bool(not execution_state or execution_state.exploration_ready
-                                          or execution_state.permission_blocked or not schemas),
+                        allow_finish=bool(not execution_state or execution_state.finish_allowed
+                                          or not schemas),
                     )
                 elif (callable(stream_chat) and (not schemas or stream_with_tools)
                       and not (execution_state is not None
@@ -5817,8 +5958,34 @@ class Agent:
                         request_messages,
                         tools=schemas,
                     )
+            except WorkspaceContextOverflow as e:
+                # No provider call occurred; do not fabricate failed usage.
+                report = execution_state.incomplete_report(str(e)) if execution_state else str(e)
+                self.messages.append({'role': 'assistant', 'content': report})
+                yield AgentEvent('text', {'content': report})
+                yield AgentEvent('error', {'message': str(e)})
+                yield AgentEvent('done', finish_payload())
+                return
             except Exception as e:  # surface, don't crash the session
                 observe_runtime_usage(failed=True)
+                if (
+                    self.model_info.backend == 'ollama'
+                    and isinstance(e, OllamaIncompleteResponse)
+                    and not workspace_transport_retried
+                    and active_schemas()
+                    and not streamed_this_response
+                    and not self.cancellation_check()
+                ):
+                    # The adapter returned no calls or public text. Retry one
+                    # fresh action, charged to the same turn budget, without
+                    # replaying any completed tool operation.
+                    workspace_transport_retried = True
+                    self.messages.append(_controller_message(
+                        'The previous response ended before completion; no pending call executed. '
+                        'Choose a fresh small action. Preserve completed edits and results.'
+                    ))
+                    yield AgentEvent('retry', {'reason': 'incomplete response; one fresh action'})
+                    continue
                 # Ollama starts a separate runner for every option set. On a
                 # hybrid model, a CUDA worker can abort while auto-placement
                 # is evaluating a long prompt, even though the same request
@@ -5899,8 +6066,7 @@ class Agent:
                 yield AgentEvent('text', {'content': msg['content']})
                 planning_request = False
                 continue
-            if execution_state is not None and msg.pop('completed_step', False) is True:
-                execution_state.complete_step()
+            complete_active_step = msg.pop('completed_step', False) is True
             content = msg.get("content", "")
             raw_tool_calls = msg.get("tool_calls")
             tool_calls: list[dict[str, Any]] = (
@@ -5979,6 +6145,8 @@ class Agent:
                     )
 
             if not tool_calls:
+                if execution_state is not None and complete_active_step:
+                    execution_state.complete_step()
                 if (
                     code_request
                     and {"write_file", "edit_file"}.intersection(
@@ -6332,8 +6500,12 @@ class Agent:
                 yield AgentEvent("done", finish_payload())
                 return
 
+            completion_target = execution_state.plan_cursor if execution_state is not None else -1
+            step_actions_succeeded = True
             for call in tool_calls:
                 name, args, tool, result, metadata = yield from execute_tool_call(call)
+                step_actions_succeeded = step_actions_succeeded and (
+                    metadata.get('executed') is True and metadata.get('status') != 'failed')
                 if name in {"read_file", "list_dir", "grep", "workspace_info",
                             "git_status", "git_diff"} and metadata.get("execution_id"):
                     read_execution_keys[str(metadata["execution_id"])] = _tool_call_key(name, args)
@@ -6391,7 +6563,8 @@ class Agent:
                                         and metadata.get('error_type') == 'WorkspacePathError')
                     recoverable_edit = (name == 'edit_file'
                                         and metadata.get('error_type') == 'EditConflict')
-                    recoverable_arguments = metadata.get('error_type') == 'ToolArgumentError'
+                    recoverable_arguments = metadata.get('error_type') in {
+                        'ToolArgumentError', 'ToolScopeError'}
                     recoverable_failure = (recoverable_lookup or recoverable_command
                                            or recoverable_path or recoverable_edit
                                            or recoverable_arguments)
@@ -6521,6 +6694,14 @@ class Agent:
                     tool_message["metadata"] = {
                         key: value for key, value in metadata.items() if key != "edit"
                     }
+                    if (name in {'write_file', 'edit_file'}
+                            and tool is not None
+                            and getattr(tool.fn, '__self__', None) is workspace
+                            and isinstance(edit_metadata, dict)
+                            and edit_metadata.get('changed') is True
+                            and metadata.get('executed') is True
+                            and metadata.get('status') != 'failed'):
+                        tool_message['metadata']['workspace_edit_changed'] = True
                 self.messages.append(tool_message)
                 if recovery_instruction:
                     self.messages.append(_controller_message(recovery_instruction))
@@ -6541,6 +6722,10 @@ class Agent:
                     # calls. Stop at this safe result boundary instead of
                     # executing calls beyond the non-expandable turn budget.
                     break
+
+            if (execution_state is not None and complete_active_step and step_actions_succeeded
+                    and execution_state.plan_cursor == completion_target):
+                execution_state.complete_step()
 
         if execution_state is not None and execution_state.missing_completion():
             report = execution_state.incomplete_report(
