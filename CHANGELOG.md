@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+## v0.2.0-alpha.4 - 2026-10-06
+
+- Make bare `klaude` the primary interactive entry point while retaining
+  `klaude chat`; keep completed output in ordinary terminal scrollback and
+  preserve queued commands, session continuity, and model changes during work.
+- Improve the typed Settings navigation, appearance controls, MCPs/Skills
+  search and management, permission links, background inventories, and
+  field-scoped persistence feedback. Fix Input Field height reset handling.
+- Add external MCP management, bounded public Registry discovery, explicit
+  enablement, and private remote OAuth authentication. Keep imports and Registry
+  installs disabled until explicitly enabled.
+- Add OpenRouter and secure provider-key settings alongside the existing
+  OpenAI API, Gemini API, and Codex account runtimes; preserve provider-specific
+  continuation, cancellation, and usage accounting.
+- Add controlled read-only delegation with intersected capabilities, permission
+  checks, conservative concurrency, aggregate budgets, and durable public
+  worker outcomes.
+- Improve malformed-call/path recovery, shell and validation failure tracking,
+  bounded working-source context, task-state continuity, and factual incomplete
+  results. Preserve dirty-worktree boundaries.
+- Add locked Python 3.11–3.13 CI, lint/types and installed-wheel smoke gates,
+  plus reproducible release-candidate builds and provenance attestations.
+- Record the proposed model connection, AI Defaults, Search, Agent Tools,
+  Model Manager, Deep Research, Library, and Gallery work in
+  [the settings and feature plan](docs/odysseus-settings-and-features-plan.md).
+  These planned additions are not shipped feature claims.
+
+### Known limitations
+
+- Neither `qwen3.5:4b` nor `qwen2.5-coder:3b` has demonstrated completion of the
+  unchanged Stockroom CSV benchmark. Final-candidate comparisons remain pending;
+  automated host checks do not establish autonomous task completion. See the
+  [task-state evaluation](docs/agent-task-state-evaluation.md).
+- Delegated workers remain read-only; unrestricted implementation workers are
+  not included. Model/server behavior still depends on the configured provider,
+  model capabilities, and available hardware.
+
+## Earlier development notes
+
 - Add a native external MCP client with local stdio and remote Streamable HTTP
   transports, safe VS Code/OpenCode JSON import, explicit trust before launch,
   cached bounded tool discovery, collision-safe namespacing, per-tool ASK
