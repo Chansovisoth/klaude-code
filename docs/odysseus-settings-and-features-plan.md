@@ -2,14 +2,19 @@
 
 Status: reviewed and proposed; implementation has not started.
 Reviewed: 2026-10-05. Klaude baseline: `fdb2386`.
+Product direction updated: 2026-10-06; artifact/media management belongs in Library.
 
 ## 1. Objective and scope
 
 Add the requested model, AI-default, search, and agent-tool settings with clear
-navigation, then introduce the associated Model Manager, Deep Research, Library, and
-Gallery workflows. Reuse Klaude's working settings panel, runtime, permission,
+navigation, then introduce Model Manager, Deep Research, and Library with a Media
+view for coding artifacts. Reuse Klaude's working settings panel, runtime, permission,
 retrieval, and persistence components. Keep ordinary chat fast and local model
 defaults bounded.
+
+Klaude remains a coding/agent environment. Library is its durable information
+workspace; Media manages screenshots and image artifacts used or produced by
+that work. A standalone Gallery and canvas/layer editing are outside this plan.
 
 This document records an implementation plan, not implemented functionality.
 It does not advance the separate [agent orchestration plan](agent-orchestration-plan.md):
@@ -46,8 +51,8 @@ server/provider documentation.
 | Zero tool-call limit | Odysseus: unlimited. Klaude: automatic ceiling, normally 40 calls at 20 steps. | Preserve existing zero semantics through migration. Use named modes instead of an ambiguous numeric sentinel. |
 | Research token limit | Odysseus's `research_max_tokens` reaches final report generation as `max_report_tokens`. | Label it **Max report tokens**; separate it from context size and the total run's usage budget. |
 | Cookbook | Hardware-aware model discovery, download, serving, dependencies, and server management. | Build **Model Manager**, a model lifecycle workspace. This is a different workflow from installing Skills. |
-| Library | Chats, Documents, Research, and Archive; the inspected Archive view contains archived sessions. | Introduce clearly typed views without changing Klaude's existing meaning of a named knowledge library. |
-| Gallery | Media inventory, albums, tagging, saved edits, and a browser image editor. | A terminal media browser is a useful first slice; full visual editing needs a graphical surface and additional backend support. |
+| Library | Chats, Documents, Research, and Archive; the inspected Archive view contains archived sessions. | Build a durable information workspace with Sessions, Knowledge, Documents, Research, Media, and Archive, preserving named knowledge-library semantics. |
+| Gallery | Media inventory, albums, tagging, saved edits, and a browser image editor. | Adopt artifact/media management inside Library → Media. A standalone Gallery and canvas/layer editing are outside the current scope. |
 | Writing style | Odysseus scopes this to email replies and can extract it from sent emails. | Defer email-specific controls until Klaude has an email workflow. Do not apply that text to coding-agent instructions automatically. |
 
 One implementation pattern should not be copied: the inspected Odysseus
@@ -216,9 +221,10 @@ replayable evidence. A job/report store and resumable job lifecycle are addition
 work. Extend the canonical runtime with a research profile; do not reproduce
 Odysseus's duplicate legacy/compatibility research handlers.
 
-### 4.3 Gallery: media inventory and editing
+### 4.3 Odysseus Gallery reference and Klaude's Media scope
 
-The inspected navigation is **Photos, Albums, Edit, Settings**.
+The inspected Odysseus navigation is **Photos, Albums, Edit, Settings**. The table
+describes upstream features for reference, not Klaude's implementation scope.
 
 | View | Fields/actions |
 | --- | --- |
@@ -229,16 +235,34 @@ The inspected navigation is **Photos, Albums, Edit, Settings**.
 | Edit | Image chooser, templates, saved projects, visual editing/layers and optional AI generation/editing/enhancement operations. |
 | Settings | AI-tagging status and progress, Start AI tag, Cancel, Clear AI tags, link to Vision defaults. User-created tags are retained. |
 
-A terminal implementation should start with a searchable metadata list, detail,
-external viewer/open-file integration, import/export, and acknowledged album/tag
-actions. AI tagging requires the vision pipeline. Separate manual and generated
-tags so clearing generated tags does not erase user edits.
+Klaude's initial implementation is **Library → Media**:
 
-Full canvas/layer editing belongs in an optional graphical companion. Terminal
-image protocols can enhance previews when supported, but cannot be the only way
-to inspect or manage a file. Do not claim full editor parity from a TUI list.
+- Screenshots associated with project, session, or task work.
+- Uploaded/imported images and generated images from supported workflows.
+- A searchable list with artifact-type/source filters and useful chronological
+  sorting, followed by detail and best-effort previews.
+- Metadata: name, type, size, dimensions, creation/import time, origin, and known
+  session/task/model associations. Unknown provenance remains unknown.
+- Manual tags, open externally, and export actions.
 
-### 4.4 Library: saved work, separated by type
+Basic Media storage, import, metadata, tags, preview and export do not depend on
+a vision or image-generation model. Capture available provenance when an artifact
+is saved; storing it does not add it to model context or a knowledge index.
+Terminal image protocols can enhance previews, with file-path/export fallbacks
+on headless or unsupported terminals.
+
+Vision and generation can later consume or produce these artifacts. Optional AI
+tagging follows a working vision pipeline, remains an explicit action, and keeps
+generated tags separate from manual tags. Photos/albums/favorites navigation,
+canvas/layers and AI editing are not part of the initial coding-artifact workflow.
+
+Media can become a separate Gallery only if substantial image workflows justify
+that product decision. This is a possible future direction, not a delivery
+milestone or a commitment to build a desktop image editor.
+
+### 4.4 Library: the durable information workspace
+
+Odysseus's inspected Library has these views:
 
 | Tab | Purpose and controls |
 | --- | --- |
@@ -247,15 +271,54 @@ to inspect or manage a file. Do not claim full editor parity from a TUI list.
 | Research | Browse saved research reports and open/discuss/export results. |
 | Archive | Browse archived sessions; search, sort, restore/delete. |
 
-Klaude should add **Knowledge libraries** as an explicit view over its existing
-named buckets, alongside Sessions, Documents, Research, and Archive. Keep
-`klaude libraries`, `klaude query`, library identifiers, storage APIs, and
-`collection` compatibility unchanged.
+Use this exact hierarchy for Klaude:
 
-Do not index every chat, document, image, or report into a knowledge library
-automatically. Importing/storing an artifact and learning/indexing it are
-separate actions. Defer AI Tidy until it can present a reviewable proposal and
-apply selected changes; do not let a utility model independently delete data.
+```text
+Library
+  Sessions
+  Knowledge
+  Documents
+  Research
+  Media
+  Archive
+```
+
+| Klaude view | Purpose |
+| --- | --- |
+| Sessions | Durable conversations, resume, search, organization and archive actions. |
+| Knowledge | Existing named knowledge libraries, learned sources, querying and explicit indexing/refresh management. |
+| Documents | Stored/imported documents with search, metadata and export; learning into a knowledge library is a separate action. |
+| Research | Durable reports, sources and job associations; view/discuss/export with explicit learning when supported. |
+| Media | Screenshots, uploaded/generated images, previews, metadata, tags, external open and export. |
+| Archive | Archived supported records with content retained, searchable history and explicit restore/delete. Start with sessions and add artifact types with their lifecycle support. |
+
+The **Knowledge** view contains Klaude's existing named **knowledge libraries**.
+Keep `klaude libraries`, `klaude query`, library identifiers, storage APIs, and
+`collection` compatibility. Library is a navigation workspace over distinct
+stores; it does not redefine a knowledge library or make every record retrievable
+by the AI. Use action labels such as Import document, Learn into knowledge library,
+Archive session, and Delete artifact to make their effects clear.
+
+### Durable-information rules
+
+- **Stored ≠ indexed:** retaining an artifact does not automatically populate a
+  knowledge library's vector or full-text index or grant new model access to its
+  content. Existing session/inventory search indexes support browsing; they are
+  separate from knowledge indexing and learning. Existing conversation history,
+  resume and configured Memory recall retain their own behavior and controls.
+- **Imported ≠ learned:** Library import makes an artifact available there.
+  Learning/indexing into a named knowledge library is an explicit separate action.
+  Import a managed copy or retain an explicitly described file reference without
+  mutating the original project file.
+- **Archived ≠ deleted:** archive changes normal-list visibility while retaining
+  content and a restore action. It does not erase stored content or silently
+  remove learned/indexed copies. Permanent deletion is a separate confirmed
+  operation with its affected records and index implications stated.
+
+Maintain independent storage, indexing and archive state, with type/origin
+information and IDs tied to the appropriate store. Defer AI Tidy until it can
+present a reviewable proposal and apply selected changes; a utility model cannot
+independently delete durable information.
 
 ## 5. Proposed navigation and migration
 
@@ -294,11 +357,13 @@ The Models summary shows connected/enabled endpoint counts and the default
 chat model. Add Models offers two entry actions, so only one form is edited at
 a time. Added Models leads with its inventory controls and endpoint list.
 
-Model Manager, Deep Research, Library, and Gallery are feature workspaces reached
-through a proposed feature launcher, outside Settings. Their configuration
-links open the relevant Settings page and return to the caller. New command
-entry points, if introduced, must be implemented in the canonical command
-registry; this document does not advertise nonexistent slash commands.
+Model Manager, Deep Research, and Library are feature workspaces reached through
+a proposed feature launcher, outside Settings. Library contains Sessions,
+Knowledge, Documents, Research, Media, and Archive in that order. Media is a
+Library view, not a separate feature-launcher entry. Configuration links open
+the relevant Settings page and return to the caller. New command entry points,
+if introduced, must be implemented in the canonical command registry; this
+document does not advertise nonexistent slash commands.
 
 ### Where current Klaude controls move
 
@@ -311,7 +376,7 @@ registry; this document does not advertise nonexistent slash commands.
 | Providers Hugging Face token | Model Manager → Settings | Existing Providers entry can link here until Model Manager is implemented. |
 | Tools web-provider toggles | Search → Providers | Preserve enabled state and existing routing order. |
 | Tools web result validation | Search → Web Search → Advanced | Preserve current behavior and explain that discovery leads are not fetched evidence. |
-| Tools knowledge availability/validation | Agent Tools → Knowledge | Link to Knowledge libraries; keep the existing field semantics. |
+| Tools knowledge availability/validation | Agent Tools → Knowledge | Link to Library → Knowledge; keep the existing field semantics. |
 | Tools other availability toggles | Agent Tools → registry-derived groups | No duplicate switch in two pages; context-specific pages link to the owner. |
 | Tools Activity Updates | Agent Tools → Activity Updates | Retain existing default and event-driven behavior. |
 | Runtime turn limit/subagent workers | Agent Tools → Execution | Preserve bounded defaults and read-only child constraints. |
@@ -446,7 +511,7 @@ existing broker-backed model/account page rather than forcing it into this form.
 | Vision | Auto-detect from configured, enabled, capable endpoints or explicit choice; show Unavailable when no supported image input pipeline/model exists. Provide an enable switch when the pipeline is implemented. |
 | Research | Same as chat, resolved when the job is accepted; explicit endpoint/model override and a link to Search → Deep Research defaults. |
 | Image generation | Off by default; capable model/service selector and only quality options supported by that adapter. Add its switch with the functioning generation pipeline. |
-| Embedding model | Preserve Klaude's existing embedding configuration under Advanced/Knowledge. Changing embedding dimensions/model needs a deliberate index migration/rebuild; a utility fallback cannot silently replace it. |
+| Embedding model | Preserve Klaude's existing embedding configuration through Library → Knowledge → Advanced. Changing embedding dimensions/model needs a deliberate index migration/rebuild; a utility fallback cannot silently replace it. |
 | Email writing style | Future email-specific integration; not a global system-prompt editor. |
 
 All role selections display inheritance as **Same as chat → endpoint/model**,
@@ -557,9 +622,11 @@ A tool being enabled never bypasses workspace boundaries or grants permission.
   evidence on recovery, or identify a report as partial/stale. Keep search leads
   separate from verified fetched sources; never invent citations.
 - Library initially projects existing session/knowledge stores with typed IDs.
-  Documents/reports can share bounded artifact metadata, but retain their own
-  content/provenance contracts. Add durable session archive state only with
-  proper compatibility and active-worker behavior.
+  Documents, reports and Media share bounded artifact metadata where useful,
+  while retaining their own content/provenance contracts. Storage/import never
+  implies knowledge indexing or automatic model-context inclusion. Keep archive
+  visibility, indexing and permanent deletion independent, with explicit restore
+  and deletion effects. Retain active-worker/session compatibility.
 - Model Manager needs owned download/process jobs, disk-space/progress/cancellation
   handling, cache metadata and backend adapters. Start with native Ollama
   inventory/pull/remove and already-installed engine integration. Arbitrary
@@ -572,10 +639,12 @@ A tool being enabled never bypasses workspace boundaries or grants permission.
 - Build launch commands from validated structured fields/argument lists rather
   than evaluating form text as shell code. Advanced engine options appear only
   when the supported engine/version can consume them.
-- Gallery requires media storage/import/export, metadata, album/tag ownership,
-  bounded image decoding and external-viewer handling. Vision/generation adapters
-  and jobs precede AI tagging/editing. Cloud media transfers follow explicit role
-  selection; background tagging does not silently select another endpoint.
+- Library → Media requires managed artifact storage/import/export, metadata,
+  manual tags, bounded image decoding and external-viewer handling. It works
+  before vision/generation adapters exist. Later image workflows save outputs
+  into this view and optional AI tagging retains manual tags. Cloud media
+  transfers follow explicit role selection; neither import nor viewing starts
+  a model request or silently selects another endpoint.
 
 ### UI organization
 
@@ -595,9 +664,9 @@ phases. Complete and validate one useful slice before expanding scope.
 | S1: connection foundation | Endpoint store/migration, endpoint-aware identity/cache, async discovery/testing, compatible local adapter; preserve existing native providers. | Same model ID on two endpoints resolves correctly; existing config/session resume survives; real native Ollama and available compatible server discovery/chat/tool smoke; cancellation and malformed-call regression checks. |
 | S2: requested model pages | Models landing, Add Models, Added Models, per-model selection; Default Chat and Utility roles with implemented consumers. | Real keyboard walkthrough, masked draft test/add, multiple endpoints, unavailable/auth states, acknowledged deletion, session/default distinction, pending model selection, restart persistence. |
 | S3: Search and Agent Tools | Move current controls, add provider/fallback editors, execution controls, registry-based availability; maintain old routes. | Existing provider routing outcomes remain intact; toggles stay authoritative under rapid edits/failing saves; disabled tools remain unavailable on all call paths; tool-limit zero migration is exact. |
-| S4: Deep Research and Library | Research defaults and bounded jobs, saved reports/sources; Library views for existing sessions/knowledge plus reports/documents as implemented. | Real sourced multi-step research with a small local model; cancellation/partial result/restart recovery; honest source reuse; sessions resume and query/library compatibility; no automatic private-document indexing. |
+| S4: Deep Research and Library | Research defaults/jobs/reports; Library hierarchy Sessions, Knowledge, Documents, Research, Media, Archive. Deliver basic Media storage/import/previews/metadata/tags/open/export independently of AI image pipelines. | Real sourced multi-step research; cancellation/partial result/recovery; honest source reuse; session/query/library compatibility; imports remain unlearned until explicit indexing; archive preserves content and restore; real Media import/preview fallback/export without a vision model. |
 | S5: Model Manager | Useful local inventory/download/serve flow; later extend to managed llama.cpp/vLLM, dependencies and remote SSH as separate slices. | Real download cancellation, disk/port/engine failures, supported hardware unavailable states, owned process cleanup, endpoint registration after health check, explicit downloaded-file deletion. |
-| S6: Vision, image generation and Gallery | Working media role adapters/jobs; terminal metadata/albums/viewer/export/tagging; optional graphical editor later. | Real media import/preview fallback/export, generated/manual tag separation, generation/vision failure and cancellation, supported quality settings; no claimed canvas parity without an actual editor. |
+| S6: Vision and image generation integration | Working media role adapters/jobs that consume and produce Library → Media artifacts; optional explicit AI tagging. No standalone Gallery or canvas/layer editor milestone. | Real screenshot/image analysis and generation workflows; failure/cancellation; supported quality options; output/provenance saved in Media; generated/manual tag separation; no automatic indexing or model calls on import/view. |
 
 Provider expansion can follow S1 in separate slices: DeepSeek via its supported
 API contract, native Anthropic, then additional presets. A preset enters the UI
@@ -644,6 +713,12 @@ role consumers out of that first slice.
   shutdown resource cleanup and active-worker ownership.
 - Model/server probes and provider tests use explicit user actions and private
   test inputs; failures do not leak secrets or claim success.
+- Library lifecycle checks: store/import without knowledge indexing or model
+  calls; explicit learning into a named library; archive/restore without content
+  deletion; permanent deletion shows its scope and any indexed-copy implications.
+- Media checks: screenshots and uploaded/generated artifacts, metadata and manual
+  tags, supported/unsupported previews, headless external-open fallback, export
+  and source-file preservation. Basic management works without vision/generation.
 
 For implementation changes, run the relevant focused tests, then the project's
 existing locked unit, Ruff, and production-source mypy validation via `make check`.

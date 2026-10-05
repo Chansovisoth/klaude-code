@@ -24,8 +24,10 @@
   results. Preserve dirty-worktree boundaries.
 - Add locked Python 3.11–3.13 CI, lint/types and installed-wheel smoke gates,
   plus reproducible release-candidate builds and provenance attestations.
+  Start the non-publishing candidate gate through manual dispatch or an alpha-tag
+  push before verifying and publishing the prerelease.
 - Record the proposed model connection, AI Defaults, Search, Agent Tools,
-  Model Manager, Deep Research, Library, and Gallery work in
+  Model Manager, Deep Research, and Library (including Media) work in
   [the settings and feature plan](docs/odysseus-settings-and-features-plan.md).
   These planned additions are not shipped feature claims.
 
