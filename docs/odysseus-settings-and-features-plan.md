@@ -3,7 +3,7 @@
 Status: reviewed and proposed; requested feature implementation has not started.
 Reviewed: 2026-10-05. Klaude baseline: `fdb2386`.
 Product direction updated: 2026-10-06; artifact/media management belongs in Library.
-Phase grouping updated: 2026-10-06; S0 is the outstanding reliability gate.
+Phase grouping updated: 2026-10-06; S0 complete, S1–S6 planned and unstarted.
 
 ## 1. Objective and scope
 
@@ -677,9 +677,11 @@ finishes; all listed checks are required before the whole phase is complete.
 
 ### S0 — Finish the reliability baseline
 
+Status: **complete**. Verified checkpoint: `02fcf48`; full CI passed on 2026-10-06.
+
 - [x] Verify the current TUI shutdown fix locally: a late redraw must
   not change the reported outcome of an already committed memory/session write.
-- [ ] Require successful Python 3.11–3.13 CI for the checkpoint containing the
+- [x] Require successful Python 3.11–3.13 CI for the checkpoint containing the
   fix, including lint, production types and the existing packaging gate.
 - [x] Verify existing plan approval, cancellation, malformed-call/path recovery,
   shell failure tracking, workspace-cache invalidation, dirty-worktree safety,
@@ -690,11 +692,12 @@ Current evidence: the local fix and deterministic regression passed `make check`
 with 2,453 passed, 19 skipped, Ruff passing and mypy passing on 83 source files.
 Fresh five-wheel installation/import/CLI smoke also passed. The
 [S0 validation record](s0-reliability-validation.md) maps the regression coverage
-and records the reproduced race and remaining gate.
-The fix is uncommitted and outside the published alpha.4 checkpoint. Python 3.13
-verification of this fix remains pending. Rerunning the existing tag job was
-rejected because the current token lacks Actions write permission; a subsequent
-authorized checkpoint push can run CI for the new code.
+and records the reproduced race and completed CI gate.
+The [checkpoint CI](https://github.com/Chansovisoth/klaude-code/actions/runs/37426174871)
+passed for `02fcf48323ed857e8f289b5a8679d1ea70b3b0ef`: each Python 3.11, 3.12
+and 3.13 job reported 2,453 passed and 19 skipped; lint/types and packaging passed.
+The fix was committed and pushed to main with explicit approval. The published
+alpha.4 checkpoint remains the earlier release snapshot.
 
 **Gate:** the checkpoint containing the fix passes the full CI matrix; accurately
 record any unavailable checks. The separate small-model CSV/GPU evaluation keeps
@@ -873,9 +876,10 @@ no automatic model calls or knowledge indexing.
 
 ### First implementation slice
 
-Finish **S0 verification**, then start **S1 for the existing Ollama configuration
-and a second manually entered local endpoint**. Establish migration, identity,
-ownership and testing before wiring the full Add/Added forms. S2 then delivers
+With **S0 complete**, the next implementation slice is **S1 for the existing
+Ollama configuration and a second manually entered local endpoint**.
+Establish migration, identity, ownership and testing before wiring the full
+Add/Added forms. S2 then delivers
 the immediately useful model-settings flow. Subsequent slices follow the order
 above and their individual gates.
 

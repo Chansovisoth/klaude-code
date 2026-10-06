@@ -1,6 +1,6 @@
 # S0 reliability validation
 
-Date: 2026-10-06. Status: local validation complete; checkpoint CI pending.
+Date: 2026-10-06. Status: **S0 complete; local validation and checkpoint CI passed.**
 Roadmap: [S0 in the settings and feature plan](odysseus-settings-and-features-plan.md#s0--finish-the-reliability-baseline).
 Baseline: `af334d5ff4c9cf4ba5835b1d58324c40cd419139` (published alpha.4).
 
@@ -82,14 +82,24 @@ Temporary logs: `/tmp/klaude-ci-shutdown-make-check-final.log` and
 artifacts. These checks do not establish completion of the small-model CSV
 benchmark, whose evaluation remains in the separate orchestration track.
 
-## Remaining gate
+## Checkpoint CI and completed gate
 
-S0 requires successful GitHub CI for a checkpoint containing this fix:
-Python 3.11, 3.12 and 3.13 tests, lint/types, and installed-wheel smoke.
-The current token's lack of Actions write permission blocked rerunning the old
-tag job. An explicitly authorized normal checkpoint push can trigger CI for
-the new code without manually dispatching a workflow.
+Verified checkpoint: `02fcf48323ed857e8f289b5a8679d1ea70b3b0ef`, pushed to main
+with explicit user approval. Its
+[CI run 37426174871](https://github.com/Chansovisoth/klaude-code/actions/runs/37426174871)
+completed successfully for that exact commit:
 
-The fix is currently uncommitted and absent from the published alpha.4 release.
-Record the new checkpoint SHA, CI run and job outcomes here when verified;
-mark S0 complete only after that gate passes.
+| Job | Result |
+| --- | --- |
+| Tests, Python 3.11 | 2,453 passed, 19 skipped; 93.47s |
+| Tests, Python 3.12 | 2,453 passed, 19 skipped; 95.86s |
+| Tests, Python 3.13 | 2,453 passed, 19 skipped; 96.67s |
+| Lint and production types | Ruff passed; mypy passed on 83 source files |
+| Build and installed-CLI smoke | Five wheels built/installed; imports and installed `klaude --help` passed |
+
+The approved checkpoint push started CI through the existing workflow. The
+earlier token limitation affected manual reruns and did not prevent this gate.
+Temporary CI log: `/tmp/klaude-s0-checkpoint-ci.log`.
+
+S0 is complete. The fix is on main; the published alpha.4 tag and wheel artifacts
+still identify the earlier release checkpoint. S1 remains planned and unstarted.
