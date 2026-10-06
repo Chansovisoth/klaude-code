@@ -17490,7 +17490,15 @@ class PersistentChatTUI:
     def _emit(self, kind: str, payload: object = None) -> None:
         self._events.put((kind, payload))
         if not self.shutting_down:
-            self.application.invalidate()
+            try:
+                self.application.invalidate()
+            except (AttributeError, RuntimeError):
+                # A worker can enter invalidate just before run_async clears
+                # its loop. Keep a late repaint from failing a committed write,
+                # while preserving redraw errors in a running application.
+                loop = self.application.loop
+                if self.application.is_running and loop is not None and not loop.is_closed():
+                    raise
 
     def _publish_shared_event(self, kind: str, payload: object, *, turn_id: str) -> bool:
         """Keep optional cross-process mirroring from breaking the model turn."""

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Prevent a worker's late TUI repaint during shutdown from reporting a committed
+  session or memory-setting write as failed. Keep redraw errors visible while
+  the application is running, and cover the teardown race deterministically.
+
 ## v0.2.0-alpha.4 - 2026-10-06
 
 - Make bare `klaude` the primary interactive entry point while retaining

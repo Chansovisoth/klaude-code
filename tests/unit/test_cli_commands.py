@@ -5644,6 +5644,94 @@ def test_settings_picker_responds_while_session_write_is_blocked(
     asyncio.run(exercise())
 
 
+def test_session_write_acknowledgement_survives_tui_shutdown(tmp_path):
+    from klaude_cli.session_actions import AutomaticMemoryUpdate, SessionActionWriter
+
+    async def exercise():
+        memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+        tui = _fake_persistent_tui()
+        entered, release = threading.Event(), threading.Event()
+        acknowledgements = []
+
+        def emit(kind, payload):
+            acknowledgements.append((kind, payload))
+            tui._emit(kind, payload)
+
+        writer = SessionActionWriter(memory, emit)
+        action = AutomaticMemoryUpdate(tui.session_id, tui.client_id, 1, False)
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = DummyOutput()
+            started = asyncio.Event()
+            task = asyncio.create_task(tui.application.run_async(pre_run=started.set))
+            await asyncio.wait_for(started.wait(), timeout=2)
+            real_loop = tui.application.loop
+
+            class LoopProbe:
+                def is_closed(self):
+                    if threading.current_thread().name == "klaude-session-actions":
+                        entered.set()
+                        assert release.wait(5)
+                    return real_loop.is_closed()
+
+                def __getattr__(self, name):
+                    return getattr(real_loop, name)
+
+            # Pause the worker after invalidate's loop check. The real TUI
+            # then exits and clears that loop before the repaint resumes.
+            tui.application.loop = LoopProbe()
+            try:
+                assert writer.submit(action)
+                for _ in range(200):
+                    if entered.is_set():
+                        break
+                    await asyncio.sleep(0.005)
+                assert entered.is_set()
+                tui.shutting_down = True
+                tui.application.exit()
+                await task
+                assert tui.application.loop is None
+            finally:
+                release.set()
+                if not task.done():
+                    tui.application.exit()
+                    await task
+                drained = writer.close(wait=True)
+                saved = memory.auto_memory_enabled()
+                memory.db.close()
+            assert drained
+            assert saved is False
+            assert acknowledgements == [("memory_setting_saved", (action, True))]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("error_type", [AttributeError, RuntimeError])
+def test_tui_emit_preserves_redraw_errors_while_running(monkeypatch, error_type):
+    async def exercise():
+        tui = _fake_persistent_tui()
+        with create_pipe_input() as pipe:
+            tui.application.input = pipe
+            tui.application.output = DummyOutput()
+            started = asyncio.Event()
+            task = asyncio.create_task(tui.application.run_async(pre_run=started.set))
+            await asyncio.wait_for(started.wait(), timeout=2)
+
+            def broken_redraw():
+                raise error_type("active redraw failure")
+
+            try:
+                with monkeypatch.context() as patch:
+                    patch.setattr(tui.application, "invalidate", broken_redraw)
+                    with pytest.raises(error_type, match="active redraw failure"):
+                        tui._emit("append", "update")
+            finally:
+                tui.application.exit()
+                await task
+
+    asyncio.run(exercise())
+
+
 def test_mode_only_selection_does_not_change_remembered_model(tmp_path):
     preferences = tmp_path / "preferences.json"
     preferences.write_text('{"last_model": "ollama/another-model"}')

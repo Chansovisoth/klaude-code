@@ -423,7 +423,10 @@ Chat slash commands currently include:
   save clears the override, while failure keeps the requested value process-local
   and visibly unconfirmed. Settings overview also marks pending/failed persistence.
   Accepted writes survive navigation and use the action lane's bounded queue and
-  two-second shutdown drain. Bare `/memory` and line-oriented controls remain
+  two-second shutdown drain. Worker acknowledgements remain queued through TUI
+  shutdown; a repaint racing with event-loop teardown cannot turn a committed
+  write into a reported save failure. Redraw errors while the application is
+  running still propagate. Bare `/memory` and line-oriented controls remain
   separate synchronous compatibility paths. Manage memories opens a typed,
   searchable list of up to 200 sanitized facts with stable content IDs. Enter
   opens edit/delete actions; deletion requires a separate confirmation that

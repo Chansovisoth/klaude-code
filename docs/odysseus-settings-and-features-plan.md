@@ -1,8 +1,9 @@
 # Odysseus settings and feature plan for Klaude
 
-Status: reviewed and proposed; implementation has not started.
+Status: reviewed and proposed; requested feature implementation has not started.
 Reviewed: 2026-10-05. Klaude baseline: `fdb2386`.
 Product direction updated: 2026-10-06; artifact/media management belongs in Library.
+Phase grouping updated: 2026-10-06; S0 is the outstanding reliability gate.
 
 ## 1. Objective and scope
 
@@ -656,30 +657,227 @@ second preference writer, permission system, model loop, or secret store.
 
 ## 8. Delivery sequence and acceptance gates
 
-These settings milestones are independent of the numbered agent-orchestration
-phases. Complete and validate one useful slice before expanding scope.
+Use the existing **S1–S6** settings phase IDs and add **S0** for the current
+reliability gate. These IDs are independent of the numbered
+[agent-orchestration phases](agent-orchestration-plan.md). Each slice below
+needs its own working user flow and evidence before the next slice starts.
+Planning does not mark a phase implemented or authorize a commit/push.
+For phases with several slices, apply the relevant gate checks as each slice
+finishes; all listed checks are required before the whole phase is complete.
 
-| Milestone | Deliverable | Required evidence before moving on |
-| --- | --- | --- |
-| S1: connection foundation | Endpoint store/migration, endpoint-aware identity/cache, async discovery/testing, compatible local adapter; preserve existing native providers. | Same model ID on two endpoints resolves correctly; existing config/session resume survives; real native Ollama and available compatible server discovery/chat/tool smoke; cancellation and malformed-call regression checks. |
-| S2: requested model pages | Models landing, Add Models, Added Models, per-model selection; Default Chat and Utility roles with implemented consumers. | Real keyboard walkthrough, masked draft test/add, multiple endpoints, unavailable/auth states, acknowledged deletion, session/default distinction, pending model selection, restart persistence. |
-| S3: Search and Agent Tools | Move current controls, add provider/fallback editors, execution controls, registry-based availability; maintain old routes. | Existing provider routing outcomes remain intact; toggles stay authoritative under rapid edits/failing saves; disabled tools remain unavailable on all call paths; tool-limit zero migration is exact. |
-| S4: Deep Research and Library | Research defaults/jobs/reports; Library hierarchy Sessions, Knowledge, Documents, Research, Media, Archive. Deliver basic Media storage/import/previews/metadata/tags/open/export independently of AI image pipelines. | Real sourced multi-step research; cancellation/partial result/recovery; honest source reuse; session/query/library compatibility; imports remain unlearned until explicit indexing; archive preserves content and restore; real Media import/preview fallback/export without a vision model. |
-| S5: Model Manager | Useful local inventory/download/serve flow; later extend to managed llama.cpp/vLLM, dependencies and remote SSH as separate slices. | Real download cancellation, disk/port/engine failures, supported hardware unavailable states, owned process cleanup, endpoint registration after health check, explicit downloaded-file deletion. |
-| S6: Vision and image generation integration | Working media role adapters/jobs that consume and produce Library → Media artifacts; optional explicit AI tagging. No standalone Gallery or canvas/layer editor milestone. | Real screenshot/image analysis and generation workflows; failure/cancellation; supported quality options; output/provenance saved in Media; generated/manual tag separation; no automatic indexing or model calls on import/view. |
+| Phase | Feature group | Delivery order within the phase | Depends on |
+| --- | --- | --- | --- |
+| S0 | Reliability baseline | Current shutdown fix and regression verification | Existing release baseline |
+| S1 | Model connections | Migration/identity → connection discovery/testing → compatible runtime | S0 |
+| S2 | Models settings and AI Defaults | Add/Added pages → chat/utility defaults → provider expansion | S1 |
+| S3 | Search and Agent Tools | S3a Search → S3b Agent Tools and settings reorganization | S2 |
+| S4 | Library and Deep Research | S4a Library/storage → S4b research jobs, defaults and reports | S1–S3 |
+| S5 | Model Manager | S5a Ollama lifecycle → S5b managed engines → S5c dependencies/SSH | S1–S2; scheduled after S4 |
+| S6 | Vision and image generation | S6a image analysis → S6b generation → S6c optional AI tags | S2 and S4a; managed engines use S5 |
 
-Provider expansion can follow S1 in separate slices: DeepSeek via its supported
-API contract, native Anthropic, then additional presets. A preset enters the UI
-only when its transport is implemented and validated. Existing OpenAI API,
-Gemini API, OpenRouter and Codex account paths remain first-class.
+### S0 — Finish the reliability baseline
+
+- [x] Verify the current TUI shutdown fix locally: a late redraw must
+  not change the reported outcome of an already committed memory/session write.
+- [ ] Require successful Python 3.11–3.13 CI for the checkpoint containing the
+  fix, including lint, production types and the existing packaging gate.
+- [x] Verify existing plan approval, cancellation, malformed-call/path recovery,
+  shell failure tracking, workspace-cache invalidation, dirty-worktree safety,
+  validation reruns and exit-code behavior in the local suite; retain these gates
+  throughout this roadmap.
+
+Current evidence: the local fix and deterministic regression passed `make check`
+with 2,453 passed, 19 skipped, Ruff passing and mypy passing on 83 source files.
+Fresh five-wheel installation/import/CLI smoke also passed. The
+[S0 validation record](s0-reliability-validation.md) maps the regression coverage
+and records the reproduced race and remaining gate.
+The fix is uncommitted and outside the published alpha.4 checkpoint. Python 3.13
+verification of this fix remains pending. Rerunning the existing tag job was
+rejected because the current token lacks Actions write permission; a subsequent
+authorized checkpoint push can run CI for the new code.
+
+**Gate:** the checkpoint containing the fix passes the full CI matrix; accurately
+record any unavailable checks. The separate small-model CSV/GPU evaluation keeps
+its existing status and completion gates in the agent-orchestration plan.
+
+### S1 — Model connection foundation
+
+- [ ] Store multiple connections with stable endpoint IDs, adapter type,
+  normalized URL, enabled state and private credential references.
+- [ ] Migrate the current Ollama URL, startup model and native-provider choices;
+  retain session resume and field-scoped preferences.
+- [ ] Identify/cache a model by endpoint plus model ID; keep same-named models
+  on different servers distinct.
+- [ ] Add owned, cancellable discovery/health checks with precise authentication,
+  network, missing-catalog and malformed-response feedback.
+- [ ] Add the compatible runtime needed for explicitly configured llama.cpp,
+  vLLM or other compatible servers; retain native provider continuation/tools.
+
+**Gate:** use the existing Ollama connection and a second manually entered local
+endpoint through real chat and tool calls; verify identity, restart/resume,
+streaming, cancellation and malformed-call recovery. Clearly distinguish mocked
+protocol coverage from a server that was actually available and tested.
+
+### S2 — Models pages and AI Defaults
+
+**S2a: Connect and manage models**
+
+- [ ] Models landing page with Added Models, Add Models and session selection.
+- [ ] Add Local Models and Add API Models forms: name, adapter/provider,
+  endpoint, masked authentication, Test, Add and Cancel.
+- [ ] Added Models: probe, endpoint detail, enable/disable, reviewed removal and
+  acknowledged outcomes; authentication errors stay distinct from offline state.
+- [ ] Per-endpoint model inventory: Filter, Reload, enabled/total count,
+  per-model visibility/pinning and observed/unknown capability metadata.
+
+**S2b: Defaults with functioning consumers**
+
+- [ ] Default Chat endpoint/model for new sessions; preserve the current
+  session's independent model choice and pending changes during a running turn.
+- [ ] Utility endpoint/model, Same as chat inheritance and ordered explicit
+  fallbacks, paired with bounded optional naming/summary consumers.
+- [ ] Display effective selections and fallback use. Keep deterministic
+  compaction and avoid extra model calls for simple requests.
+- [ ] Add Research, Vision and Image generation controls when their S4/S6
+  consumers work; preserve the existing embedding role and migration boundary.
+
+**S2c: Additional cloud adapters**
+
+- [ ] Add DeepSeek, then native Anthropic and other supported presets in
+  separately validated slices. Existing OpenAI API, Gemini API, OpenRouter and
+  Codex account paths remain available.
+
+**Gate:** keyboard walkthroughs of draft test/add/cancel, multiple endpoints,
+auth/offline states, removal, restart persistence and session/default differences;
+verify that credentials stay bound to their intended service. Provider presets
+become selectable only with an implemented, validated adapter.
+
+### S3 — Search and Agent Tools
+
+**S3a: Search**
+
+- [ ] Web Search: Auto/pinned provider, relevant provider fields and masked
+  credentials, results per query, Test, enabled state and fallback ordering.
+- [ ] URL Fetch: its own provider configuration, credentials and availability.
+- [ ] Move existing web-provider controls to their single owning page; retain
+  current routing/validation semantics and compatibility links.
+- [ ] Add Google PSE/Serper or other new search adapters only as complete,
+  separately tested slices with their actual credential fields.
+
+**S3b: Agent Tools and navigation migration**
+
+- [ ] Execution: maximum steps, Auto/Custom tool-call limits, advanced token
+  budget and provider-aware subagent worker limits. Migrate current zero to Auto;
+  an Unlimited option requires separately implemented and verified semantics.
+- [ ] Registry-derived groups, enabled/total counts, individual/group toggles
+  with mixed state, permission links and Activity Updates.
+- [ ] Link MCPs and Skills to their existing managed-capability pages; retain
+  their search/manage navigation and the existing Memory/Permissions ownership.
+- [ ] Move only the relevant controls from Tools, Providers and Runtime; keep
+  device/context/calibration in Runtime and update canonical help/aliases.
+- [ ] Apply the proposed Settings grouping and shared width, filtering,
+  focus/Back, table-header and footer conventions across migrated pages.
+
+**Gate:** rapid edits, failed saves and Back/filtering preserve authoritative
+state; disabled tools stay absent on every execution path; current search routing,
+permissions, read-only delegation and all existing entry routes keep working.
+
+### S4 — Library, then Deep Research
+
+**S4a: Library and durable artifacts**
+
+- [ ] Build the Library workspace in this order: **Sessions, Knowledge,
+  Documents, Research, Media, Archive**. Add working actions as their consumers
+  arrive; prepare report storage for S4b.
+- [ ] Sessions/Knowledge first: browse, search, resume, explicit learning/query
+  and refresh, preserving existing library IDs and compatibility commands.
+- [ ] Documents: import/store, metadata, filters, open and export; learning into
+  a named knowledge library remains explicit.
+- [ ] Media: screenshots and uploaded/imported images, previews with terminal
+  fallbacks, metadata, manual tags, open externally and export.
+- [ ] Archive: start with sessions, search/restore retained content, separate
+  confirmed permanent deletion; extend to artifact types with supported lifecycle.
+- [ ] Maintain **Stored ≠ indexed; Imported ≠ learned; Archived ≠ deleted**.
+
+**S4b: Deep Research**
+
+- [ ] Job form: question, format, bounded rounds, search provider, endpoint/model
+  overrides, Queue and Start.
+- [ ] AI Defaults research role plus Search research defaults: max report
+  tokens, extraction timeout/parallelism, run deadline and advanced budgets.
+- [ ] Owned jobs with public progress, sources, cancel, partial/error outcomes
+  and bounded recovery/checkpoints using the canonical runtime.
+- [ ] Sourced reports saved into Library → Research, with view/discuss/export
+  and explicit learning; re-fetch required evidence on recovery.
+
+**Gate:** imports preserve originals and launch no indexing/model calls; archive
+restores content; Media works without vision/generation. A real multi-step
+research job produces supported citations, saves its report and handles
+cancellation/recovery honestly, with bounded local-model work.
+
+### S5 — Model Manager
+
+**S5a: Local Ollama lifecycle**
+
+- [ ] Installed-model inventory, discovery/download, progress/cancel, hardware
+  information and Hugging Face credential/settings ownership where relevant.
+- [ ] Native Ollama pull/remove and service health/status; distinguish removing
+  a connection from explicitly deleting a downloaded model.
+
+**S5b: Managed serving**
+
+- [ ] Integrate already-installed llama.cpp/vLLM, then owned launch/stop/logs,
+  validated model/port/device/context fields and supported engine options.
+- [ ] Register served endpoints after a successful health check; explicitly
+  adopt existing processes and stop only owned processes.
+
+**S5c: Dependencies and remote servers**
+
+- [ ] Dependency inspection and explicitly requested installation/rebuild.
+- [ ] SSH server configuration, connection testing, model directories and
+  server-scoped hardware/process settings as a separate extension.
+
+**Gate:** verify actual download cancellation, disk/port/engine failures,
+unavailable hardware, owned-process cleanup, endpoint registration and explicit
+file deletion for each supported slice. Configuration must not imply untested
+hardware fit or tool reliability.
+
+### S6 — Vision and image generation through Library → Media
+
+**S6a: Vision**
+
+- [ ] Working image/screenshot input, analysis adapter, enable switch,
+  capability-aware model selection and explicit role fallbacks.
+
+**S6b: Image generation**
+
+- [ ] Working image-service connections and generation jobs; enabled state,
+  selected model and only quality options supported by that adapter.
+- [ ] Save generated output, provenance and session/task associations into Media.
+
+**S6c: Optional AI tags**
+
+- [ ] Explicit image-tagging action after vision works; distinguish generated
+  tags from manual tags and preserve manual choices.
+
+**Gate:** actual analysis/generation, cancellation/errors and artifact export;
+selected endpoint and budgets remain explicit. Importing/viewing Media starts
+no automatic model calls or knowledge indexing.
+
+### Deferred product extensions
+
+- Email writing style and speech controls need separately designed consumers.
+- AI Tidy needs a reviewable proposal and selected, acknowledged changes.
+- A standalone Gallery, photo/album workspace or canvas/layer editor needs a
+  future product decision; it has no delivery milestone in S0–S6.
 
 ### First implementation slice
 
-Start with **S1 for the existing Ollama configuration and a second manually
-entered local endpoint**. Establish migration, identity, ownership and testing
-before wiring the full Add/Added forms. Then S2 supplies the immediately useful
-user flow. Keep research, SSH installation, media editing and additional model
-role consumers out of that first slice.
+Finish **S0 verification**, then start **S1 for the existing Ollama configuration
+and a second manually entered local endpoint**. Establish migration, identity,
+ownership and testing before wiring the full Add/Added forms. S2 then delivers
+the immediately useful model-settings flow. Subsequent slices follow the order
+above and their individual gates.
 
 ## 9. Validation plan
 
