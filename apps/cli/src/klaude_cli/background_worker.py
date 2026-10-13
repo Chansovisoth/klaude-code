@@ -1,4 +1,8 @@
-"""Private fixed-operation worker. No shell, tools, model turns, or arbitrary imports."""
+"""Private fixed-operation worker. No shell, tools, or arbitrary operations.
+
+Utility generation is an explicit bounded tool-free operation, separate from
+read-only inventory/catalog operations.
+"""
 
 from __future__ import annotations
 
@@ -80,6 +84,52 @@ def _skill_description(manifest: Path, data: dict[str, Any]) -> str:
 
 def execute(request: dict[str, Any]) -> object:
     kind = request.get("kind")
+    if kind in {"research_control", "research_run"}:
+        os.environ["KLAUDE_CONFIG_DIR"] = request["config_dir"]
+        os.environ["KLAUDE_DATA_DIR"] = request["data_dir"]
+        for name, value in request.get("environment_keys", {}).items():
+            if (
+                re.fullmatch(r"[A-Z][A-Z0-9_]{0,99}", name)
+                and name not in {"HOME", "PATH", "PYTHONPATH", "PYTHONHOME"}
+                and not name.startswith("KLAUDE_")
+                and isinstance(value, str) and len(value) <= 8192
+            ):
+                os.environ[name] = value
+        from klaude_core.research import execute_research_request
+
+        return execute_research_request(request)
+    if kind == "library_knowledge_operation":
+        os.environ["KLAUDE_CONFIG_DIR"] = request["config_dir"]
+        os.environ["KLAUDE_DATA_DIR"] = request["data_dir"]
+        from klaude_cli.library_knowledge import run_operation
+
+        return run_operation(request)
+    if kind == "library":
+        from klaude_cli.library_inventory import execute_library
+
+        return execute_library(request)
+    if kind == "fetch_settings_test":
+        os.environ["KLAUDE_CONFIG_DIR"] = request["config_dir"]
+        os.environ["KLAUDE_DATA_DIR"] = request["data_dir"]
+        from klaude_cli.fetch_settings import run_fetch_test
+
+        return run_fetch_test(request)
+    if kind == "search_settings_test":
+        # Config resolves its paths at import time, before any provider imports.
+        os.environ["KLAUDE_CONFIG_DIR"] = request["config_dir"]
+        os.environ["KLAUDE_DATA_DIR"] = request["data_dir"]
+        from klaude_cli.search_settings import run_search_test
+
+        return run_search_test(request)
+    if kind == "utility":
+        from klaude_core.utility import run_utility
+
+        return run_utility(request)
+    if kind in {"model_settings_inventory", "model_settings_test"}:
+        from klaude_cli.model_settings import read_inventory, test_catalog
+
+        return (read_inventory(request) if kind == "model_settings_inventory"
+                else test_catalog(request))
     if kind in {"skill_update_all_check", "mcp_update_all_check"}:
         batch_items = request.get("items")
         if not isinstance(batch_items, list) or not 1 <= len(batch_items) <= 10 or not all(
@@ -270,6 +320,10 @@ def execute(request: dict[str, Any]) -> object:
         # Tokens/runtime objects never cross IPC. The live runtime is constructed
         # lazily in the parent; its first actual request owns SDK/network work.
         return {"ready": True}
+    if kind == "connection_models":
+        from klaude_core.model_discovery import probe_connection
+
+        return probe_connection(request)
     if kind == "local_models":
         import httpx
 

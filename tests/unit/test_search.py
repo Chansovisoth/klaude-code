@@ -777,7 +777,8 @@ def test_searxng_runs_bounded_location_aware_school_plan_once(monkeypatch):
     query = build_search_query("AIS school at my location", cfg, 5)
     calls = []
 
-    def fake_searx(_base_url, q, max_results, *, relevance_filter=True):
+    def fake_searx(_base_url, q, max_results, *, relevance_filter=True, expand_queries=True):
+        assert not expand_queries
         calls.append((q, relevance_filter))
         return SearchResponse(
             results=[
@@ -1417,7 +1418,8 @@ def test_category_discovery_uses_one_provider_query_strategy(monkeypatch):
     query = build_search_query("Cambodian startups", cfg, 8)
     calls = []
 
-    def fake_searx(_base_url, q, max_results, *, relevance_filter=True):
+    def fake_searx(_base_url, q, max_results, *, relevance_filter=True, expand_queries=True):
+        assert not expand_queries
         calls.append((q, max_results, relevance_filter))
         return SearchResponse(
             results=[

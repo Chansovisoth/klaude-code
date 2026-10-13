@@ -2,6 +2,122 @@
 
 ## Unreleased
 
+- Complete S4b Deep Research: reviewed job forms, durable queues, a Research
+  model role and bounded Search defaults, owned execution with progress/cancel,
+  metadata-only recovery checkpoints and fresh evidence on resume. Reuse model
+  adapters and the Library store; atomically publish reports with job completion.
+  Check exact citation quotes, repair invalid findings once, retain honest partial
+  outcomes and distinguish CLI exit codes. Add report preview/export, private
+  scoped discussion and reviewed learning. Fix stale cross-client error writes,
+  report-loading/navigation feedback, persisted search/fetch settings and native
+  structured planning; preserve model changes and published reports. Reject
+  truncated source bodies during Knowledge learning. S4 is complete locally;
+  S5 Model Manager and S6 remain unstarted. See the S4b validation record for
+  actual CLI/TUI evidence and the remaining small-model coverage limitation.
+
+- Finish S4a's Knowledge consumers: reviewed source learning, hybrid queries and
+  managed-source refresh through bounded owned tasks, retaining the shared indexer,
+  existing retrieval and CLI compatibility. Add live progress and cancellation
+  feedback without chat generation; preserve old indexed knowledge on failed or
+  oversized refreshes. Fetch refreshed pages freshly and verify content checksums
+  during interrupted-docs recovery. Fix repeated-query/Back state, long-result
+  terminal-resize crashes, and two-column inventory width use. This completed S4a.
+
+- Continue S4a with Documents/Media managed copies, metadata search/type filters,
+  sorting, tags, bounded text/image-metadata previews, explicit desktop open and
+  byte-preserving export. Store content and metadata atomically in a private
+  SQLite artifact store; import launches no indexing or model calls. Add artifact
+  archive/restore and confirmed deletion, stale-revision guards, workspace export
+  boundaries and matching `klaude library` commands. Move detail actions above
+  metadata and open previews at their beginning. Prepare report storage for the
+  subsequent S4b slice; the Knowledge slice above adds its actions.
+
+- Start S4a with Library's Sessions/Knowledge/Archive foundation. Add typed
+  navigation, bounded read-only store inventories, session search/paging/previews,
+  resume, local indexed-text search, archive/restore and confirmed permanent
+  deletion. Keep controls above wrapped tables, logical Back/filter/draft state,
+  and accurate loading/save feedback. Serialize archive state and worker leases
+  across clients, preserve saved turns/recall, reject stale deletion, and avoid
+  phantom-worker waits in clients whose session was archived elsewhere. Retain
+  existing knowledge commands. This foundation precedes the artifact slice above;
+  S4b Deep Research follows in the slice above.
+
+- Complete S3b with live-registry built-in groups, enabled/total counts,
+  mixed-state bulk switches, individual availability controls, purpose and
+  permission links, and links to existing MCP/Skills owners. Regroup Settings
+  into Appearance, Models & AI, Agent, and Advanced; retain Providers/Tools
+  routes and link Search/URL Fetch to the single availability owner.
+  Apply availability preferences to all built-ins in chat and ask, preserve
+  ordered live intent and permission grants, and recheck current disables in
+  subsequent schemas and delegated child capability intersections.
+
+- Start S3b with typed Agent Tools execution settings: bounded step presets and
+  custom values, finite Auto/custom tool-call limits, optional reported-token
+  budget/usage and provider-aware worker controls. Preserve existing Tools links,
+  move execution ownership from Runtime, and scope resets by field/page.
+  Apply saved governor limits to both chat and ask before the first request,
+  keep them out of inference options and retain a running turn's captured ceiling.
+  Preserve live intent, filtering and focus through ordered saves/failures;
+  clear transient numeric input before returning to the chat composer. Complete
+  skipped tool-result pairs when a provider batch exceeds the governor, without
+  charging or retiring skipped calls. Report a reached limit directly when a
+  required file read cannot run, avoiding an impossible retry.
+  Registry groups and the remaining Settings reorganization are still pending.
+
+- Complete S3a URL Fetch settings with independent routing/availability, Crawl4AI
+  service/key controls, shared Exa credentials, explicit cloud fallback,
+  cancellable uncached diagnostics and current transport limits. Preserve
+  migration behavior, field-scoped saves and Tools/Providers links. Bound
+  authenticated extraction responses, repair configuration-scoped failure reuse,
+  enforce current limits on cached sources and honor zero cache TTL.
+  Retain explicit URL reads when searching is prohibited. Fix the new masked
+  editor transition, prioritize transient validation errors, and honor custom
+  shared credential references and saved removals on restart.
+
+- Start S3a with a Web Search settings owner: Auto/pinned routing, result presets
+  and custom counts, provider details, private masked credentials, SearXNG URL,
+  Tavily depth, exact fallback ordering and cancellable provider diagnostics.
+  Preserve existing Tools/Providers entry routes, live state and scoped resets.
+  Apply saved availability/validation in shared chat/ask agent construction.
+  Prevent negated code actions in source-only searches from forcing code repair.
+  Avoid expanding SearXNG's planned queries twice; the real fixture search now
+  makes 3 requests instead of 24 with the same five leads.
+- Start S2 model settings with Added Models, Add Models and Session model pages,
+  private Local/API drafts, cancellable catalog-only tests, acknowledged Add,
+  endpoint details, catalog filtering/reload and manual model selection.
+  Add probe, scoped health metadata, endpoint toggles/reviewed removals, safe
+  Clear offline and independent per-model enabled/hidden/pinned preferences.
+  Explicitly handle affected startup choices, preserve running model snapshots
+  and block new requests to removed/disabled models.
+- Add S2b AI Defaults with separate Default Chat/session choices, Utility
+  inheritance, ordered explicit fallbacks and bounded output presets. Provide
+  opt-in AI recap/naming with public-only context, no tools, cancellation,
+  explicit fallback receipts and concurrent-rename protection. Keep ordinary
+  chat, first-input naming and compaction free of extra Utility calls. Wrap long
+  informational setting values at narrow terminal widths.
+- Add S2c's DeepSeek endpoint preset, Cloud picker shortcut, CLI registration and
+  dedicated Chat Completions runtime without cloud SDK dependencies. Explicitly
+  map thinking modes and retain bounded private reasoning only for the same
+  endpoint/model and connection revision. Reuse cancellation, tool recovery,
+  session restore and Utility bounds; keep generic providers free of that state.
+  Validate real terminal/one-shot paths against local protocol fixtures; live
+  DeepSeek generation remains unverified.
+- Add native Anthropic endpoint settings, paginated catalogs and an SDK-free
+  Messages runtime. Preserve signed thinking/tool blocks privately across
+  same-model continuation and session restore, reject incomplete streams, and
+  reuse owned cancellation and malformed-call recovery. Use declared catalog
+  metadata for modes/efforts, show required thinking explicitly, and exclude
+  known always-on models from tool-free Utility. Validate real CLI/TUI paths
+  against local protocol fixtures; live paid Anthropic generation is unverified.
+- Add versioned model connections, endpoint-qualified model references,
+  revision-scoped catalogs and cancellable catalog checks through
+  `klaude model-connections list/add/test`. Preserve native model choices,
+  session preferences, private credential references and embedding configuration.
+- Add an SDK-free Chat Completions runtime for explicitly configured compatible
+  endpoints, with streamed tool assembly, incomplete-response rejection,
+  malformed-call recovery, bounded context and shared transport cancellation.
+- Translate retained compatible tool arguments when switching to native Ollama,
+  preserving conversation history without the observed HTTP 400.
 - Prevent a worker's late TUI repaint during shutdown from reporting a committed
   session or memory-setting write as failed. Keep redraw errors visible while
   the application is running, and cover the teardown race deterministically.

@@ -527,6 +527,7 @@ def searx_search_detailed(
     max_results: int = 8,
     *,
     relevance_filter: bool = True,
+    expand_queries: bool = True,
 ) -> SearchResponse:
     query = clean_search_query(query)
     collected: list[dict] = []
@@ -534,7 +535,8 @@ def searx_search_detailed(
     attempted: list[str] = []
     failed: list[str] = []
     per_query = max(max_results, 8)
-    for search_query in expand_search_queries(query):
+    variants = expand_search_queries(query) if expand_queries else [query] if query else []
+    for search_query in variants:
         attempted.append(search_query)
         try:
             r = httpx.get(

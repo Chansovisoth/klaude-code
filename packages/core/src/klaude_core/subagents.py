@@ -332,7 +332,7 @@ def run_agent_assignment(parent: Any, assignment: SubagentAssignment) -> Subagen
     child_tools = [
         parent.tools[name]
         for name in assignment.callable_tools
-        if name in parent.tools
+        if name in parent.tools and name not in parent.disabled_tool_names
     ]
     child_gate = PermissionGate(
         {name: "allow" for name in assignment.callable_tools},
@@ -905,7 +905,9 @@ def supervise_agent_tasks(
     if not isinstance(callable_tools, (list, tuple, set, frozenset)):
         callable_tools = ()
     supervisor = SubagentSupervisor(
-        parent_callable_tools=(str(name) for name in callable_tools),
+        parent_callable_tools=(
+            str(name) for name in callable_tools if name not in parent.disabled_tool_names
+        ),
         effective_permissions=getattr(parent.gate, "policies", {}),
         process_grants=getattr(parent.gate, "process_grants", ()),
         worker=lambda assignment: run_agent_assignment(parent, assignment),

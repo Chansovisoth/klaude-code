@@ -9,6 +9,7 @@ dist/
 logs/
 .klaude/
 /config/config.toml
+/config/model-connections.json
 /config/env
 /config/.env
 /config/.env.*

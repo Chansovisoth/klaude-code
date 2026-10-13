@@ -1197,7 +1197,7 @@ def test_gemini_tool_enabled_stream_preserves_function_call_signature(monkeypatc
         "text": "Checking.", "candidates": [candidate], "usage_metadata": None,
     })()
 
-    def request(_model, _messages, tools, stream, _think):
+    def request(_model, _messages, tools, stream, _think, *, options=None):
         requested.extend(tools)
         assert stream is True
         return iter([chunk])
@@ -1512,3 +1512,48 @@ def test_local_models_group_by_family_then_rank_families_by_strongest_variant():
         ("OpenAI", ["gpt-oss:20b"]),
         ("Meta Llama", ["llama3.2:8b", "llama3.1:3b"]),
     ]
+
+
+def test_openai_bounded_nonstreaming_generation_sends_output_ceiling(monkeypatch):
+    runtime = OpenAIRuntime("test-key", request_timeout=12)
+    requests = []
+    response = SimpleNamespace(status="completed", output=[], output_text="Cache task", usage=None)
+    monkeypatch.setattr(
+        runtime, "_response_create", lambda **kwargs: requests.append(kwargs) or response
+    )
+    assert runtime.chat("model", [], options={"num_predict": 128})["content"] == "Cache task"
+    assert requests[0]["max_output_tokens"] == 128
+    assert requests[0]["store"] is False
+    assert runtime.fork_for_child().request_timeout == 12
+
+
+@pytest.mark.parametrize("runtime_type", [OpenAIRuntime, OpenRouterRuntime])
+def test_bounded_cloud_client_disables_hidden_sdk_retries(monkeypatch, runtime_type):
+    import sys
+    from types import ModuleType
+
+    module = ModuleType("openai")
+    received = []
+    module.OpenAI = lambda **kwargs: received.append(kwargs) or SimpleNamespace(close=lambda: None)
+    monkeypatch.setitem(sys.modules, "openai", module)
+    runtime = runtime_type("test-key", request_timeout=12)
+    runtime._client()
+    assert received[0]["timeout"] == 12 and received[0]["max_retries"] == 0
+
+
+def test_gemini_bounded_request_sets_retry_timeout_and_generation_ceiling(monkeypatch):
+    runtime = GeminiRuntime("test-key", request_timeout=12)
+    received = []
+    generation = []
+    client = SimpleNamespace(
+        models=SimpleNamespace(
+            generate_content=lambda **kwargs: generation.append(kwargs) or SimpleNamespace()
+        ),
+        close=lambda: None,
+    )
+    sdk = SimpleNamespace(Client=lambda **kwargs: received.append(kwargs) or client)
+    monkeypatch.setattr(runtime, "_sdk", lambda: (sdk, SimpleNamespace()))
+    runtime._request("model", [], None, False, False, {"num_predict": 512})
+    assert received[0]["http_options"] == {"timeout": 12000, "retry_options": {"attempts": 1}}
+    assert generation[0]["config"]["max_output_tokens"] == 512
+    runtime.close()

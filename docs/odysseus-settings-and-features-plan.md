@@ -1,9 +1,17 @@
 # Odysseus settings and feature plan for Klaude
 
-Status: reviewed and proposed; requested feature implementation has not started.
+Status: S0 reliability and S1 model connection foundation implemented and validated locally;
+S2a connection pages/maintenance and S2b AI Defaults are implemented and validated locally.
+S2c's DeepSeek and native Anthropic slices are implemented and validated locally.
+S3a Web Search and URL Fetch are implemented and validated locally.
+S3b execution controls, registry-derived tool groups and navigation migration are implemented
+and validated locally. [S3b follow-up evidence](s3b-agent-tools-validation.md).
+S4–S6 remain reviewed proposals, with implementation unstarted.
 Reviewed: 2026-10-05. Klaude baseline: `fdb2386`.
 Product direction updated: 2026-10-06; artifact/media management belongs in Library.
-Phase grouping updated: 2026-10-06; S0 complete, S1–S6 planned and unstarted.
+Phase grouping updated: 2026-10-13; S0, S1, S2a, S2b and S2c complete locally;
+S3a and S3b complete locally; S4-S6 remain unstarted.
+Live paid-provider certification remains unverified.
 
 ## 1. Objective and scope
 
@@ -705,15 +713,15 @@ its existing status and completion gates in the agent-orchestration plan.
 
 ### S1 — Model connection foundation
 
-- [ ] Store multiple connections with stable endpoint IDs, adapter type,
+- [x] Store multiple connections with stable endpoint IDs, adapter type,
   normalized URL, enabled state and private credential references.
-- [ ] Migrate the current Ollama URL, startup model and native-provider choices;
+- [x] Migrate the current Ollama URL, startup model and native-provider choices;
   retain session resume and field-scoped preferences.
-- [ ] Identify/cache a model by endpoint plus model ID; keep same-named models
+- [x] Identify/cache a model by endpoint plus model ID; keep same-named models
   on different servers distinct.
-- [ ] Add owned, cancellable discovery/health checks with precise authentication,
+- [x] Add owned, cancellable discovery/health checks with precise authentication,
   network, missing-catalog and malformed-response feedback.
-- [ ] Add the compatible runtime needed for explicitly configured llama.cpp,
+- [x] Add the compatible runtime needed for explicitly configured llama.cpp,
   vLLM or other compatible servers; retain native provider continuation/tools.
 
 **Gate:** use the existing Ollama connection and a second manually entered local
@@ -721,34 +729,77 @@ endpoint through real chat and tool calls; verify identity, restart/resume,
 streaming, cancellation and malformed-call recovery. Clearly distinguish mocked
 protocol coverage from a server that was actually available and tested.
 
+**Completed 2026-10-13.** Native Ollama and its separately registered compatible
+endpoint passed real one-shot tools, interactive switching, cancellation and
+restart/resume checks. Full tests/static checks and fresh wheel smoke passed.
+See [S1 validation and limits](s1-model-connections-validation.md); live
+llama.cpp/vLLM certification and S2 forms are separate work.
+
 ### S2 — Models pages and AI Defaults
 
 **S2a: Connect and manage models**
 
-- [ ] Models landing page with Added Models, Add Models and session selection.
-- [ ] Add Local Models and Add API Models forms: name, adapter/provider,
+- [x] Models landing page with Added Models, Add Models and session selection.
+- [x] Add Local Models and Add API Models forms: name, adapter/provider,
   endpoint, masked authentication, Test, Add and Cancel.
-- [ ] Added Models: probe, endpoint detail, enable/disable, reviewed removal and
+- [x] Added Models: probe, endpoint detail, enable/disable, reviewed removal and
   acknowledged outcomes; authentication errors stay distinct from offline state.
-- [ ] Per-endpoint model inventory: Filter, Reload, enabled/total count,
+- [x] Per-endpoint model inventory: Filter, Reload, enabled/total count,
   per-model visibility/pinning and observed/unknown capability metadata.
+
+**First working slice, 2026-10-13:** typed landing/add/detail pages, private
+drafts and masked keys, catalog-only draft tests, acknowledged ordered Add,
+read-only Added Models snapshots, per-endpoint catalog reload/filter and manual
+model selection. Controls precede table headers; capabilities remain unknown
+unless existing cache metadata supplies evidence. Cancel does not save a draft.
+The current session and embedding choice remain unchanged by Add. See
+[S2 connection UI validation](s2-model-settings-validation.md).
+
+**Maintenance slice complete, 2026-10-13:** cancellable serial Probe of enabled
+endpoints; durable scoped check status/age; endpoint enable/disable and reviewed
+removal; Clear offline reviews only network/timeout failures and rejects changed
+health. Affected startup choices require explicit replacement/unset. Running
+turns retain their model; new prompts reject removed/disabled endpoints/models.
+An unset startup opens Models without selecting a fallback. Per-model enabled,
+hidden and pinned fields merge independently, survive missing catalogs, and
+affect session pickers. Filters are endpoint scoped; fresh reviews clear stale
+search and initially focus Cancel. Real TUI evidence and regression gates are
+in the [S2 validation record](s2-model-settings-validation.md#s2a-maintenance-follow-up).
+
+**AI Defaults slice complete, 2026-10-13:** Default Chat is independent of the
+active session; Utility inherits the session model or uses an explicit endpoint,
+with up to three ordered fallbacks and a visible bounded output budget. Optional
+AI recap and title consumers use public dialogue only, no tools, owned
+cancellation and finite generation deadlines. Ordinary chat and deterministic
+compaction add no Utility calls. Removal reviews include affected roles.
+Real native/compatible CLI sessions, fallback/cancellation/restart checks and
+regressions are recorded in the [S2b validation record](s2b-ai-defaults-validation.md).
+
+**Phase numbering:** S4 is Library, then Deep Research; Model Manager is S5.
+S4a and S4b are complete locally; S5 and S6 remain unstarted.
 
 **S2b: Defaults with functioning consumers**
 
-- [ ] Default Chat endpoint/model for new sessions; preserve the current
+- [x] Default Chat endpoint/model for new sessions; preserve the current
   session's independent model choice and pending changes during a running turn.
-- [ ] Utility endpoint/model, Same as chat inheritance and ordered explicit
+- [x] Utility endpoint/model, Same as chat inheritance and ordered explicit
   fallbacks, paired with bounded optional naming/summary consumers.
-- [ ] Display effective selections and fallback use. Keep deterministic
+- [x] Display effective selections and fallback use. Keep deterministic
   compaction and avoid extra model calls for simple requests.
-- [ ] Add Research, Vision and Image generation controls when their S4/S6
-  consumers work; preserve the existing embedding role and migration boundary.
+- [x] Add Research endpoint/model controls with its functioning S4b consumer.
+- [ ] Add Vision and Image generation controls with their S6 consumers;
+  preserve the existing embedding role and migration boundary.
 
 **S2c: Additional cloud adapters**
 
-- [ ] Add DeepSeek, then native Anthropic and other supported presets in
-  separately validated slices. Existing OpenAI API, Gemini API, OpenRouter and
-  Codex account paths remain available.
+- [x] Add DeepSeek as an explicit connection preset, with a dedicated reasoning
+  continuation adapter, session/default/Utility consumers and local protocol
+  validation. [Evidence and cloud limits](s2c-deepseek-validation.md).
+- [x] Add native Anthropic with explicit endpoint settings, paginated catalogs,
+  Messages/tool continuation, declared mode/effort controls and Utility consumers.
+  [Local evidence and cloud limits](s2c-anthropic-validation.md).
+  Existing OpenAI API, Gemini API, OpenRouter and Codex account paths remain available.
+  Additional providers require their own implemented and validated adapters.
 
 **Gate:** keyboard walkthroughs of draft test/add/cancel, multiple endpoints,
 auth/offline states, removal, restart persistence and session/default differences;
@@ -759,27 +810,64 @@ become selectable only with an implemented, validated adapter.
 
 **S3a: Search**
 
-- [ ] Web Search: Auto/pinned provider, relevant provider fields and masked
+- [x] Web Search: Auto/pinned provider, relevant provider fields and masked
   credentials, results per query, Test, enabled state and fallback ordering.
-- [ ] URL Fetch: its own provider configuration, credentials and availability.
-- [ ] Move existing web-provider controls to their single owning page; retain
+- [x] URL Fetch: its own provider configuration, credentials and availability.
+- [x] Move existing web-provider controls to their single owning page; retain
   current routing/validation semantics and compatibility links.
 - [ ] Add Google PSE/Serper or other new search adapters only as complete,
   separately tested slices with their actual credential fields.
 
+**Web Search slice, 2026-10-13:** typed Search entry and provider/detail/result/
+fallback pages, immediate intent and acknowledged non-secret saves, ordered
+masked key writes, user-reviewed cancellable tests and compatibility links.
+Real chat/ask tests found and fixed one-shot availability bypass, negated-code
+repair routing and duplicated SearXNG expansion (24 → 3 HTTP requests for the
+same five leads). [Evidence and remaining scope](s3a-web-search-validation.md).
+**URL Fetch slice, 2026-10-13:** independent Local/Exa routing and cloud fallback,
+Crawl4AI service/keys and separate provider availability, ordered private saves,
+owned uncached diagnostics, read-only transport limits and compatibility links.
+Real terminal/one-shot checks found and fixed the masked editor transition,
+crowded validation errors and a search-prohibition rule that removed explicit
+URL reads. Extraction responses and cache/failure reuse obey current limits.
+[Evidence and remaining limits](s3a-url-fetch-validation.md).
+Optional new provider adapters remain deferred complete slices.
+
 **S3b: Agent Tools and navigation migration**
 
-- [ ] Execution: maximum steps, Auto/Custom tool-call limits, advanced token
+- [x] Execution: maximum steps, Auto/Custom tool-call limits, advanced token
   budget and provider-aware subagent worker limits. Migrate current zero to Auto;
   an Unlimited option requires separately implemented and verified semantics.
-- [ ] Registry-derived groups, enabled/total counts, individual/group toggles
+- [x] Registry-derived groups, enabled/total counts, individual/group toggles
   with mixed state, permission links and Activity Updates.
-- [ ] Link MCPs and Skills to their existing managed-capability pages; retain
+- [x] Link MCPs and Skills to their existing managed-capability pages; retain
   their search/manage navigation and the existing Memory/Permissions ownership.
-- [ ] Move only the relevant controls from Tools, Providers and Runtime; keep
+- [x] Move only the relevant controls from Tools, Providers and Runtime; keep
   device/context/calibration in Runtime and update canonical help/aliases.
-- [ ] Apply the proposed Settings grouping and shared width, filtering,
+- [x] Apply the proposed Settings grouping and shared width, filtering,
   focus/Back, table-header and footer conventions across migrated pages.
+
+**Execution slice, 2026-10-13:** Agent Tools home and typed Execution/Advanced
+pages own steps, finite Auto/custom calls, reported-token cap/usage and workers.
+Runtime retains hardware/context/calibration with a compatibility link. Old
+execution preferences retain their keys and apply before both chat and ask.
+Scoped ordered saves/resets preserve tools, permissions, hardware and live intent;
+running turns use their captured step budget. A stopped batch receives one
+skipped result per remaining call ID, and a budget-blocked required read fails
+without an impossible retry. Its legacy tool-controls landing is now replaced
+by the registry-derived Built-in Tools page. [Evidence](s3b-agent-execution-validation.md).
+
+**Registry/navigation slice complete, 2026-10-13:** Built-in groups use the live
+registry, omit MCP inventories and unregistered tools, and show enabled/total
+counts. Group switches accurately show mixed state; tools support Space toggles
+and Enter for purpose/availability/permission detail. MCPs/Skills links return
+to their existing owners; Search/URL Fetch link to one availability owner.
+Knowledge validation remains distinct from Search validation and permission grants.
+Settings uses Appearance, Models & AI, Agent and Advanced; Provider credentials
+remain under Advanced until Model Manager can own Hugging Face settings.
+All built-in availability loads before chat/ask, and live disables are rechecked
+in later schemas, capability snapshots and delegated child intersections.
+[Interaction, protocol and regression evidence](s3b-agent-tools-validation.md).
 
 **Gate:** rapid edits, failed saves and Back/filtering preserve authoritative
 state; disabled tools stay absent on every execution path; current search routing,
@@ -789,29 +877,68 @@ permissions, read-only delegation and all existing entry routes keep working.
 
 **S4a: Library and durable artifacts**
 
-- [ ] Build the Library workspace in this order: **Sessions, Knowledge,
-  Documents, Research, Media, Archive**. Add working actions as their consumers
-  arrive; prepare report storage for S4b.
-- [ ] Sessions/Knowledge first: browse, search, resume, explicit learning/query
-  and refresh, preserving existing library IDs and compatibility commands.
-- [ ] Documents: import/store, metadata, filters, open and export; learning into
+- [x] Build Library navigation in this order: **Sessions, Knowledge,
+  Documents, Research, Media, Archive**. Sessions/Knowledge/Documents/Media/Archive
+  work; the subsequent S4b slice supplies Research jobs/reports.
+- [x] Sessions: browse, full-store search, bounded pages/public previews and resume.
+- [x] Knowledge: browse existing named libraries and search active/enabled indexed
+  text without model calls, preserving existing IDs and compatibility commands.
+- [x] Add TUI consumers for explicit learning, hybrid query and managed-source
+  refresh, reusing existing service owners and CLI compatibility.
+- [x] Prepare durable report/artifact storage for S4b.
+- [x] Documents: import/store, metadata, filters, open and export; learning into
   a named knowledge library remains explicit.
-- [ ] Media: screenshots and uploaded/imported images, previews with terminal
+- [x] Media: screenshots and uploaded/imported images, previews with terminal
   fallbacks, metadata, manual tags, open externally and export.
-- [ ] Archive: start with sessions, search/restore retained content, separate
+- [x] Archive: start with sessions, search/restore retained content, separate
   confirmed permanent deletion; extend to artifact types with supported lifecycle.
-- [ ] Maintain **Stored ≠ indexed; Imported ≠ learned; Archived ≠ deleted**.
+- [x] Maintain **Stored ≠ indexed; Imported ≠ learned; Archived ≠ deleted**
+  for the implemented session/document/media stores.
+
+**Foundation complete locally, 2026-10-13:** typed Library pages outside Settings,
+read-only inventories/search, session lifecycle and cross-client guards passed
+the real `TEST KLAUDE FEATURES LIBRARY` CLI/TUI run. Archive retains content and
+configured recall; browsing adds no model/embedding/indexing work. A subsequent
+Documents/Media slice adds managed imports, metadata/tags/filters/previews/export,
+artifact archive/restore/delete and durable report storage. Explicit Knowledge
+TUI actions were pending at that checkpoint and are supplied below.
+[Artifact scope and validation](s4a-artifacts-validation.md).
+[Scope, interaction and regression evidence](s4a-library-validation.md).
+
+**Artifact slice validated locally, 2026-10-13:** real
+`TEST KLAUDE FEATURES LIBRARY ARTIFACTS` CLI/TUI run passed with unchanged original
+and knowledge-file hashes, zero generation requests and 40/70/120-column layouts.
+Final checks: **2,797 passed, 19 skipped**, Ruff/mypy and five-wheel packaging passed.
+The subsequent Knowledge slice supplies the remaining TUI actions; S4b had not
+started at that artifact checkpoint.
+[Knowledge interaction and validation evidence](s4a-knowledge-validation.md).
+
+**S4a complete locally, 2026-10-13:** explicit learning, hybrid query and
+managed-source refresh passed the real `TEST KLAUDE FEATURES KNOWLEDGE ACTIONS`
+CLI/TUI run, including cancellation, fresh public-source replacement and resize
+at 40/70/120 columns. Final gate: **2,823 passed, 19 skipped**, Ruff/mypy and
+five-wheel packaging passed. No commit or push was performed in this slice.
 
 **S4b: Deep Research**
 
-- [ ] Job form: question, format, bounded rounds, search provider, endpoint/model
+- [x] Job form: question, format, bounded rounds, search provider, endpoint/model
   overrides, Queue and Start.
-- [ ] AI Defaults research role plus Search research defaults: max report
+- [x] AI Defaults research role plus Search research defaults: max report
   tokens, extraction timeout/parallelism, run deadline and advanced budgets.
-- [ ] Owned jobs with public progress, sources, cancel, partial/error outcomes
+- [x] Owned jobs with public progress, sources, cancel, partial/error outcomes
   and bounded recovery/checkpoints using the canonical runtime.
-- [ ] Sourced reports saved into Library → Research, with view/discuss/export
+- [x] Sourced reports saved into Library → Research, with view/discuss/export
   and explicit learning; re-fetch required evidence on recovery.
+
+**S4b complete locally, 2026-10-13:** real bare CLI/TUI and one-shot research
+walkthroughs cover reviewed queue/start, public-source extraction, citation
+repair, atomic publication, cancellation/resume, report discussion/export and
+explicit learning. Research defaults use bounded local values rather than the
+earlier larger proposals: 2048 output, 8192 context, 2 rounds, 6 queries, 8 sources,
+30-second extraction requests, 2 extraction workers and a 300-second run deadline.
+There is no automatic model fallback or queue daemon. An actual qwen3.5:4b run
+produced a supported partial report, not complete requested topic coverage.
+[Scope, exact checks, real-model limits and final validation](s4b-deep-research-validation.md).
 
 **Gate:** imports preserve originals and launch no indexing/model calls; archive
 restores content; Media works without vision/generation. A real multi-step
@@ -874,14 +1001,26 @@ no automatic model calls or knowledge indexing.
 - A standalone Gallery, photo/album workspace or canvas/layer editor needs a
   future product decision; it has no delivery milestone in S0–S6.
 
-### First implementation slice
+### Next implementation slice
 
-With **S0 complete**, the next implementation slice is **S1 for the existing
-Ollama configuration and a second manually entered local endpoint**.
-Establish migration, identity, ownership and testing before wiring the full
-Add/Added forms. S2 then delivers
-the immediately useful model-settings flow. Subsequent slices follow the order
-above and their individual gates.
+With **S0, S1, S2a, S2b, S2c, S3a, S3b, S4a and S4b complete locally**, the next
+slice is **S5a Model Manager: local Ollama lifecycle**. Library's foundation,
+artifact workflows, explicit Knowledge actions and Deep Research consumers
+passed their recorded local validation gates.
+**S5 Model Manager and S6 have not started.** See the
+[S1 evidence](s1-model-connections-validation.md) and
+[S2 connection UI evidence](s2-model-settings-validation.md), followed by the
+[S2b AI Defaults evidence](s2b-ai-defaults-validation.md) and
+[S2c DeepSeek evidence](s2c-deepseek-validation.md) and
+[native Anthropic evidence](s2c-anthropic-validation.md) and
+[S3a Web Search evidence](s3a-web-search-validation.md) and
+[URL Fetch evidence](s3a-url-fetch-validation.md) and
+[Agent execution evidence](s3b-agent-execution-validation.md) and
+[Agent Tools/navigation evidence](s3b-agent-tools-validation.md) and
+[Library foundation evidence](s4a-library-validation.md) and
+[artifact workflow evidence](s4a-artifacts-validation.md) and
+[Knowledge action evidence](s4a-knowledge-validation.md) and
+[Deep Research evidence](s4b-deep-research-validation.md).
 
 ## 9. Validation plan
 

@@ -94,6 +94,13 @@ from klaude_core import (
     save_provider_secret,
     supervise_agent_tasks,
 )
+from klaude_core.agent_settings import (
+    EXECUTION_LIMITS,
+    apply_execution_settings,
+    public_execution_settings,
+)
+from klaude_core.ai_defaults import migrate_defaults, read_defaults
+from klaude_core.compatible_runtime import CompatibleRuntime
 from klaude_core.config import (
     CONFIG_DIR,
     DEFAULT_PERMISSIONS,
@@ -105,6 +112,7 @@ from klaude_core.dates import find_establishment_date, operating_duration_since
 from klaude_core.intent import (
     explicit_local_file_read_request,
     explicit_only_tool_names,
+    explicit_public_page_read_request,
     explicit_workspace_inspection,
     explicitly_disallows_tools,
     has_nonnegated_action,
@@ -115,6 +123,19 @@ from klaude_core.knowledge_tool_contract import (
     knowledge_tool_parameters,
 )
 from klaude_core.memory import explicit_memory_candidate, is_sensitive_memory
+from klaude_core.model_connections import (
+    DEFAULT_IDS,
+    connection_key,
+    connection_registry,
+    legacy_connections,
+    resolve_connection,
+    split_model_ref,
+)
+from klaude_core.model_management import (
+    choices_from_payload,
+    model_choice,
+    validate_model_reference,
+)
 from klaude_core.model_runtime import (
     discover_codex_models,
     discover_gemini_models,
@@ -134,8 +155,18 @@ from klaude_core.runtime_context import (
     context_to_dict,
     render_runtime_context,
 )
+from klaude_core.search_settings import PROVIDERS as SEARCH_SETTINGS_PROVIDERS
+from klaude_core.search_settings import primary_provider
 from klaude_core.settings_store import DELETE, settings_lock, update_settings
 from klaude_core.skill_catalog import SkillRecord
+from klaude_core.tool_settings import (
+    BUILTIN_TOOL_GROUPS as PERMISSION_TOOL_GROUPS,
+)
+from klaude_core.tool_settings import (
+    BUILTIN_TOOL_LABELS,
+    availability_values,
+    builtin_names,
+)
 from prompt_toolkit import Application, PromptSession
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.application.current import get_app
@@ -186,6 +217,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from .agent_settings import AgentSettings
+from .ai_default_settings import AIDefaultSettings, utility_request
 from .background_jobs import OwnedBackgroundJobs
 from .dividers import (
     DEFAULT_DIVIDER_COLOR,
@@ -201,7 +234,10 @@ from .dividers import (
     divider_styles,
     validate_divider_pattern,
 )
+from .fetch_settings import FetchSettings
 from .installed_settings import InstalledFilter, filter_page
+from .library_commands import app as library_app
+from .library_workspace import LibraryWorkspace
 from .mcp_management import (
     install_result_page,
     manage_removal_confirmation,
@@ -239,9 +275,16 @@ from .mcp_search_panel import (
 )
 from .mcp_updates import valid_candidate_payload
 from .memory_panel import memory_detail_page, memory_list_page
+from .model_connections import app as model_connections_app
+from .model_settings import ModelSettings
 from .pickers import PickerController, PickerRow, match_score
+from .research_commands import app as research_app
+from .search_settings import KEY_LABELS as SEARCH_KEY_LABELS
+from .search_settings import SearchSettings
 from .session_actions import (
     AutomaticMemoryUpdate,
+    LibraryArtifactChange,
+    LibrarySessionChange,
     MemoryFactUpdate,
     SessionActionWriter,
     SessionSettingUpdate,
@@ -322,6 +365,9 @@ mcp_app = typer.Typer(
     invoke_without_command=True,
 )
 app.add_typer(mcp_app, name="mcp")
+app.add_typer(model_connections_app, name="model-connections")
+app.add_typer(library_app, name="library")
+app.add_typer(research_app, name="research")
 mcp_auth_app = typer.Typer(help="Manage OAuth for remote MCP servers.")
 mcp_app.add_typer(mcp_auth_app, name="auth")
 
@@ -493,6 +539,8 @@ MODEL_PROVIDER_FOR_BACKEND = {
     "openai_api": "OpenAI API",
     "openrouter": "OpenRouter",
     "gemini_api": "Gemini API",
+    "deepseek": "DeepSeek",
+    "anthropic": "Anthropic",
 }
 
 TOOL_API_KEY_PROVIDERS = {
@@ -571,63 +619,6 @@ PERMISSION_PRESET_DESCRIPTIONS = {
     "Full Access": "All tools are allowed; Klaude's hard safety boundaries still apply.",
     RESET_THEME_CHOICE: "The configured default policy for every registered tool.",
 }
-PERMISSION_TOOL_GROUPS = (
-    (
-        "WORKSPACE",
-        (
-            ("read_file", "Read file"),
-            ("list_dir", "List directory"),
-            ("grep", "Search files"),
-            ("workspace_info", "Workspace info"),
-            ("storage_usage", "OS storage usage"),
-            ("write_file", "Write file"),
-            ("edit_file", "Edit file"),
-            ("run_shell", "Run shell"),
-        ),
-    ),
-    (
-        "GIT",
-        (
-            ("git_status", "Status"),
-            ("git_diff", "Diff"),
-            ("git_commit", "Commit"),
-        ),
-    ),
-    (
-        "WEB & RESEARCH",
-        (
-            ("web_search", "Web search"),
-            ("fetch_url", "Fetch URL"),
-            ("http_probe", "HTTP probe"),
-            ("code_search", "Code search"),
-            ("crawl_site", "Crawl site"),
-            ("learn_source", "Learn source"),
-            ("weather_lookup", "Weather lookup"),
-            ("current_time", "Current time"),
-            ("huggingface_search", "Hugging Face search"),
-            ("huggingface_details", "Hugging Face details"),
-            ("huggingface_readme", "Hugging Face README"),
-        ),
-    ),
-    (
-        "KNOWLEDGE & SESSIONS",
-        (
-            ("query_knowledge", "Query knowledge"),
-            ("search_sessions", "Search sessions"),
-            ("list_recent_sessions", "List recent sessions"),
-            ("remember_fact", "Remember fact"),
-            ("list_commands", "List commands"),
-        ),
-    ),
-    (
-        "USER INTERACTION",
-        (("request_user_input", "Request user input"),),
-    ),
-    (
-        "ORCHESTRATION",
-        (("delegate_task", "Delegate read-only task"),),
-    ),
-)
 PERMISSION_TOOL_LABELS = {
     tool_name: label
     for _group_name, group_tools in PERMISSION_TOOL_GROUPS
@@ -1695,34 +1686,21 @@ def _load_chat_preferences(path: Path) -> dict[str, object]:
 
 
 def _save_last_chat_model(path: Path, model: str) -> None:
-    update_settings(path, {("last_model",): model})
+    update_settings(path, {("last_model",): model, ("require_model_selection",): DELETE})
 
 
 def _load_runtime_preferences(path: Path) -> dict[str, int | None]:
     raw = _load_chat_preferences(path).get("runtime_options")
     if not isinstance(raw, dict):
         return {}
-    preferences: dict[str, int | None] = {}
-    for key in (
-        "num_gpu",
-        "num_thread",
-        "num_ctx",
-        "max_steps",
-        "max_subagent_concurrency",
-    ):
+    preferences: dict[str, int | None] = public_execution_settings(raw)
+    for key in ("num_gpu", "num_thread", "num_ctx"):
         value = raw.get(key)
         if value is None and key in raw:
             preferences[key] = None
-        elif type(value) is int and (
-            (key == "num_gpu" and value >= -1)
-            or (key == "max_steps" and 1 <= value <= 64)
-            or (key == "max_subagent_concurrency" and 0 <= value <= 4)
-            or (
-                key not in {"num_gpu", "max_steps", "max_subagent_concurrency"}
-                and value >= 1
-            )
-        ):
+        elif type(value) is int and (value >= -1 if key == "num_gpu" else value >= 1):
             preferences[key] = value
+
     return preferences
 
 
@@ -1795,16 +1773,17 @@ TOOL_AVAILABILITY_LABELS = {
 }
 
 
-def _tool_availability_preferences(path: Path) -> dict[str, bool]:
+def _tool_availability_preferences(path: Path, names=()) -> dict[str, bool]:
     raw = _load_chat_preferences(path).get("tool_availability", {})
-    if not isinstance(raw, dict):
-        return {name: True for name in TOOL_AVAILABILITY_LABELS}
-    return {name: raw.get(name) is not False for name in TOOL_AVAILABILITY_LABELS}
+    return availability_values(raw, set(BUILTIN_TOOL_LABELS) | set(names))
 
 
 def _apply_tool_availability_preferences(agent, path: Path) -> None:
-    values = _tool_availability_preferences(path)
-    agent.disabled_tool_names = {name for name, enabled in values.items() if not enabled}
+    values = _tool_availability_preferences(path, getattr(agent, "tools", {}))
+    unrelated = set(getattr(agent, "disabled_tool_names", set())) - set(values)
+    agent.disabled_tool_names = unrelated | {
+        name for name, enabled in values.items() if not enabled
+    }
 
 
 def _web_provider_preferences(path: Path, cfg) -> dict[str, bool]:
@@ -2473,13 +2452,9 @@ def _save_runtime_preferences(path: Path, preferences: dict[str, int | None]) ->
 
 
 def _apply_runtime_preferences(agent: Agent, preferences: dict[str, int | None]) -> None:
+    apply_execution_settings(agent, preferences)
     for key, value in preferences.items():
-        if key == "max_steps":
-            if value is not None:
-                agent.max_steps = value
-            continue
-        if key == "max_subagent_concurrency":
-            agent.max_subagent_concurrency = 0 if value is None else value
+        if key in EXECUTION_LIMITS:
             continue
         if value is None:
             agent.ollama_options.pop(key, None)
@@ -2793,7 +2768,79 @@ CLI_COMMANDS = (
         "query",
         "Hybrid-search the knowledge base (no LLM, raw chunks).",
     ),
+    CommandSpec(
+        "research", CommandSurface.CLI, "research",
+        "Run bounded web research and browse saved jobs.",
+    ),
+    CommandSpec(
+        "research run", CommandSurface.CLI,
+        "research run QUESTION [--model MODEL] [--provider PROVIDER] "
+        "[--rounds N] [--format FORMAT] [--queue]",
+        "Create a research job; save a cited report or queue explicitly.",
+    ),
+    CommandSpec(
+        "research resume", CommandSurface.CLI, "research resume JOB_ID",
+        "Resume research with re-fetched evidence.",
+    ),
+    CommandSpec(
+        "research list", CommandSurface.CLI, "research list [--offset N]",
+        "Browse research metadata without model/network work.",
+    ),
     CommandSpec("libraries", CommandSurface.CLI, "libraries", "List learned knowledge libraries."),
+    CommandSpec(
+        "library",
+        CommandSurface.CLI,
+        "library",
+        "Manage document and image copies without automatic indexing.",
+    ),
+    CommandSpec(
+        "library list",
+        CommandSurface.CLI,
+        "library list [--type TYPE] [--archived] [--search TEXT]",
+        "Browse bounded artifact metadata.",
+    ),
+    CommandSpec(
+        "library import",
+        CommandSurface.CLI,
+        "library import PATH [--type document|media]",
+        "Import a managed copy; retain the original.",
+    ),
+    CommandSpec(
+        "library info",
+        CommandSurface.CLI,
+        "library info ARTIFACT_ID",
+        "Inspect metadata and a bounded preview.",
+    ),
+    CommandSpec(
+        "library export",
+        CommandSurface.CLI,
+        "library export ARTIFACT_ID DESTINATION",
+        "Export to a new workspace file without overwriting.",
+    ),
+    CommandSpec(
+        "library tags",
+        CommandSurface.CLI,
+        "library tags ARTIFACT_ID TAGS",
+        "Replace comma-separated manual tags.",
+    ),
+    CommandSpec(
+        "library archive",
+        CommandSurface.CLI,
+        "library archive ARTIFACT_ID",
+        "Archive a copy while retaining its content.",
+    ),
+    CommandSpec(
+        "library restore",
+        CommandSurface.CLI,
+        "library restore ARTIFACT_ID",
+        "Restore an archived copy.",
+    ),
+    CommandSpec(
+        "library delete",
+        CommandSurface.CLI,
+        "library delete ARTIFACT_ID",
+        "Confirm permanent deletion of an archived copy.",
+    ),
     CommandSpec(
         "collections",
         CommandSurface.CLI,
@@ -2851,6 +2898,13 @@ CLI_COMMANDS = (
         "auth",
         "Manage Cloud AI account authentication.",
     ),
+    CommandSpec("model-connections", CommandSurface.CLI, "model-connections list",
+                "List configured model endpoint identities."),
+    CommandSpec("model-connections-add", CommandSurface.CLI,
+                "model-connections add ID --adapter ADAPTER --url URL",
+                "Register an Ollama or compatible endpoint without running a model."),
+    CommandSpec("model-connections-test", CommandSurface.CLI, "model-connections test ID",
+                "Test and cache a model catalog; Ctrl+C cancels the owned check."),
     CommandSpec(
         "mcp",
         CommandSurface.CLI,
@@ -2858,6 +2912,12 @@ CLI_COMMANDS = (
         "Connect and manage external MCP servers.",
     ),
     CommandSpec("sessions", CommandSurface.CLI, "sessions", "List recent conversation sessions."),
+    CommandSpec("sessions-archived", CommandSurface.CLI, "sessions --archived",
+                "List archived conversations with content retained."),
+    CommandSpec("sessions-archive", CommandSurface.CLI, "sessions archive SESSION_ID",
+                "Archive an idle session without deleting its content."),
+    CommandSpec("sessions-restore", CommandSurface.CLI, "sessions restore SESSION_ID",
+                "Restore an archived conversation to normal session lists."),
     CommandSpec(
         "sessions-delete",
         CommandSurface.CLI,
@@ -2967,7 +3027,8 @@ CHAT_COMMANDS = (
     ),
     CommandSpec("compact", CommandSurface.CHAT, "/compact", "Compact stale context now."),
     CommandSpec(
-        "recap", CommandSurface.CHAT, "/recap", "Show a concise current conversation recap."
+        "recap", CommandSurface.CHAT, "/recap [--ai]",
+        "Show a deterministic recap; --ai uses the configured Utility model."
     ),
     CommandSpec(
         "status", CommandSurface.CHAT, "/status", "Show session, context, model, and memory status."
@@ -2995,7 +3056,8 @@ CHAT_COMMANDS = (
         "/clear",
         "Clear only the terminal view; keep the current chat session.",
     ),
-    CommandSpec("rename", CommandSurface.CHAT, "/rename NAME", "Rename this session."),
+    CommandSpec("rename", CommandSurface.CHAT, "/rename NAME|--ai",
+                "Rename this session; --ai uses the Utility model."),
     CommandSpec("fork", CommandSurface.CHAT, "/fork", "Continue a copy of this conversation."),
     CommandSpec("export", CommandSurface.CHAT, "/export [PATH]", "Export this chat as Markdown."),
     CommandSpec("diff", CommandSurface.CHAT, "/diff", "Show Git changes and untracked files."),
@@ -3006,6 +3068,11 @@ CHAT_COMMANDS = (
         "/resume [SESSION_ID]",
         "Resume a saved conversation; list all sessions with age, ID, and name.",
     ),
+    CommandSpec("library", CommandSurface.CHAT, "/library [VIEW]",
+                "Browse Sessions, Knowledge, Documents, Research, Media and Archive; "
+                "artifact storage is still in development.",
+                examples=("/library", "/library sessions", "/library knowledge",
+                          "/library archive")),
     CommandSpec(
         "keybinds",
         CommandSurface.CHAT,
@@ -3016,15 +3083,18 @@ CHAT_COMMANDS = (
         "settings",
         CommandSurface.CHAT,
         "/settings [CATEGORY]",
-        "Configure appearance, models, providers, tools, MCPs, memory, skills, "
-        "permissions, and runtime.",
+        "Configure Appearance, Models & AI, Agent Tools, MCPs, Skills, Memory, "
+        "Permissions, provider credentials, and Runtime.",
         examples=(
             "/settings",
             "/settings theme",
             "/settings divider",
             "/settings spinner",
             "/settings models",
+            "/settings ai defaults",
             "/settings providers",
+            "/settings search",
+            "/settings agent tools",
             "/settings tools",
             "/settings mcps",
             "/settings runtime",
@@ -3438,12 +3508,23 @@ class TwoClickPanelControl(FormattedTextControl):
     """Confirm only when the same typed row identity receives a second click."""
 
     def __init__(self, tui) -> None:
-        super().__init__(
-            tui._panel_body_fragments,
-            focusable=True,
-            get_cursor_position=lambda: Point(x=0, y=tui._panel_selected_line()),
-        )
         self._tui = tui
+        self._cursor_y = 0
+        super().__init__(
+            self._render_fragments,
+            focusable=True,
+            get_cursor_position=lambda: Point(x=0, y=self._cursor_y),
+        )
+
+    def _render_fragments(self):
+        if self._tui._panel is None:
+            self._cursor_y = 0
+            return []
+        # Text and cursor must use the same geometry snapshot. Re-rendering the
+        # cursor after a resize can address a line absent from the cached text.
+        body = self._tui._panel_body()
+        self._cursor_y = self._tui._panel.focus_line(body)
+        return self._tui._panel_body_fragments(body)
 
     def mouse_handler(self, mouse_event):
         if mouse_event.event_type != MouseEventType.MOUSE_UP:
@@ -3717,7 +3798,8 @@ def _format_command_entries(
 ) -> list[str]:
     lines: list[str] = []
     effective_width = _command_reference_width(width)
-    name_width = max(len(entry.usage) for entry in entries) + 2
+    name_width = min(max(len(entry.usage) for entry in entries) + 2,
+                     max(20, effective_width // 2))
     inline_threshold = 56
 
     for entry in entries:
@@ -3729,7 +3811,8 @@ def _format_command_entries(
 
         prefix = f"  {name:<{name_width}}"
         if effective_width < inline_threshold or len(prefix) + 20 > effective_width:
-            lines.append(f"  {name}")
+            lines.extend(textwrap.wrap(name, width=effective_width,
+                                       initial_indent="  ", subsequent_indent="    "))
             wrapped = textwrap.wrap(
                 description,
                 width=max(20, effective_width - 6),
@@ -5138,13 +5221,16 @@ def _delegate_task_permission_detail(args: dict) -> str:
     return f"Delegate {count} bounded read-only tasks? {objective}"
 
 
-def _subagent_parallelism(agent: Agent) -> int:
+def _subagent_parallelism(agent: Agent, *, configured: int | None = None) -> int:
     """Conservative automatic policy; local inference stays single-worker."""
-    configured = max(0, min(4, int(getattr(agent, "max_subagent_concurrency", 0))))
+    configured = max(0, min(4, int(
+        getattr(agent, "max_subagent_concurrency", 0) if configured is None else configured
+    )))
     if configured:
         return configured
-    backend = str(getattr(getattr(agent, "model_info", None), "backend", "ollama"))
-    return 1 if backend == "ollama" else 2
+    info = getattr(agent, "model_info", None)
+    source = getattr(info, "source", "Local")
+    return 1 if source == "Local" or getattr(info, "backend", "") == "openai_compatible" else 2
 
 
 def _subagent_parallelism_label(agent: Agent) -> str:
@@ -5946,6 +6032,8 @@ def _select_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
         re.search(r"\b(diagnos\w*|fastfetch|neofetch|system|hardware|memory|cpu|gpu)\b", text)
     )
     names = _heuristic_tool_names(user_message, tools)
+    if explicit_public_page_read_request(user_message) and "fetch_url" in tools:
+        names = list(dict.fromkeys(["fetch_url", *names]))
     if named_file_read:
         names = list(dict.fromkeys([
             *(name for name in ("read_file", "list_dir", "workspace_info", "grep")
@@ -6948,6 +7036,11 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
     from klaude_web import Web
 
     cfg = load_config()
+    preferences_path = cfg.data_dir / "chat-preferences.json"
+    availability = _tool_availability_preferences(preferences_path)
+    validation = _tool_validation_preferences(preferences_path)
+    cfg.web_search.result_validation_enabled = validation["web_search"]
+    cfg.retrieval_validation_enabled = validation["knowledge_search"]
     ollama = Ollama(cfg.ollama_url)
     memory = Memory(cfg.memory_file, cfg.sessions_db)
     ws = Workspace(workdir)
@@ -6973,7 +7066,8 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
     runtime_text = render_runtime_context(runtime_result.context, cfg) if runtime_result else ""
     runtime_text = _append_tool_capabilities(
         runtime_text,
-        web_search_available=cfg.permissions.get("web_search", "allow") != "deny",
+        web_search_available=availability["web_search"]
+        and cfg.permissions.get("web_search", "allow") != "deny",
     )
     S = {"type": "string"}
     tools += [
@@ -7030,11 +7124,11 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
                 },
                 "required": ["query"],
             },
-            lambda query, max_results=12, provider="", provider_strict=False: (
+            lambda query, max_results=None, provider="", provider_strict=False: (
                 _web_search_tool_result(
                     web,
                     query,
-                    max_results,
+                    cfg.web_search.default_results if max_results is None else max_results,
                     provider=provider,
                     provider_strict=provider_strict,
                 )
@@ -7042,7 +7136,10 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
             start_metadata=lambda args: _web_search_start_metadata(
                 web,
                 str(args.get("query", "")),
-                _bounded_result_count(args.get("max_results", 12), 12),
+                _bounded_result_count(
+                    args.get("max_results", cfg.web_search.default_results),
+                    cfg.web_search.default_results,
+                ),
                 provider=str(args.get("provider", "")),
                 provider_strict=bool(args.get("provider_strict", False)),
             ),
@@ -7417,6 +7514,8 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
     # These preferences intentionally affect only this interactive agent's
     # tool instances; config.toml remains the durable administrator default.
     agent.tool_config = cfg
+    _apply_tool_availability_preferences(agent, preferences_path)
+    apply_execution_settings(agent, _load_runtime_preferences(preferences_path))
     agent.skill_reader = skill_reader
     agent.user_input_broker = user_input_broker
     agent.mcp_client_manager = getattr(cfg, "_mcp_client_manager", None)
@@ -7756,7 +7855,12 @@ def _render(
     if live_lifecycle and not memory.acquire_session_lease(
         session_id, client_id, turn_id
     ):
-        message = "This session already has an active worker; use /resume to follow it."
+        archived = getattr(memory, "session_archived", None)
+        message = (
+            "This session is archived; use klaude sessions restore SESSION_ID first."
+            if callable(archived) and archived(session_id) else
+            "This session already has an active worker; use /resume to follow it."
+        )
         console.print(Text(message))
         if raise_on_error:
             raise typer.Exit(1)
@@ -8146,9 +8250,9 @@ def _update_managed_docs_sources(cfg, targets: list[str], max_pages: int) -> Non
         installed = update_docs_source(
             cfg,
             target,
-            web.fetch,
+            web.fetch_fresh,
             max_pages=None if max_pages < 0 else max_pages,
-            crawler=web.crawl_site,
+            crawler=lambda url, **kwargs: web.crawl_site(url, fresh=True, **kwargs),
         )
         total = _index_installed_docs(installed, kn)
         snapshot = f"; snapshot {installed.snapshot}" if installed.snapshot else ""
@@ -8179,6 +8283,7 @@ def _available_chat_models(cfg, ollama: Ollama, include_local: bool = True) -> l
     Cloud discovery refreshes separately in the background so normal picker
     navigation never waits on a provider network request.
     """
+    cached = load_model_cache(cfg.data_dir / "model-cache.json")
     enabled_backends = {
         backend
         for backend, key in (
@@ -8190,22 +8295,67 @@ def _available_chat_models(cfg, ollama: Ollama, include_local: bool = True) -> l
     }
     if any(
         item.backend == "openai_codex"
-        for item in load_model_cache(cfg.data_dir / "model-cache.json")
+        for item in cached
     ):
         enabled_backends.add("openai_codex")
+    connections = connection_registry(cfg).load() if hasattr(cfg, "config_dir") else {}
+    initialized = bool(connections) or (hasattr(cfg, "config_dir")
+                                      and connection_registry(cfg).path.exists())
+    defaults = {item.backend: item for item in legacy_connections(cfg)} if initialized else {}
+    authentication = {
+        item.id: (bool(connection_key(cfg, item)),
+                  provider_secret_revision(cfg.config_dir, item.key_env))
+        if item.key_env else (True, "")
+        for item in connections.values()
+    }
+
+    def bind_default(item: ModelInfo) -> ModelInfo | None:
+        if not initialized:
+            return item
+        connection = connections.get(DEFAULT_IDS.get(item.backend, ""))
+        if not connection or not connection.enabled:
+            return None
+        expected = defaults.get(item.backend)
+        if expected is None or (connection.base_url, connection.key_env, connection.source) != (
+            expected.base_url, expected.key_env, expected.source,
+        ):
+            return None  # Never relabel an old service's catalog as another endpoint.
+        return replace(item, connection_id=connection.id, connection_revision=connection.revision,
+                       connection_source=connection.source, credential_revision=(
+                           authentication[connection.id][1]))
+
     models: list[ModelInfo] = [
         item
-        for item in load_model_cache(cfg.data_dir / "model-cache.json")
-        if item.backend in enabled_backends
+        for item in cached
+        if not item.connection_id and item.backend in enabled_backends
     ]
+    models = [bound for item in models if (bound := bind_default(item)) is not None]
+    for item in cached:
+        connection = connections.get(item.connection_id)
+        if (
+            connection and connection.enabled and connection.backend == item.backend
+            and connection.revision == item.connection_revision
+            and authentication[connection.id][0]
+            and item.credential_revision == authentication[connection.id][1]
+        ):
+            models.append(item)
     if include_local:
         try:
-            models.extend(ModelInfo("ollama", name, name) for name in ollama.list_models())
+            for name in ollama.list_models():
+                bound = bind_default(ModelInfo("ollama", name, name))
+                if bound is not None:
+                    models.append(bound)
         except Exception:
             pass
+    models = list({item.ref: item for item in models}.values())
+    choices = choices_from_payload(connection_registry(cfg)._read()) if initialized else {}
+    models = [item for item in models if
+              model_choice(choices, item.connection_id, item.model_id)["enabled"] and not
+              model_choice(choices, item.connection_id, item.model_id)["hidden"]]
     return sorted(
         models,
         key=lambda item: (
+            not model_choice(choices, item.connection_id, item.model_id)["pinned"],
             item.source != "Cloud",
             item.provider,
             local_model_weight_first_key(item)
@@ -8220,7 +8370,10 @@ def _resolve_chat_model(models: list[ModelInfo], name: str) -> ModelInfo | None:
     query = name.strip()
     if not query:
         return None
-    exact = [item for item in models if query in {item.ref, item.model_id}]
+    exact = [item for item in models if query in {item.ref, item.model_id} or (
+        item.connection_id == DEFAULT_IDS.get(item.backend)
+        and query == f"{item.backend}/{item.model_id}"
+    )]
     if len(exact) == 1:
         return exact[0]
     folded = query.casefold()
@@ -8241,6 +8394,18 @@ def _resolve_chat_model(models: list[ModelInfo], name: str) -> ModelInfo | None:
 
 def _resolve_requested_chat_model(cfg, ollama: Ollama, name: str) -> ModelInfo | None:
     """Resolve an explicit model, refreshing only its cloud catalog when needed."""
+    qualified = split_model_ref(name)
+    if qualified:
+        validate_model_reference(cfg, name)
+        backend, connection_id, model_id = qualified
+        connection = resolve_connection(cfg, connection_id, backend)
+        cached = _resolve_chat_model(_available_chat_models(cfg, ollama, False), name)
+        return cached or ModelInfo(
+            backend, model_id, model_id, connection_id=connection.id,
+            connection_revision=connection.revision, connection_source=connection.source,
+            credential_revision=(provider_secret_revision(cfg.config_dir, connection.key_env)
+                                 if connection.key_env else ""),
+        )
     selected = _resolve_chat_model(_available_chat_models(cfg, ollama), name)
     if selected is not None or "/" not in name:
         return selected
@@ -8281,12 +8446,12 @@ def _model_picker_rows(
         for family, members in grouped_local_models(available):
             rows.append(_choice_section(family))
             for item in members:
-                row = item.model_id
+                row = item.ref if item.connection_id else item.model_id
                 rows.append(row)
                 mapping[row] = item
     else:
         for item in available:
-            row = item.model_id
+            row = item.ref if item.connection_id else item.model_id
             rows.append(row)
             mapping[row] = item
     # Do not make an already-running local session appear model-less merely
@@ -8303,6 +8468,8 @@ def _model_picker_rows(
             "openrouter": "OpenRouter",
             "openai_codex": "OpenAI Codex",
             "gemini_api": "Gemini API",
+            "deepseek": "DeepSeek",
+            "anthropic": "Anthropic",
         }[backend]
         rows.append(_choice_unavailable(f"{label} — models unavailable"))
     elif backend == "ollama" and not any(item.backend == "ollama" for item in models):
@@ -8310,19 +8477,73 @@ def _model_picker_rows(
     return rows, mapping
 
 
+def _bound_model_info(cfg, info: ModelInfo) -> ModelInfo:
+    """Freeze a legacy default's endpoint and credential revision at selection."""
+    if not info.connection_id and hasattr(cfg, "config_dir"):
+        registry = connection_registry(cfg)
+        if registry.path.exists():
+            default_connection = resolve_connection(cfg, DEFAULT_IDS[info.backend], info.backend)
+            info = replace(info, connection_id=default_connection.id,
+                           connection_revision=default_connection.revision,
+                           connection_source=default_connection.source, credential_revision=(
+                               provider_secret_revision(cfg.config_dir, default_connection.key_env)
+                               if default_connection.key_env else ""))
+    return info
+
+
 def _set_agent_model(
     agent: Agent, cfg, ollama: Ollama, info: ModelInfo, *, validated: bool = False,
 ) -> None:
+    info = _bound_model_info(cfg, info)
+    if hasattr(cfg, "config_dir"):
+        validate_model_reference(cfg, info.ref)
+    connection = (resolve_connection(cfg, info.connection_id, info.backend)
+                  if info.connection_id else None)
+    if connection and info.connection_revision != connection.revision:
+        raise ValueError("Model connection changed; select the model again")
+    key = connection_key(cfg, connection) if connection else ""
+    if connection and connection.key_env and not key:
+        raise ValueError("Referenced API key is not configured")
+    if connection and connection.key_env and info.credential_revision != provider_secret_revision(
+        cfg.config_dir, connection.key_env,
+    ):
+        raise ValueError("Model credentials changed; select the model again")
     runtime: Any
     if info.backend == "ollama":
+        if connection:
+            ollama = Ollama(connection.base_url, api_key=key, trust_env=False)
         # Unit-test and plugin fakes may already be a compatible runtime.
         runtime = OllamaRuntime(ollama) if isinstance(ollama, Ollama) else ollama
+    elif info.backend == "openai_compatible":
+        if connection is None:
+            raise ValueError("Compatible models require an explicit connection")
+        runtime = CompatibleRuntime(connection.base_url, key)
+    elif info.backend == "deepseek":
+        from klaude_core.deepseek_runtime import DeepSeekRuntime
+
+        if connection is None:
+            raise ValueError("DeepSeek models require an explicit connection")
+        runtime = DeepSeekRuntime(
+            connection.base_url, key,
+            connection_scope=f"{connection.id}:{connection.revision}:{info.credential_revision}",
+        )
+    elif info.backend == "anthropic":
+        from klaude_core.anthropic_runtime import AnthropicRuntime
+
+        if connection is None:
+            raise ValueError("Anthropic models require an explicit connection")
+        runtime = AnthropicRuntime(
+            connection.base_url, key, model=info.model_id, capabilities=info.capabilities,
+            connection_scope=f"{connection.id}:{connection.revision}:{info.credential_revision}",
+        )
     elif info.backend == "openai_api":
-        runtime = OpenAIRuntime(cfg.openai_api_key)
+        runtime = OpenAIRuntime(key if connection else cfg.openai_api_key,
+                                base_url=connection.base_url if connection else "")
         if not validated:
             runtime._client().close()
     elif info.backend == "openrouter":
-        runtime = OpenRouterRuntime(cfg.openrouter_api_key)
+        runtime = OpenRouterRuntime(key if connection else cfg.openrouter_api_key,
+                                    base_url=connection.base_url if connection else "")
         if not validated:
             runtime._client().close()
     elif info.backend == "openai_codex":
@@ -8330,7 +8551,7 @@ def _set_agent_model(
         if not validated:
             runtime.auth.credentials()
     elif info.backend == "gemini_api":
-        runtime = GeminiRuntime(cfg.gemini_api_key)
+        runtime = GeminiRuntime(key if connection else cfg.gemini_api_key)
         if not validated:
             runtime._sdk()
     else:
@@ -8341,6 +8562,11 @@ def _set_agent_model(
     agent.model_info = info
     agent.runtime = runtime
     agent.ollama = runtime
+    if info.backend == "anthropic" and (
+        getattr(agent, "reasoning_mode", "standard") not in _session_reasoning_modes(agent)
+    ):
+        agent.reasoning_effort = _session_effort_choices(agent)[0]
+        _apply_session_mode(agent, cfg, _session_reasoning_modes(agent)[0])
     session_id = str(getattr(agent, "session_id", ""))
     if session_id:
         _set_agent_session_context(agent, session_id)
@@ -8390,9 +8616,10 @@ def _apply_session_effort(agent: Agent, cfg, effort: str) -> None:
     # Compatibility for callers carrying a pre-Phase-1 saved "auto" value.
     # It is intentionally no longer selectable or shown in the UI.
     if effort in {"auto", "off"}:
-        agent.reasoning_mode = "standard"
-        agent.ollama_think = False
-        agent.ollama_code_think = False
+        _apply_session_mode(agent, cfg, "standard")
+        return
+    if "thinking" not in _session_reasoning_modes(agent):
+        _apply_session_mode(agent, cfg, "standard")
         return
     agent.reasoning_mode = "thinking"
     agent.reasoning_effort = effort
@@ -8407,7 +8634,30 @@ def _apply_session_effort(agent: Agent, cfg, effort: str) -> None:
     agent.ollama_code_think = value
 
 
+def _session_reasoning_modes(agent: Agent) -> tuple[str, ...]:
+    info = getattr(agent, "model_info", None)
+    types = getattr(getattr(info, "capabilities", None), "thinking_types", None)
+    if getattr(info, "backend", "") == "anthropic" and types:
+        return tuple(mode for mode in REASONING_MODES if
+                     mode == "standard" and "disabled" in types or mode == "thinking"
+                     and any(value in types for value in ("enabled", "adaptive")))
+    return tuple(REASONING_MODES)
+
+
+def _session_effort_choices(agent: Agent) -> tuple[str, ...]:
+    info = getattr(agent, "model_info", None)
+    if info is not None and getattr(info, "backend", "") == "anthropic":
+        return tuple(level for level in info.capabilities.effort_levels if level != "off") \
+            or tuple(EFFORT_CHOICES)
+    return tuple(EFFORT_CHOICES)
+
+
 def _apply_session_mode(agent: Agent, cfg, mode: str) -> None:
+    modes = _session_reasoning_modes(agent)
+    if mode not in modes:
+        mode = modes[0]
+        if mode == "thinking":
+            agent.reasoning_effort = _session_effort_choices(agent)[0]
     agent.reasoning_mode = mode
     if mode == "standard":
         agent.ollama_think = False
@@ -8417,11 +8667,15 @@ def _apply_session_mode(agent: Agent, cfg, mode: str) -> None:
 
 
 def _choose_effort(agent: Agent, cfg, requested: str = "") -> str | None:
+    if "thinking" not in _session_reasoning_modes(agent):
+        console.print("[yellow]Thinking is unavailable for this model.[/]")
+        return None
     requested = requested.strip().lower()
     selected: str | None
     if requested:
-        if requested not in EFFORT_CHOICES:
-            console.print("[red]unknown effort[/] — choose low, medium, or high")
+        if requested not in _session_effort_choices(agent):
+            console.print("[red]unknown effort[/] — choose "
+                          + ", ".join(_session_effort_choices(agent)))
             return None
         selected = requested
     else:
@@ -8429,8 +8683,9 @@ def _choose_effort(agent: Agent, cfg, requested: str = "") -> str | None:
         selected = _select_tui_option(
             "Reasoning effort",
             f"Choose effort for {agent.model}. ↑/↓ navigate, Enter marks, Tab confirms.",
-            list(EFFORT_CHOICES),
-            current if current in EFFORT_CHOICES else "medium",
+            list(_session_effort_choices(agent)),
+            current if current in _session_effort_choices(agent)
+            else _session_effort_choices(agent)[0],
         )
         if selected is None:
             return None
@@ -8442,15 +8697,16 @@ def _choose_mode(agent: Agent, cfg, requested: str = "") -> str | None:
     requested = requested.strip().lower()
     selected: str | None
     if requested:
-        if requested not in REASONING_MODES:
-            console.print("[red]unknown mode[/] — choose standard or thinking")
+        if requested not in _session_reasoning_modes(agent):
+            console.print("[red]unavailable mode[/] — choose "
+                          + ", ".join(_session_reasoning_modes(agent)))
             return None
         selected = requested
     else:
         selected = _select_tui_option(
             "Reasoning mode",
             f"Choose reasoning mode for {agent.model}.",
-            list(REASONING_MODES),
+            list(_session_reasoning_modes(agent)),
             getattr(agent, "reasoning_mode", "standard"),
         )
         if selected is None:
@@ -8463,7 +8719,11 @@ def _choose_model_and_effort(agent: Agent, cfg, requested: str = "") -> bool:
     requested = requested.strip()
     models = _available_chat_models(cfg, _agent_local_ollama(agent))
     if requested:
-        resolved = _resolve_chat_model(models, requested)
+        try:
+            resolved = _resolve_requested_chat_model(cfg, _agent_local_ollama(agent), requested)
+        except (ValueError, RuntimeError) as exc:
+            console.print(Text(str(exc), style="red"))
+            return False
         if resolved is None:
             console.print(f"[red]no unique Cloud or Local match for '{requested}'[/]")
             return False
@@ -8740,6 +9000,7 @@ class PersistentChatTUI:
         appearance_path: Path | None = None,
         chat_preferences_path: Path | None = None,
         character_stream: bool = True,
+        model_selection_required: bool = False,
     ) -> None:
         self.agent = agent
         self.memory = memory
@@ -8760,6 +9021,7 @@ class PersistentChatTUI:
         self._remote_queue: list[str] = []
         self._watching_remote = False
         self.cfg = cfg
+        self._startup_unselected = model_selection_required
         self.character_stream = character_stream
         self.ui_state = ChatUIState(
             model=agent.model,
@@ -8821,6 +9083,11 @@ class PersistentChatTUI:
         self._background_jobs = OwnedBackgroundJobs(self._emit)
         self._session_io = SessionIOCoordinator(memory, self._emit)
         self._session_actions = SessionActionWriter(memory, self._emit)
+        self._model_settings = ModelSettings(self)
+        self._ai_defaults = AIDefaultSettings(self)
+        self._search_settings = SearchSettings(self)
+        self._fetch_settings = FetchSettings(self)
+        self._library = LibraryWorkspace(self)
         self._skill_actions = SkillActionWriter(cfg, self._emit)
         self._skill_discovery = SkillDiscovery(
             self._background_jobs, self._show_skill_discovery, self._edit_skill_search,
@@ -8969,7 +9236,9 @@ class PersistentChatTUI:
         self._model_save_state = ""
         self.show_activity_updates = _activity_updates_enabled(self.chat_preferences_path)
         self._tool_validation = _tool_validation_preferences(self.chat_preferences_path)
-        self._tool_availability = _tool_availability_preferences(self.chat_preferences_path)
+        self._tool_availability = _tool_availability_preferences(
+            self.chat_preferences_path, getattr(self.agent, "tools", {})
+        )
         self._web_provider_availability = _web_provider_preferences(
             self.chat_preferences_path, self.cfg
         )
@@ -8982,6 +9251,8 @@ class PersistentChatTUI:
         self._runtime_device_mode = _runtime_device_mode(
             self.chat_preferences_path, self._runtime_preferences
         )
+        apply_execution_settings(self.agent, self._runtime_preferences)
+        self._agent_settings = AgentSettings(self)
         self._termux_terminal = _is_termux_terminal()
         self.appearance = _load_tui_appearance(self.appearance_path)
         self._spinner_draft: Spinner | None = None
@@ -8991,7 +9262,7 @@ class PersistentChatTUI:
                 _klaude_logo() + "\n"
                 "Local-first coding, knowledge, and web research.\n"
                 f"Path: {getattr(agent, 'workdir', Path.cwd())}\n"
-                f"Model: {agent.model}\n"
+                f"Model: {'Not selected' if self._startup_unselected else agent.model}\n"
                 "Tips\n"
                 "  ENTER send/queue · ALT+\\ steer · ALT+ENTER newline\n\n"
                 + _session_divider(
@@ -9603,10 +9874,10 @@ class PersistentChatTUI:
             and not self._panel.page.table_section_id \
             and self._panel_width() >= 60 else 2
 
-    def _panel_body_fragments(self):
+    def _panel_body_fragments(self, body=None):
         if self._panel is None:
             return []
-        body = self._panel_body()
+        body = body if body is not None else self._panel_body()
         fragments = []
         for index, line in enumerate(body.lines):
             fragments.extend(line)
@@ -9626,6 +9897,8 @@ class PersistentChatTUI:
             save_state = self._memory_fact_save_state
         elif kind == "memory settings":
             save_state = self._memory_save_state
+        elif kind.startswith(("search settings ", "fetch settings ", "agent settings ")):
+            save_state = self._runtime_save_state
         elif kind in {"tools settings", "permission settings", "permission preset",
                       "mcp permission servers", "mcp permission tools", "runtime settings",
                       "runtime device", "CPU threads", "context size", "turn limit",
@@ -9685,7 +9958,8 @@ class PersistentChatTUI:
             navigation_hints="↑↓ move · ENTER resume · / search · ESC cancel"
             if kind == "session" else
             concise_hints
-            if kind in {SEARCH_KIND, DETAIL_KIND, INSTALL_KIND, "mcp settings",
+            if kind.startswith("library ") or kind in {SEARCH_KIND, DETAIL_KIND, INSTALL_KIND,
+                        "mcp settings",
                         "skills settings", "skills import", "mcp manage list",
                         "skills manage list"} else "",
         ))
@@ -9742,13 +10016,22 @@ class PersistentChatTUI:
         if previous is None and self._panel_composer_draft is None:
             self._panel_composer_draft = (self.input.text, list(self._composer_pastes))
         shared_inventory = (
+            {"ai defaults " + view for view in (
+                "home", "endpoints", "models", "fallbacks", "fallback-detail", "output")},
+            {"model settings " + view for view in (
+                "home", "add", "form", "providers", "adapters", "untested",
+                "added", "detail", "catalog",
+                "confirm", "replacement", "offline", "catalog-filter", "model-detail",
+            )},
             {"skills settings", "skills import", "skills manage filter",
              "skills manage list", "skills manage detail",
              "skill detail", "skill update review", "skill update all review"},
             {"mcp settings", "mcp manage list", "mcp manage filter", "mcp manage detail",
              "mcp manage delete", "mcp manage update", "mcp manage update all"},
         )
-        if previous != kind and not any(
+        if previous != kind and not (
+            str(previous).startswith("library ") and kind.startswith("library ")
+        ) and not any(
             previous in group and kind in group for group in shared_inventory
         ):
             self._cancel_inventory_job(previous)
@@ -10214,13 +10497,17 @@ class PersistentChatTUI:
     def _choice_value_is_active(self, value: str) -> bool:
         """Whether a picker row represents the value currently in use."""
         kind = self._choice_kind
+        if self._startup_unselected and kind in {"model source", "model cloud provider", "model"}:
+            return False
         if kind in {"model source", "model cloud provider"}:
             backend = getattr(getattr(self.agent, "model_info", None), "backend", "ollama")
             if kind == "model source":
-                return value == ("Local" if backend == "ollama" else "Cloud")
+                return value == getattr(getattr(self.agent, "model_info", None), "source", "Local")
             return value == {
                 "openai_codex": "OpenAI Codex", "openai_api": "OpenAI",
                 "openrouter": "OpenRouter", "gemini_api": "Google",
+                "deepseek": "DeepSeek",
+                "anthropic": "Anthropic",
             }.get(backend)
         if kind == "theme":
             saved_theme = (
@@ -10277,11 +10564,14 @@ class PersistentChatTUI:
             return value == ("auto (provider-aware)" if configured == 0 else str(configured))
         if kind == "model":
             choice = getattr(self, "_model_choices", {}).get(value)
-            return (
-                choice.ref == _agent_model_ref(self.agent)
-                if choice
-                else value.strip() == self.agent.model
-            )
+            active = getattr(self.agent, "model_info", None)
+            if choice and isinstance(active, ModelInfo):
+                return choice.ref == active.ref or (
+                    not choice.connection_id and active.connection_id == DEFAULT_IDS.get(
+                        choice.backend,
+                    ) and choice.backend == active.backend and choice.model_id == active.model_id
+                )
+            return value.strip() == self.agent.model
         if kind == "effort":
             return value == _effort_value_label(self.agent.ollama_code_think)
         if kind == "permission preset" and value in PERMISSION_PRESETS:
@@ -10311,7 +10601,7 @@ class PersistentChatTUI:
     def _apply_live_tool_preferences(self) -> None:
         """Apply authoritative UI snapshots without reading pending disk state."""
         unrelated = set(getattr(self.agent, "disabled_tool_names", set())) - set(
-            TOOL_AVAILABILITY_LABELS
+            self._tool_availability
         )
         self.agent.disabled_tool_names = unrelated | {
             name for name, enabled in self._tool_availability.items() if not enabled
@@ -10747,6 +11037,8 @@ class PersistentChatTUI:
                 ("class:runtime_text", "masked · Enter submit · Ctrl+C cancel "),
             ]
         if self._settings_input_request and self._choice_kind is None:
+            if self.status_error:
+                return [("class:runtime_error", f" {self.status_error} ")]
             return [
                 ("class:runtime_busy", f" INPUT · {self._settings_input_request['label']} "),
                 ("class:runtime_text", "Enter submit · Esc cancel "),
@@ -10797,8 +11089,19 @@ class PersistentChatTUI:
             ]
         debug_started = self._debug_label_started_at
         debug_active = debug_started is not None
-        worker_active = self.running or self._watching_remote or debug_active
-        activity = self.activity
+        utility_active=bool(self._ai_defaults.utility or self._ai_defaults.preparing_utility)
+        knowledge_task = self._library.knowledge.task
+        knowledge_active = knowledge_task is not None
+        worker_active = (self.running or self._watching_remote or debug_active
+                         or utility_active or knowledge_active or self._library.research.busy)
+        activity = "working" if utility_active else self.activity
+        if knowledge_task is not None:
+            activity = "waiting for cancellation" if self._library.knowledge.stopping else (
+                "exploring knowledge" if knowledge_task[3] == "query" else "learning"
+            )
+        if self._library.research.busy:
+            activity = ("waiting for cancellation"
+                        if self._library.research.stopping else "researching")
         if (
             self._activity_started_at is not None
             and _live_activity_label(activity) == "RUNNING"
@@ -10822,7 +11125,15 @@ class PersistentChatTUI:
         )
         state_style = "class:runtime_busy" if worker_active else "class:runtime_text"
         elapsed = ""
-        if self.running and self._turn_started_at is not None:
+        if self._library.research.task:
+            elapsed = f" {_activity_elapsed(int(time.monotonic()-self._library.research.started))}"
+        elif knowledge_active:
+            age = int(time.monotonic() - self._library.knowledge.task_started)
+            elapsed = f" {_activity_elapsed(age)}"
+        elif utility_active and self._ai_defaults.utility_started_at:
+            utility_age=int(time.monotonic()-self._ai_defaults.utility_started_at)
+            elapsed=f" {_activity_elapsed(utility_age)}"
+        elif self.running and self._turn_started_at is not None:
             elapsed_seconds = max(0, int(time.monotonic() - self._turn_started_at))
             elapsed = f" {_activity_elapsed(elapsed_seconds)}"
         elif self._watching_remote and self._remote_turn_started_at:
@@ -10868,6 +11179,8 @@ class PersistentChatTUI:
         return fragments
 
     def _status_model_fragments(self):
+        if self._startup_unselected:
+            return [("class:runtime_text", "model not selected")]
         return [
             (
                 "class:runtime_model",
@@ -11116,7 +11429,11 @@ class PersistentChatTUI:
 
         @bindings.add("c-c")
         def cancel(event) -> None:
-            if self._choice_kind:
+            if self._library.research.task and not self._settings_input_request:
+                self._library.research.stop()
+            elif self._library.knowledge.busy and not self._settings_input_request:
+                self._library.knowledge.stop()
+            elif self._choice_kind:
                 self._cancel_choice()
             elif self._secret_request:
                 self._answer_secret(None, cancelled=True)
@@ -11726,8 +12043,10 @@ class PersistentChatTUI:
             "OpenAI",
             "OpenRouter",
             "Google",
+            "DeepSeek",
+            "Anthropic",
             "back",
-            "Tip: open any cloud provider to sign in, sign out, or choose a model",
+            "Tip: open a provider to connect an account or endpoint",
         ]
         self._begin_choice("model cloud provider", rows, "OpenAI")
 
@@ -11765,7 +12084,13 @@ class PersistentChatTUI:
         self._model_auth_status = ""
         provider = MODEL_PROVIDER_FOR_BACKEND.get(backend, "Ollama")
         authenticated = False
-        if backend != "ollama":
+        if backend in {"deepseek", "anthropic"}:
+            rows = [
+                _choice_section(provider.upper()), f"Add {provider} endpoint",
+                _choice_section("MODELS"), *rows,
+            ]
+            self._model_auth_status = "Endpoint-owned API keys"
+        elif backend != "ollama":
             authenticated = self._model_backend_authenticated(backend)
             auth_action = "Logout" if authenticated else "Login"
             status = "signed in" if authenticated else "not signed in"
@@ -11869,6 +12194,11 @@ class PersistentChatTUI:
     def _start_model_catalog_refresh(self, backend: str) -> None:
         if self.shutting_down:
             return
+        registry = connection_registry(self.cfg)
+        if registry.path.exists():
+            connection = registry.load().get(DEFAULT_IDS.get(backend, ""))
+            if connection is None or not connection.enabled:
+                return
         provider = MODEL_PROVIDER_FOR_BACKEND.get(backend, "")
         env_name, attribute = MODEL_API_KEY_PROVIDERS.get(provider, ("", ""))
         key = str(getattr(self.cfg, attribute, "")) if attribute else ""
@@ -12024,6 +12354,7 @@ class PersistentChatTUI:
         if self._setup_job is not None:
             self.status_error = "Finish or cancel the current operation before changing model"
             return
+        info = _bound_model_info(self.cfg, info)
         defer_selection = self.running or self._watching_remote
         origin = (self.session_id, _agent_model_ref(self.agent))
         parent = self._model_parent if hasattr(self, "_model_parent") else "cloud"
@@ -12031,7 +12362,23 @@ class PersistentChatTUI:
         env_name, attribute = MODEL_API_KEY_PROVIDERS.get(provider, ("", ""))
         key = str(getattr(self.cfg, attribute, "")) if attribute else ""
 
+        connection = (resolve_connection(self.cfg, info.connection_id, info.backend)
+                      if info.connection_id else None)
+        if connection:
+            env_name = connection.key_env
+            attribute = ""
+            key = connection_key(self.cfg, connection)
+
         def commit() -> None:
+            if connection:
+                current = resolve_connection(self.cfg, connection.id, connection.backend)
+                revision = (provider_secret_revision(self.cfg.config_dir, env_name)
+                            if env_name else "")
+                if current != connection or info.connection_revision != current.revision \
+                        or info.credential_revision != revision \
+                        or key != connection_key(self.cfg, current) \
+                        or env_name and not key:
+                    raise RuntimeError("Connection changed or unavailable; select the model again")
             if (
                 origin != (self.session_id, _agent_model_ref(self.agent))
                 or attribute and key != getattr(self.cfg, attribute, "")
@@ -12044,7 +12391,10 @@ class PersistentChatTUI:
                 self._model_flow_parent = ""
                 self._set_input("")
                 self._append(
-                    f"\n[session] {info.ref} selected for the next prompt · standard mode. "
+                    f"\n[session] {info.ref} selected for the next prompt · "
+                    + ("thinking required; lowest supported effort. "
+                       if info.backend == "anthropic" and info.capabilities.requires_thinking
+                       else "standard mode. ") +
                     "Current work keeps its original model.\n"
                 )
                 self.status_error = ""
@@ -12068,9 +12418,10 @@ class PersistentChatTUI:
             except Exception:
                 self._restore_prior_model()
                 raise RuntimeError("Unable to activate model; previous model retained") from None
-            self._begin_choice("mode", [*REASONING_MODES, CANCEL_CHOICE], "standard")
+            modes = _session_reasoning_modes(self.agent)
+            self._begin_choice("mode", [*modes, CANCEL_CHOICE], modes[0])
 
-        if info.backend == "ollama":
+        if info.backend in {"ollama", "openai_compatible", "deepseek", "anthropic"}:
             commit()
             return
 
@@ -12141,8 +12492,7 @@ class PersistentChatTUI:
             self.status_error = "Selected model unavailable; choose a model before sending again"
             return False
         self._next_prompt_model = None
-        self._submit_preference_changes({("last_model",): info.ref})
-        self._model_save_state = "saving"
+        self._startup_unselected = False
         self.ui_state.update_from_agent(self.agent)
         update = f"model {info.ref} · standard · conversation retained"
         self._append(f"\n[session] {update}\n")
@@ -12150,6 +12500,37 @@ class PersistentChatTUI:
             self.session_id, self.client_id, update
         ))
         return True
+
+    def _activate_new_session_default(
+        self, reference: str | None, settings: AIDefaultSettings
+    ) -> None:
+        try:
+            if reference is None:
+                raise ValueError("Default Chat is unset; choose a session model")
+            from klaude_core.model_management import reference_parts
+
+            parts=reference_parts(reference)
+            info=next((item for item in settings.models if reference_parts(item.ref)==parts),None)
+            connection=settings.connections.get(parts[1])
+            if connection is None:
+                raise ValueError("Default Chat endpoint unavailable")
+            if info is None:
+                info=ModelInfo(parts[0],parts[2],parts[2],connection_id=connection.id,
+                               connection_revision=connection.revision,connection_source=connection.source,
+                               credential_revision=settings.credential_revisions.get(connection.id,""))
+            if not settings.registered:
+                info=replace(info,connection_id="",connection_revision="",credential_revision="")
+            _set_agent_model(self.agent,self.cfg,_agent_local_ollama(self.agent),info,validated=True)
+            _apply_session_mode(self.agent,self.cfg,"standard")
+            self._startup_unselected=False
+            self.ui_state.update_from_agent(self.agent)
+            self._append(f"\n[session] New session uses Default Chat: {info.ref}\n")
+        except (OSError, ValueError, RuntimeError):
+            self._startup_unselected=True
+            self._model_settings.open()
+            self._model_settings.notify(
+                "Default Chat unavailable or unset; choose a session model", "warning")
+        self._start_next()
 
     def _restore_prior_model(self) -> None:
         if self._choice_prior_model is None:
@@ -12184,8 +12565,7 @@ class PersistentChatTUI:
         self._choice_prior_runtime_state = None
         self._model_flow_parent = ""
         if model_changed:
-            self._submit_preference_changes({("last_model",): _agent_model_ref(self.agent)})
-            self._model_save_state = "saving"
+            self._startup_unselected = False
         self.ui_state.update_from_agent(self.agent)
         self._set_input("")
         self.activity = "ready" if not self.running else self.activity
@@ -12194,14 +12574,14 @@ class PersistentChatTUI:
         update = f"model {_agent_model_ref(self.agent)} · {detail} · conversation retained"
         self._append(f"\n[session] {update}\n")
         if model_changed:
-            self._append("\n[session] Model preference applied; saving for future chats.\n")
+            self._append("\n[session] Session model applied; Default Chat is unchanged.\n")
         if not self._session_actions.submit(SessionSettingUpdate(
             self.session_id, self.client_id, update
         )):
             self.status_error = "Session setting history unavailable; change active locally"
             self._append(f"\n[warning] {self.status_error}.\n")
         if return_to_settings:
-            self._begin_choice("settings", self._settings_categories(), "models")
+            self._model_settings.open()
 
     def _cancel_choice(self, *, resume_queue: bool = True) -> None:
         if self._panel is not None:
@@ -12348,6 +12728,8 @@ class PersistentChatTUI:
         if choice_kind == "memory facts":
             self._open_settings_category("memory", "Manage memories")
             return
+        if self._agent_settings.return_from_owner(choice_kind):
+            return
         parent = {
             "theme": "theme",
             "text theme": "theme",
@@ -12389,7 +12771,10 @@ class PersistentChatTUI:
         self._choice_values = []
         self._set_input("")
         self.activity = "ready" if not self.running else self.activity
-        if parent == "settings" or return_to_model_settings:
+        if return_to_model_settings:
+            self._model_settings.open()
+            return
+        if parent == "settings":
             settings_category = SETTINGS_CATEGORY_FOR_KIND.get(choice_kind, "theme")
             default = "models" if return_to_model_settings else settings_category
             self._begin_choice("settings", self._settings_categories(), default, restore=True)
@@ -12632,6 +13017,13 @@ class PersistentChatTUI:
                     return_model_backend=backend,
                 )
             return
+        if self._choice_kind == "model" and selected in {
+            "Add DeepSeek endpoint", "Add Anthropic endpoint",
+        }:
+            self._model_settings.begin_api_provider(
+                "anthropic" if selected == "Add Anthropic endpoint" else "deepseek"
+            )
+            return
         if self._choice_kind == "model source":
             if selected == "Cloud":
                 self._open_cloud_provider()
@@ -12639,7 +13031,7 @@ class PersistentChatTUI:
                 self._open_model_backend("ollama", "source")
             elif selected == "back":
                 self._model_flow_parent = ""
-                self._begin_choice("settings", self._settings_categories(), "models")
+                self._model_settings.open()
             elif selected == CANCEL_CHOICE:
                 self._cancel_choice()
             return
@@ -12654,6 +13046,10 @@ class PersistentChatTUI:
                 self._open_model_backend("openrouter", "cloud")
             elif selected == "Google":
                 self._open_model_backend("gemini_api", "cloud")
+            elif selected == "DeepSeek":
+                self._open_model_backend("deepseek", "cloud")
+            elif selected == "Anthropic":
+                self._open_model_backend("anthropic", "cloud")
             return
         if self._choice_kind == "mode":
             if selected == CANCEL_CHOICE:
@@ -12661,7 +13057,9 @@ class PersistentChatTUI:
                 return
             _apply_session_mode(self.agent, self.cfg, selected)
             if selected == "thinking":
-                self._begin_choice("effort", [*EFFORT_CHOICES, CANCEL_CHOICE], "medium")
+                efforts = _session_effort_choices(self.agent)
+                self._begin_choice("effort", [*efforts, CANCEL_CHOICE],
+                                   getattr(self.agent, "reasoning_effort", efforts[0]))
             else:
                 self._finish_reasoning_selection()
             return
@@ -12791,7 +13189,7 @@ class PersistentChatTUI:
         if self._choice_kind == "settings":
             category = selected.split(":", 1)[0].casefold()
             if category == "models":
-                self._open_model_source("settings")
+                self._model_settings.open()
             else:
                 self._open_settings_category(category)
             return
@@ -12955,6 +13353,12 @@ class PersistentChatTUI:
         return [row.legacy_label for row in self._settings_home_page().rows]
 
     def _settings_home_page(self) -> PanelPage:
+        search_primary = primary_provider(self.cfg)
+        search_summary = (
+            ("ON" if self._tool_availability["web_search"] else "OFF") + " · "
+            + ("Auto" if search_primary == "auto" else SEARCH_SETTINGS_PROVIDERS[search_primary])
+            + f" · {self.cfg.web_search.default_results} results"
+        )
         snapshot = (
             self._settings_overview
             if self._settings_overview_scope == self._settings_overview_paths()
@@ -12981,7 +13385,7 @@ class PersistentChatTUI:
             for _env_name, attribute in PROVIDER_API_KEY_PROVIDERS.values()
         )
         provider_total = len(PROVIDER_API_KEY_PROVIDERS)
-        registered_tools = set(getattr(self.agent, "tools", {}))
+        registered_tools = builtin_names(getattr(self.agent, "tools", {}))
         disabled_tools = set(getattr(self.agent, "disabled_tool_names", set()))
         tools_summary = f"{len(registered_tools - disabled_tools)}/{len(registered_tools)} enabled"
         skills_summary = (
@@ -13001,7 +13405,7 @@ class PersistentChatTUI:
             "gpu-only": "GPU only",
         }[self._runtime_device_mode]
         mode = getattr(self.agent, "reasoning_mode", "standard")
-        model_detail = _agent_model_ref(self.agent)
+        model_detail = "Not selected" if self._startup_unselected else _agent_model_ref(self.agent)
         if self._model_save_state:
             model_detail += (
                 " · saving preference" if self._model_save_state == "saving"
@@ -13040,8 +13444,8 @@ class PersistentChatTUI:
             line_color_summary, text_color_summary,
         ))
         providers = f"{configured_providers}/{provider_total} API keys"
-        runtime = (f"{device} · {self.agent.max_steps} steps · "
-                   f"{_subagent_parallelism_label(self.agent)} workers")
+        context_summary = f"{self.agent.ollama_options.get('num_ctx', 8192):,} context"
+        runtime = f"{device} · {context_summary}"
         rows = [
             PanelRow("section:appearance", RowKind.SECTION, "APPEARANCE",
                      legacy_label=_choice_section("APPEARANCE")),
@@ -13060,38 +13464,45 @@ class PersistentChatTUI:
                      f"{spinner_summary}, {self.appearance.spinner.animation.interval} ms",
                      action=PanelAction("category", "spinner"), section_id="section:appearance",
                      legacy_label="Spinner"),
-            PanelRow("section:assistant", RowKind.SECTION, "ASSISTANT",
-                     legacy_label=_choice_section("ASSISTANT")),
+            PanelRow("section:assistant", RowKind.SECTION, "MODELS & AI",
+                     legacy_label=_choice_section("MODELS & AI")),
             PanelRow("category:models", RowKind.NAVIGATION, "Models", model_detail,
                      action=PanelAction("category", "models"), section_id="section:assistant",
                      legacy_label=f"Models: {model_detail}"),
-            PanelRow("category:providers", RowKind.NAVIGATION, "Providers", providers,
-                     action=PanelAction("category", "providers"), section_id="section:assistant",
-                     legacy_label=f"Providers: {providers}"),
-            PanelRow("category:tools", RowKind.NAVIGATION, "Tools", tools_summary,
-                     action=PanelAction("category", "tools"), section_id="section:assistant",
+            PanelRow("category:ai defaults", RowKind.NAVIGATION, "AI Defaults",
+                     "New sessions and optional utility work",
+                     action=PanelAction("category", "ai defaults"), section_id="section:assistant",
+                     legacy_label="AI Defaults"),
+            PanelRow("category:search", RowKind.NAVIGATION, "Search",
+                     search_summary,
+                     action=PanelAction("category", "search"), section_id="section:assistant",
+                     legacy_label="Search"),
+            PanelRow("section:agent", RowKind.SECTION, "AGENT",
+                     legacy_label=_choice_section("AGENT")),
+            PanelRow("category:tools", RowKind.NAVIGATION, "Agent Tools", tools_summary,
+                     action=PanelAction("category", "agent tools"), section_id="section:agent",
                      legacy_label="Tools: availability, providers, and validation"),
             PanelRow("category:mcp servers", RowKind.NAVIGATION, "MCPs", mcp_detail,
                      action=PanelAction("category", "mcp servers"),
-                     section_id="section:assistant", legacy_label=f"MCP servers: {mcp_detail}",
+                     section_id="section:agent", legacy_label=f"MCP servers: {mcp_detail}",
                      search_terms="MCP servers"),
             PanelRow("category:skills", RowKind.NAVIGATION, "Skills", skills_summary,
-                     action=PanelAction("category", "skills"), section_id="section:assistant",
+                     action=PanelAction("category", "skills"), section_id="section:agent",
                      legacy_label="Skills: installed inventory"),
             PanelRow("category:memory", RowKind.NAVIGATION, "Memory", memory_summary,
-                     action=PanelAction("category", "memory"), section_id="section:assistant",
+                     action=PanelAction("category", "memory"), section_id="section:agent",
                      legacy_label=f"Memory: {memory_state}"),
-            PanelRow("section:capabilities", RowKind.SECTION, "CAPABILITIES & SAFETY",
-                     legacy_label=_choice_section("CAPABILITIES & SAFETY")),
             PanelRow("category:permissions", RowKind.NAVIGATION, "Permissions", permission_preset,
                      action=PanelAction("category", "permissions"),
-                     section_id="section:capabilities",
+                     section_id="section:agent",
                      legacy_label=f"Permissions: {permission_preset}"),
             PanelRow("section:advanced", RowKind.SECTION, "ADVANCED",
                      legacy_label=_choice_section("ADVANCED")),
+            PanelRow("category:providers", RowKind.NAVIGATION, "Provider credentials", providers,
+                     action=PanelAction("category", "providers"), section_id="section:advanced",
+                     legacy_label=f"Providers: {providers}"),
             PanelRow("category:runtime", RowKind.NAVIGATION, "Runtime", device,
-                     f"{self.agent.max_steps} steps · "
-                     f"{_subagent_parallelism_label(self.agent)} workers",
+                     context_summary,
                      action=PanelAction("category", "runtime"), section_id="section:advanced",
                      legacy_label=f"Runtime: {runtime}"),
             PanelRow("reset-all", RowKind.ACTION, "Reset appearance settings",
@@ -13141,7 +13552,23 @@ class PersistentChatTUI:
                 default or ("visible" if initial_appearance_entry else ""))
             return
         if category == "models":
-            self._open_model_source("settings")
+            self._model_settings.open()
+            return
+        if category == "ai defaults":
+            self._ai_defaults.open()
+            return
+        if category == "agent tools":
+            self._agent_settings.open()
+            return
+        if category == "url fetch":
+            if not hasattr(self, "_fetch_settings"):
+                self._fetch_settings = FetchSettings(self)
+            self._fetch_settings.open(parent="search")
+            return
+        if category == "search":
+            if not hasattr(self, "_search_settings"):
+                self._search_settings = SearchSettings(self)
+            self._search_settings.open()
             return
         if category in {"memory", "mcp servers"}:
             self._invalidate_settings_overview()
@@ -13312,9 +13739,7 @@ class PersistentChatTUI:
                     f"{preferences_editor} — nano unavailable"
                 )
             choices = [
-                _choice_section("EXECUTION"),
-                f"turn limit: {self.agent.max_steps} steps",
-                f"subagent workers: {_subagent_parallelism_label(self.agent)}",
+                "Agent execution settings",
                 _choice_section("DEVICE"),
                 f"device: {device}",
                 _choice_section("PERFORMANCE"),
@@ -13341,39 +13766,7 @@ class PersistentChatTUI:
             self._open_panel(page, "permission settings", default_id)
             return
         if category == "tools":
-            values = self._tool_validation
-            availability = self._tool_availability
-            providers = self._web_provider_availability
-            ordered_provider_names = [
-                name for name in self.cfg.web_search.provider_order if name in providers
-            ]
-            ordered_provider_names.extend(
-                name for name in providers if name not in ordered_provider_names
-            )
-            choices = [
-                _choice_section("DISPLAY"),
-                f"activity updates: {'on' if self.show_activity_updates else 'off'} (toggle)",
-                _choice_section("RESEARCH TOOLS"),
-                *[
-                    f"{label}: {'on' if availability[name] else 'off'} (toggle)"
-                    for name, label in TOOL_AVAILABILITY_LABELS.items()
-                ],
-                _choice_section("WEB PROVIDERS"),
-                *[
-                    f"provider {name}: {'on' if providers[name] else 'off'} (toggle)"
-                    for name in ordered_provider_names
-                ],
-                _choice_section("RESULT VALIDATION"),
-                f"web search validation: {'on' if values['web_search'] else 'off'} (toggle)",
-                "knowledge search validation: "
-                f"{'on' if values['knowledge_search'] else 'off'} (toggle)",
-                "back",
-                RESET_THEME_CHOICE,
-                CANCEL_CHOICE,
-            ]
-            begin_choice(
-                "tools settings", choices, _settings_choice_default(choices, default)
-            )
+            self._agent_settings.open()
             return
 
     def _permission_panel_page(self) -> PanelPage:
@@ -13464,6 +13857,10 @@ class PersistentChatTUI:
         if self._panel is None:
             return
         row = self._panel.row()
+        if row is not None and row.enabled and row.action and \
+                row.action.kind.startswith("agent-settings-tool:"):
+            self._apply_panel_action(PanelAction("agent-settings-toggle-entry", row.action.target))
+            return
         if (
             row is not None and row.enabled and row.action
             and (row.kind == RowKind.TOGGLE or row.action.kind in {"tool-policy", "mcp-tool"})
@@ -13471,6 +13868,46 @@ class PersistentChatTUI:
             self._apply_panel_action(row.action)
 
     def _apply_panel_action(self, action: PanelAction) -> None:
+        if action.kind.startswith("library-"):
+            try:
+                self._library.action(action)
+            except (ValueError, RuntimeError, KeyError) as exc:
+                self._set_panel_feedback(str(exc), "error")
+            return
+        if action.kind in {"back", "mcp-settings-back", "skill-back"} and \
+                self._agent_settings.return_from_owner(self._choice_kind):
+            return
+        if action.kind.startswith("agent-settings-"):
+            try:
+                self._agent_settings.action(action)
+            except (ValueError, RuntimeError) as exc:
+                self._agent_settings.feedback = (str(exc), "error")
+                self._set_panel_feedback(str(exc), "error")
+            return
+        if action.kind.startswith("fetch-settings-"):
+            try:
+                self._fetch_settings.action(action)
+            except (ValueError, RuntimeError) as exc:
+                self._fetch_settings.notify(str(exc), "error")
+            return
+        if action.kind.startswith("search-settings-"):
+            try:
+                self._search_settings.action(action)
+            except (ValueError, RuntimeError, KeyError) as exc:
+                self._search_settings.notify(str(exc), "error")
+            return
+        if action.kind.startswith("ai-defaults-"):
+            try:
+                self._ai_defaults.action(action)
+            except (ValueError, RuntimeError, KeyError) as exc:
+                self._set_panel_feedback(str(exc), "error")
+            return
+        if action.kind.startswith("model-settings-"):
+            try:
+                self._model_settings.action(action)
+            except (ValueError, RuntimeError) as exc:
+                self._set_panel_feedback(str(exc), "error")
+            return
         if action.kind == "mcp-install-open":
             self._mcp_manage_open_target = action.target
             self._open_mcp_manage("server:" + action.target)
@@ -14159,7 +14596,7 @@ class PersistentChatTUI:
             self._cancel_choice()
         elif action.kind == "category":
             if action.target == "models":
-                self._open_model_source("settings")
+                self._model_settings.open()
             else:
                 self._open_settings_category(action.target)
         elif action.kind == "reset-all":
@@ -14731,6 +15168,16 @@ class PersistentChatTUI:
             )
 
     def _cancel_inventory_job(self, kind: str | None) -> None:
+        if kind and kind.startswith("library "):
+            self._library.leave()
+        if kind and kind.startswith("fetch settings "):
+            self._fetch_settings.leave()
+        if kind and kind.startswith("search settings "):
+            self._search_settings.leave()
+        if kind and kind.startswith("ai defaults "):
+            self._ai_defaults.leave()
+        if kind and kind.startswith("model settings "):
+            self._model_settings.leave()
         if kind in {SEARCH_KIND, DETAIL_KIND, INSTALL_KIND}:
             self._skill_discovery.cancel()
         if kind == "mcp review":
@@ -14784,6 +15231,30 @@ class PersistentChatTUI:
     def _apply_background_result(self, payload: object) -> None:
         key, identity, result, error = cast(tuple[str, str, Any, str], payload)
         if self.shutting_down or not self._background_jobs.current(key, identity):
+            return
+        if key == "library":
+            self._library.accept(identity, result, error)
+            return
+        if key == "library:research":
+            self._library.research.accept(identity, result, error)
+            return
+        if key == "research:control":
+            self._library.research.accept_control(identity, result, error)
+            return
+        if key == "library:knowledge":
+            self._library.knowledge.accept(identity, result, error)
+            return
+        if key == "fetch-settings:test":
+            self._fetch_settings.accept(identity, result, error)
+            return
+        if key == "search-settings:test":
+            self._search_settings.accept(identity, result, error)
+            return
+        if key.startswith("ai-defaults:"):
+            self._ai_defaults.accept(key, identity, result, error)
+            return
+        if key.startswith("model-settings:"):
+            self._model_settings.accept(key, identity, result, error)
             return
         if key in {"skill-search", "skill-source"}:
             self._skill_discovery.accept(key, identity, result, error, self._choice_kind)
@@ -15353,7 +15824,11 @@ class PersistentChatTUI:
             "single_line": callback in (
                 ("divider-pattern",), ("spinner-frames",), ("spinner-interval",),
                 ("skill-search-query",), ("mcp-search-query",),
-            ),
+            ) or bool(callback and callback[0] in {
+                "model-settings", "ai-defaults", "search-settings", "fetch-settings",
+                "agent-settings",
+                "library",
+            }),
         }
         self.application.layout.focus(self.input)
         self.activity = "waiting for setup input"
@@ -15378,6 +15853,60 @@ class PersistentChatTUI:
         if request is None:
             return
         callback = request.get("on_submit")
+        if isinstance(callback, tuple) and len(callback) == 2 and callback[0] == "library":
+            self._settings_input_request = None
+            try:
+                self._library.answer(str(callback[1]), value)
+            except (ValueError, RuntimeError) as exc:
+                self._settings_input_request = request
+                self.status_error = str(exc)
+                self.application.invalidate()
+            return
+        if isinstance(callback, tuple) and len(callback) == 2 and callback[0] == "agent-settings":
+            self._settings_input_request = None
+            try:
+                self._agent_settings.answer(str(callback[1]), value)
+            except (ValueError, RuntimeError) as exc:
+                self._settings_input_request = request
+                self.status_error = str(exc)
+                self.application.invalidate()
+            return
+        if isinstance(callback, tuple) and len(callback) == 2 and callback[0] == "fetch-settings":
+            self._settings_input_request = None
+            try:
+                self._fetch_settings.answer(str(callback[1]), value)
+            except (ValueError, RuntimeError) as exc:
+                self._settings_input_request = request
+                self.status_error = str(exc)
+                self.application.invalidate()
+            return
+        if isinstance(callback, tuple) and len(callback) == 2 and callback[0] == "search-settings":
+            self._settings_input_request = None
+            try:
+                self._search_settings.answer(str(callback[1]), value)
+            except (ValueError, RuntimeError) as exc:
+                self._settings_input_request = request
+                self.status_error = str(exc)
+                self.application.invalidate()
+            return
+        if isinstance(callback, tuple) and callback and callback[0] == "ai-defaults":
+            self._settings_input_request = None
+            try:
+                self._ai_defaults.answer(value)
+            except (ValueError, RuntimeError) as exc:
+                self._settings_input_request = request
+                self.status_error = str(exc)
+                self.application.invalidate()
+            return
+        if isinstance(callback, tuple) and len(callback) == 2 and callback[0] == "model-settings":
+            self._settings_input_request = None
+            try:
+                self._model_settings.answer(str(callback[1]), value)
+            except (ValueError, RuntimeError) as exc:
+                self._settings_input_request = request
+                self.status_error = str(exc)
+                self.application.invalidate()
+            return
         if callback == ("skill-search-query",):
             if value:
                 from klaude_core.skill_catalog import SearchRequest
@@ -16096,6 +16625,8 @@ class PersistentChatTUI:
             self.application.invalidate()
             return
         if selected == "back":
+            if self._agent_settings.return_from_owner(kind):
+                return
             category = SETTINGS_CATEGORY_FOR_KIND.get(kind, "theme")
             self._begin_choice("settings", self._settings_categories(), category)
             return
@@ -16149,6 +16680,9 @@ class PersistentChatTUI:
             self._open_settings_category("theme", selected)
             return
         if kind == "runtime settings":
+            if selected == "Agent execution settings":
+                self._agent_settings.open(view="execution")
+                return
             if selected == "cancel calibration":
                 self._cancel_runtime_calibration()
                 self._open_settings_category("runtime", "auto calibrate")
@@ -16204,62 +16738,34 @@ class PersistentChatTUI:
                 )
                 return
             if selected.startswith("turn limit:"):
-                preset = {
-                    12: "Safe · 12 steps",
-                    20: "Balanced · 20 steps",
-                    40: "Extended · 40 steps",
-                }.get(self.agent.max_steps, "custom input")
-                self._begin_choice(
-                    "turn limit",
-                    [
-                        "Safe · 12 steps",
-                        "Balanced · 20 steps",
-                        "Extended · 40 steps",
-                        "custom input",
-                        "back",
-                        RESET_THEME_CHOICE,
-                    ],
-                    preset,
-                )
+                self._agent_settings.open(view="steps")
                 return
             if selected.startswith("subagent workers:"):
-                configured = max(
-                    0,
-                    min(
-                        4,
-                        int(getattr(self.agent, "max_subagent_concurrency", 0)),
-                    ),
-                )
-                self._begin_choice(
-                    "subagent workers",
-                    [
-                        "auto (provider-aware)",
-                        "1",
-                        "2",
-                        "3",
-                        "4",
-                        "back",
-                        RESET_THEME_CHOICE,
-                    ],
-                    "auto (provider-aware)" if configured == 0 else str(configured),
-                )
+                self._agent_settings.open(view="workers")
                 return
             self.agent.ollama_options.pop("num_gpu", None)
             self.agent.ollama_options.pop("num_thread", None)
-            self.agent.max_steps = self.cfg.max_agent_steps
-            self.agent.max_subagent_concurrency = getattr(
-                self.cfg, "max_subagent_concurrency", 0
-            )
-            self._runtime_preferences.pop("max_steps", None)
-            self._runtime_preferences.pop("max_subagent_concurrency", None)
             self._runtime_device_mode = "auto"
             self._persist_runtime_preferences(
-                "num_gpu", "num_thread", remove=("max_steps", "max_subagent_concurrency")
+                "num_gpu", "num_thread"
             )
             self._open_settings_category("runtime", selected)
             return
         if kind == "tools settings":
+            if selected == "Agent execution settings":
+                self._agent_settings.open(view="execution")
+                return
             values = self._tool_validation
+            if selected == "URL Fetch settings":
+                if not hasattr(self, "_fetch_settings"):
+                    self._fetch_settings = FetchSettings(self)
+                self._fetch_settings.open(parent="tools")
+                return
+            if selected == "Web Search settings":
+                if not hasattr(self, "_search_settings"):
+                    self._search_settings = SearchSettings(self)
+                self._search_settings.open(parent="tools")
+                return
             availability = self._tool_availability
             providers = self._web_provider_availability
             changes: dict[tuple[str, ...], object] = {}
@@ -16289,16 +16795,19 @@ class PersistentChatTUI:
                             break
             else:
                 changes = {
-                    ("tool_validation",): {"web_search": True, "knowledge_search": True},
-                    ("tool_availability",): {name: True for name in TOOL_AVAILABILITY_LABELS},
-                    ("web_provider_availability",): {name: True for name in self.cfg.web_providers},
+                    ("tool_validation", "knowledge_search"): True,
+                    **{("tool_availability", name): True
+                       for name in TOOL_AVAILABILITY_LABELS
+                       if name not in {"web_search", "fetch_url"}},
                     ("display", "activity_updates"): True,
                     ("display", "reasoning_activity"): DELETE,
                 }
                 self.show_activity_updates = True
-                values.update(dict.fromkeys(values, True))
-                availability.update(dict.fromkeys(availability, True))
-                providers.update(dict.fromkeys(providers, True))
+                values["knowledge_search"] = True
+                availability.update({
+                    name: True for name in availability
+                    if name not in {"web_search", "fetch_url"}
+                })
             self._apply_live_tool_preferences()
             self._submit_preference_changes(changes)
             self._open_settings_category("tools", selected)
@@ -16603,8 +17112,15 @@ class PersistentChatTUI:
         """Whether an action must wait for earlier queued work to finish."""
         return bool(
             self.running
+            or self._library.knowledge.busy
+            or self._library.research.busy
             or self._watching_remote
             or self._ollama_control_action
+            or self._ai_defaults.utility
+            or self._ai_defaults.preparing_utility
+            or self._ai_defaults.title_pending
+            or self._ai_defaults.new_session_pending
+            or self._ai_defaults.pending
             or (self.pending and not self._executing_queued_command)
         )
 
@@ -16624,6 +17140,8 @@ class PersistentChatTUI:
             return True
         if command == "/memory":
             return bool(argument.strip())
+        if command == "/recap":
+            return argument.strip()=="--ai"
         return False
 
     def _queue_session_action(self, text: str) -> None:
@@ -16649,6 +17167,11 @@ class PersistentChatTUI:
             self._start_next()
 
     def _resume_session(self, session_id: str) -> None:
+        archived = getattr(self.memory, "session_archived", None)
+        if callable(archived) and archived(session_id):
+            self._append("\n[session] This session is archived; "
+                         "restore it in /library archive first.\n")
+            return
         snapshot = self.memory.session_snapshot(session_id)
         turns = snapshot["turns"]
         if not turns:
@@ -16920,6 +17443,9 @@ class PersistentChatTUI:
                 self._append("\n[session] Finish or cancel active and queued work first.\n")
                 return
             self._set_input("")
+            if command == "/recap" and argument.strip()=="--ai":
+                self._ai_defaults.start_utility("recap")
+                return
             try:
                 if command == "/compact":
                     before = len(self.agent.messages)
@@ -16979,6 +17505,9 @@ class PersistentChatTUI:
                 return
             try:
                 if command == "/rename":
+                    if argument.strip()=="--ai":
+                        self._ai_defaults.start_utility("name")
+                        return
                     self.memory.rename_session(self.session_id, argument)
                     self._session_title_hint = " ".join(argument.split())
                     self._append(f"\n[session] Renamed to {argument.strip()}\n")
@@ -17023,6 +17552,8 @@ class PersistentChatTUI:
                         self._pending_attachments.clear()
                         self._clear_session_view()
                     self.session_id = target
+                    if command == "/new":
+                        self._ai_defaults.new_session()
                     self._cancel_runtime_calibration()
                     self._invalidate_settings_overview()
                     self._session_io.switch_scope(target, self.client_id)
@@ -17071,7 +17602,11 @@ class PersistentChatTUI:
             self._enqueue(text.removeprefix("/queue ").strip(), force_queue=True)
             return
         if text == "/cancel":
-            if self.running:
+            if self._library.research.task:
+                self._library.research.stop()
+            elif self._library.knowledge.busy:
+                self._library.knowledge.stop()
+            elif self.running:
                 self.cancel_requested.set()
                 self._cancel_active_transport()
                 self.activity = "interrupt requested"
@@ -17120,6 +17655,12 @@ class PersistentChatTUI:
             else:
                 self._open_resume()
             return
+        if text == "/library" or text.startswith("/library "):
+            try:
+                self._library.open(text.removeprefix("/library").strip().lower() or "home")
+            except ValueError as exc:
+                self._append("\n[error] " + str(exc) + "\n")
+            return
         if text == "/model" or text.startswith("/model "):
             requested = text.removeprefix("/model").strip()
             if requested:
@@ -17130,7 +17671,13 @@ class PersistentChatTUI:
                 active = getattr(self.agent, "model_info", None)
                 if active is not None and active.backend == "ollama" and active not in available:
                     available.append(active)
-                resolved = _resolve_chat_model(available, requested)
+                try:
+                    resolved = (_resolve_requested_chat_model(
+                        self.cfg, _agent_local_ollama(self.agent), requested,
+                    ) if split_model_ref(requested) else _resolve_chat_model(available, requested))
+                except (ValueError, RuntimeError) as exc:
+                    self._append(f"\n[error] Model unavailable: {exc}\n")
+                    return
                 if resolved is None:
                     if not self._local_models_loaded_at and (
                         "/" not in requested or requested.startswith("ollama/")
@@ -17196,15 +17743,23 @@ class PersistentChatTUI:
                 "spinner": "spinner",
                 "model": "models",
                 "models": "models",
+                "ai defaults": "ai defaults",
+                "defaults": "ai defaults",
                 "provider": "providers",
                 "providers": "providers",
+                "search": "search",
+                "url fetch": "url fetch",
+                "fetch": "url fetch",
+                "web search": "search",
                 "mcp": "mcp servers",
                 "mcps": "mcp servers",
                 "mcp servers": "mcp servers",
                 "memory": "memory",
                 "skill": "skills",
                 "skills": "skills",
-                "tools": "tools",
+                "tools": "agent tools",
+                "agent tools": "agent tools",
+                "agent": "agent tools",
                 "permission": "permissions",
                 "permissions": "permissions",
                 "runtime": "runtime",
@@ -17214,7 +17769,7 @@ class PersistentChatTUI:
             if requested not in category_aliases:
                 self._append(
                     "\n[error] Settings category must be theme, input, divider, spinner, "
-                    "models, providers, "
+                    "models, ai defaults, providers, search, "
                     "memory, skills, MCP, tools, permissions, runtime, or reset.\n"
                 )
                 return
@@ -17417,6 +17972,8 @@ class PersistentChatTUI:
             or not self.pending
             or self.shutting_down
             or self._setup_job is not None
+            or self._library.knowledge.busy
+            or self._library.research.busy
             or self._mcp_mutation_pending is not None
             or self._mcp_catalog_unconfirmed
             or self._queue_edit_index is not None
@@ -17427,8 +17984,28 @@ class PersistentChatTUI:
             or self._secret_request is not None
             or self._settings_input_request is not None
             or self._ollama_control_action is not None
+            or self._model_settings.change_pending is not None
+            or self._model_settings.pending is not None
+            or self._ai_defaults.utility is not None
+            or self._ai_defaults.preparing_utility
+            or self._ai_defaults.pending
+            or self._ai_defaults.title_pending
+            or self._ai_defaults.new_session_pending
         ):
             return
+        if self._model_settings.unconfirmed:
+            self.status_error = "Model settings unconfirmed; reload Added Models before continuing"
+            self.application.invalidate()
+            return
+        if not isinstance(self.pending[0], PendingChatCommand):
+            try:
+                if getattr(self, "_startup_unselected", False):
+                    raise ValueError("Startup model is unset; choose a session model")
+                validate_model_reference(self.cfg, _agent_model_ref(self.agent))
+            except (OSError, ValueError) as exc:
+                self.status_error = str(exc)
+                self.application.invalidate()
+                return
         turn = self.pending.popleft()
         if isinstance(turn, PendingChatCommand):
             self._run_queued_action(turn)
@@ -17440,6 +18017,14 @@ class PersistentChatTUI:
             self.client_id,
             turn_id,
         ):
+            archived = getattr(self.memory, "session_archived", None)
+            if callable(archived) and archived(self.session_id):
+                self._append("\n[session] This session was archived from another client. "
+                             "Restore it in /library archive; this prompt was not run.\n")
+                if not self.input.text:
+                    self._set_input(str(turn))
+                self.activity = "session archived"
+                return
             self.pending.appendleft(turn)
             self._watching_remote = True
             self.activity = "watching session worker"
@@ -18158,6 +18743,16 @@ class PersistentChatTUI:
         self.application.invalidate()
 
     def _open_provider_key_settings(self, label: str, default: str | None = None) -> None:
+        if label == "Crawl4AI Cloud":
+            if not hasattr(self, "_fetch_settings"):
+                self._fetch_settings = FetchSettings(self)
+            self._fetch_settings.open(provider="crawl4ai", parent="providers")
+            return
+        if label in SEARCH_KEY_LABELS:
+            if not hasattr(self, "_search_settings"):
+                self._search_settings = SearchSettings(self)
+            self._search_settings.open(provider=SEARCH_KEY_LABELS[label], parent="providers")
+            return
         env_name, attribute = PROVIDER_API_KEY_PROVIDERS[label]
         configured = bool(getattr(self.cfg, attribute, ""))
         self._provider_key_label = label
@@ -18214,6 +18809,40 @@ class PersistentChatTUI:
         self._set_input("")
         self._answer_secret(value or None)
 
+    def _begin_model_connection_secret(self) -> None:
+        self._choice_kind = None
+        self._choice_values = []
+        self._set_input("")
+        self._secret_request = {
+            "label": "Model API key", "prompt": "Enter API key · masked · Esc cancels",
+            "handler": "model_connection_key",
+        }
+        self.activity = "waiting for masked input"
+        self.application.layout.focus(self.input)
+        self.application.invalidate()
+
+    def _begin_search_secret(self) -> None:
+        self._search_settings.leave()
+        self._choice_kind = None
+        self._choice_values = []
+        self._set_input("")
+        self._secret_request = {
+            "label": "Search provider API key", "prompt": "Enter API key · masked · Esc cancels",
+            "handler": "search_provider_key",
+        }
+        self.application.invalidate()
+
+    def _begin_fetch_secret(self) -> None:
+        self._fetch_settings.leave()
+        self._choice_kind = None
+        self._choice_values = []
+        self._set_input("")
+        self._secret_request = {
+            "label": "Fetch provider API key", "prompt": "Enter API key · masked · Esc cancels",
+            "handler": "fetch_provider_key",
+        }
+        self.application.invalidate()
+
     def _answer_secret(self, value: str | None, *, cancelled: bool = False) -> None:
         request = self._secret_request
         if request is None:
@@ -18222,7 +18851,25 @@ class PersistentChatTUI:
         self._secret_request = None
         callback = request.get("on_submit")
         handler = str(request.get("handler") or "")
-        if handler == "mcp_plan_input":
+        if handler == "fetch_provider_key":
+            try:
+                self._fetch_settings.save_key(None if cancelled else value)
+            except ValueError as exc:
+                self._fetch_settings.show("detail", "key")
+                self._fetch_settings.notify(str(exc), "error")
+        elif handler == "search_provider_key":
+            try:
+                self._search_settings.save_key(None if cancelled else value)
+            except ValueError as exc:
+                self._search_settings.show("detail", "key")
+                self._search_settings.notify(str(exc), "error")
+        elif handler == "model_connection_key":
+            try:
+                self._model_settings.answer("key", None if cancelled else value)
+            except ValueError as exc:
+                self._model_settings.show("form", focus="key")
+                self._model_settings.notify(str(exc), "error")
+        elif handler == "mcp_plan_input":
             if cancelled:
                 self._back_mcp_catalog_input()
             else:
@@ -18350,10 +18997,14 @@ class PersistentChatTUI:
         )
         spinner_preview = self._spinner_page_open()
         animating = spinner_preview or self.running or self._watching_remote \
+            or self._library.knowledge.busy \
+            or self._library.research.busy \
+            or self._ai_defaults.utility is not None or bool(self._ai_defaults.preparing_utility) \
             or self._setup_job is not None or self._permission_request is not None \
             or self._user_input_request is not None or self._debug_label_started_at is not None
         spinner = self._spinner_preview() if spinner_preview else self.appearance.spinner.animation
         self.application.refresh_interval = min(0.1, spinner.interval / 1000) if animating else 0.1
+        self._library.research.poll()
         while True:
             try:
                 kind, payload = self._events.get_nowait()
@@ -18361,6 +19012,12 @@ class PersistentChatTUI:
                 break
             if kind == "append":
                 self._append(str(payload))
+            elif kind == "background_stopped":
+                stopped_key, stopped_identity = cast(tuple[str, str], payload)
+                if stopped_key == "library:research":
+                    self._library.research.stopped(stopped_identity)
+                if stopped_key == "library:knowledge":
+                    self._library.knowledge.stopped(stopped_identity)
             elif kind == "mcp_mutation_saved":
                 mcp_result = cast(MCPMutationResult, payload)
                 if not self._mcp_mutation_pending or (
@@ -18552,6 +19209,14 @@ class PersistentChatTUI:
                     self._append(f"\n[warning] {message}.\n")
                     if action.session_id == self.session_id:
                         self.status_error = message
+            elif kind == "library_session_saved":
+                change, error = cast(tuple[LibrarySessionChange, str], payload)
+                self._library.saved(change, error)
+            elif kind == "library_artifact_saved":
+                artifact_change, artifact_result, artifact_error = cast(
+                    tuple[LibraryArtifactChange, object, str], payload
+                )
+                self._library.artifacts.saved(artifact_change, artifact_result, artifact_error)
             elif kind == "settings_saved":
                 revision, saved = cast(tuple[int, bool], payload)
                 if revision != self._runtime_save_revision:
@@ -18592,8 +19257,12 @@ class PersistentChatTUI:
                         )
                         self._open_settings_category(category, selected)
                     self.status_error = error
+            elif kind == "fetch_provider_saved":
+                self._fetch_settings.saved_key(payload)
+            elif kind == "search_provider_saved":
+                self._search_settings.saved_key(payload)
             elif kind == "settings_tools":
-                revision, values = cast(tuple[int, dict[str, dict[str, bool]]], payload)
+                revision, values = cast(tuple[int, dict[str, dict[str, Any]]], payload)
                 if revision != self._runtime_save_revision:
                     continue
                 for group, current in (
@@ -18605,10 +19274,22 @@ class PersistentChatTUI:
                         name: enabled for name, enabled in values.get(group, {}).items()
                         if name in current and isinstance(enabled, bool)
                     })
+                if "execution_settings" in values:
+                    self._agent_settings.merge_saved(values["execution_settings"])
                 enabled = values.get("display", {}).get("activity_updates")
                 if isinstance(enabled, bool):
                     self.show_activity_updates = enabled
                 self._apply_live_tool_preferences()
+                if self._agent_settings.visible:
+                    self._agent_settings.show()
+                if hasattr(self, "_fetch_settings") and "fetch_settings" in values:
+                    self._fetch_settings.merge_saved(values["fetch_settings"])
+                if hasattr(self, "_fetch_settings") and self._fetch_settings.visible:
+                    self._fetch_settings.show()
+                if hasattr(self, "_search_settings") and "search_settings" in values:
+                    self._search_settings.merge_saved(values["search_settings"])
+                if hasattr(self, "_search_settings") and self._search_settings.visible:
+                    self._search_settings.show()
                 if self._choice_kind == "tools settings":
                     selected = self._choice_values[self._choice_index]
                     error = self.status_error
@@ -18652,6 +19333,19 @@ class PersistentChatTUI:
                 self.status_error = str(payload)
             elif kind == "background_result":
                 self._apply_background_result(payload)
+            elif kind == "model_connection_saved":
+                self._model_settings.saved(payload)
+            elif kind == "model_connection_updated":
+                self._model_settings.updated(payload)
+                if not self._ai_defaults.pending:
+                    self._ai_defaults.defaults=None
+            elif kind == "ai_defaults_saved":
+                self._ai_defaults.saved(payload)
+            elif kind == "session_title_saved":
+                self._ai_defaults.title_saved(payload)
+            elif kind == "utility_history_failed":
+                self._append("\n[warning] AI title saved; "
+                             "its session history entry is unconfirmed.\n")
             elif kind == "setup_progress":
                 cancel, rows = cast(tuple[threading.Event, list[str]], payload)
                 if (
@@ -18896,6 +19590,8 @@ class PersistentChatTUI:
                     self._start_next()
         self._flush_transcript()
 
+        self._agent_settings.refresh_usage()
+
     def _exit(self) -> None:
         self._hide_text_theme_preview()
         self.shutting_down = True
@@ -19011,8 +19707,14 @@ def chat(
         _clear_plain_session_view(force=True)
     cfg = load_config()
     chat_preferences_path = cfg.data_dir / "chat-preferences.json"
-    remembered_model = _load_last_chat_model(chat_preferences_path)
+    try:
+        defaults = migrate_defaults(cfg)
+    except (OSError, ValueError) as exc:
+        console.print(Text(f"AI Defaults unavailable: {exc}",style="red"))
+        raise typer.Exit(1) from exc
+    remembered_model = defaults.chat
     requested_model = model or remembered_model or ""
+    selection_required = not model and defaults.chat is None
     # A canonical cloud reference cannot be handed to Ollama during startup.
     startup_surface: AbstractContextManager[None] = nullcontext()
     if interactive_tui:
@@ -19029,16 +19731,37 @@ def chat(
             Path.cwd(), None if "/" in requested_model else (requested_model or None)
         )
     selected_model_applied = False
-    if requested_model:
-        selected = _resolve_requested_chat_model(
-            cfg, _agent_local_ollama(agent), requested_model
-        )
-        if selected is not None:
-            try:
+    if not requested_model and not selection_required and connection_registry(cfg).path.exists():
+        try:
+            _set_agent_model(agent, cfg, _agent_local_ollama(agent), agent.model_info)
+        except (RuntimeError, ValueError) as exc:
+            if interactive_tui:
+                selection_required = True
+            else:
+                console.print(Text(str(exc), style="red"))
+                _close_agent_mcp(agent)
+                raise typer.Exit(1) from exc
+    if requested_model and not selection_required:
+        try:
+            resolution_target = (f"ollama/{remembered_model}"
+                                 if remembered_model and not model and "/" not in remembered_model
+                                 else requested_model)
+            selected = _resolve_requested_chat_model(
+                cfg, _agent_local_ollama(agent), resolution_target,
+            )
+            if selected is None:
+                raise ValueError("Default Chat model unavailable; choose a model")
+            if selected is not None:
                 _set_agent_model(agent, cfg, _agent_local_ollama(agent), selected)
                 selected_model_applied = True
-            except (CodexAuthError, RuntimeError, ValueError) as exc:
-                console.print(f"[yellow]saved cloud model unavailable:[/] {exc}")
+        except (CodexAuthError, RuntimeError, ValueError) as exc:
+            if interactive_tui and not model:
+                selection_required = True
+            elif "@" in requested_model.partition("/")[0] or connection_registry(cfg).path.exists():
+                console.print(Text(str(exc), style="red"))
+                _close_agent_mcp(agent)
+                raise typer.Exit(1) from exc
+            console.print(f"[yellow]saved cloud model unavailable:[/] {exc}")
     _apply_saved_permissions(agent, chat_preferences_path)
     runtime_preferences, _ = _migrate_runtime_device_preference(
         chat_preferences_path, _load_runtime_preferences(chat_preferences_path)
@@ -19047,15 +19770,16 @@ def chat(
     _apply_tool_validation_preferences(agent, chat_preferences_path)
     _apply_tool_availability_preferences(agent, chat_preferences_path)
     _apply_web_provider_preferences(agent, chat_preferences_path)
-    if remembered_model and not model and "/" not in remembered_model:
+    if remembered_model and not model and not selection_required and "/" not in remembered_model:
         try:
             installed_models = _agent_local_ollama(agent).list_models()
         except Exception:
             installed_models = []
         if installed_models and remembered_model not in installed_models:
-            agent.model = cfg.models["coder"]
+            default = ModelInfo("ollama", cfg.models["coder"], cfg.models["coder"])
+            _set_agent_model(agent, cfg, _agent_local_ollama(agent), default)
             _apply_session_mode(agent, cfg, "standard")
-    if not requested_model or selected_model_applied:
+    if not selection_required and (not requested_model or selected_model_applied):
         try:
             _save_last_chat_model(chat_preferences_path, _agent_model_ref(agent))
         except OSError as exc:
@@ -19069,18 +19793,29 @@ def chat(
     )
     if interactive_tui:
         try:
-            PersistentChatTUI(
+            tui = PersistentChatTUI(
                 agent,
                 memory,
                 session_id,
                 cfg,
                 chat_preferences_path=chat_preferences_path,
                 character_stream=False,
-            ).run()
+                model_selection_required=selection_required,
+            )
+            if selection_required:
+                tui._model_settings.open()
+                tui._model_settings.notify(
+                    "Startup model unavailable or unset; choose a session model", "warning",
+                )
+            tui.run()
         finally:
             _close_agent_mcp(agent)
         console.print("[dim]bye[/]")
         return
+    if selection_required:
+        _close_agent_mcp(agent)
+        console.print(Text("Startup model is unset; use chat --model REFERENCE", style="red"))
+        raise typer.Exit(1)
     user_input_broker = getattr(agent, "user_input_broker", None)
     if user_input_broker is not None and sys.stdin.isatty():
         user_input_broker.handler = _ask_line_user_input
@@ -19097,6 +19832,7 @@ def chat(
         )
     prompt_session = None if no_tui else _new_chat_prompt_session()
     line_attachments: list[Path] = []
+    line_selection_required = False
     while True:
         try:
             user_msg = (
@@ -19194,6 +19930,35 @@ def chat(
             except OSError as exc:
                 console.print(Text(f"Error: {exc}"))
             continue
+        if command in {"/recap","/rename"} and argument.strip()=="--ai":
+            if line_selection_required:
+                console.print(Text("Choose /model before using Utility.",style="yellow"))
+                continue
+            from klaude_core.utility import run_utility
+
+            try:
+                request=utility_request(cfg,session_id,_agent_model_ref(agent),
+                                        native_options=getattr(agent,"ollama_options",{}))
+                request["task"]="name" if command=="/rename" else "recap"
+                result=run_utility(request)
+                if result.get("error"):
+                    console.print(Text(result["error"],style="yellow"))
+                else:
+                    detail=(f"AI Utility via {result['model']} · "
+                            f"fallback {len(result['attempts'])-1}")
+                    if command=="/rename":
+                        if memory.rename_session_if_current(
+                            session_id,result["text"],result["prior_name"]):
+                            console.print(Text(detail+"\nRenamed to "+result["text"]))
+                        else:
+                            console.print(Text("Session title changed; generated title discarded."))
+                    else:
+                        console.print(Text(detail+"\n"+result["text"]))
+                    memory.log_turn(session_id,"system",{
+                        "event":"session_update","detail":detail+"\n"+result["text"]})
+            except (OSError,ValueError,sqlite3.Error):
+                console.print(Text("AI Utility unavailable; review AI Defaults",style="yellow"))
+            continue
         if command in {"/compact", "/recap", "/status", "/memory", "/skills"}:
             try:
                 if command == "/compact":
@@ -19259,6 +20024,16 @@ def chat(
                         agent.restore_session([])
                         _clear_plain_session_view()
                     session_id = target
+                    if command=="/new":
+                        line_selection_required=True
+                        reference=read_defaults(cfg).chat
+                        if reference:
+                            selected=_resolve_requested_chat_model(cfg,_agent_local_ollama(agent),reference)
+                            if selected:
+                                _set_agent_model(agent,cfg,_agent_local_ollama(agent),selected)
+                                _apply_session_mode(agent,cfg,"standard")
+                                line_selection_required=False
+                                ui_state.update_from_agent(agent)
                     _set_agent_session_context(agent, session_id)
                     ui_state.prompt_tokens = 0
                     ui_state.output_tokens = 0
@@ -19308,6 +20083,10 @@ def chat(
                 target = typer.prompt("Session ID (blank cancels)", default="").strip()
                 if not target:
                     continue
+            if memory.session_archived(target):
+                console.print("This session is archived; "
+                              "use klaude sessions restore SESSION_ID first.")
+                continue
             turns = memory.load_session(target, timestamps=True)
             if not turns:
                 console.print(Text(f"No saved session: {target}"))
@@ -19318,13 +20097,15 @@ def chat(
             _clear_plain_session_view()
             console.print(Text(_restored_transcript(target, turns, console.width - 1)))
             continue
+        if user_msg == "/library" or user_msg.startswith("/library "):
+            console.print("Library's navigation workspace is available in interactive klaude. "
+                          "Use klaude sessions, klaude sessions --archived, klaude libraries, "
+                          "and klaude query for line-oriented browsing.")
+            continue
         if user_msg == "/model" or user_msg.startswith("/model "):
             target = user_msg.removeprefix("/model").strip()
             if _choose_model_and_effort(agent, cfg, target):
-                try:
-                    _save_last_chat_model(chat_preferences_path, _agent_model_ref(agent))
-                except OSError as exc:
-                    console.print(f"[yellow]model preference was not saved:[/] {exc}")
+                line_selection_required=False
                 ui_state.update_from_agent(agent)
                 update = (
                     f"model {_agent_model_ref(agent)} · "
@@ -19380,6 +20161,10 @@ def chat(
             session_id=session_id,
         ):
             continue
+        if line_selection_required:
+            console.print(Text("Default Chat unavailable or unset; "
+                               "choose /model before sending.",style="yellow"))
+            continue
         if _handle_command_reference_request(user_msg, agent, memory, session_id):
             continue
         if _handle_explicit_memory_request(user_msg, agent, memory, session_id):
@@ -19423,28 +20208,36 @@ def ask(question: str, model: str = typer.Option("", help="override model")):
     """One-shot question with tools enabled."""
     cfg = load_config()
     agent, memory = _build_agent(Path.cwd())
-    if model:
-        selected = _resolve_requested_chat_model(cfg, _agent_local_ollama(agent), model)
-        if selected is None:
-            raise typer.BadParameter(f"model is unavailable or ambiguous: {model}")
-        try:
-            _set_agent_model(agent, cfg, _agent_local_ollama(agent), selected)
-        except (CodexAuthError, RuntimeError, ValueError) as exc:
-            raise typer.BadParameter(str(exc)) from exc
-    user_input_broker = getattr(agent, "user_input_broker", None)
-    if user_input_broker is not None and sys.stdin.isatty():
-        user_input_broker.handler = _ask_line_user_input
     session_id = uuid.uuid4().hex
     _set_agent_session_context(agent, session_id)
     if _handle_unknown_slash_command(
-        question,
-        agent=agent,
-        memory=memory,
-        session_id=session_id,
-    ):
+        question,agent=agent,memory=memory,session_id=session_id,
+    ) or _handle_command_reference_request(question,agent,memory,session_id):
+        _close_agent_mcp(agent)
         return
-    if _handle_command_reference_request(question, agent, memory, session_id):
-        return
+    try:
+        requested=model
+        saved=_load_chat_preferences(cfg.data_dir / "chat-preferences.json")
+        if not requested and "ai_defaults" in saved:
+            requested=read_defaults(cfg).chat or ""
+            if not requested:
+                raise RuntimeError("Default Chat is unset; supply ask --model REFERENCE")
+        if requested:
+            selected = _resolve_requested_chat_model(cfg, _agent_local_ollama(agent), requested)
+            if selected is None:
+                raise typer.BadParameter(f"model is unavailable or ambiguous: {requested}")
+            _set_agent_model(agent, cfg, _agent_local_ollama(agent), selected)
+        elif connection_registry(cfg).path.exists():
+            _set_agent_model(agent, cfg, _agent_local_ollama(agent), agent.model_info)
+    except (CodexAuthError, RuntimeError, ValueError) as exc:
+        _close_agent_mcp(agent)
+        if not model:
+            console.print(Text(str(exc),style="red"))
+            raise typer.Exit(1) from exc
+        raise typer.BadParameter(str(exc)) from exc
+    user_input_broker = getattr(agent, "user_input_broker", None)
+    if user_input_broker is not None and sys.stdin.isatty():
+        user_input_broker.handler = _ask_line_user_input
     try:
         if not _handle_explicit_memory_request(question, agent, memory, session_id):
             _render(agent, memory, session_id, question, raise_on_error=True)
@@ -19568,25 +20361,9 @@ def crawl(
 
 
 def _index_installed_docs(installed, kn) -> int:
-    from klaude_knowledge import IndexDocument, finalize_docs_source
+    from klaude_knowledge import index_installed_docs
 
-    documents = []
-    for path, source_url in zip(installed.files, installed.source_urls, strict=False):
-        rel = path.relative_to(installed.current_dir).as_posix()
-        documents.append(
-            IndexDocument(
-                source=source_url,
-                text=path.read_text(errors="replace"),
-                title=rel,
-            )
-        )
-    total = kn.replace_owner_snapshot_atomic(
-        installed.library,
-        f"docs:{installed.name}",
-        documents,
-    )
-    finalize_docs_source(installed)
-    return total
+    return index_installed_docs(installed, kn)
 
 
 @docs_app.callback(invoke_without_command=True)
@@ -19986,10 +20763,47 @@ def memory_search(query: str, n: int = typer.Option(8, "-n")):
 
 
 @sessions_app.callback(invoke_without_command=True)
-def sessions_root(ctx: typer.Context, n: int = typer.Option(10, "-n")):
+def sessions_root(ctx: typer.Context, n: int = typer.Option(10, "-n"),
+                  archived: bool = typer.Option(False, "--archived")):
     """List recent conversation sessions."""
     if ctx.invoked_subcommand is None:
+        if archived:
+            from .library_inventory import session_inventory
+
+            data = session_inventory(load_config().sessions_db, archived=True)
+            for item in data["items"][:max(1, min(n, 100))]:
+                console.print(Text(f"{item['id']}  {item['date']}  {item['title']}"))
+            if not data["items"]:
+                console.print("No archived sessions yet.")
+            if data["more"] or len(data["items"]) > n:
+                console.print("Use /library archive to search and page through more sessions.")
+            return
         console.print(_styled_recent_sessions(_memory_store().recent_sessions(n)))
+
+
+def _change_session_archive_cli(session_id: str, operation: str) -> None:
+    memory = _memory_store()
+    try:
+        memory.change_session_archive(session_id, operation)
+    except (ValueError, sqlite3.Error) as exc:
+        console.print(Text(f"Session action failed: {exc}"))
+        raise typer.Exit(1) from None
+    finally:
+        memory.db.close()
+    console.print(Text("Session archived; content retained." if operation == "archive"
+                       else "Session restored.", style="green"))
+
+
+@sessions_app.command("archive")
+def sessions_archive(session_id: str):
+    """Archive an idle conversation without deleting its content."""
+    _change_session_archive_cli(session_id, "archive")
+
+
+@sessions_app.command("restore")
+def sessions_restore(session_id: str):
+    """Restore an archived conversation to normal session lists."""
+    _change_session_archive_cli(session_id, "restore")
 
 
 @sessions_app.command("delete")

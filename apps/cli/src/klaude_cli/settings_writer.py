@@ -11,9 +11,19 @@ from typing import Any
 from klaude_core.settings_store import DELETE, update_settings
 
 
-def public_tool_settings(value: dict[str, Any]) -> dict[str, dict[str, bool]]:
+def public_tool_settings(value: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Return only bounded boolean preferences, never arbitrary saved data."""
     result = {}
+    from klaude_core.agent_settings import public_execution_settings
+    from klaude_core.fetch_settings import public_fetch_settings
+    from klaude_core.search_settings import public_search_settings
+
+    if "runtime_options" in value:
+        result["execution_settings"] = public_execution_settings(value["runtime_options"])
+    if "fetch_settings" in value:
+        result["fetch_settings"] = public_fetch_settings(value["fetch_settings"])
+    if "search_settings" in value:
+        result["search_settings"] = public_search_settings(value["search_settings"])
     for group in ("tool_validation", "tool_availability", "web_provider_availability"):
         raw = value.get(group)
         if isinstance(raw, dict):

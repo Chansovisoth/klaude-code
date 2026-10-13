@@ -143,6 +143,7 @@ from klaude_cli.main import (
     sessions_delete,
     system_info,
 )
+from klaude_cli.settings_panel import PanelAction, RowKind
 from klaude_core import (
     Agent,
     AgentEvent,
@@ -453,8 +454,13 @@ def test_sessions_subcommands_are_in_canonical_registry():
     assert registry_usages == {
         "sessions delete SESSION_ID",
         "sessions clear",
+        "sessions archive SESSION_ID",
+        "sessions restore SESSION_ID",
+        "sessions --archived",
     }
-    assert typer_usages == {"sessions delete", "sessions clear"}
+    assert typer_usages == {
+        "sessions delete", "sessions clear", "sessions archive", "sessions restore"
+    }
 
 
 def test_session_delete_and_clear_commands_require_confirmation(tmp_path, monkeypatch):
@@ -503,7 +509,9 @@ def test_command_reference_wraps_narrow_and_aligns_wide():
     wide = format_command_reference(width=120)
     narrow = format_command_reference(width=40)
 
-    assert "  chat                        Interactive agent session" in wide
+    chat_line = next(line for line in wide.splitlines() if line.startswith("  chat "))
+    assert chat_line.removeprefix("  chat").lstrip().startswith("Interactive agent session")
+    assert len(chat_line) <= 120
     assert "  huggingface-details\n      Print Hugging Face Hub" in narrow
     assert "docs add NAME URL -l LIBRARYInstall" not in wide
     assert ("  docs add NAME URL -l LIBRARY\n      Install refreshable llms.txt") in narrow
@@ -1424,7 +1432,7 @@ def test_init_line_mode_keeps_generated_task_out_of_public_user_message(tmp_path
     tui = _fake_persistent_tui(tmp_path / "appearance.json")
     tui.agent.workdir = tmp_path
     memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
-    cfg = Config()
+    cfg = Config(models={"coder":tui.agent.model})
     rendered = []
     monkeypatch.setattr(Config, "data_dir", property(lambda _self: tmp_path))
     monkeypatch.setattr("klaude_cli.main.load_config", lambda: cfg)
@@ -1453,7 +1461,7 @@ def test_resume_line_mode_lists_and_restores_without_sending_command_to_model(
     memory.log_turn("saved", "user", "Earlier question")
     memory.log_turn("saved", "assistant", "Earlier reply")
     tui.agent.restore_session = lambda turns: Agent.restore_session(tui.agent, turns)
-    cfg = Config()
+    cfg = Config(models={"coder":tui.agent.model})
     monkeypatch.setattr(Config, "data_dir", property(lambda _self: tmp_path))
     monkeypatch.setattr("klaude_cli.main.load_config", lambda: cfg)
     monkeypatch.setattr("klaude_cli.main._build_agent", lambda *_args: (tui.agent, memory))
@@ -2849,9 +2857,10 @@ def test_tools_settings_persist_independent_validation_toggles(tmp_path):
     path = tmp_path / "chat-preferences.json"
     tui = _fake_persistent_tui(chat_preferences_path=path)
 
-    tui._open_settings_category("tools")
-    assert tui._choice_kind == "tools settings"
-    tui._choice_index = tui._choice_values.index("web search validation: on (toggle)")
+    tui._open_settings_category("search")
+    assert tui._choice_kind == "search settings home"
+    tui._panel.picker.focus("validation")
+    tui._apply_picker_state()
     tui._accept_choice()
 
     saved = json.loads(path.read_text())
@@ -2861,7 +2870,8 @@ def test_tools_settings_persist_independent_validation_toggles(tmp_path):
     assert "tool_availability" not in saved
     assert tui.agent.tool_config.web_search.result_validation_enabled is False
     assert tui.agent.tool_config.retrieval_validation_enabled is True
-    assert tui._choice_values[tui._choice_index] == "web search validation: off (toggle)"
+    assert tui._panel.row().id == "validation"
+    assert tui._panel.row().checked is False
 
 
 def test_permission_command_opens_grouped_settings_and_replaces_plural_command(tmp_path):
@@ -3225,7 +3235,7 @@ def test_rebuilding_any_settings_page_preserves_its_selected_logical_row(tmp_pat
         ("input field", "border:"),
         ("memory", "automatic memory:"),
         ("providers", "OpenRouter:"),
-        ("tools", "web search validation:"),
+        ("tools", "Activity Updates"),
         ("permissions", "Write file:"),
         ("runtime", "CPU threads:"),
     ):
@@ -3244,8 +3254,8 @@ def test_settings_include_memory_skills_and_provider_categories():
     categories = tui._settings_categories()
 
     assert "\0section:APPEARANCE" in categories
-    assert "\0section:ASSISTANT" in categories
-    assert "\0section:CAPABILITIES & SAFETY" in categories
+    assert "\0section:MODELS & AI" in categories
+    assert "\0section:AGENT" in categories
     assert "\0section:ADVANCED" in categories
     assert any(value.startswith("Models:") for value in categories)
     assert any(value.startswith("Providers:") for value in categories)
@@ -3406,7 +3416,8 @@ def test_settings_back_returns_to_the_same_summary_row(
     tui.memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
 
     tui._open_settings_category(category)
-    tui._choice_index = tui._choice_values.index("back")
+    tui._panel.picker.focus("back")
+    tui._apply_picker_state()
     tui._accept_choice()
 
     assert tui._choice_kind == "settings"
@@ -3619,9 +3630,10 @@ def test_tools_settings_persist_and_apply_individual_research_tool_toggles(tmp_p
     path = tmp_path / "chat-preferences.json"
     tui = _fake_persistent_tui(chat_preferences_path=path)
 
+    tui.agent.tools = {"query_knowledge": object()}
     tui._open_settings_category("tools")
-    tui._choice_index = tui._choice_values.index("knowledge library: on (toggle)")
-    tui._accept_choice()
+    tui._agent_settings.open_tool("query_knowledge")
+    tui._apply_panel_action(PanelAction("agent-settings-tool-toggle"))
 
     assert _tool_availability_preferences(path)["query_knowledge"] is False
     assert "query_knowledge" in tui.agent.disabled_tool_names
@@ -3636,8 +3648,9 @@ def test_tools_settings_persist_and_apply_web_provider_toggles(tmp_path):
     path = tmp_path / "chat-preferences.json"
     tui = _fake_persistent_tui(chat_preferences_path=path)
 
-    tui._open_settings_category("tools")
-    tui._choice_index = tui._choice_values.index("provider exa: on (toggle)")
+    tui._open_provider_key_settings("Exa")
+    tui._panel.picker.focus("provider-enabled")
+    tui._apply_picker_state()
     tui._accept_choice()
 
     assert _web_provider_preferences(path, tui.cfg)["exa"] is False
@@ -3651,30 +3664,23 @@ def test_tools_settings_persist_and_apply_web_provider_toggles(tmp_path):
 
 def test_settings_choice_sections_are_visible_and_not_selectable():
     tui = _fake_persistent_tui()
-
-    tui._open_settings_category("tools")
-    headings = [
-        value.removeprefix("\0section:")
-        for value in tui._choice_values
-        if value.startswith("\0section:")
-    ]
-    assert headings == ["DISPLAY", "RESEARCH TOOLS", "WEB PROVIDERS", "RESULT VALIDATION"]
-    assert not tui._choice_values[tui._choice_index].startswith("\0section:")
-
-    tui._choice_index = tui._choice_values.index("\0section:WEB PROVIDERS")
-    tui._accept_choice()
-    assert not tui._choice_values[tui._choice_index].startswith("\0section:")
+    tui._begin_choice("settings", tui._settings_categories(), "tools")
+    headings = [row.label for row in tui._panel.page.rows if row.kind == RowKind.SECTION]
+    assert headings == ["APPEARANCE", "MODELS & AI", "AGENT", "ADVANCED"]
+    assert not tui._panel.row().kind == RowKind.SECTION
+    for row in tui._panel.page.rows:
+        if row.kind == RowKind.SECTION:
+            assert not row.selectable
 
 
 def test_first_picker_option_reveals_its_section_heading():
     tui = _fake_persistent_tui()
-    tui._open_settings_category("tools")
-    first = tui._choice_values.index("activity updates: on (toggle)")
-    tui._choice_index = first
-    assert tui._picker is not None
-    tui._picker.scroll_top = first
+    tui._open_settings_category("permissions")
+    tui._panel.picker.focus("preset")
+    tui._apply_picker_state()
+    tui._picker.scroll_top = tui._choice_index
     assert tui._choice_scroll(None) == 0
-    assert tui._choice_values[0] == "\0section:DISPLAY"
+    assert tui._choice_values[0] == "\0section:PRESET"
 
 
 def test_tools_settings_can_toggle_high_level_activity_updates(tmp_path):
@@ -3682,12 +3688,12 @@ def test_tools_settings_can_toggle_high_level_activity_updates(tmp_path):
     tui = _fake_persistent_tui(chat_preferences_path=path)
 
     tui._open_settings_category("tools")
-    tui._choice_index = tui._choice_values.index("activity updates: on (toggle)")
+    tui._choice_index = tui._choice_values.index("Activity Updates")
     tui._accept_choice()
 
     assert tui.show_activity_updates is False
     assert json.loads(path.read_text())["display"]["activity_updates"] is False
-    assert tui._choice_values[tui._choice_index] == "activity updates: off (toggle)"
+    assert tui._panel.row().id == "activity" and tui._panel.row().checked is False
 
 
 def test_activity_updates_default_on_and_migrate_reasoning_activity_preference(tmp_path):
@@ -3856,35 +3862,17 @@ def test_activity_updates_redact_secret_shaped_values():
 
 def test_settings_toggles_render_as_theme_colored_two_cell_switches(tmp_path):
     tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "chat-preferences.json")
-
     tui._open_settings_category("tools")
-    tui._choice_index = tui._choice_values.index("activity updates: on (toggle)")
-    fragments = tui._choice_fragments()
-
-    assert ("class:toggle.on", "■") in fragments
-    rendered = "".join(text for _style, text in fragments)
-    activity_row = next(line for line in rendered.splitlines() if "activity updates" in line)
-    assert activity_row.endswith("[  ■]")
-    assert "activity updates: on (toggle)" not in rendered
-    toggle_index = next(
-        index for index, fragment in enumerate(fragments) if fragment == ("class:toggle.on", "■")
-    )
-    assert fragments[toggle_index - 1] == ("class:toggle.track", "[  ")
-    assert fragments[toggle_index + 1] == ("class:toggle.track", "]")
-
+    tui._panel.picker.focus("activity")
+    tui._apply_picker_state()
+    fragments = [fragment for line in tui._panel_body().lines for fragment in line]
+    assert any("class:toggle.on" in style and text == "■" for style, text in fragments)
+    assert "[  ■] ON" in "".join(text for _style, text in fragments)
     tui._accept_choice()
-    fragments = tui._choice_fragments()
-
-    assert ("class:toggle.off", "■") in fragments
-    toggle_index = next(
-        index for index, fragment in enumerate(fragments) if fragment == ("class:toggle.off", "■")
-    )
-    assert fragments[toggle_index - 1] == ("class:toggle.track", "[")
-    assert fragments[toggle_index + 1] == ("class:toggle.track", "  ]")
-    rendered = "".join(text for _style, text in fragments)
-    activity_row = next(line for line in rendered.splitlines() if "activity updates" in line)
-    assert activity_row.endswith("[■  ]")
-    assert "activity updates: off (toggle)" not in rendered
+    fragments = [fragment for line in tui._panel_body().lines for fragment in line]
+    assert not any("class:toggle.on" in style for style, _text in fragments)
+    assert "[■  ] OFF" in "".join(text for _style, text in fragments)
+    assert tui._panel.row().id == "activity"
 
 
 def test_off_toggle_square_matches_brackets_and_on_square_uses_primary_color():
@@ -3918,22 +3906,13 @@ def test_settings_category_rows_render_as_aligned_columns(tmp_path):
     assert len(value_columns) == 1
     assert all(": " not in line for line in rows)
 
-    tui._open_settings_category("tools")
-    rendered = "".join(text for _style, text in tui._choice_fragments())
-    toggle_rows = [
-        line
-        for line in rendered.splitlines()
-        if any(
-            name in line
-            for name in (
-                "activity updates",
-                "web search validation",
-                "knowledge search validation",
-            )
-        )
-    ]
-    assert len(toggle_rows) == 3
-    assert len({line.index("[") for line in toggle_rows}) == 1
+    tui.agent.tools = {"read_file": object(), "run_shell": object()}
+    tui._agent_settings.open()
+    tui._agent_settings.action(PanelAction("agent-settings-group:WORKSPACE", "WORKSPACE"))
+    rows = ["".join(text for _style, text in line) for line in tui._panel_body().lines]
+    tool_rows = [line for line in rows if "Read file" in line or "Run shell" in line]
+    assert len(tool_rows) == 2
+    assert len({line.index("ON") for line in tool_rows}) == 1
 
 
 def test_input_setting_toggle_keeps_its_selector_row(tmp_path):
@@ -4513,7 +4492,7 @@ def test_persistent_tui_inline_model_picker_leads_to_effort_picker(tmp_path):
 
     tui._accept_choice()
 
-    assert _load_last_chat_model(preferences) == "ollama/gpt-oss:20b"
+    assert _load_last_chat_model(preferences) is None
 
 
 @pytest.mark.parametrize("key,expected", [(Keys.Down, 0), (Keys.Up, 1)])
@@ -4680,12 +4659,16 @@ def test_settings_submenus_end_with_back_instead_of_cancel(category):
     assert tui._choice_kind == "settings"
 
 
-def test_models_settings_uses_model_picker_flow_and_returns_to_settings():
+def test_models_settings_landing_keeps_session_picker_flow_and_parent_navigation():
     tui = _fake_persistent_tui()
     tui._begin_choice("settings", tui._settings_categories(), "models")
 
     tui._accept_choice()
 
+    assert tui._choice_kind == "model settings home"
+    tui._panel.picker.focus("session")
+    tui._apply_picker_state()
+    tui._accept_choice()
     assert tui._choice_kind == "model source"
     assert tui._choice_values == ["Local", "Cloud", "back"]
     tui._choice_index = tui._choice_values.index("Local")
@@ -4699,18 +4682,64 @@ def test_models_settings_uses_model_picker_flow_and_returns_to_settings():
 
     tui._choice_index = tui._choice_values.index("back")
     tui._accept_choice()
+    assert tui._choice_kind == "model settings home"
+    tui._dismiss_picker()
     assert tui._choice_kind == "settings"
     assert tui._choice_values[tui._choice_index].startswith("Models:")
 
 
-def test_settings_models_command_opens_same_source_picker():
+def test_settings_models_command_opens_models_landing():
     tui = _fake_persistent_tui()
     tui._set_input("/settings models")
 
     tui._submit_buffer(steer=False)
 
-    assert tui._choice_kind == "model source"
-    assert tui._choice_values == ["Local", "Cloud", "back"]
+    assert tui._choice_kind == "model settings home"
+    assert [row.label for row in tui._panel.page.rows] == [
+        "Added Models", "Add Models", "Session model", "Back",
+    ]
+
+
+def test_new_model_endpoint_draft_starts_without_previous_form_filter():
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui()
+    controller = tui._model_settings
+    controller.action(PanelAction("model-settings-local"))
+    original = controller.draft.identity
+    tui._panel.search_active = True
+    tui._panel.filter("authentication")
+    controller.action(PanelAction("model-settings-back", "discard"))
+    controller.action(PanelAction("model-settings-api"))
+    assert controller.draft.identity != original
+    assert tui._panel.picker.query == ""
+    assert not tui._panel.search_active
+    assert tui._panel.picker.selected_id == "url"
+
+
+def test_disabled_active_model_holds_next_prompt_without_changing_running_runtime(
+    tmp_path, monkeypatch,
+):
+    from klaude_core.model_connections import connection_registry
+    from klaude_core.model_management import ModelChange, apply_model_change
+
+    monkeypatch.setattr("klaude_core.config.CONFIG_DIR", tmp_path / "config")
+    monkeypatch.setattr("klaude_core.config.DATA_DIR", tmp_path / "data")
+    tui = _fake_persistent_tui()
+    tui.cfg.models["coder"] = "different:3b"
+    registry = connection_registry(tui.cfg)
+    default = registry.migrate(tui.cfg)["default-ollama"]
+    runtime = tui.agent.ollama
+    apply_model_change(tui.cfg, ModelChange("choice", (default,), tui.agent.model,
+                                          "enabled", False, True))
+    tui.pending.append(PendingChatTurn("implement the project"))
+    tui.running = True
+    tui._start_next()
+    assert tui.agent.ollama is runtime and len(tui.pending) == 1
+    tui.running = False
+    tui._start_next()
+    assert not tui.running and len(tui.pending) == 1
+    assert "Model is disabled" in tui.status_error
 
 
 def test_bottom_status_omits_obsolete_scroll_hint():
@@ -5089,15 +5118,18 @@ def test_live_picker_is_responsive_while_settings_writer_is_blocked(
                 tui._open_settings_category("runtime", "context size:")
                 query, prefix = "context", "context size:"
             elif category == "tools":
-                tui._open_settings_category("tools", "web search validation:")
-                tui._apply_settings_action("tools settings", "web search validation: on (toggle)")
-                query, prefix = "validation", "web search validation:"
+                tui._open_settings_category("tools")
+                tui._apply_panel_action(PanelAction("agent-settings-activity"))
+                query, prefix = "activity", "Activity Updates"
             else:
+                # A pending unrelated preferences save must not own model
+                # selection or cause the session choice to become a default.
+                tui._persist_runtime_preferences("num_ctx")
                 tui._model_flow_parent = "settings"
                 tui._activate_selected_model(ModelInfo("ollama", "gpt-oss:20b", "gpt-oss:20b"))
                 tui._choice_index = tui._choice_values.index("standard")
                 tui._accept_choice()
-                query, prefix = "models", "Models:"
+                query, prefix = "session", "Session model"
             state = "_runtime_save_state"
         else:
             from klaude_cli.main import _migrate_appearance
@@ -5119,7 +5151,7 @@ def test_live_picker_is_responsive_while_settings_writer_is_blocked(
             try:
                 await asyncio.sleep(0.05)
                 assert entered.is_set()
-                pipe.send_text("/" + query if category == "model" else query)
+                pipe.send_text("/" + query if category in {"model", "tools"} else query)
                 for _ in range(40):
                     if tui._choice_filter_query == query:
                         break
@@ -5177,33 +5209,37 @@ def test_runtime_settings_control_device_threads_and_context_persist(tmp_path):
     }
 
 
-def test_runtime_turn_limit_presets_custom_value_and_reset_persist(tmp_path):
+def test_runtime_execution_link_steps_custom_value_and_reset_persist(tmp_path):
     preferences_path = tmp_path / "chat-preferences.json"
     tui = _fake_persistent_tui(chat_preferences_path=preferences_path)
-
     tui._open_settings_category("runtime")
-    turn_row = next(value for value in tui._choice_values if value.startswith("turn limit:"))
-    tui._choice_index = tui._choice_values.index(turn_row)
+    assert not any(row.startswith("turn limit:") for row in tui._choice_values)
+    tui._choice_index = tui._choice_values.index("Agent execution settings")
     tui._accept_choice()
-
-    assert tui._choice_kind == "turn limit"
-    tui._choice_index = tui._choice_values.index("Extended · 40 steps")
+    assert tui._choice_kind == "agent settings execution"
+    tui._panel.picker.focus("steps")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    tui._panel.picker.focus("choose:40")
+    tui._apply_picker_state()
     tui._accept_choice()
     assert tui.agent.max_steps == 40
     assert _load_runtime_preferences(preferences_path)["max_steps"] == 40
-
-    tui._choice_index = tui._choice_values.index("turn limit: 40 steps")
+    tui._panel.picker.focus("steps")
+    tui._apply_picker_state()
     tui._accept_choice()
-    tui._choice_index = tui._choice_values.index("custom input")
+    tui._panel.picker.focus("custom")
+    tui._apply_picker_state()
     tui._accept_choice()
     tui._set_input("31")
-    tui._submit_buffer(steer=False)
+    tui._submit_settings_input_response()
     assert tui.agent.max_steps == 31
     assert _load_runtime_preferences(preferences_path)["max_steps"] == 31
-
-    tui._choice_index = tui._choice_values.index("turn limit: 31 steps")
+    tui._panel.picker.focus("steps")
+    tui._apply_picker_state()
     tui._accept_choice()
-    tui._choice_index = tui._choice_values.index("reset to default")
+    tui._panel.picker.focus("reset-field")
+    tui._apply_picker_state()
     tui._accept_choice()
     assert tui.agent.max_steps == tui.cfg.max_agent_steps
     assert "max_steps" not in _load_runtime_preferences(preferences_path)
@@ -5219,34 +5255,22 @@ def test_runtime_turn_limit_preference_applies_to_agent(tmp_path):
     assert agent.max_steps == 40
 
 
-def test_runtime_subagent_workers_persist_and_reset(tmp_path):
+def test_agent_subagent_workers_persist_and_reset(tmp_path):
     preferences_path = tmp_path / "chat-preferences.json"
     tui = _fake_persistent_tui(chat_preferences_path=preferences_path)
     tui.agent.max_subagent_concurrency = 0
-
-    tui._open_settings_category("runtime")
-    workers_row = next(
-        value for value in tui._choice_values if value.startswith("subagent workers:")
-    )
-    tui._choice_index = tui._choice_values.index(workers_row)
-    tui._accept_choice()
-    assert tui._choice_kind == "subagent workers"
-
-    tui._choice_index = tui._choice_values.index("3")
+    tui._open_settings_category("agent tools")
+    tui._agent_settings.show("workers")
+    tui._panel.picker.focus("choose:3")
+    tui._apply_picker_state()
     tui._accept_choice()
     assert tui.agent.max_subagent_concurrency == 3
     assert _load_runtime_preferences(preferences_path)["max_subagent_concurrency"] == 3
-
-    workers_row = next(
-        value for value in tui._choice_values if value.startswith("subagent workers:")
-    )
-    tui._choice_index = tui._choice_values.index(workers_row)
+    tui._agent_settings.show("workers")
+    tui._panel.picker.focus("reset-field")
+    tui._apply_picker_state()
     tui._accept_choice()
-    tui._choice_index = tui._choice_values.index("reset to default")
-    tui._accept_choice()
-    assert tui.agent.max_subagent_concurrency == getattr(
-        tui.cfg, "max_subagent_concurrency", 0
-    )
+    assert tui.agent.max_subagent_concurrency == tui.cfg.max_subagent_concurrency
     assert "max_subagent_concurrency" not in _load_runtime_preferences(preferences_path)
 
 
@@ -5491,7 +5515,7 @@ def test_cancel_during_reasoning_picker_restores_runtime_without_saving(tmp_path
     assert json.loads(preferences.read_text()) == {"last_model": "ollama/qwen3.5:4b", "future": 1}
 
 
-def test_confirmed_model_save_is_async_and_failures_keep_selected_runtime(monkeypatch):
+def test_session_selection_never_writes_default_and_save_failures_keep_runtime(monkeypatch):
     tui = _fake_persistent_tui()
     requests = []
 
@@ -5522,24 +5546,21 @@ def test_confirmed_model_save_is_async_and_failures_keep_selected_runtime(monkey
     assert requests == [] and tui._choice_kind == "mode"
     tui._choice_index = tui._choice_values.index("standard")
     tui._accept_choice()
-    assert requests == [{("last_model",): "ollama/gpt-oss:20b"}]
+    assert requests == []
     assert len(actions) == 1 and actions[0].session_id == tui.session_id
-    assert tui._model_save_state == "saving"
+    assert tui._model_save_state == ""
     assert tui.agent.history == ["existing conversation"]
     # A later unrelated write shares the serialized revision boundary.
     tui._persist_runtime_preferences("num_ctx")
     tui._emit("settings_saved", (1, False))
     tui._before_render(None)
-    assert tui._model_save_state == "saving"
-    tui._emit("settings_saved", (2, False))
-    tui._before_render(None)
-    assert tui._model_save_state == "failed"
+    assert tui._model_save_state == ""
     assert tui.agent.model == "gpt-oss:20b" and tui.agent.ollama is selected_runtime
     assert tui.agent.history == ["existing conversation"]
     tui._persist_runtime_preferences("num_ctx")
-    tui._emit("settings_saved", (3, True))
+    tui._emit("settings_saved", (2, True))
     tui._before_render(None)
-    assert tui._model_save_state == "saved"
+    assert tui._model_save_state == ""
 
 
 def test_session_setting_failures_report_original_scope_without_changing_runtime():
@@ -5752,16 +5773,58 @@ def test_cloud_providers_remain_available_for_in_picker_login(monkeypatch):
     assert tui._choice_values[tui._choice_index] == "OpenAI"
     assert ("class:choice.selected", "  › OpenAI\n") in fragments
     assert all("API key not configured" not in value for value in tui._choice_values)
+    assert "DeepSeek" in tui._choice_values
     assert tui._choice_values[-3:] == [
         "back",
         "",
-        "Tip: open any cloud provider to sign in, sign out, or choose a model",
+        "Tip: open a provider to connect an account or endpoint",
     ]
     assert ("class:choice.disabled", "\n") in fragments
     assert (
         "class:choice.disabled",
-        "    Tip: open any cloud provider to sign in, sign out, or choose a model",
+        "    Tip: open a provider to connect an account or endpoint",
     ) in fragments
+
+
+def test_deepseek_picker_connects_explicit_endpoint_without_legacy_login(monkeypatch):
+    import klaude_cli.main as cli_main
+
+    monkeypatch.setattr(cli_main, "_model_picker_rows", lambda *_args, **_kwargs: ([], {}))
+    tui = _fake_persistent_tui()
+    tui._open_model_backend("deepseek", "cloud")
+    assert "Add DeepSeek endpoint" in tui._choice_values
+    assert "Login" not in tui._choice_values and "Logout" not in tui._choice_values
+    tui._choice_index = tui._choice_values.index("Add DeepSeek endpoint")
+    tui._accept_choice()
+    assert tui._model_settings.draft.backend == "deepseek"
+    assert tui._model_settings.draft.url == "https://api.deepseek.com/v1"
+    assert not tui._model_settings.draft.key
+
+
+def test_anthropic_picker_uses_explicit_endpoint_and_declared_modes(monkeypatch):
+    import klaude_cli.main as cli_main
+    from klaude_core.model_runtime import ModelCapabilities
+
+    monkeypatch.setattr(cli_main, "_model_picker_rows", lambda *_args, **_kwargs: ([], {}))
+    tui = _fake_persistent_tui()
+    tui._open_model_backend("anthropic", "cloud")
+    assert "Login" not in tui._choice_values
+    tui._choice_index = tui._choice_values.index("Add Anthropic endpoint")
+    tui._accept_choice()
+    assert tui._model_settings.draft.backend == "anthropic"
+    assert tui._model_settings.draft.url == "https://api.anthropic.com/v1"
+    tui.agent.model_info = ModelInfo("anthropic", "unknown-name", "Test",
+        ModelCapabilities(thinking_types=("adaptive",),
+                          effort_levels=("off", "low", "high", "max")))
+    assert cli_main._session_reasoning_modes(tui.agent) == ("thinking",)
+    cli_main._apply_session_mode(tui.agent, tui.cfg, "standard")
+    assert tui.agent.reasoning_mode == "thinking" and tui.agent.ollama_think == "low"
+    assert cli_main._session_effort_choices(tui.agent) == ("low", "high", "max")
+    tui.agent.model_info = ModelInfo("anthropic", "standard-name", "Test",
+        ModelCapabilities(thinking_types=("disabled",)))
+    assert cli_main._session_reasoning_modes(tui.agent) == ("standard",)
+    cli_main._apply_session_effort(tui.agent, tui.cfg, "high")
+    assert tui.agent.reasoning_mode == "standard" and tui.agent.ollama_think is False
 
 
 def test_unauthenticated_cloud_provider_opens_login_action(monkeypatch):
@@ -5849,8 +5912,9 @@ def test_live_picker_keeps_heading_above_first_option_visible():
         with create_pipe_input() as pipe:
             tui.application.input = pipe
             tui.application.output = DummyOutput()
-            tui._open_settings_category("tools")
-            tui._choice_index = tui._choice_values.index("activity updates: on (toggle)")
+            tui._open_settings_category("permissions")
+            tui._picker.focus("preset")
+            tui._apply_picker_state()
             assert tui._picker is not None
             tui._picker.scroll_top = tui._choice_index
             task = asyncio.create_task(tui.application.run_async())
@@ -6727,31 +6791,35 @@ def test_provider_settings_collect_and_save_api_key_through_masked_composer(monk
     assert "Crawl4AI Cloud: not configured" in tui._choice_values
     assert "Hugging Face: not configured" in tui._choice_values
 
+    def save_search_key(update):
+        saved.append((update.cfg.config_dir, update.name, update.value))
+        tui._emit("search_provider_saved", (update.session_id, update.identity, True, True))
+        return True
+    tui._session_actions = SimpleNamespace(submit=save_search_key)
     tui._choice_index = tui._choice_values.index("Brave Search: not configured")
     tui._accept_choice()
-    tui._choice_index = tui._choice_values.index("Add API key")
+    assert tui._choice_kind == "search settings detail"
+    tui._panel.picker.focus("key")
+    tui._apply_picker_state()
     tui._accept_choice()
     tui._set_input("brave-private-key")
     tui._submit_secret_response()
-
-    assert saved[-1] == (
-        tui.cfg.config_dir,
-        "BRAVE_SEARCH_API_KEY",
-        "brave-private-key",
-    )
+    tui._before_render(None)
+    assert saved[-1] == (tui.cfg.config_dir, "BRAVE_SEARCH_API_KEY", "brave-private-key")
     assert tui.cfg.brave_search_api_key == "brave-private-key"
     assert "brave-private-key" not in tui.output.text
-    assert tui._panel.page.rows[0].description == "Status: configured"
-    assert "Remove API key" in tui._choice_values
-
-    tui._choice_index = tui._choice_values.index("Remove API key")
+    assert tui._panel.row().value == "Configured · untested"
+    tui._panel.picker.focus("remove-key")
+    tui._apply_picker_state()
     tui._accept_choice()
-
+    assert tui._panel.row().id == "back"  # Removal initially focuses Cancel.
+    tui._panel.picker.focus("confirm-remove-key")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    tui._before_render(None)
     assert saved[-1] == (tui.cfg.config_dir, "BRAVE_SEARCH_API_KEY", "")
     assert tui.cfg.brave_search_api_key == ""
-    assert tui._panel.page.rows[0].description == "Status: not configured"
-    assert "Remove API key" not in tui._choice_values
-    assert tui._choice_values[tui._choice_index] == "Add API key"
+    assert tui._panel.row().value == "API key missing"
 
     cancelled = threading.Event()
     tui._secret_request = {
@@ -10077,13 +10145,22 @@ def test_fetch_url_tool_description_requires_selective_untrusted_reading():
     assert "never instructions" in lowered
 
 
-def test_cli_docs_indexing_uses_shared_owner_snapshot_helper():
+def test_cli_docs_indexing_uses_shared_owner_snapshot_helper(tmp_path):
     from klaude_cli.main import _index_installed_docs
 
-    source = inspect.getsource(_index_installed_docs)
-
-    assert "replace_owner_snapshot_atomic" in source
-    assert "delete_sources" not in source
+    path = tmp_path / "guide.md"
+    path.write_text("# Verified guide\n\nRetained content")
+    calls = []
+    knowledge = SimpleNamespace(replace_owner_snapshot_atomic=lambda *args: calls.append(args) or 3)
+    installed = SimpleNamespace(
+        files=[path], source_urls=["https://example.com/guide.md"],
+        current_dir=tmp_path, library="widgets", name="widget-docs", pending_manifest_path=None,
+    )
+    assert _index_installed_docs(installed, knowledge) == 3
+    library, owner, documents = calls[0]
+    assert (library, owner) == ("widgets", "docs:widget-docs")
+    assert documents[0].source == installed.source_urls[0]
+    assert documents[0].text == path.read_text() and documents[0].title == "guide.md"
 
 
 def test_mcp_indexing_uses_shared_owner_snapshot_helper():
@@ -10872,7 +10949,7 @@ def test_settings_permission_mcp_breadcrumb_and_parent_focus_restore():
         ("mcp servers", "MCPs"),
         ("memory", "Memory"),
         ("skills", "Skills"),
-        ("tools", "Tools"),
+        ("tools", "Agent Tools"),
         ("permissions", "Permissions"),
         ("runtime", "Runtime"),
     ],
@@ -10894,10 +10971,10 @@ def test_every_settings_category_uses_dedicated_panel(category, title):
 def test_settings_heading_underlines_only_the_title():
     tui = _fake_persistent_tui()
     tui._begin_choice("settings", tui._settings_categories(), "models")
-    heading = next(row for row in tui._panel_body().lines if "ASSISTANT" in str(row))
+    heading = next(row for row in tui._panel_body().lines if "MODELS & AI" in str(row))
     assert heading == (
         ("class:panel.heading-marker", "▪ "),
-        ("class:panel.section", "ASSISTANT"),
+        ("class:panel.section", "MODELS & AI"),
     )
     style = tui.application.style
     assert style.get_attrs_for_style_str("class:panel.section").underline is True
@@ -10932,8 +11009,8 @@ def test_settings_subpages_keep_panel_focus_and_toggle_state(tmp_path):
     tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "preferences.json")
     tui._open_settings_category("tools")
     assert tui._panel is not None
-    assert tui._panel.page.legacy_actions
-    row = next(row for row in tui._panel.page.rows if row.id == "activity updates")
+    assert not tui._panel.page.legacy_actions
+    row = next(row for row in tui._panel.page.rows if row.id == "activity")
     assert row.kind == RowKind.TOGGLE and row.checked is True
     tui._picker.focus(row.id)
     tui._apply_picker_state()
@@ -10950,18 +11027,18 @@ def test_settings_subpages_keep_panel_focus_and_toggle_state(tmp_path):
     assert tui._panel.page.breadcrumb == ("Settings", "Theme", "Interface")
 
     tui._open_settings_category("runtime")
-    tui._picker.focus("turn limit")
+    tui._picker.focus("agent execution settings")
     tui._apply_picker_state()
     tui._accept_choice()
-    assert tui._panel.page.breadcrumb == ("Settings", "Runtime", "Turn Limit")
+    assert tui._panel.page.breadcrumb == ("Settings", "Agent Tools", "Execution")
 
     tui._open_settings_category("providers")
     provider = next(row for row in tui._panel.page.rows if row.label == "Tavily")
     tui._picker.focus(provider.id)
     tui._apply_picker_state()
     tui._accept_choice()
-    assert tui._panel.page.breadcrumb == ("Settings", "Providers", "Tavily")
-    assert not any("API key" in row.value for row in tui._panel.page.rows)
+    assert tui._panel.page.breadcrumb == ("Settings", "Search", "Web Search", "Providers", "Tavily")
+    assert next(row for row in tui._panel.page.rows if row.id == "key").value == "API key missing"
 
 
 def test_panel_footer_reports_only_the_current_settings_save_state():
@@ -10990,12 +11067,10 @@ def test_settings_reset_rows_keep_actions_without_bracketed_control():
     assert permission_reset.value == ""
     assert permission_reset.description
 
-    tui._open_settings_category("tools")
-    legacy_reset = next(
-        row for row in tui._panel.page.rows if row.legacy_label == "reset to default"
-    )
-    assert legacy_reset.action.kind == "legacy-choice"
-    assert legacy_reset.value == ""
+    tui._agent_settings.open(view="tools")
+    reset = next(row for row in tui._panel.page.rows if row.id == "reset-tools")
+    assert reset.action.kind == "agent-settings-reset-tools"
+    assert reset.value == ""
     assert "[ Reset ]" not in "".join(
         text for line in tui._panel_body().lines for _style, text in line
     )
@@ -11297,13 +11372,14 @@ def test_tools_toggle_preserves_other_client_settings_and_unknown_fields(tmp_pat
 
     preferences = tmp_path / "preferences.json"
     tui = _fake_persistent_tui(chat_preferences_path=preferences)
-    tui._open_settings_category("tools")
+    tui._open_settings_category("search")
     update_settings(preferences, {
         ("last_model",): "new-model",
         ("tool_availability", "fetch_url"): False,
         ("display", "future_setting"): "preserved",
     })
-    tui._choice_index = tui._choice_values.index("web search validation: on (toggle)")
+    tui._panel.picker.focus("validation")
+    tui._apply_picker_state()
     tui._accept_choice()
     saved = json.loads(preferences.read_text())
     assert saved["last_model"] == "new-model"
@@ -11317,49 +11393,34 @@ def test_tools_toggle_preserves_other_client_settings_and_unknown_fields(tmp_pat
 
 def test_pending_tool_toggles_and_reset_use_live_state_without_disk_reads(monkeypatch):
     tui = _fake_persistent_tui()
+    tui.agent.tools = {"query_knowledge": object()}
     requests = []
 
     class PendingWriter:
         def submit(self, changes):
             from copy import deepcopy
-
             requests.append(deepcopy(changes))
             return len(requests)
 
     tui._settings_writer = PendingWriter()
     monkeypatch.setattr(
-        "klaude_cli.main._load_chat_preferences", lambda *_: pytest.fail("UI read")
+        "klaude_cli.main._load_chat_preferences", lambda *_a: pytest.fail("UI read")
     )
     monkeypatch.setattr(
-        "klaude_cli.main.update_settings", lambda *args, **kwargs: pytest.fail("UI write")
+        "klaude_cli.main.update_settings", lambda *_a, **_k: pytest.fail("UI write")
     )
-    tui._open_settings_category("tools")
-    for prefix, expected_key in (
-        ("web search validation:", ("tool_validation", "web_search")),
-        ("knowledge library:", ("tool_availability", "query_knowledge")),
-        ("provider exa:", ("web_provider_availability", "exa")),
-        ("activity updates:", ("display", "activity_updates")),
-    ):
-        for enabled in (False, True, False):
-            row = next(value for value in tui._choice_values if value.startswith(prefix))
-            tui._choice_index = tui._choice_values.index(row)
-            tui._accept_choice()
-            assert requests[-1][expected_key] is enabled
-            assert tui._choice_values[tui._choice_index].startswith(prefix)
-    assert tui.agent.tool_config.web_search.result_validation_enabled is False
+    tui._agent_settings.open_tool("query_knowledge")
+    for enabled in (False, True, False):
+        tui._apply_panel_action(PanelAction("agent-settings-tool-toggle"))
+        assert requests[-1][("tool_availability", "query_knowledge")] is enabled
+        assert tui._panel.picker.selected_id == "tool-toggle"
     assert "query_knowledge" in tui.agent.disabled_tool_names
-    assert tui.agent.tool_config.web_providers["exa"].enabled is False
-    assert tui.show_activity_updates is False
-    tui._choice_index = tui._choice_values.index(RESET_THEME_CHOICE)
-    tui._accept_choice()
-    assert tui.agent.tool_config.web_search.result_validation_enabled is True
+    tui._agent_settings.show("tools")
+    tui._apply_panel_action(PanelAction("agent-settings-reset-tools"))
     assert "query_knowledge" not in tui.agent.disabled_tool_names
-    assert tui.agent.tool_config.web_providers["exa"].enabled is True
-    assert tui.show_activity_updates is True
-    tui._choice_index = tui._choice_values.index("knowledge library: on (toggle)")
-    tui._accept_choice()
+    tui._agent_settings.open_tool("query_knowledge")
+    tui._apply_panel_action(PanelAction("agent-settings-tool-toggle"))
     assert requests[-1] == {("tool_availability", "query_knowledge"): False}
-    assert "query_knowledge" in tui.agent.disabled_tool_names
     tui._emit("settings_tools", (1, {"tool_availability": {"query_knowledge": True}}))
     tui._emit("settings_saved", (1, True))
     tui._before_render(None)
@@ -11369,8 +11430,7 @@ def test_pending_tool_toggles_and_reset_use_live_state_without_disk_reads(monkey
     tui._before_render(None)
     assert tui._runtime_save_state == "failed"
     assert "query_knowledge" in tui.agent.disabled_tool_names
-    footer = "".join(text for _style, text in tui._panel_footer_fragments())
-    assert "save unconfirmed" in footer.lower()
+    assert "save unconfirmed" in "".join(t for _s, t in tui._panel_footer_fragments()).lower()
 
 
 def test_tool_ack_merges_only_registered_boolean_settings():
@@ -11643,6 +11703,7 @@ def test_cloud_picker_never_waits_on_local_model_discovery(monkeypatch, tmp_path
     from klaude_cli.main import _model_picker_rows
 
     monkeypatch.setattr("klaude_core.config.DATA_DIR", tmp_path)
+    monkeypatch.setattr("klaude_core.config.CONFIG_DIR", tmp_path / "config")
     cfg = Config()
     cfg.openrouter_api_key = "test-key"
 
@@ -11886,7 +11947,10 @@ def test_unavailable_model_remains_inert_with_visible_reason():
 @pytest.mark.parametrize(
     "outcome", ["success", "cancel", "session", "key", "modal", "remote", "active"]
 )
-def test_cloud_activation_is_owned_and_commits_only_current_selection(monkeypatch, outcome):
+def test_cloud_activation_is_owned_and_commits_only_current_selection(
+    monkeypatch, outcome, tmp_path,
+):
+    monkeypatch.setattr("klaude_core.config.CONFIG_DIR", tmp_path / "config")
     from klaude_core.model_runtime import OpenRouterRuntime
 
     async def exercise():
@@ -13513,10 +13577,9 @@ def test_settings_tools_summary_counts_live_registered_tools_after_toggle_and_ba
     tui._begin_choice("settings", tui._settings_categories(), "tools")
     assert tui._panel.row().value == "2/3 enabled"
     tui._accept_choice()
-    row = next(row for row in tui._panel.page.rows if row.id == "web search")
-    tui._panel.picker.focus(row.id)
-    tui._apply_picker_state()
-    tui._activate_panel_toggle()
+    tui._agent_settings.open_tool("web_search")
+    tui._apply_panel_action(PanelAction("agent-settings-tool-toggle"))
+    tui._agent_settings.show("home")
     tui._cancel_choice()
     assert tui._panel.picker.selected_id == "category:tools"
     assert tui._panel.row().value == "1/3 enabled"
@@ -14790,3 +14853,133 @@ def test_current_project_behavior_does_not_imply_current_external_research():
         tools,
     )
     assert "web_search" in fresh
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_pending_model_selection_freezes_endpoint_and_keeps_running_runtime(
+    tmp_path, monkeypatch, legacy,
+):
+    from dataclasses import replace
+
+    from klaude_cli.main import _bound_model_info
+    from klaude_core.model_connections import ModelConnection, connection_registry
+    from klaude_core.settings_store import atomic_write_private
+
+    monkeypatch.setattr("klaude_core.config.CONFIG_DIR", tmp_path / "config")
+    monkeypatch.setattr("klaude_core.config.DATA_DIR", tmp_path / "data")
+    cfg = Config()
+    registry = connection_registry(cfg)
+    registry.migrate(cfg)
+    connection = (
+        registry.load()["default-ollama"]
+        if legacy
+        else ModelConnection("lab", "Lab", "openai_compatible", "http://other:8080")
+    )
+    if not legacy:
+        registry.add(connection)
+    tui = _fake_persistent_tui()
+    tui.cfg = cfg
+    tui.agent.model_info = ModelInfo("ollama", "old", "Old")
+    tui.running = True
+    runtime = tui.agent.ollama
+    messages = list(tui.agent.messages)
+    raw = ModelInfo(connection.backend, "test", "Test")
+    info = (
+        raw
+        if legacy
+        else replace(raw, connection_id=connection.id, connection_revision=connection.revision)
+    )
+    tui._activate_selected_model(info)
+    pending = tui._next_prompt_model[1]
+    assert pending.connection_id == connection.id
+    assert pending.connection_revision == connection.revision
+    assert tui.agent.ollama is runtime and tui.agent.messages == messages
+    payload = json.loads(registry.path.read_text())
+    payload["connections"][connection.id]["base_url"] = "http://changed/v1"
+    atomic_write_private(registry.path, json.dumps(payload))
+    tui.running = False
+    assert not tui._apply_next_prompt_model()
+    assert tui.agent.ollama is runtime and tui.agent.messages == messages
+    if legacy:
+        assert _bound_model_info(cfg, raw).connection_revision != pending.connection_revision
+
+
+def test_ai_defaults_selection_saves_role_without_touching_session(tmp_path):
+    from klaude_cli.model_settings import read_inventory
+    from klaude_cli.settings_panel import PanelAction
+    from klaude_core.ai_defaults import migrate_defaults
+    from klaude_core.model_connections import connection_registry
+
+    tui = _fake_persistent_tui()
+    cfg = SimpleNamespace(
+        config_dir=tmp_path / "config",
+        data_dir=tmp_path,
+        models={"coder": tui.agent.model},
+        ollama_url="http://localhost:11434",
+    )
+    tui.cfg = cfg
+    registry = connection_registry(cfg)
+    registry.migrate(cfg)
+    migrate_defaults(cfg)
+    controller = tui._ai_defaults
+    controller.open()
+    snapshot = read_inventory(
+        {
+            "config_dir": str(cfg.config_dir),
+            "data_dir": str(cfg.data_dir),
+            "roles": cfg.models,
+            "ollama_url": cfg.ollama_url,
+        }
+    )
+    identity = controller.inventory[0]
+    controller.accept("ai-defaults:inventory", identity, snapshot, "")
+    original = tui.agent.ollama
+    actions = []
+    tui._session_actions = SimpleNamespace(submit=lambda update: actions.append(update) or True)
+    controller.action(PanelAction("ai-defaults-chat"))
+    controller.action(PanelAction("ai-defaults-endpoint:default-ollama", "default-ollama"))
+    controller.select("gpt-oss:20b")
+    assert len(actions) == 1 and actions[0].change.field == "chat"
+    assert actions[0].change.value == "ollama@default-ollama/gpt-oss:20b"
+    assert tui.agent.model == "qwen3.5:4b" and tui.agent.ollama is original
+    assert "ai-defaults:home" in tui._panel.page.id
+    # A read started before the save must not restore the previous default.
+    controller.refresh()
+    controller.accept("ai-defaults:inventory", controller.inventory[0], snapshot, "")
+    assert controller.defaults.chat == "ollama@default-ollama/gpt-oss:20b"
+    controller.saved((tui.session_id, controller.pending[0], controller.defaults.public(), ""))
+    assert controller.feedback == ("AI Defaults saved", "success")
+    assert tui.agent.ollama is original
+
+
+def test_ai_utility_cancel_closes_progress_restores_draft_and_drops_late_result():
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui()
+    tui._set_input("unsent draft")
+    original = tui.agent.ollama
+    controller = tui._ai_defaults
+    controller.utility = ("utility-id", tui.session_id, "recap")
+    controller.show("utility")
+    assert "WORKING" in "".join(text for _style, text in tui._status_fragments())
+    controller.action(PanelAction("ai-defaults-utility-cancel"))
+    assert controller.utility is None and tui._choice_kind is None
+    assert tui.input.text == "unsent draft"
+    controller.utility_result("utility-id", {"text": "stale response"}, "")
+    assert "stale response" not in tui.output.text and tui.agent.ollama is original
+
+
+@pytest.mark.parametrize("width", [38, 80, 120])
+def test_ai_defaults_rows_render_neatly_at_supported_widths(tmp_path, width):
+    from klaude_cli.settings_panel import render_body
+    from klaude_core.ai_defaults import AIDefaults
+    from prompt_toolkit.utils import get_cwidth
+
+    tui = _fake_persistent_tui()
+    controller = tui._ai_defaults
+    controller.defaults = AIDefaults("ollama/small:3b")
+    controller.show("home")
+    body=render_body(tui._panel,width)
+    rendered="\n".join("".join(text for _style,text in line) for line in body.lines)
+    assert all(get_cwidth(line) <= width for line in rendered.splitlines())
+    assert "Default Chat" in rendered and "Utility" in rendered

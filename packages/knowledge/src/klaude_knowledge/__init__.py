@@ -1,5 +1,6 @@
 from .docs import (
     finalize_docs_source,
+    index_installed_docs,
     install_crawl_source,
     install_docs_source,
     list_docs_sources,
@@ -21,6 +22,7 @@ __all__ = [
     "IndexDocument",
     "install_docs_source",
     "finalize_docs_source",
+    "index_installed_docs",
     "install_crawl_source",
     "install_skill_package",
     "finalize_skill_package",

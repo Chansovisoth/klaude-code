@@ -23,14 +23,18 @@ from .settings_store import atomic_write_private, read_settings, settings_lock
 
 BACKEND_METADATA = {
     "ollama": ("Local", "Ollama"),
+    "openai_compatible": ("Local", "Compatible API"),
     "openai_api": ("Cloud", "OpenAI"),
     "openrouter": ("Cloud", "OpenRouter"),
     "gemini_api": ("Cloud", "Google"),
     "openai_codex": ("Cloud", "OpenAI Codex"),
+    "deepseek": ("Cloud", "DeepSeek"),
+    "anthropic": ("Cloud", "Anthropic"),
     # Reserved for later agent bridges; they are intentionally not runnable.
     "codex": ("Cloud", "OpenAI"),
     "gemini_cli": ("Cloud", "Google"),
 }
+MAX_MODEL_CACHE_BYTES = 8_000_000
 
 
 def _metadata_mapping(value: object) -> dict[str, Any]:
@@ -111,6 +115,14 @@ class ModelCapabilities:
     effort_levels: tuple[str, ...] = ("off", "low", "medium", "high")
     supports_tools: bool = True
     context_window: int | None = None
+    tools_evidence: str = "unknown"
+    thinking_types: tuple[str, ...] | None = None
+    max_output_tokens: int | None = None
+
+    @property
+    def requires_thinking(self) -> bool:
+        return self.thinking_types is not None and bool(self.thinking_types) \
+            and "disabled" not in self.thinking_types
 
 
 @dataclass(frozen=True)
@@ -120,13 +132,31 @@ class ModelInfo:
     display_name: str
     capabilities: ModelCapabilities = field(default_factory=ModelCapabilities)
     released_at: int = 0
+    connection_id: str = ""
+    connection_revision: str = ""
+    connection_source: str = ""
+    credential_revision: str = ""
 
     @property
     def ref(self) -> str:
-        return f"{self.backend}/{self.model_id}"
+        prefix = f"{self.backend}@{self.connection_id}" if self.connection_id else self.backend
+        return f"{prefix}/{self.model_id}"
+
+    @property
+    def request_identity(self) -> tuple[str, str]:
+        scope = (f"{self.backend}@{self.connection_id}:{self.connection_revision}"
+                 if self.connection_id else self.backend)
+        return scope, self.model_id
+
+    @property
+    def uses_configured_context(self) -> bool:
+        """Unknown compatible servers receive a bounded budget, including remote ones."""
+        return self.source == "Local" or self.backend == "openai_compatible"
 
     @property
     def source(self) -> str:
+        if self.connection_source:
+            return self.connection_source
         return BACKEND_METADATA.get(self.backend, ("Cloud", self.backend))[0]
 
     @property
@@ -135,8 +165,10 @@ class ModelInfo:
 
 
 def load_model_cache(path: Path) -> list[ModelInfo]:
-    """Read a non-sensitive cached cloud catalog; malformed caches are ignored."""
+    """Read public cached catalogs; malformed or oversized caches are ignored."""
     try:
+        if path.is_symlink() or path.stat().st_size > MAX_MODEL_CACHE_BYTES:
+            return []
         raw = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return []
@@ -145,58 +177,79 @@ def load_model_cache(path: Path) -> list[ModelInfo]:
 
 
 def models_from_records(entries: object) -> list[ModelInfo]:
+    from .model_connections import BACKENDS, split_model_ref, validate_model_id
+
     result: list[ModelInfo] = []
     for item in entries if isinstance(entries, list) else []:
         if not isinstance(item, dict):
             continue
         backend = item.get("backend")
         model_id = item.get("model_id")
-        if (
-            backend not in {"openai_api", "openai_codex", "openrouter", "gemini_api"}
-            or not isinstance(model_id, str)
-            or not is_chat_model_id(backend, model_id)
-        ):
+        if not isinstance(backend, str) or backend not in BACKENDS \
+                or not is_chat_model_id(backend, str(model_id)):
             continue
-        result.append(
-            ModelInfo(
-                backend,
-                model_id,
-                str(item.get("display_name") or model_id),
-                capabilities=ModelCapabilities(
-                    effort_levels=tuple(item.get("effort_levels") or ())
-                    or ModelCapabilities().effort_levels,
-                    supports_tools=bool(item.get("supports_tools", True)),
-                    context_window=(
-                        int(item["context_window"])
-                        if isinstance(item.get("context_window"), int)
-                        and int(item["context_window"]) > 0
-                        else None
-                    ),
-                ),
-                released_at=int(item.get("released_at") or 0),
-            )
-        )
+        connection_id = item.get("connection_id", "")
+        try:
+            model_id = validate_model_id(model_id)
+            if connection_id:
+                split_model_ref(f"{backend}@{connection_id}/{model_id}")
+            elif backend in {"ollama", "openai_compatible"}:
+                continue
+            released = max(0, int(item.get("released_at") or 0))
+        except (ValueError, TypeError):
+            continue
+        window = item.get("context_window")
+        effort = item.get("effort_levels")
+        thinking = item.get("thinking_types")
+        output = item.get("max_output_tokens")
+        result.append(ModelInfo(
+            backend, model_id, str(item.get("display_name") or model_id),
+            capabilities=ModelCapabilities(
+                effort_levels=tuple(effort) if isinstance(effort, list)
+                and effort and all(isinstance(level, str) for level in effort)
+                else ModelCapabilities().effort_levels,
+                supports_tools=item.get("supports_tools", True) is True,
+                context_window=window if type(window) is int and window > 0 else None,
+                tools_evidence=str(item.get("tools_evidence") or "unknown"),
+                thinking_types=tuple(thinking) if isinstance(thinking, list)
+                and len(thinking) <= 3 and all(
+                    isinstance(level, str) and level in {"disabled", "enabled", "adaptive"}
+                    for level in thinking) else None,
+                max_output_tokens=output if type(output) is int
+                and 0 < output <= 2_000_000 else None,
+            ), released_at=released, connection_id=connection_id,
+            connection_revision=str(item.get("connection_revision") or ""),
+            connection_source=item.get("connection_source", "")
+            if item.get("connection_source") in {"Local", "Cloud"} else "",
+            credential_revision=str(item.get("credential_revision") or ""),
+        ))
     return result
 
 
 def model_records(models: list[ModelInfo]) -> list[dict[str, Any]]:
     """Serialize only public catalog fields, for caches and private worker IPC."""
-    return {
-        "models": [
-            {
-                "backend": item.backend,
-                "model_id": item.model_id,
-                "display_name": item.display_name,
-                "effort_levels": list(item.capabilities.effort_levels),
-                "supports_tools": item.capabilities.supports_tools,
-                "context_window": item.capabilities.context_window,
-                "released_at": item.released_at,
-            }
-            for item in models
-            if item.backend in {"openai_api", "openai_codex", "openrouter", "gemini_api"}
-            and is_chat_model_id(item.backend, item.model_id)
-        ]
-    }["models"]
+    return [
+        {
+            "backend": item.backend, "model_id": item.model_id,
+            "display_name": item.display_name,
+            "effort_levels": list(item.capabilities.effort_levels),
+            "supports_tools": item.capabilities.supports_tools,
+            "context_window": item.capabilities.context_window,
+            "tools_evidence": item.capabilities.tools_evidence,
+            "thinking_types": list(item.capabilities.thinking_types)
+            if item.capabilities.thinking_types is not None else None,
+            "max_output_tokens": item.capabilities.max_output_tokens,
+            "released_at": item.released_at,
+            "connection_id": item.connection_id,
+            "connection_revision": item.connection_revision,
+            "connection_source": item.connection_source,
+            "credential_revision": item.credential_revision,
+        }
+        for item in models
+        if (item.connection_id or item.backend in {
+            "openai_api", "openai_codex", "openrouter", "gemini_api",
+        }) and is_chat_model_id(item.backend, item.model_id)
+    ]
 
 
 def model_cache_generation(path: Path, backend: str) -> str:
@@ -207,6 +260,7 @@ def model_cache_generation(path: Path, backend: str) -> str:
 def save_model_cache(
     path: Path, models: list[ModelInfo], *, backend: str | None = None,
     expected_generation: str | None = None, invalidate: bool = False,
+    connection_id: str = "",
 ) -> bool:
     """Merge one provider under a lock and reject results invalidated during discovery.
 
@@ -215,23 +269,31 @@ def save_model_cache(
     """
     try:
         with settings_lock(path):
+            if path.exists() and path.stat().st_size > MAX_MODEL_CACHE_BYTES:
+                return False
             payload = read_settings(path)
             generations = payload.get("generations", {})
             generations = dict(generations) if isinstance(generations, dict) else {}
             if backend is not None:
+                scope = f"{backend}@{connection_id}" if connection_id else backend
                 if (
                     expected_generation is not None
-                    and generations.get(backend, "") != expected_generation
+                    and generations.get(scope, "") != expected_generation
                 ):
                     return False
                 if invalidate:
-                    generations[backend] = uuid.uuid4().hex
+                    generations[scope] = uuid.uuid4().hex
                 existing = models_from_records(payload.get("models", []))
-                models = [item for item in existing if item.backend != backend] + [
-                    item for item in models if item.backend == backend
+                models = [item for item in existing if (item.backend, item.connection_id)
+                          != (backend, connection_id)] + [
+                    item for item in models
+                    if (item.backend, item.connection_id) == (backend, connection_id)
                 ]
             payload.update(models=model_records(models), generations=generations)
-            atomic_write_private(path, json.dumps(payload, indent=2) + "\n")
+            serialized = json.dumps(payload, indent=2) + "\n"
+            if len(serialized.encode()) > MAX_MODEL_CACHE_BYTES:
+                return False
+            atomic_write_private(path, serialized)
             return True
     except OSError:
         return False
@@ -396,7 +458,8 @@ class OllamaRuntime:
 
     def fork_for_child(self) -> OllamaRuntime:
         """Create an independent transport tracker for child model requests."""
-        return OllamaRuntime(Ollama(self.ollama.base_url, timeout=self.ollama.timeout))
+        return OllamaRuntime(Ollama(self.ollama.base_url, timeout=self.ollama.timeout,
+                   api_key=self.ollama.api_key, trust_env=self.ollama.trust_env))
 
     def close(self) -> None:
         self.ollama.close()
@@ -452,7 +515,9 @@ class OpenAIRuntime(_CancelableResponseRuntime):
 
     backend = "openai_api"
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, *, base_url: str = "", request_timeout: float | None = None):
+        self.base_url = base_url
+        self.request_timeout=request_timeout
         if not api_key.strip():
             raise ValueError("OpenAI API key is not configured.")
         self.api_key = api_key
@@ -488,13 +553,20 @@ class OpenAIRuntime(_CancelableResponseRuntime):
             from openai import OpenAI
         except ImportError as exc:  # pragma: no cover - depends on optional extra
             raise RuntimeError("OpenAI API support requires `klaude-core[cloud]`.") from exc
-        return OpenAI(api_key=self.api_key)
+        return OpenAI(api_key=self.api_key, **({"base_url": self.base_url}
+                                              if self.base_url else {}),
+                      **({"timeout":self.request_timeout,"max_retries":0}
+                         if self.request_timeout is not None else {}))
 
     def fork_for_child(self) -> OpenAIRuntime:
         """Keep credentials while isolating mutable stream and usage state."""
-        return OpenAIRuntime(self.api_key)
+        return OpenAIRuntime(self.api_key, base_url=self.base_url,
+                             request_timeout=self.request_timeout)
 
     def _response_create(self, **kwargs: Any):
+        if self.request_timeout is not None and not kwargs.get("stream"):
+            with self._client() as client:
+                return client.responses.create(**kwargs)
         return self._client().responses.create(**kwargs)
 
     @classmethod
@@ -614,6 +686,8 @@ class OpenAIRuntime(_CancelableResponseRuntime):
         }
         if think not in {None, False, "off", "auto"}:
             kwargs["reasoning"] = {"effort": str(think)}
+        if options and type(options.get("num_predict")) is int and options["num_predict"]>0:
+            kwargs["max_output_tokens"] = options["num_predict"]
         response = self._response_create(**kwargs)
         self._record(response)
         self._raise_for_terminal_response(response)
@@ -887,13 +961,121 @@ class OpenAIRuntime(_CancelableResponseRuntime):
         }
 
 
+def chat_completion_messages(
+    messages: list[dict[str, Any]], *, include_reasoning: bool = False,
+    deepseek_scope: tuple[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    call_ids = {
+        str(call.get("id", ""))
+        for message in messages
+        if message.get("role") == "assistant"
+        for call in message.get("tool_calls", []) or []
+        if isinstance(call, dict) and call.get("id")
+    }
+    output_ids = {
+        str(message.get("tool_call_id", ""))
+        for message in messages
+        if message.get("role") == "tool" and message.get("tool_call_id")
+    }
+    complete_call_ids = call_ids & output_ids
+    result: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role", ""))
+        if role == "tool":
+            call_id = str(message.get("tool_call_id", ""))
+            if call_id in complete_call_ids:
+                result.append(
+                    {"role": "tool", "tool_call_id": call_id, "content": _content(message)}
+                )
+            continue
+        if role not in {"system", "user", "assistant"}:
+            continue
+        item: dict[str, Any] = {"role": role, "content": _content(message)}
+        calls = message.get("tool_calls")
+        if role == "assistant" and isinstance(calls, list) and calls:
+            complete_calls = []
+            for call in calls:
+                if (
+                    not isinstance(call, dict)
+                    or str(call.get("id", "")) not in complete_call_ids
+                ):
+                    continue
+                function = call.get("function", {})
+                if not isinstance(function, dict):
+                    continue
+                arguments = function.get("arguments", "{}")
+                if not isinstance(arguments, str):
+                    arguments = json.dumps(arguments)
+                complete_calls.append(
+                    {
+                        "id": str(call["id"]),
+                        "type": "function",
+                        "function": {
+                            "name": str(function.get("name", "")),
+                            "arguments": arguments,
+                        },
+                    }
+                )
+            if complete_calls:
+                item["tool_calls"] = complete_calls
+        reasoning_details = message.get("openrouter_reasoning_details")
+        all_calls_complete = not calls or (
+            isinstance(calls, list)
+            and all(
+                isinstance(call, dict)
+                and str(call.get("id", "")) in complete_call_ids
+                for call in calls
+            )
+        )
+        if (
+            include_reasoning and role == "assistant"
+            and isinstance(reasoning_details, list)
+            and all_calls_complete
+        ):
+            # OpenRouter requires this sequence to be echoed unchanged and
+            # in order across tool continuations. It remains private model
+            # state and is never rendered as transcript text.
+            item["reasoning_details"] = reasoning_details
+        if deepseek_scope is not None and role == "assistant" and all_calls_complete:
+            continuation = message.get("deepseek_continuation")
+            if (isinstance(continuation, dict)
+                    and (continuation.get("scope"), continuation.get("model")) == deepseek_scope
+                    and isinstance(continuation.get("reasoning_content"), str)):
+                item["reasoning_content"] = continuation["reasoning_content"]
+        result.append(item)
+    return result
+
+
+def validated_chat_calls(calls: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Let the agent retry a bad provider call without exposing its arguments."""
+    assembled = [calls[index] for index in sorted(calls)]
+    for call in assembled:
+        function = call["function"]
+        if not call["id"] or not function["name"]:
+            return [{"function": {"name": "", "arguments": "{}"},
+                     "parse_status": "malformed"}]
+        try:
+            arguments = json.loads(function["arguments"] or "{}")
+        except json.JSONDecodeError:
+            return [{"function": {"name": "", "arguments": "{}"},
+                     "parse_status": "malformed"}]
+        if not isinstance(arguments, dict):
+            return [{"function": {"name": "", "arguments": "{}"},
+                     "parse_status": "malformed"}]
+    return assembled
+
+
 class OpenRouterRuntime(_CancelableResponseRuntime):
     """OpenRouter Chat Completions adapter with streaming tool assembly."""
 
     backend = "openrouter"
     base_url = "https://openrouter.ai/api/v1"
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, *, base_url: str = "", request_timeout: float | None = None):
+        self.request_timeout=request_timeout
+        self._bounded_client: Any = None
+        if base_url:
+            self.base_url = base_url
         if not api_key.strip():
             raise ValueError("OpenRouter API key is not configured.")
         self.api_key = api_key
@@ -908,86 +1090,22 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         return OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
+            **({"timeout":self.request_timeout,"max_retries":0}
+               if self.request_timeout is not None else {}),
         )
 
     def fork_for_child(self) -> OpenRouterRuntime:
-        return OpenRouterRuntime(self.api_key)
+        return OpenRouterRuntime(self.api_key, base_url=self.base_url,
+                                 request_timeout=self.request_timeout)
+
+    def close(self) -> None:
+        self.cancel_active()
+        if self._bounded_client is not None:
+            self._bounded_client.close()
 
     @staticmethod
     def _messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        call_ids = {
-            str(call.get("id", ""))
-            for message in messages
-            if message.get("role") == "assistant"
-            for call in message.get("tool_calls", []) or []
-            if isinstance(call, dict) and call.get("id")
-        }
-        output_ids = {
-            str(message.get("tool_call_id", ""))
-            for message in messages
-            if message.get("role") == "tool" and message.get("tool_call_id")
-        }
-        complete_call_ids = call_ids & output_ids
-        result: list[dict[str, Any]] = []
-        for message in messages:
-            role = str(message.get("role", ""))
-            if role == "tool":
-                call_id = str(message.get("tool_call_id", ""))
-                if call_id in complete_call_ids:
-                    result.append(
-                        {"role": "tool", "tool_call_id": call_id, "content": _content(message)}
-                    )
-                continue
-            if role not in {"system", "user", "assistant"}:
-                continue
-            item: dict[str, Any] = {"role": role, "content": _content(message)}
-            calls = message.get("tool_calls")
-            if role == "assistant" and isinstance(calls, list) and calls:
-                complete_calls = []
-                for call in calls:
-                    if (
-                        not isinstance(call, dict)
-                        or str(call.get("id", "")) not in complete_call_ids
-                    ):
-                        continue
-                    function = call.get("function", {})
-                    if not isinstance(function, dict):
-                        continue
-                    arguments = function.get("arguments", "{}")
-                    if not isinstance(arguments, str):
-                        arguments = json.dumps(arguments)
-                    complete_calls.append(
-                        {
-                            "id": str(call["id"]),
-                            "type": "function",
-                            "function": {
-                                "name": str(function.get("name", "")),
-                                "arguments": arguments,
-                            },
-                        }
-                    )
-                if complete_calls:
-                    item["tool_calls"] = complete_calls
-            reasoning_details = message.get("openrouter_reasoning_details")
-            all_calls_complete = not calls or (
-                isinstance(calls, list)
-                and all(
-                    isinstance(call, dict)
-                    and str(call.get("id", "")) in complete_call_ids
-                    for call in calls
-                )
-            )
-            if (
-                role == "assistant"
-                and isinstance(reasoning_details, list)
-                and all_calls_complete
-            ):
-                # OpenRouter requires this sequence to be echoed unchanged and
-                # in order across tool continuations. It remains private model
-                # state and is never rendered as transcript text.
-                item["reasoning_details"] = reasoning_details
-            result.append(item)
-        return result
+        return chat_completion_messages(messages, include_reasoning=True)
 
     @staticmethod
     def _attribute(value: Any, name: str, default: Any = None) -> Any:
@@ -997,22 +1115,7 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
 
     @staticmethod
     def _validated_calls(calls: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
-        """Let the agent retry a bad provider call without exposing its arguments."""
-        assembled = [calls[index] for index in sorted(calls)]
-        for call in assembled:
-            function = call["function"]
-            if not call["id"] or not function["name"]:
-                return [{"function": {"name": "", "arguments": "{}"},
-                         "parse_status": "malformed"}]
-            try:
-                arguments = json.loads(function["arguments"] or "{}")
-            except json.JSONDecodeError:
-                return [{"function": {"name": "", "arguments": "{}"},
-                         "parse_status": "malformed"}]
-            if not isinstance(arguments, dict):
-                return [{"function": {"name": "", "arguments": "{}"},
-                         "parse_status": "malformed"}]
-        return assembled
+        return validated_chat_calls(calls)
 
     @staticmethod
     def _reasoning_details(value: Any) -> list[dict[str, Any]]:
@@ -1063,7 +1166,10 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         if think not in {None, False, "off", "auto"}:
             kwargs["extra_body"] = {"reasoning": {"effort": str(think)}}
         try:
-            return self._client().chat.completions.create(**kwargs)
+            client=self._client()
+            if self.request_timeout is not None:
+                self._bounded_client=client
+            return client.chat.completions.create(**kwargs)
         except Exception as exc:
             status = getattr(exc, "status_code", None)
             if status == 402:
@@ -1074,7 +1180,10 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
             if isinstance(status, int):
                 # SDK exception strings can include account IDs and response
                 # bodies. Keep status diagnostics without persisting that body.
-                raise RuntimeError(f"OpenRouter request rejected (HTTP {status}).") from None
+                from .compatible_runtime import CompatibleModelError
+
+                raise CompatibleModelError(
+                    f"OpenRouter request rejected (HTTP {status}).",status_code=status) from None
             raise
 
     def chat(
@@ -1094,6 +1203,7 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         response_id = ""
         usage: Any = None
         completed = False
+        finish_reason: str | None = None
         try:
             for chunk in response_stream:
                 self._raise_chunk_error(chunk)
@@ -1103,6 +1213,7 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
                 for choice in choices:
                     if self._attribute(choice, "finish_reason", None) is not None:
                         completed = True
+                        finish_reason=str(self._attribute(choice,"finish_reason"))
                     delta = self._attribute(choice, "delta", {}) or {}
                     reasoning_details.extend(
                         self._reasoning_details(
@@ -1131,6 +1242,7 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         assembled_calls = self._validated_calls(calls)
         self.last_chat_metadata = {
             "provider": self.backend,
+            "finish_reason":finish_reason,
             **({"response_id": response_id} if response_id else {}),
             "usage": _metadata_mapping(usage),
         }
@@ -1481,11 +1593,15 @@ class CodexRuntime(OpenAIRuntime):
 _CLIENT_ORIGINATOR = "klaude_code"
 
 
-def discover_codex_models(auth: CodexAuthManager | None = None) -> list[ModelInfo]:
+def discover_codex_models(
+    auth: CodexAuthManager | None = None, *, strict: bool = False,
+) -> list[ModelInfo]:
     """Return the account-aware model catalog from official Codex."""
     try:
         listed = (auth or CodexAuthManager()).list_models()
     except Exception:
+        if strict:
+            raise
         return []
     result: list[ModelInfo] = []
     for item in listed:
@@ -1521,7 +1637,9 @@ class GeminiRuntime(_CancelableResponseRuntime):
 
     backend = "gemini_api"
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, *, request_timeout: float | None = None):
+        self.request_timeout=request_timeout
+        self._bounded_client: Any = None
         if not api_key.strip():
             raise ValueError("Gemini API key is not configured.")
         self.api_key = api_key
@@ -1538,7 +1656,12 @@ class GeminiRuntime(_CancelableResponseRuntime):
 
     def fork_for_child(self) -> GeminiRuntime:
         """Keep the API credential while isolating mutable response state."""
-        return GeminiRuntime(self.api_key)
+        return GeminiRuntime(self.api_key,request_timeout=self.request_timeout)
+
+    def close(self) -> None:
+        self.cancel_active()
+        if self._bounded_client is not None:
+            self._bounded_client.close()
 
     def _request(
         self,
@@ -1547,6 +1670,7 @@ class GeminiRuntime(_CancelableResponseRuntime):
         tools: list[dict[str, Any]] | None,
         stream: bool,
         think: bool | str | None,
+        options: dict[str, Any] | None = None,
     ):
         genai, types = self._sdk()
         contents = []
@@ -1599,6 +1723,8 @@ class GeminiRuntime(_CancelableResponseRuntime):
             for t in tools or []
         ]
         config: dict[str, Any] = {"system_instruction": system}
+        if options and type(options.get("num_predict")) is int and options["num_predict"]>0:
+            config["max_output_tokens"] = options["num_predict"]
         effort = str(think).lower() if isinstance(think, str) else ""
         if effort in {"low", "medium", "high"}:
             if model.casefold().startswith("gemini-2.5"):
@@ -1614,7 +1740,11 @@ class GeminiRuntime(_CancelableResponseRuntime):
         if declarations:
             config["tools"] = [{"function_declarations": declarations}]
             config["automatic_function_calling"] = {"disable": True}
-        client = genai.Client(api_key=self.api_key)
+        client = genai.Client(api_key=self.api_key,**({"http_options":{
+            "timeout":int(self.request_timeout*1000),"retry_options":{"attempts":1}}}
+            if self.request_timeout is not None else {}))
+        if self.request_timeout is not None:
+            self._bounded_client=client
         method = client.models.generate_content_stream if stream else client.models.generate_content
         return method(model=model, contents=contents, config=config)
 
@@ -1626,10 +1756,12 @@ class GeminiRuntime(_CancelableResponseRuntime):
         options: dict[str, Any] | None = None,
         think: bool | str | None = None,
     ) -> dict[str, Any]:
-        response = self._request(model, messages, tools, False, think)
+        response = self._request(model, messages, tools, False, think, options=options)
         self.last_chat_metadata = {
             "provider": "gemini_api",
             "usage": getattr(response, "usage_metadata", None),
+            "finish_reason":str(next((getattr(candidate,"finish_reason","")
+                for candidate in getattr(response,"candidates",[]) or []),"")),
         }
         calls = []
         for candidate in getattr(response, "candidates", []) or []:
@@ -1664,7 +1796,7 @@ class GeminiRuntime(_CancelableResponseRuntime):
         think: bool | str | None = None,
     ):
         response_stream = self._track_active_response(
-            self._request(model, messages, tools, True, think)
+            self._request(model, messages, tools, True, think, options=options)
         )
         calls: list[dict[str, Any]] = []
         try:
@@ -1795,7 +1927,7 @@ def discover_openrouter_models(api_key: str) -> list[ModelInfo]:
     return sorted(result, key=newest_model_first_key)
 
 
-def discover_gemini_models(api_key: str) -> list[ModelInfo]:
+def discover_gemini_models(api_key: str, *, strict: bool = False) -> list[ModelInfo]:
     """Return Gemini generate-content models through the official SDK."""
     if not api_key:
         return []
@@ -1804,6 +1936,8 @@ def discover_gemini_models(api_key: str) -> list[ModelInfo]:
         genai, _ = runtime._sdk()
         listed = genai.Client(api_key=api_key).models.list()
     except Exception:
+        if strict:
+            raise
         return []
     result = []
     for item in listed:

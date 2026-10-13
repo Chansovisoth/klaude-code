@@ -3,10 +3,12 @@ the agent sees."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 from klaude_core import Config, EntityResolver, WikimediaEntityClient
+from klaude_core.fetch_settings import exa_fallback, fetch_provider
 
 from .cache import TTLCache
 from .crawler import crawl_site as crawl_site_pages
@@ -15,6 +17,7 @@ from .fetch import (
     FetchLimits,
     FetchPageError,
     UnsafeURL,
+    _bound_content,
     canonical_url_key,
     canonicalize_public_url,
     fetch_page_detailed,
@@ -169,6 +172,21 @@ class Web:
     def fetch(self, url: str) -> str:
         return str(self.fetch_detailed(url).get("content", ""))
 
+    def fetch_fresh(self, url: str) -> str:
+        """Explicit source refresh bypasses page/turn caches, retaining fetch guards."""
+        result = self.fetch_fresh_detailed(url)
+        if result.get("content_truncated"):
+            raise FetchPageError(
+                "Source exceeded configured extraction limits", failure_class="content_limit"
+            )
+        return str(result.get("content", ""))
+
+    def fetch_fresh_detailed(self, url: str) -> dict:
+        """Fresh guarded extraction with final URL and source metadata."""
+        return self._bounded_document(
+            self._fetch_uncached_detailed(canonicalize_public_url(url))
+        )
+
     def probe_detailed(self, url: str, method: str = "HEAD") -> dict:
         """Return bounded HTTP metadata without reading page content."""
         try:
@@ -223,10 +241,14 @@ class Web:
             return self._fetch_failure(url, exc, "unsafe_url", transient=False)
 
         sources = self._source_registry()
+        profile = self._fetch_profile()
+        if getattr(self, "_last_fetch_profile", None) != profile:
+            sources.clear_failures()
+            self._last_fetch_profile = profile
         registered = sources.source_for_url(requested_url)
         if registered is not None:
             return {
-                **registered.to_dict(),
+                **self._bounded_document(registered.to_dict()),
                 "canonical_url": url_key,
                 "status": "succeeded",
                 "provider": "registry",
@@ -241,11 +263,11 @@ class Web:
         if previous_failure is not None:
             return {**previous_failure, "attempt_reused": True}
 
-        key = f"page_v2::{self.cfg.web_provider}::{url_key}"
-        hit = self.cache.get(key)
+        key = f"page_v3::{profile}::{url_key}"
+        hit = self.cache.get(key) if self.cfg.web_fetch.cache_ttl_seconds else None
         if hit is not None:
             if isinstance(hit, dict) and "content" in hit:
-                cached = {**hit, "cache_hit": True}
+                cached = {**self._bounded_document(hit), "cache_hit": True}
             else:
                 cached = {
                     "requested_url": requested_url,
@@ -313,8 +335,29 @@ class Web:
         }
         cache_value = dict(response)
         cache_value.pop("source_id", None)
-        self.cache.set(key, cache_value, self.cfg.web_fetch.cache_ttl_seconds)
+        if self.cfg.web_fetch.cache_ttl_seconds:
+            self.cache.set(key, cache_value, self.cfg.web_fetch.cache_ttl_seconds)
         return response
+
+    def _bounded_document(self, document: dict) -> dict:
+        content, truncated = _bound_content(
+            str(document.get("content", "")), self.cfg.web_fetch.max_content_characters
+        )
+        return {**document, "content": content, "content_length": len(content),
+                "content_truncated": bool(document.get("content_truncated") or truncated)}
+
+    def _fetch_profile(self) -> str:
+        import hashlib
+        import json
+
+        cfg = self.cfg
+        values = (fetch_provider(cfg), exa_fallback(cfg), cfg.crawl4ai_url, cfg.exa_base_url,
+                  cfg.web_fetch.crawl4ai_enabled, cfg.web_fetch.exa_enabled,
+                  cfg.web_fetch.timeout_seconds, cfg.web_fetch.max_download_bytes,
+                  cfg.web_fetch.max_content_characters, cfg.web_fetch.max_redirects,
+                  cfg.web_fetch.cache_ttl_seconds, cfg.crawl4ai_api_key, cfg.exa_api_key)
+        # Scope failed attempts and disk cache without storing credentials in keys.
+        return hashlib.sha256(json.dumps(values).encode()).hexdigest()
 
     def _fetch_failure(
         self,
@@ -442,10 +485,12 @@ class Web:
         delay_min: float | None = None,
         delay_max: float | None = None,
         on_progress=None,
+        fresh: bool = False,
+        fetcher: Callable[[str], str] | None = None,
     ) -> dict:
         result = crawl_site_pages(
             start_url,
-            self.fetch,
+            fetcher or (self.fetch_fresh if fresh else self.fetch),
             max_depth=self.cfg.crawl_max_depth if max_depth is None else max_depth,
             max_pages=self.cfg.crawl_max_pages if max_pages is None else max_pages,
             pattern=pattern,
@@ -488,7 +533,8 @@ class Web:
     ) -> SearchResponse:
         search_query = build_search_query(query, self.cfg, max_results, intent=intent)
         semantic_query = search_query.text
-        if provider:
+        if (provider or self.cfg.web_search.settings_provider is not None
+                or self.cfg.web_search.settings_fallbacks is not None):
             return quality_search(
                 self.cfg,
                 query,
@@ -560,8 +606,12 @@ class Web:
     def _fetch_uncached(self, url: str) -> str:
         return str(self._fetch_uncached_detailed(url).get("content", ""))
 
-    def _fetch_uncached_detailed(self, url: str) -> dict:
-        if self.cfg.web_provider == "exa":
+    def _fetch_uncached_detailed(self, url: str, *, extraction: str = "") -> dict:
+        if fetch_provider(self.cfg) == "exa":
+            if not self.cfg.web_fetch.exa_enabled:
+                raise FetchPageError("Exa is disabled", failure_class="disabled")
+            if not self.cfg.exa_api_key:
+                raise FetchPageError("Exa key missing", failure_class="configuration")
             requested_url = canonicalize_public_url(url)
             safe_url, redirect_count = resolve_public_url(
                 requested_url,
@@ -573,6 +623,8 @@ class Web:
                 self.cfg.exa_api_key,
                 safe_url,
                 max_characters=self.cfg.web_fetch.max_content_characters,
+                timeout_seconds=self.cfg.web_fetch.timeout_seconds,
+                max_response_bytes=self.cfg.web_fetch.max_download_bytes,
             )
             return {
                 "requested_url": requested_url,
@@ -602,9 +654,10 @@ class Web:
             )
             fetched = fetch_page_detailed(
                 url,
-                self.cfg.crawl4ai_url,
+                self.cfg.crawl4ai_url if self.cfg.web_fetch.crawl4ai_enabled else "",
                 self.cfg.crawl4ai_api_key,
                 limits=limits,
+                extraction=extraction,
             )
             return {
                 "requested_url": fetched.requested_url,
@@ -634,21 +687,22 @@ class Web:
             raise
         except FetchPageError as exc:
             if (
-                self.cfg.web_provider == "auto"
+                exa_fallback(self.cfg)
+                and self.cfg.web_fetch.exa_enabled
                 and self.cfg.exa_api_key
                 and exc.failure_class in {"empty_extraction", "unsupported_content_type"}
                 and exc.final_url
             ):
                 safe_url = validate_public_url(exc.final_url)
-                attempted = ["direct"]
-                if self.cfg.crawl4ai_url:
-                    attempted.append("crawl4ai")
-                attempted.extend(["trafilatura", "exa"])
+                attempted = list(exc.attempted_providers) or ["direct"]
+                attempted.append("exa")
                 content = exa_fetch(
                     self.cfg.exa_base_url,
                     self.cfg.exa_api_key,
                     safe_url,
                     max_characters=self.cfg.web_fetch.max_content_characters,
+                    timeout_seconds=self.cfg.web_fetch.timeout_seconds,
+                    max_response_bytes=self.cfg.web_fetch.max_download_bytes,
                 )
                 return {
                     "requested_url": canonicalize_public_url(url),

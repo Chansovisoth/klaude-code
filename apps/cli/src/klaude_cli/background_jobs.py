@@ -1,4 +1,4 @@
-"""Owned, replaceable read-only jobs with killable isolated worker processes."""
+"""Owned, replaceable jobs with killable isolated worker processes."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ class BackgroundJob:
     id: str
     cancel: threading.Event = field(default_factory=threading.Event)
     thread: threading.Thread | None = None
+    notify_cancel: bool = False
 
 
 class OwnedBackgroundJobs:
@@ -44,7 +45,8 @@ class OwnedBackgroundJobs:
                 if job.key == key:
                     job.cancel.set()
 
-    def submit(self, key: str, request: dict[str, Any], *, timeout: float = 30) -> str:
+    def submit(self, key: str, request: dict[str, Any], *, timeout: float = 30,
+               notify_cancel: bool = False) -> str:
         with self._lock:
             self.cancel(key)
             identity = uuid.uuid4().hex
@@ -54,7 +56,7 @@ class OwnedBackgroundJobs:
             if len(self._active) >= 8:
                 self.emit("background_result", (key, identity, None, "Background jobs busy; retry"))
                 return identity
-            job = BackgroundJob(key, identity)
+            job = BackgroundJob(key, identity, notify_cancel=notify_cancel)
             self._active[identity] = job
             job.thread = threading.Thread(
                 target=self._run,
@@ -114,6 +116,8 @@ class OwnedBackgroundJobs:
                 self._stop_process(process)
             with self._lock:
                 self._active.pop(job.id, None)
+            if job.notify_cancel and job.cancel.is_set():
+                self.emit("background_stopped", (job.key, job.id))
         if self.current(job.key, job.id):
             self.emit("background_result", (job.key, job.id, result, error))
 

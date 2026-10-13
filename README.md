@@ -52,6 +52,8 @@ uv run klaude       # or: uv tool install --editable apps/cli && klaude
 | `klaude query "…" -l nextjs` | inspect raw retrieval from a library (no LLM) |
 | `klaude libraries` | list learned libraries |
 | `klaude skills` | list installed assistant skills |
+| `klaude model-connections list` | list model endpoint identities without connecting |
+| `klaude model-connections test ID` | check and cache an endpoint's model catalog |
 | `klaude search "…"` | web search via the configured provider |
 | `klaude code-search "…"` | search programming docs and code examples |
 | `klaude huggingface-search model "qwen coder"` | search Hugging Face Hub models, datasets, and Spaces |
@@ -80,6 +82,103 @@ uv run klaude       # or: uv tool install --editable apps/cli && klaude
 
 Inside the interactive chat, use `/help` to print the command reference
 without asking the model to summarize it.
+
+`/library` opens the durable-information workspace: **Sessions, Knowledge,
+Documents, Research, Media, Archive**. Sessions supports full-store text search,
+100-record pages, recent public-turn previews, resume and archive. Archive keeps
+conversation content and provides restore or separately confirmed permanent
+deletion. Current sessions and active workers cannot be archived from this page.
+Knowledge browses existing named libraries and provides local keyword search
+without model/embedding calls. Learn source, Hybrid query and Managed sources
+provide explicit TUI actions over the existing knowledge services. Learning and
+refresh require a reviewed destination/source; hybrid queries use the configured
+local embedding model. Owned tasks remain responsive, support Cancel/Ctrl+C,
+and retain existing CLI commands. Documents and Media import private managed
+copies (up to 32 MiB), with metadata search, type filters, sorting, manual tags,
+bounded previews, desktop open and export to new workspace files. Archive →
+Documents and Media supports restore and separately confirmed deletion. Import
+and archive preserve originals and existing learned copies. Image previews show
+header dimensions and an export/open fallback; no vision model is needed.
+Research provides reviewed **Queue** and **Start** actions, bounded multi-round
+web research, source receipts, cancellation and resume with fresh source reads.
+Saved reports support preview, discussion, export, tags/archive and separately
+reviewed learning into a named knowledge library. Discussion uses a bounded
+private report excerpt; the public conversation shows the report name and your
+question. Citation quotes are checked against fetched excerpts; review the
+model's interpretation and coverage, especially with smaller local models.
+
+Choose a Research endpoint/model in **Settings → AI Defaults**, or inherit the
+session model. **Settings → Search → Deep Research** controls provider, report
+output, extraction concurrency/timeouts, run deadline and advanced work budgets.
+Defaults suit bounded local runs: 2 rounds, 6 queries, 8 sources, 8,192 context
+tokens, 2,048 report tokens and a 300-second run deadline. These are adjustable;
+research does not silently switch models or use Utility fallbacks.
+
+For the CLI, use `klaude research run "QUESTION"`, add `--queue` to save a job
+without starting research, inspect `klaude research list`, and continue with
+`klaude research resume JOB_ID`. A completed run exits 0, a saved partial report
+exits 2, an error exits 1, and Ctrl+C exits 130. Queued jobs start explicitly;
+there is no unattended queue daemon. See the
+[S4b validation and model limitations](docs/s4b-deep-research-validation.md).
+
+Artifact CLI includes `klaude library import PATH` for documents and
+`klaude library import PATH --type media` for images. Use `klaude library list`,
+`klaude library info ARTIFACT_ID`, `klaude library tags ARTIFACT_ID "tag, tag"`,
+and `klaude library export ARTIFACT_ID NEW_FILE`; archive, restore and delete
+subcommands each take an artifact ID. `library` manages stored copies; `libraries`
+continues to list named knowledge libraries. Use an exported file with the
+existing `klaude learn PATH -l NAME` command to learn explicitly.
+
+Use `klaude sessions archive SESSION_ID`, `klaude sessions --archived`, and
+`klaude sessions restore SESSION_ID` from the CLI. Archived sessions leave normal
+session lists and `/resume`; restore one before continuing it. Archiving retains
+existing memory-recall behavior. **Stored ≠ indexed; Imported ≠ learned;
+Archived ≠ deleted.** Library browsing never learns content automatically.
+
+`/settings models` opens Added Models, Add Models and Session model. Add a
+local Ollama/compatible server or a supported API endpoint using a private
+draft, masked key and catalog-only Test. Test does not save or generate;
+Add saves separately and retains the current chat model. Endpoint details
+provide catalog reload/filter, manual model-ID selection, model visibility/pinning,
+and endpoint enable/disable/reviewed removal. Probe checks enabled endpoints;
+Clear offline reviews unreachable ones separately from authentication failures.
+Affected startup choices require explicit replacement or unset. `/model` retains
+the existing session selection flow; session choices no longer rewrite Default Chat. See
+[the S2 validation record](docs/s2-model-settings-validation.md).
+
+`/settings ai defaults` configures Default Chat for new sessions, an optional
+Utility endpoint/model, ordered explicit Utility fallbacks and output limits.
+Utility defaults to Same as chat. `/recap --ai` and `/rename --ai` explicitly
+generate a bounded recap/title from recent public dialogue, without tools.
+Ordinary chat, deterministic `/recap` and compaction make no extra Utility calls.
+Default Chat applies to startup, `/new` and configured one-shot `ask`; explicit
+CLI `--model` overrides it. Output-limit feedback points to Utility output;
+Klaude never silently raises that budget or chooses an unconfigured fallback.
+See [S2b evidence and provider limits](docs/s2b-ai-defaults-validation.md).
+
+`/settings search` opens Web Search: enabled state, Auto/pinned provider, default
+result count, provider management, a cancellable Test and fallback ordering.
+Provider details contain masked keys and relevant options such as SearXNG URL
+and Tavily depth. Existing Tools/Providers entries link to this owner.
+Default agent results remain 12; choose 3/5/10/12/20 or Custom (1–50).
+Explicit tool result counts still override the default. Reset restores routing
+and result defaults while retaining keys, availability and provider options.
+Test sends a query and respects billing, availability and health policies; its
+footer reports the actual provider and result count. A catalog/configured key
+is not proof of a working search. Availability also applies to `klaude ask`.
+Search choices do not change URL Fetch routing. See
+[Web Search evidence and limits](docs/s3a-web-search-validation.md).
+
+Open **URL Fetch settings** from Search or Tools, or use `/settings fetch`.
+Choose the local cascade or explicit Exa cloud extraction, configure Crawl4AI's
+service root and optional masked key, and manage independent fetch availability.
+Exa's key remains shared with Web Search. The cloud fallback is visible and
+explicit; existing config behavior is retained until overridden. Test reads a
+public URL in a cancellable worker and reports the actual extractor, without
+learning or saving the page. Provider detail tests do not substitute a fallback.
+Transport limits show current `[web.fetch]` values; private targets and unsafe
+redirects remain blocked. Reset restores config routing without removing keys,
+endpoints or availability. See [URL Fetch validation](docs/s3a-url-fetch-validation.md).
 
 Maintainers can compare configured model behavior with the opt-in live harness:
 
@@ -158,17 +257,40 @@ Custom animations accept compact graphemes (`⠋⠙⠹`) or explicit quoted fram
 (`"⢎⡰", "⢎⡡"`); the latter preserves spaces and multi-character frames.
 Set a custom interval in milliseconds (blank defaults to 100), preview it, then
 choose Apply spinner. `/settings spinner` opens this page directly.
-Tools lets you independently turn web-search and local-knowledge result validation on or off.
+**Agent Tools** (`/settings tools` or `/settings agent tools`) starts with
+Execution, Built-in Tools, Activity Updates, and links to MCPs and Skills. Execution configures
+steps per message (default 20, custom 1–64), a finite Auto tool-call ceiling
+(`max(4, steps × 2)`) or custom 1–256, and subagent workers. Advanced offers
+an optional total-token budget (1–2,000,000) and provider-reported usage.
+**No total-token cap** retains the finite step, time and non-progress limits;
+token checks occur between calls and can overshoot, and missing provider usage
+is explicitly unreported. Limits apply to new messages in chat and `klaude ask`.
+Scoped resets preserve device/context choices, tool availability and permissions.
+Runtime keeps device, threads, context and calibration, with an execution link.
+Built-in Tools groups only tools in the live registry, with enabled/total counts.
+Enter opens a group or a tool's purpose and permission link; Space switches a
+selected tool. Group switches show ON, OFF, or MIXED and enable a mixed group
+on the first press. Availability changes never grant permission. Disabled tools
+stay absent from subsequent model schemas, recovered calls, and delegated workers.
+MCPs and Skills keep their existing management pages. Settings now groups
+Appearance, Models & AI, Agent, and Advanced; `/settings providers` remains
+available under Advanced as Provider credentials until Model Manager owns
+Hugging Face configuration. Search and URL Fetch link to the availability owner.
+[S3b validation](docs/s3b-agent-tools-validation.md).
+
+Search owns web-result validation; Agent Tools → Built-in Tools → Knowledge &
+Sessions owns local-knowledge result validation.
 Turning validation off exposes unvalidated discovery leads, but retains the normal transport,
-provenance, and fetch safety limits. It also offers an opt-in Reasoning Activity view for
-high-level live stages, not private model scratchpad text. Chat output uses normal terminal
+provenance, and fetch safety limits. Activity Updates is enabled by default for
+high-level live stages without private model scratchpad text. Chat output uses normal terminal
 scrollback, so it has no Klaude-managed border or scrollbar; the rounded input border
 defaults to on. Input Field → Height → Enter min/max accepts two whole numbers
 (for example `2 10`). The composer grows between those limits; valid limits
 satisfy `1 ≤ min ≤ max ≤ 12`, with defaults of 8 and 12. Enter saves, Escape or
 Ctrl+C cancels, and typing `reset to default` restores both defaults.
-Runtime also exposes Subagent Workers: Auto uses one local Ollama worker or two
-cloud workers, while an explicit 1–4 value is available for quota and hardware
+Agent Tools → Execution exposes Subagent workers: Auto uses one worker for
+Ollama and compatible endpoints (including remote endpoints), or two for native
+cloud providers, while an explicit 1–4 value is available for quota and hardware
 tuning. Only audited independent read-only workspace inspections can overlap;
 web, knowledge, shell, Git, and mutation work remains sequential.
 Each category can be reset independently. Pastelle Azure is the
@@ -529,6 +651,82 @@ such as `openai_codex/gpt-5.6-sol`, `openai_api/gpt-5`, or
 `openrouter/anthropic/claude-sonnet-4`; older saved bare model names continue to
 mean Ollama.
 
+### Additional model connections
+
+Register an Ollama server or a server exposing Chat Completions, such as a
+configured llama.cpp or vLLM server:
+
+```bash
+klaude model-connections add lab --adapter openai_compatible --url http://192.168.1.20:8080/v1
+klaude model-connections test lab
+klaude chat --model openai_compatible@lab/MODEL_ID
+klaude ask "Read README.md and summarize the project" --model openai_compatible@lab/MODEL_ID
+```
+
+Use `--adapter ollama` for the native Ollama API. `--key-env VARIABLE` references
+a key in private `config/.env` or the process environment; it never accepts the
+key itself as a command argument. `--cloud` requires HTTPS. Testing a connection
+reads its catalog without loading a model; Ctrl+C cancels the owned worker.
+A successful catalog check does not verify tool, vision, or reasoning support.
+
+Connections live in private `config/model-connections.json`. The first Add or
+Test migrates existing native choices once, retaining config roles and session
+preferences. Qualified references distinguish identical model IDs on different
+endpoints. Existing native aliases still work; chat remembers the qualified
+selection across launches. Missing or disabled qualified connections fail
+explicitly, preserving the saved selection.
+
+The compatible runtime needs no cloud SDK. It sends portable temperature and
+output-budget controls, streams text/tool calls, and retains native provider
+runtimes separately. Context allocation and server-specific reasoning, GPU, and
+thread controls remain server settings; Klaude uses a bounded conversation
+budget without claiming it changed the server's allocation. Unknown compatible
+servers default to one worker, with the existing explicit concurrency override.
+Add/Added Models settings and AI Defaults are implemented. See the
+[S1 validation](docs/s1-model-connections-validation.md),
+[connection UI validation](docs/s2-model-settings-validation.md) and
+[AI Defaults validation](docs/s2b-ai-defaults-validation.md) for evidence and limits.
+
+DeepSeek is available under Add Models → Add API Models → Provider, or
+`/model` → Cloud → DeepSeek → Add DeepSeek endpoint. Its key is entered through
+the masked draft composer and saved only when Add is accepted. Scripted setup
+can instead reference `DEEPSEEK_API_KEY` from private `config/.env`:
+
+```bash
+klaude model-connections add deepseek --adapter deepseek --url https://api.deepseek.com/v1
+klaude model-connections test deepseek
+klaude ask --model deepseek@deepseek/MODEL_ID "Your question"
+```
+
+Use a model ID returned by the catalog. Registration requires HTTPS and does not
+generate text or change your default model. Registered models work with Session
+model, Default Chat and Utility. Standard mode disables DeepSeek thinking;
+thinking mode retains continuation privately without displaying it. Existing
+provider connections remain unchanged. See the
+[DeepSeek validation and live-cloud limits](docs/s2c-deepseek-validation.md).
+
+Anthropic is also available in Add API Models or `/model` → Cloud → Anthropic →
+Add Anthropic endpoint. The endpoint form uses a masked, connection-owned key.
+Scripted registration references `ANTHROPIC_API_KEY` from private `config/.env`
+or the environment:
+
+```bash
+klaude model-connections add anthropic --adapter anthropic --url https://api.anthropic.com/v1
+klaude model-connections test anthropic
+klaude ask --model anthropic@anthropic/MODEL_ID "Your question"
+```
+
+Use a model ID from the catalog. The native Messages adapter needs no cloud SDK
+and keeps signed thinking blocks private. Mode and effort choices use declared
+catalog capabilities. Models that require thinking show Thinking with the lowest
+supported effort, retaining the configured output cap; they are unavailable for
+the tool-free, thinking-disabled Utility role. Older catalogs with unknown
+thinking support need updated metadata before Thinking can run. Manual thinking
+also requires an output budget above 1,024 tokens; Klaude reports insufficient
+budgets without increasing them. Local protocol checks passed; live paid
+generation remains unverified. See the
+[Anthropic validation](docs/s2c-anthropic-validation.md).
+
 Klaude uses relevance-first provider routing for web search. Configured
 providers are tried according to query intent, missing optional keys are skipped
 quietly, and keyless Brave website search through the local DDGS adapter is the
@@ -572,7 +770,7 @@ while the transcript retains completed `[EXPLORED]`, `[EDITED]`, `[RAN]`, and
 `[LEARNED]` milestones.
 These updates describe observable tool activity only—not private model
 reasoning—and remain visible to clients following or resuming the session. They
-can be disabled under `/settings` → Tools → Activity Updates.
+can be disabled under `/settings` → Agent Tools → Activity Updates.
 
 Tavily integration status:
 

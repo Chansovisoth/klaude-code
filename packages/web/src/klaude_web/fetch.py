@@ -563,16 +563,20 @@ def _crawl4ai(
     api_key: str = "",
     *,
     timeout_seconds: float = 60.0,
+    max_response_bytes: int = 2_000_000,
 ) -> str:
-    response = httpx.post(
+    from .provider_http import post_json
+
+    data = post_json(
         f"{base_url.rstrip('/')}/md",
         headers=crawl4ai_headers(api_key),
-        json={"url": url, "f": "fit"},
-        timeout=timeout_seconds,
+        payload={"url": url, "f": "fit"},
+        timeout=timeout_seconds, max_bytes=max_response_bytes,
     )
-    response.raise_for_status()
-    data = response.json()
-    markdown = data.get("markdown") or data.get("result", {}).get("markdown") or ""
+    nested = data.get("result")
+    markdown = data.get("markdown") or (nested.get("markdown") if isinstance(nested, dict) else "")
+    if not isinstance(markdown, str):
+        raise FetchPageError("crawl4ai returned invalid markdown", failure_class="provider_failure")
     if not str(markdown).strip():
         raise FetchPageError("crawl4ai returned empty markdown", failure_class="empty_extraction")
     return str(markdown).strip()
@@ -606,9 +610,14 @@ def fetch_page_detailed(
     limits: FetchLimits | None = None,
     resolver: Callable[..., list[tuple]] = socket.getaddrinfo,
     transport: httpx.BaseTransport | None = None,
+    extraction: str = "",
 ) -> FetchPageResult:
     """Fetch one public page and return bounded, extracted evidence plus diagnostics."""
     active_limits = limits or FetchLimits()
+    if extraction not in {"", "crawl4ai"}:
+        raise ValueError("Unsupported extraction provider")
+    if extraction == "crawl4ai" and not crawl4ai_url:
+        raise FetchPageError("Crawl4AI endpoint missing or disabled", failure_class="configuration")
     try:
         page = _download_public_page(url, active_limits, resolver=resolver, transport=transport)
     except FetchPageError as exc:
@@ -626,7 +635,13 @@ def fetch_page_detailed(
     extraction_status = "plain_text"
 
     try:
-        if page.content_type in TEXT_CONTENT_TYPES:
+        if extraction == "crawl4ai":
+            attempted.append("crawl4ai")
+            content = _crawl4ai(crawl4ai_url, page.final_url, crawl4ai_api_key,
+                                timeout_seconds=active_limits.timeout_seconds,
+                                max_response_bytes=active_limits.max_download_bytes)
+            provider, extraction_status = "crawl4ai", "main_content"
+        elif page.content_type in TEXT_CONTENT_TYPES:
             content = body
         elif page.content_type in HTML_CONTENT_TYPES or not page.content_type:
             title, published_at, author, metadata = _html_metadata(body)
@@ -639,6 +654,7 @@ def fetch_page_detailed(
                         page.final_url,
                         crawl4ai_api_key,
                         timeout_seconds=active_limits.timeout_seconds,
+                        max_response_bytes=active_limits.max_download_bytes,
                     )
                     provider = "crawl4ai"
                     extraction_status = "main_content"
@@ -656,6 +672,7 @@ def fetch_page_detailed(
                 page.final_url,
                 crawl4ai_api_key,
                 timeout_seconds=active_limits.timeout_seconds,
+                max_response_bytes=active_limits.max_download_bytes,
             )
             provider = "crawl4ai"
             extraction_status = "main_content"

@@ -71,11 +71,11 @@ def test_exa_auth_debug_log_is_fingerprinted_not_secret(monkeypatch, caplog):
 def test_exa_fetch_requests_markdown_text(monkeypatch):
     calls = []
 
-    def fake_post(url, headers, json, timeout):
-        calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
-        return FakeResponse({"results": [{"text": "# Docs\n\nBody"}]})
+    def fake_post(url, headers, payload, timeout, max_bytes):
+        calls.append({"url": url, "headers": headers, "json": payload, "timeout": timeout})
+        return {"results": [{"text": "# Docs\n\nBody"}]}
 
-    monkeypatch.setattr("klaude_web.exa.httpx.post", fake_post)
+    monkeypatch.setattr("klaude_web.provider_http.post_json", fake_post)
 
     assert exa_fetch("https://api.exa.ai", "key", "https://example.test") == "# Docs\n\nBody"
     assert calls[0]["json"]["urls"] == ["https://example.test"]

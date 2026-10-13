@@ -1491,6 +1491,10 @@ def search_cache_key(cfg: Config, query: SearchQuery) -> str:
         "query": query.text.lower(),
         "intent": query.intent.value,
         "provider": cfg.web_provider,
+        "settings_provider": cfg.web_search.settings_provider,
+        "settings_fallbacks": cfg.web_search.settings_fallbacks,
+        "searxng_url": cfg.searxng_url,
+        "tavily_depth": cfg.web_providers["tavily"].default_depth,
         "provider_preference": query.provider_preference,
         "provider_strict": query.provider_strict,
         "provider_route": {
@@ -3020,6 +3024,7 @@ class SearXNGProvider(BaseProvider):
                     variant,
                     query.result_limit,
                     relevance_filter=False,
+                    expand_queries=False,
                 )
             except Exception as exc:
                 attempted.append(variant)
@@ -3820,6 +3825,16 @@ class ProviderRegistry:
         return providers, skipped
 
     def _ordered_names(self, intent: SearchIntent) -> list[str]:
+        if (self.cfg.web_search.settings_provider is not None
+                or self.cfg.web_search.settings_fallbacks is not None):
+            from klaude_core.search_settings import primary_provider
+
+            order = self.cfg.web_search.settings_fallbacks
+            order = list(order if order is not None else self.cfg.web_search.provider_order)
+            primary = primary_provider(self.cfg)
+            if primary != "auto":
+                order = [primary, *(name for name in order if name != primary)]
+            return [name for name in dict.fromkeys(order) if name in self.providers]
         if self.cfg.web_provider == "local":
             return ["searxng"]
         if self.cfg.web_provider == "brave":

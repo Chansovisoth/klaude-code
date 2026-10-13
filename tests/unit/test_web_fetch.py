@@ -103,15 +103,11 @@ def test_fetch_page_preserves_html_metadata(monkeypatch):
 def test_fetch_page_sends_crawl4ai_api_key(monkeypatch):
     calls = []
 
-    def fake_post(url, headers, json, timeout):
-        calls.append((url, headers, json, timeout))
-        return httpx.Response(
-            200,
-            json={"markdown": "# Crawled"},
-            request=httpx.Request("POST", url),
-        )
+    def fake_post(url, headers, payload, timeout, max_bytes):
+        calls.append((url, headers, payload, timeout))
+        return {"markdown": "# Crawled"}
 
-    monkeypatch.setattr("klaude_web.fetch.httpx.post", fake_post)
+    monkeypatch.setattr("klaude_web.provider_http.post_json", fake_post)
     result = fetch_page_detailed(
         "https://example.com/",
         "http://crawl.test",

@@ -7,6 +7,43 @@ import pytest
 from klaude_core.ollama import Ollama
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+def test_native_requests_translate_retained_compatible_calls_without_mutating_history(streaming):
+    from copy import deepcopy
+
+    history = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call-1",
+         "function": {"name": "read_file", "arguments": '{"path":"proof.txt"}'}}]},
+        {"role": "tool", "tool_call_id": "call-1", "tool_name": "read_file", "content": "proof"},
+        {"role": "user", "content": "Continue"},
+    ]
+    original = deepcopy(history)
+    captured = []
+
+    def handler(request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, content=json.dumps({
+            "message": {"role": "assistant", "content": "Verified"}, "done": True,
+        }) + "\n")
+
+    runtime = Ollama("http://model.test")
+    runtime._chat_client_factory = lambda: httpx.Client(
+        base_url=runtime.base_url, transport=httpx.MockTransport(handler),
+    )
+    try:
+        if streaming:
+            list(runtime.chat_stream("test", history))
+        else:
+            runtime.chat("test", history)
+        assert captured[0]["messages"][0]["tool_calls"][0]["function"]["arguments"] == {
+            "path": "proof.txt",
+        }
+        assert captured[0]["messages"][1] == history[1]
+        assert history == original
+    finally:
+        runtime.close()
+
+
 def test_chat_assembles_streamed_transport_for_tool_compatible_response():
     observed = {}
 

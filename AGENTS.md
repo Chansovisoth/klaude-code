@@ -113,11 +113,126 @@ Top-level commands currently include:
 - `klaude import-skill`: install a skill ZIP/folder/file and index text files.
 - `klaude query`: raw hybrid search over local knowledge, no LLM answer.
 - `klaude libraries` and `klaude collections`: list learned libraries.
+- `klaude library list/import/info/export/tags/archive/restore/delete`: manage
+  private document/image copies, separately from knowledge libraries. Import
+  copies one regular non-symlink file up to 32 MiB (`--type document|media`),
+  retaining originals and launching no indexing/model work. List searches names,
+  tags, MIME types and origins, supports type/sort/archived filters and bounded
+  100-record pages. Exact typed IDs distinguish document/media/research records.
+  Export creates a new file inside the current workspace, never overwrites and
+  verifies stored checksums. Tags are manual; archive retains content; restore
+  changes visibility; permanent deletion requires archive and confirmation.
+  Originals, exported/opened copies and learned knowledge remain independent.
+  Research reports use the same private store and artifact lifecycle.
+- `klaude research run QUESTION [--model MODEL] [--provider PROVIDER]
+  [--rounds N] [--format FORMAT] [--queue]`, `research list [--offset N]` and
+  `research resume JOB_ID`: bounded web research through the same owned worker
+  used by Library. Queue saves metadata only, with at most ten queued jobs;
+  jobs start explicitly. Capture Research/Chat defaults and endpoint/credential
+  revisions at acceptance, never silently fall back. Completed/partial/error/
+  Ctrl+C CLI outcomes exit 0/2/1/130 respectively. Resume re-fetches receipt
+  URLs; saved metadata never substitutes for evidence. Core research and CLI
+  research_commands/research_panel own this feature; evidence and limitations:
+  `docs/s4b-deep-research-validation.md`.
 - `klaude skills`: list installed assistant skills.
 - `klaude search`: web search via the configured provider router.
 - `klaude code-search`: search programming docs, examples, and debugging refs.
 - `klaude huggingface-search/details/readme`: Hugging Face Hub integration.
 - `klaude models`: list installed Ollama models and Klaude role assignment.
+- `klaude model-connections list/add/test`: register additional native Ollama,
+  Chat Completions or Anthropic Messages endpoints and inspect their catalogs. Add requires an ID,
+  `--adapter ollama|openai_compatible|deepseek|anthropic` and `--url`; optional `--key-env` stores a
+  private credential reference, never a key value, and `--cloud` requires HTTPS.
+  List is read-only; Add/Test idempotently seed existing native connections in
+  owner-only `config/model-connections.json` without rewriting config roles or
+  session preferences. Records have stable IDs, normalized URLs, enabled state,
+  adapter/source and environment references; Codex retains account ownership.
+  Qualified references use `backend@connection_id/model_id`, keeping slashes in
+  model IDs. Native aliases remain valid for defaults, while qualified selections
+  persist through chat restart. Missing/disabled qualified endpoints fail without
+  silently choosing another model. Running/pending selections capture definition
+  and credential revisions; stale activation cannot change a turn's runtime.
+  Test runs the fixed `connection_models` operation through OwnedBackgroundJobs,
+  with a 15-second outer deadline, 3-second connect/5-second read deadlines,
+  no ambient proxy credentials/redirects, 1 MB response and 1000-model bounds.
+  Authentication, network, timeout, missing catalog, malformed data and rate-limit
+  failures remain distinct. No generation/model loading occurs. Catalog publication
+  locks registry -> private credentials -> cache, rejects stale revisions and
+  scopes cache generations to adapter plus endpoint. Native legacy cache refresh
+  never replaces another endpoint's records; the merged cache is bounded to 8 MB.
+  Catalog listings leave tool/context capability evidence unknown.
+  CompatibleRuntime uses HTTPX without optional cloud SDKs, preserves complete
+  tool protocol pairs, strips provider-private reasoning from generic requests,
+  bounds SSE events/responses and publishes tool calls only after completion.
+  Malformed arguments enter the existing bounded agent recovery path; output-limit
+  and incomplete streams fail honestly. Native Ollama converts retained JSON-string
+  tool arguments to native objects without mutating shared history, supporting
+  provider switches after tools. HTTP adapters share cancellation that can wake
+  requests before response headers and fork independent child transports.
+  Compatible endpoints use configured bounded conversation budgets and default
+  to one worker, including remote endpoints; their actual allocation, reasoning,
+  GPU/thread controls remain server-owned. Native runtimes and local embeddings
+  remain separate. S2a Add/Added settings, endpoint maintenance and model
+  visibility/pinning and S2b AI Defaults are implemented. S2c's DeepSeek and
+  native Anthropic slices are implemented and validated locally. S3a Web Search
+  and URL Fetch settings are implemented and validated locally. S3b Agent Tools
+  execution, registry groups and Settings navigation migration are implemented.
+  Evidence: `docs/s3b-agent-tools-validation.md`. S4a's Library session/knowledge
+  foundation, Documents/Media storage and explicit Knowledge TUI consumers are
+  implemented. S4b research jobs/defaults/reports are also implemented and locally
+  validated; S5-S6 remain unstarted. See
+  `docs/s4a-library-validation.md`, `docs/s4a-artifacts-validation.md` and
+  `docs/s4a-knowledge-validation.md` and `docs/s4b-deep-research-validation.md`.
+  DeepSeek is an explicit Add API Models preset and `/model` Cloud provider.
+  Add DeepSeek endpoint opens an unsaved draft, rather than another global
+  login store. CLI registration with `--adapter deepseek` requires HTTPS and
+  defaults to the private `DEEPSEEK_API_KEY` reference. No DeepSeek connection is
+  silently seeded into an existing registry; legacy defaults/deletions remain intact.
+  Registered DeepSeek models use qualified `deepseek@CONNECTION/MODEL` identities
+  in session selection and AI Defaults. DeepSeekRuntime reuses the bounded HTTPX
+  stream/cancellation transport without the optional cloud SDKs. Standard mode
+  explicitly disables upstream thinking; thinking maps low to low and medium/high
+  to high. It retains at most 256,000 reasoning characters privately, publishing
+  continuation only after a complete response. Tool-enabled requests echo that
+  state only for the same endpoint, connection/credential revision and model.
+  Final continuation survives owner-only model_content restore and counts toward
+  compaction; public transcript, recap, generic compatible/Ollama requests and
+  other providers omit it. Incomplete streams never publish buffered calls, and
+  malformed arguments use the existing bounded agent recovery. Utility uses the
+  same adapter with thinking off and the existing explicit budgets/fallback policy.
+  Catalog tests remain metadata-only with unknown tool capability evidence.
+  Local protocol fixtures, keyboard/one-shot evidence and live-cloud limits are
+  recorded in `docs/s2c-deepseek-validation.md`.
+  Anthropic uses an explicit Add API Models preset and Cloud endpoint shortcut,
+  qualified `anthropic@CONNECTION/MODEL` references and the same private draft
+  lifecycle. `--adapter anthropic` requires HTTPS and defaults to the private
+  `ANTHROPIC_API_KEY` reference; existing registries gain no unsolicited endpoint.
+  Catalog checks use native x-api-key/version headers and bounded pagination,
+  never generation. Declared thinking types, effort levels and output limits
+  are cached publicly; absent metadata stays unknown, and context/tool evidence
+  is not inferred. Model IDs are not used to guess API capabilities.
+  AnthropicRuntime uses the bounded HTTPX transport and native Messages blocks
+  without cloud SDKs. Signed/redacted thinking and complete tool blocks are
+  retained privately, unmodified, for the same endpoint, connection/credential
+  revision and model. Owner-only model_content restore retains them and
+  compaction counts them; public output, Utility and other providers omit them.
+  Calls publish only after complete native message termination; malformed
+  arguments use bounded agent recovery. Output-limit/incomplete responses fail
+  honestly. Usage includes cache input and cumulative output without doubling it.
+  Declared modes/efforts constrain the model picker and direct mode controls.
+  Known always-on models visibly select Thinking with the lowest supported
+  effort and unchanged output budget, and cannot serve as thinking-disabled
+  Utility/fallback choices. Unknown Thinking profiles require catalog metadata;
+  manual thinking needs a configured output cap above 1,024 tokens. No extra
+  discovery or budget enlargement occurs during generation. Utility uses the
+  same native adapter with thinking off and existing explicit fallback bounds;
+  typed overload failures include HTTP 529. Local CLI/TUI, protocol and
+  regression evidence, with live paid-generation limits, is recorded in
+  `docs/s2c-anthropic-validation.md`.
+  Implementation: core model_connections/model_discovery/compatible_runtime and
+  http_model_transport modules; CLI model_connections and background-worker wiring.
+  Live/mocked coverage and remaining limits are recorded in
+  `docs/s1-model-connections-validation.md`.
 - `klaude remember`: append a durable fact.
 - `klaude auth login/status/logout openai-codex`: manage ChatGPT account
   authentication through the installed official Codex app-server. This is
@@ -149,6 +264,8 @@ Top-level commands currently include:
   session recall controls.
 - `klaude sessions`: list recent sessions by effective name and prefix sessions
   with an unexpired running worker lease using the same green `[ACTIVE]` badge.
+  `--archived` lists retained archived sessions; `sessions archive SESSION_ID`
+  and `sessions restore SESSION_ID` use the same transactional lifecycle as Library.
 - `klaude sessions delete SESSION_ID`: delete one session after confirmation.
 - `klaude sessions clear`: delete all sessions after confirmation.
 - `klaude session-search`: search prior conversation sessions.
@@ -157,6 +274,77 @@ Top-level commands currently include:
 - `klaude doctor`: verify services, models, config, and data directories.
 
 Chat slash commands currently include:
+
+- `/library [VIEW]`: open the Library workspace outside Settings, ordered
+  Sessions, Knowledge, Documents, Research, Media, Archive. Sessions/Archive have
+  bounded 100-record pages, full-store search over names/public turns, last-eight
+  public-turn previews, resume, archive/restore and confirmed archived deletion
+  with Back initially focused. Knowledge projects existing active-source metadata
+  and legacy library names and searches active/enabled indexed text locally;
+  existing learn/query/docs refresh commands retain ownership and compatibility.
+  Learn source and Hybrid query are explicit actions; Managed sources reviews
+  installed docs/crawls before refreshing. Private single-line editors never
+  add their inputs/results to chat. Reviewed learning supports UTF-8 local text
+  and public HTTP(S) pages, with the destination library/model/effect visible
+  and Back initially focused. Hybrid queries run only on explicit request and
+  use the existing embedding/vector/FTS/validation service, returning six bounded
+  source excerpts without chat generation. Learning/refresh use the shared atomic
+  indexer and retain originals and independent stored artifacts.
+  Knowledge tasks reuse owned worker processes, with a five-minute outer deadline,
+  30-second embedding requests, batches of at most 16 and 1000-chunk bounds.
+  Learning is capped at 2 MiB; refresh at 8 MiB cumulative text and its existing
+  page/crawl settings. Failed/partial/oversized refreshes retain previous indexed
+  knowledge. These UI bounds do not silently truncate a replacement or alter CLI
+  limits. Per-client acceptance and a cross-client task lock serialize TUI work;
+  existing CLI/model services retain their own concurrency semantics. Starting
+  requires idle model/setup/skill work; accepted tasks survive navigation and pause
+  model queue consumption. Cancel/Ctrl+C reaps the owned process before unblocking
+  the queue and reports that completed indexing may remain; no rollback is claimed.
+  Model queue/context counters and live spinner/elapsed state remain visible.
+  Session/store changes reject stale results, and task return state is captured.
+  Metadata browsing and local indexed-text search call no models, embeddings,
+  index writers or store constructors; explicit Hybrid query uses embeddings.
+  Documents/Media provide import, metadata/type/source/tag search, sorting,
+  manual tags, bounded preview, explicit desktop open and new-file export.
+  Artifact controls precede tables; detail actions precede extended metadata;
+  long previews start at the beginning and scroll with PageUp/PageDown. Media
+  accepts bounded PNG/JPEG/GIF/WebP headers, reports available dimensions and
+  offers a file export/open fallback without a decoder or vision model. Research
+  opens a typed job form, saved reports and defaults above the job inventory.
+  Queue/Start reviews initially focus Back. Progress shows bounded stages, source
+  receipts, cancel and explicit resume; no automatic queue runner is started.
+  A process lock serializes research across clients, owner leases detect interrupted
+  jobs, and cancellation waits for owned-worker cleanup. Stale failures cannot
+  overwrite a live owner or a published report. Recovery reads receipt URLs freshly;
+  checkpoints store bounded URL/title/time/hash metadata, never page bodies.
+  Job/report publication shares one SQLite transaction. Reports provide previews,
+  export, tags/archive and explicit reviewed learning through the existing indexer.
+  Discuss report preserves the unsent draft/attachments, stores its excerpt only
+  in private model_content and publishes only the report name and user question.
+  Its RESEARCH turn scope permits only query_knowledge, web_search and fetch_url,
+  intersected with availability and permission gates; no workspace/MCP/delegation
+  tools. Stored model synthesis is not fresh evidence or authorization.
+  Owned eight-second read jobs use read-only
+  SQLite, a 200ms busy timeout and three-second query deadline, bounded results
+  and 30-second snapshots;
+  Reload preserves true snapshot timestamps on failure. Leaving/navigation/session
+  changes reject late results. Writes reuse the ordered session action lane;
+  accepted actions retain target/session identity and do not steal later navigation.
+  Library uses typed rows, controls above wrapped tables, fixed header/footer,
+  stable record IDs and common draft/scrollback/Back/filter behavior. Implementation:
+  CLI library_workspace/library_inventory/library_artifact_panel/library_commands,
+  research_panel/research_commands and core library_artifacts/research;
+  validation: docs/s4a-library-validation.md and
+  docs/s4a-artifacts-validation.md. Content/metadata share atomic SQLite writes in
+  owner-only data/library/artifacts.db. Archive/tags/delete require current record
+  revisions; stale confirmations cannot delete restored artifacts. No operations
+  implicitly learn content or add it to model context. Desktop open uses a fixed
+  opener with a five-second deadline and private copies capped at eight; these
+  are retained for asynchronous viewers. Headless/failed open suggests Export.
+  Knowledge modules: CLI library_knowledge/library_knowledge_panel; evidence:
+  docs/s4a-knowledge-validation.md. Panel text and cursor use one render snapshot,
+  preventing resized long results from addressing absent text lines. Two-column
+  inventories use their spare width for values.
 
 - `/help`: print the deterministic command reference directly.
 - `/init`: start a scoped model turn that inspects the current workspace and
@@ -168,7 +356,7 @@ Chat slash commands currently include:
 - `/keybinds`: print only keyboard controls directly. Slash commands belong in
   `/help` and the `/` completion popup.
 - `/settings [CATEGORY]`: configure categorized Theme, Input Field, Divider, Spinner, Models,
-  Providers, Tools, MCPs, Skills, Memory, Permissions, and Runtime controls. Its
+  Providers, Search, Agent Tools, MCPs, Skills, Memory, Permissions, and Runtime controls. Its
   home page is a grouped, aligned overview that shows the live value or a
   concise status for every category. Theme and Spinner parent summaries display
   Default when values match their defaults; selection pages retain actual choices.
@@ -183,8 +371,9 @@ Chat slash commands currently include:
   counts from its existing owned background inventory, with loading/unavailable states.
   Memory shows the bounded saved-fact count and automatic-memory flag as
   `1 saved, ON`; its overview worker returns counts without exposing fact text.
-  ASSISTANT groups Models, Providers,
-  Tools, MCPs, Skills, and Memory in that order. Inside MCPs, the MCP Servers
+  MODELS & AI groups Models, AI Defaults and Search. AGENT groups
+  Agent Tools, MCPs, Skills, Memory and Permissions. ADVANCED contains Provider
+  credentials (the legacy Providers landing page) and Runtime. Inside MCPs, the MCP Servers
   heading shows `2 installed, 1 enabled` beside the snapshot age, independently
   of discovered tool counts. The Settings home keeps enabled/total counts.
   MCPs retains `/mcp` and
@@ -305,9 +494,121 @@ Chat slash commands currently include:
   memory/MCP changes, session/source changes, and exit cancel or invalidate jobs;
   late results cannot replace newer state. Category detail pages and other saved-setting
   writes still have separate synchronous paths pending responsiveness work.
-  Models
-  opens the same source, provider, model, mode, and effort selection flow as
-  `/model`. The active model's source, cloud provider, and model rows show Current;
+  Models opens a typed landing page with Added Models, Add Models and Session
+  model. Session model retains `/model`'s source/provider/model/mode/effort flow;
+  returning from it opens the Models landing page. Add Models has Local and API
+  drafts for implemented adapters only. Name, server type/provider, normalized
+  URL, masked key, Test, Add and Cancel use shared panels/private editors.
+  Changing an endpoint or adapter clears the entered key and test result. A new
+  draft starts unfiltered; editing an existing draft retains its page state.
+  Draft tests are cancellable 15-second catalog-only jobs: no generation and no
+  registry, key or cache publication. Untested Add requires a separate review
+  with Cancel focused. Accepted Adds use the ordered session action lane,
+  independently of session database availability, and drain through navigation
+  and exit; acknowledgements contain definitions/status only. A key is saved to
+  a unique connection-owned private environment reference before publication;
+  confirmed unpublished definitions remove that new key. Uncertain durability
+  retains the key, since atomic replacement may succeed before directory fsync
+  fails; a crash between files may leave an unused private key. Add retains
+  current chat and embedding choices.
+  Added Models opens from an eight-second read-only snapshot; endpoint detail
+  offers Manage models and Test. Per-endpoint Filter, Reload models and manual
+  model-ID entry precede catalog headers. IDs preserve provider slashes, and
+  capability evidence remains unknown for untested catalog listings. Refresh
+  retains filtering/focus and cannot interrupt transient field editing. Late
+  results are scoped to session, definition and draft revision. Live keyboard
+  evidence and remaining S2 scope are in `docs/s2-model-settings-validation.md`.
+  Added Models also offers cancellable serial Probe of enabled endpoints and
+  Clear offline. Checks persist bounded public status, age, definition and
+  credential revisions; stale successes and failures cannot replace newer
+  state. Disabled endpoints require an explicit detail-page Test. Clear offline
+  reviews network/timeout failures only and rechecks their exact health snapshot
+  before removal; authentication/rate/service errors are retained. Endpoint
+  detail has Enabled and reviewed Remove actions on the ordered action lane.
+  Reviews start unfiltered with Cancel focused. Affected startup choices require
+  an explicit enabled replacement or Unset; no implicit provider/model switch.
+  Removal retains credentials and conversation history, purges scoped catalogs
+  and model preferences, and never recreates deleted definitions on migration.
+  Startup unset persists a require-selection marker: interactive startup opens
+  Models showing Not selected; line-oriented startup refuses generation until an
+  explicit model is supplied. Session selection clears only the live unselected
+  state; S2b keeps a saved Default Chat unset until explicitly configured.
+  The current session remains independent of a maintenance replacement for its
+  saved startup choice. An accepted turn keeps its immutable runtime; new queued
+  prompts check endpoint/model availability without discarding pending input.
+  Pending/unconfirmed maintenance pauses new turns until acknowledged or reloaded.
+  Multi-file registry/preferences/cache updates do not claim crash atomicity;
+  partial failures are unconfirmed and reload verifies the actual definitions.
+  Per-model detail offers Use for this session, Enabled, Pinned and Hide from
+  session picker. Hidden/pinned state is independent of availability; disabled
+  models cannot be reinstated by manual/qualified selections. Preferences merge
+  per field under the registry lock and persist when a model disappears from
+  discovery. Catalogs include these missing choices with unknown capability
+  evidence. Filter offers All/Enabled/Disabled/Hidden/Pinned per endpoint;
+  applying it clears a navigation search, while reload retains search/focus.
+  Environment-only keys cross owned jobs through their private request pipe;
+  stored replacements/removals override launch environment values.
+  Core maintenance lives in model_management, and the UI reuses model_settings
+  and the existing session action lane without another writer or secret store.
+  AI Defaults is a separate typed page (`/settings ai defaults`, also
+  `/settings defaults`) with Default Chat, Utility, ordered Utility fallbacks
+  and Utility output, plus Research endpoint/model inheritance. It migrates the
+  effective legacy startup preference once
+  into `ai_defaults` in chat-preferences.json, preserving explicit unset and
+  unrelated fields. Default Chat applies at bare startup, `/new` and `ask` when
+  configured; an explicit CLI model override wins. Session choices and queued
+  selections now record their own history without rewriting Default Chat.
+  Utility inherits the current session model or uses its explicit endpoint/model.
+  Only `/recap --ai` and `/rename --ai` invoke it; ordinary chat, automatic
+  first-input titles, deterministic `/recap` and compaction add no model calls.
+  The owned job reads at most 24 recent saved public dialogue records and 6000
+  characters, excluding model_content, tools, system events and private reasoning.
+  It has no tools, a 40-second aggregate generation budget, a TUI 45-second outer
+  kill deadline and at most four logical attempts. Earlier candidates get at
+  most 12 seconds; the final eligible candidate may use the remaining budget.
+  SDK Utility clients explicitly disable hidden retries, bound output and close
+  owned resources. Native Ollama inherits the active GPU/thread overrides and
+  requests 4096 context tokens and thinking off;
+  compatible allocation/reasoning stays server-owned. Utility output defaults to
+  512, with visible 128/256/512/1024/2048 presets; provider reasoning can consume
+  the cap. Native title calls use at most 128. Recaps stay separately bounded
+  public output, never injected compaction state; generated titles must fit 80
+  characters. Only typed network/timeout, 429 or temporary 5xx failures use an
+  explicitly configured fallback. Authentication/configuration, protocol,
+  output-limit and quality failures never silently switch models. Unavailable
+  fallback entries are skipped and canonical aliases are deduplicated.
+  TUI receipts show actual model, fallback use, elapsed time and aggregate usage
+  or unknown usage; line-oriented output names the actual model/fallback.
+  The progress panel and shared spinner remain responsive; cancellation/exit
+  drop late results and kill the owned group, retaining the unsent composer.
+  Defaults writes use the existing ordered action lane, field comparisons and
+  captured definition/credential revisions. Pending reads cannot restore older
+  intent; failed saves remain unconfirmed without changing the active runtime.
+  Removal reviews include affected Utility overrides/fallbacks and Research
+  selections and require explicit role unset; changed snapshots reject the
+  reviewed mutation.
+  AI naming uses a conditional SQLite action, so concurrent manual renames win.
+  Title saves and history-entry failures are acknowledged separately. Codex
+  account Utility is unavailable until its broker can enforce these bounds;
+  Default Chat retains that existing account adapter. Core configuration lives
+  in ai_defaults, generation in utility, and UI ownership in ai_default_settings.
+  Live and automated evidence/remaining limits are in
+  `docs/s2b-ai-defaults-validation.md`.
+  Research likewise inherits the accepted session model or its own explicit
+  override, with no fallback list. Search → Deep Research owns its runtime
+  defaults: provider auto, 2048 output tokens, 30-second extraction request timeout,
+  2 extraction workers, 300-second run deadline, 2 rounds, 6 queries, 8 sources
+  and 8192 context tokens. Visible bounded overrides scale these values; output
+  must fit half the configured context. Extraction timeout bounds HTTP requests,
+  while the owned worker bounds the full cascade/run. Research uses Standard
+  mode through existing runtime adapters; native Ollama gets bounded planning
+  and findings JSON schemas. Always-on Anthropic and unbounded Codex account
+  generation are ineligible. Model calls receive bounded state rather than a
+  growing transcript, at most one citation repair, no arbitrary tools or shell.
+  Exact normalized quotes must occur in freshly fetched excerpts with actual
+  source IDs. This checks citation evidence, not semantic correctness or complete
+  topic coverage; smaller models may still produce partial/narrow reports.
+  The active model's source, cloud provider, and model rows show Current;
   browsing other providers does not change these markers.
   Selecting a model during local or observed remote work queues it
   for the next prompt without changing the running turn's runtime. Cloud
@@ -335,16 +636,16 @@ Chat slash commands currently include:
   successful discovery and rechecks the definition after the network wait.
   Remote OAuth in settings currently uses loopback; the top-level manual CLI
   flow remains available for SSH/headless authorization.
-  Tools persists independent
-  validation toggles for web-search
-  and local-knowledge candidates; turning validation off exposes unvalidated
+  Search owns Web Search availability and result validation; Tools retains
+  local-knowledge validation. Turning validation off exposes unvalidated
   leads only and does not bypass transport, provenance, or fetch safety bounds.
-  Tools also persists independent availability toggles for web search, URL fetch,
+  Availability preferences cover web search, URL fetch,
   restricted HTTP endpoint probing, code search, persistent source learning,
   crawl, Hugging Face search/details/README, and the local knowledge library.
   Disabled tools are omitted from model schemas and cannot be reinstated
-  by explicit retrieval routing or text-form calls. Tools also persists individual
-  on/off settings for every configured web provider, shown in `provider_order`;
+  by explicit retrieval routing or text-form calls. Shared agent construction
+  applies availability/validation before the first request in both chat and ask.
+  Search owns individual on/off settings for every configured web provider;
   disabled providers are excluded from routing without changing their priority order.
   Tools also has an Activity Updates toggle, enabled by default, for concise
   high-level live stages and completed milestones. Tools navigation, filtering,
@@ -357,6 +658,78 @@ Chat slash commands currently include:
   acknowledgements cannot restore earlier values. Unconfirmed saves keep current
   choices active and retain failed intent for the next explicit save. Availability
   changes never relax transport, permission, or workspace safety boundaries.
+  `/settings search` (also `/settings web search`) currently opens Web Search
+  directly. Its typed page has Enabled, Provider, Results per query, Manage
+  providers, Test search, Fallback order, Validate search results and scoped
+  Reset/Back. The Settings overview shows live ON/OFF, provider and result count.
+  Providers and Tools retain links to the migrated owner. Existing config routing
+  and saved provider/tool/validation booleans are retained on migration.
+  Auto retains configured routing; pinned providers lead an exact, deduplicated
+  fallback order. Unavailable/disabled/ineligible entries are skipped under
+  existing relevance, billing, quota and attempt policies. Explicit provider
+  directives and strict fallback policy still win. Provider choices affect
+  Search without changing independent URL Fetch routing. Default agent results stay
+  12; presets/custom support 1–50, and an explicit tool count takes precedence.
+  Provider detail owns enabled state, masked keys, SearXNG URL and Tavily depth
+  where applicable. Google Grounding shares the Gemini key; Exa shares its key
+  with URL Fetch. Removing a key requires confirmation initially focused on
+  Cancel. Accepted key writes drain through the ordered action lane, without
+  session storage, and return only public acknowledgement flags. Gemini changes
+  invalidate its model catalog outside the UI thread, with distinct feedback if
+  credential saving succeeded but invalidation failed. Private worker credential
+  resolution honors saved replacements/removals over stale launch values.
+  Non-secret controls use the serialized preferences writer, immediate live
+  intent and allowlisted cross-client acknowledgements. Scoped Reset clears
+  routing/fallback/count overrides, retaining keys, enabled state, validation,
+  endpoint and depth. Navigation/rendering do not read preference or credential
+  files. Single-line editors never create model turns or chat/history entries.
+  Test sends a user-reviewed query through an owned 25-second worker. Provider
+  detail tests never substitute a fallback; overall tests use current routing.
+  Tests respect availability, dependencies, billing and existing provider health;
+  they return bounded provider/count/error metadata without snippets or raw
+  upstream errors. Leaving, cancel, session or configuration changes invalidate
+  delayed results. Credentials use the private pipe, never arguments or public
+  messages. Search caches include routing, SearXNG URL and Tavily depth.
+  The SearXNG quality adapter executes already-planned variants once, without a
+  second legacy expansion; standalone legacy SearXNG search retains expansion.
+  Technical source-only prompts with negated code actions do not enter code
+  generation or require a standalone fenced artifact. Positive code requests
+  remain supported. Evidence/limits: `docs/s3a-web-search-validation.md`.
+  URL Fetch opens from Search's visible URL Fetch settings link, from Tools,
+  or `/settings fetch` and `/settings url fetch`. Its typed page owns availability,
+  Local cascade versus Exa cloud routing, provider details, an explicit Exa
+  cloud fallback, uncached Test and current read-only transport limits.
+  Existing `[web] provider` fetch behavior is retained until overridden;
+  selecting a Web Search provider never selects a fetch engine. Reset restores
+  config routing/fallback only, retaining endpoints, keys and availability.
+  Crawl4AI detail owns its optional local/LAN service root, masked key and
+  independent fetch enable toggle. Blank removes the service endpoint. Exa
+  detail shares Search's private key/reference while its fetch enable state
+  remains separate from search eligibility. Saved credential replacements and
+  removals override stale environment/TOML values on restart. Custom Exa
+  environment references work in fetch and both diagnostic workers.
+  Provider-key writes use the same ordered private action lane. Navigation uses
+  live state; field-scoped saves and public acknowledgements retain focus/query.
+  Tools links to the owning page and its reset preserves migrated fetch controls;
+  Providers' existing Crawl4AI entry opens the same detail page.
+  Test reviews a public URL, uses the real uncached fetch route in an owned
+  40-second worker, saves no page content, performs no learning/model call and
+  publishes only bounded provider/count/failure metadata. Crawl4AI detail Test
+  uses that extractor after the safe public download, without substituting local
+  extraction or cloud fallback. Local cascade still takes direct text first.
+  Cancel, navigation/session/config changes prevent late publication. Extraction
+  HTTP requests reject redirects and ambient proxy credentials, bound decoded
+  response bytes and use configured request timeouts. Provider errors do not
+  reveal upstream bodies/keys. Live progress is neutral; success is green,
+  warnings yellow and errors red. Transient input errors take precedence over
+  crowded input hints; masked key entry suspends navigation before typing.
+  Fetch cache identity includes routing/service/limits/credential identity;
+  configuration changes clear failed-attempt reuse without losing verified source
+  IDs. Reused documents still obey the current content limit, and zero cache TTL
+  bypasses disk-cache reads/writes. An explicit read of a named public URL
+  retains `fetch_url` when searching is forbidden; disabled/no-tools boundaries
+  still win. Evidence: `docs/s3a-url-fetch-validation.md`.
+  New PSE/Serper adapters remain separate work; S3b registry grouping is implemented.
   The footer uses the selected Spinner animation (Braille dots by default)
   while active, with progressive states and a
   compact unit-based elapsed value such as `⠋ WORKING 4s`, `⠙ EXPLORING 7s`,
@@ -615,27 +988,64 @@ Chat slash commands currently include:
   racing those accepted writes. Appearance uses a separate writer for its own
   file; Tools and remembered-model selections share the preferences writer.
   Startup and line-oriented chat still use synchronous compatibility saves.
-  Runtime also exposes the per-turn
-  model/tool ceiling through Safe (12), Balanced (20), Extended (40), and
-  custom 1-64 step choices. The selected value applies immediately, persists
-  for later chats, and appears in the model-facing live configuration. Reset
-  restores `[agent].max_steps` from `config.toml`; the ceiling remains an
-  emergency safety boundary with one additional tool-free finalization request.
-  `[agent].max_tool_calls` independently caps tool invocations (0 derives two
-  calls per step, bounded to 256), and the effective ceiling appears in the
-  status budget and model-facing configuration.
-  `[agent].max_total_tokens` optionally caps exact input plus output tokens
-  (0 keeps the provider/context default, bounded to 2,000,000); missing provider
-  usage remains explicitly unknown rather than estimated.
-  Runtime also exposes Subagent Workers: Auto uses one worker for Ollama and two
-  for cloud providers, while explicit 1-4 choices support stronger hardware or
-  stricter quota control. The choice applies immediately, persists in
-  `chat-preferences.json`, and reset restores
-  `[agent].max_subagent_concurrency` (`0` means Auto). This setting never widens
-  the audited concurrent-tool allowlist or any permission boundary.
-  Providers securely collects cloud-model keys plus the API keys for Brave,
-  Parallel, Tavily, Exa, Firecrawl, Crawl4AI Cloud, and Hugging Face in the
-  existing masked-secret composer. The provider list has one status row per
+  Agent Tools owns execution and built-in tool availability. `/settings tools`,
+  `/settings agent tools` and `/settings agent` open its typed home: Execution,
+  Built-in Tools, Activity Updates and links to the existing MCPs/Skills pages.
+  Groups derive from `Agent.tools`, exclude external `mcp__` tools and omit
+  unregistered capabilities; known labels/classification are shared with Permissions.
+  Counts describe enabled/registered built-ins, not permission or transport readiness.
+  Group switches show ON/OFF/MIXED; a mixed group first enables all its registered
+  tools. Enter on a tool opens purpose, Enabled and its focused Permission policy
+  link; Space on a group tool row toggles it. Enabling never modifies permission
+  grants or workspace safety. Built-in reset enables only current registered
+  built-ins, retaining MCP state, Search/provider settings and permission grants.
+  Knowledge result validation lives in Knowledge & Sessions; web result validation
+  remains in Search. Search/URL Fetch link to the availability owner and Back returns
+  with their filter/focus intact. MCP/Skills links retain their management/search flows
+  and return to Agent Tools. Inventory rendering and toggles use in-memory snapshots,
+  and field-scoped ordered saves retain failed intent and reject stale acknowledgements.
+  All builtin preferences apply before chat and ask model requests. Live disables
+  are rechecked in later schemas, native/text recovered calls, capability snapshots,
+  delegation preparation and child tool construction. `docs/s3b-agent-tools-validation.md`
+  records real TUI/protocol evidence and remaining limits.
+  Runtime retains device, threads, context, calibration and editors, with an
+  Agent execution settings link. Its reset preserves execution limits.
+  Execution offers Max steps per message (12/20/40, custom 1-64), Tool-call limit
+  (Auto or custom 1-256), Subagent workers and Advanced. Auto tool calls is
+  `max(4, steps * 2)`, a finite ceiling; zero/None legacy values retain Auto.
+  There is no Unlimited tool-call setting. Advanced offers a Total token budget
+  (No total-token cap or custom 1-2,000,000), reported usage and the count of
+  requests whose provider omitted usage. Zero means no total-token cap, not Auto.
+  Tokens count provider-reported input plus output, including repeated context
+  and child usage. Safe-boundary enforcement can overshoot by a request and
+  tool-free finalization; missing usage remains unknown, never estimated as exact.
+  Usage refresh is a bounded in-memory check only while Advanced is visible.
+  Auto workers uses one for local/native Ollama and compatible endpoints,
+  including remote compatible servers, and two for native cloud providers;
+  explicit 1-4 choices support hardware/quota control. Workers apply to the next
+  delegation without widening the read-only child allowlist, aggregate budgets
+  or permissions. Other limits are captured when a new message starts; a setting
+  edit cannot change the running turn's loop or reported step ceiling.
+  All four limits persist under existing `runtime_options` keys through the
+  serialized preferences writer. Latest-revision bounded acknowledgements merge
+  disjoint cross-client limits, preserving live intent on failed saves. Per-field
+  resets restore configured defaults; Execution reset removes only these four
+  overrides, preserving hardware/context, tool availability and permission policy.
+  Both chat and one-shot agent construction apply saved limits before the first
+  request, without forwarding governor keys as provider inference options.
+  Custom editors are private single-line inputs; invalid values retain the editor
+  and cancellation adds no chat turn. The editor number is cleared before its
+  panel returns so it cannot become the saved chat draft. Filtering and logical
+  focus survive saves. A stopped governor returns a skipped result for every
+  remaining call in the current provider batch, preserving complete tool-call
+  ID pairs without executing or charging those calls. Governor skips do not
+  count as repeated tool failures or retire a tool. If a required file read was
+  blocked by a reached limit, Klaude reports that limit without asking the
+  model to retry an impossible call; `klaude ask` exits nonzero.
+  Evidence: `docs/s3b-agent-execution-validation.md`.
+  Providers securely collects cloud-model, Crawl4AI Cloud and Hugging Face keys;
+  Brave API, Parallel, Tavily, Exa and Firecrawl entries link to Search detail.
+  The provider list has one status row per
   provider; Enter opens a detail page with a short purpose, its environment
   variable, and explicit Add/Update and Remove actions. It atomically writes
   only the corresponding
@@ -657,7 +1067,7 @@ Chat slash commands currently include:
   `chat-preferences.json`.
   Composer changes become effective immediately and save asynchronously through
   the same revision-scoped preferences writer; failure leaves the current mode
-  active and reports unconfirmed persistence. Runtime turn/subagent reset actions
+  active and reports unconfirmed persistence. Agent execution reset actions
   use the same writer rather than synchronous special-case writes.
 - `/permission`: open the Permissions settings page directly. It takes no
   arguments; permission changes are made and persisted through that page.
@@ -830,7 +1240,8 @@ Chat slash commands currently include:
   estimate and preserves the current user request. Neither path rewrites saved
   transcript history. Excerpts remain lossy, and budgets use conservative character
   estimates rather than claiming exact provider token counts.
-- `/recap`: show a concise local recap of the current session's recent turns.
+- `/recap [--ai]`: deterministic local recap by default; `--ai` explicitly uses
+  the bounded Utility job for recent saved public dialogue.
 - `/status`: available immediately even while a local or remote model turn is
   working. Show session ID and effective name, model, reasoning mode and effort,
   workspace, context estimate and approximate remaining context tokens, the
@@ -886,7 +1297,7 @@ Chat slash commands currently include:
 - `/memory [on|off]`: show durable memory status and facts, or toggle automatic
   memory generation.
 - `/skills`: list installed assistant skills and indexed file counts.
-- `/new`: start a fresh session with the current model and workspace, retaining
+- `/new`: start a fresh session with Default Chat and the current workspace, retaining
   saved conversations but clearing the terminal view and scrollback. Clears draft attachments and
   model conversation context.
 - `/clear`: erase only the current terminal view and scrollback. Keep the same
@@ -895,6 +1306,8 @@ Chat slash commands currently include:
   sessions. It takes no arguments and does not wait for the worker to become idle.
 - `/rename NAME`: persist a 1–160 character name for the current session. Named
   sessions use that name in `/resume` and Markdown exports.
+  `/rename --ai` explicitly generates an at-most-80-character Utility title and
+  conditionally saves it without overwriting a concurrent manual rename.
 - `/fork`: copy saved turns to a new session ID and continue with the current
   context; future turns do not modify the original session. Copies a saved name
   with a `(fork)` suffix. Empty chats become a new empty session.
@@ -2184,6 +2597,18 @@ session search rather than claiming no prior-session access.
 `sessions delete` and `sessions clear` require confirmation unless `--yes` or
 `-y` is passed.
 
+Session archive uses an additive `session_archive` table in the existing database.
+It changes normal-list/default-resume visibility, retaining turns, events, names,
+attachments' separate model content and configured recall. Restore is explicit;
+archived sessions cannot acquire a worker lease. Archive/restore/delete check
+state and unexpired worker ownership in the same `BEGIN IMMEDIATE` transaction
+used for lease acquisition, so another client's restore invalidates deletion.
+Library protects its current session; CLI archive can affect idle attached clients,
+which report the archive and return their unrun prompt to the composer instead
+of watching an imaginary worker. Permanent deletion removes only that session's
+turns/events/name/live/client/archive rows; durable memories and learned knowledge
+remain separate. Existing delete/clear commands also remove archive metadata.
+
 ## Runtime Context
 
 Runtime context is privacy-safe, local, volatile machine context collected by
@@ -2220,6 +2645,8 @@ The storage invariant is versioned, non-destructive replacement:
 - deleting old rows is garbage collection, not part of the critical activation
   path;
 - interrupted staging operations can be marked failed/recovered.
+- interrupted docs recovery verifies the downloaded files' exact checksums
+  against active owner metadata; matching source URLs alone are insufficient.
 
 SQLite metadata tables:
 
@@ -2275,6 +2702,11 @@ same-domain Markdown/text links. `klaude docs update` refreshes `llms.txt` and
 crawled sources. `klaude docs update --online` processes the configured
 `config/online-docs.txt`.
 
+Managed-source refresh uses fresh fetching through the existing guarded web
+cascade, bypassing page/turn caches. CLI and Library TUI indexing share
+`klaude_knowledge.docs.index_installed_docs`; manifest finalization follows
+successful atomic owner activation.
+
 Docs sources live under `.klaude/data/docs-sources/<name>/`:
 
 - `manifest.json`
@@ -2327,6 +2759,8 @@ fails closed to the local path on errors or ambiguity.
 
 Search providers use stable lowercase labels:
 
+- `brave` (keyless)
+- `brave_api`
 - `google`
 - `parallel`
 - `exa`
@@ -2338,7 +2772,7 @@ Search providers use stable lowercase labels:
 Default provider order in code is:
 
 ```toml
-["google", "parallel", "exa", "ddgs", "tavily", "firecrawl", "searxng"]
+["brave", "ddgs", "searxng", "brave_api", "google", "parallel", "exa", "tavily", "firecrawl"]
 ```
 
 Users can override order in `config/config.toml` under `[web.search]` with
@@ -2451,8 +2885,9 @@ Fetch providers are:
 - `direct`: direct HTTP for plain text, Markdown, JSON, and XML.
 - `crawl4ai`: optional configured Crawl4AI `/md` endpoint.
 - `trafilatura`: local Python HTML extraction fallback.
-- `exa`: Exa `/contents` when `[web] provider = "exa"` or `auto` fallback uses
-  Exa after local extraction fails.
+- `exa`: Exa `/contents` when explicitly selected in URL Fetch, or after an
+  eligible local extraction failure with its cloud fallback enabled. Inherited
+  `[web] provider = "exa"` / `auto` behavior remains until overridden.
 
 The preferred default cascade is direct text first, then Crawl4AI when
 configured, then trafilatura. This is important for files like
@@ -2675,7 +3110,7 @@ Development state at handoff:
   Narrow explicit-intent routing now exposes one permission-controlled
   delegation, with up to three independent tasks and conservative cloud
   concurrency; host cancellation and durable, resumable public child outcomes
-  are connected. Runtime settings expose Auto or explicit 1-4 worker limits.
+  are connected. Agent Tools settings expose Auto or explicit 1-4 worker limits.
 - Full validation can hang in the optional LanceDB roundtrip under some
   restricted sandboxes. Report the focused and non-LanceDB results separately;
   never describe the knowledge suite as green unless it completed.

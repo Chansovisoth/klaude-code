@@ -9,6 +9,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import unquote, urljoin, urlparse, urlunparse
 
 from klaude_core import Config
@@ -209,6 +210,22 @@ def finalize_docs_source(installed: InstalledDocs) -> None:
         pass
 
 
+def index_installed_docs(installed: InstalledDocs, knowledge: Any) -> int:
+    """Publish a docs snapshot through the shared indexer, then its manifest."""
+    from .indexing import IndexDocument
+
+    documents = [
+        IndexDocument(source=url, text=path.read_text(errors="replace"),
+                      title=path.relative_to(installed.current_dir).as_posix())
+        for path, url in zip(installed.files, installed.source_urls, strict=True)
+    ]
+    count = knowledge.replace_owner_snapshot_atomic(
+        installed.library, f"docs:{installed.name}", documents
+    )
+    finalize_docs_source(installed)
+    return count
+
+
 def recover_docs_sources(cfg: Config) -> int:
     from .store import KnowledgeStore
 
@@ -224,7 +241,11 @@ def recover_docs_sources(cfg: Config) -> int:
         owner = f"docs:{pending.get('name', root.name)}"
         active = store.active_owner_checksums(pending.get("library", ""), owner)
         sources = set(pending.get("indexed_sources", []))
-        is_active = bool(sources) and set(active) == sources
+        expected = {entry.get("url"): entry.get("checksum") for entry in pending.get("files", [])
+                    if isinstance(entry, dict)}
+        # Matching URLs alone cannot prove the downloaded revision was indexed.
+        # A cancelled refresh often has the same URLs as the old active snapshot.
+        is_active = bool(sources) and set(expected) == sources and active == expected
         if manifest.get("active_version") == pending.get("version_id"):
             try:
                 pending_path.unlink()

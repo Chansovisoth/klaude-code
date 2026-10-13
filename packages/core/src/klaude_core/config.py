@@ -230,6 +230,16 @@ def provider_secret_revision(config_dir: Path, name: str) -> str:
     return str(read_settings(config_dir / ".env.revisions.json").get(name, ""))
 
 
+def provider_secret_value(config_dir: Path, name: str, fallback: str = "") -> str:
+    """Private worker resolution: a stored change wins over stale launch state."""
+    saved = _parse_env_file(config_dir / ".env")
+    if name in saved:
+        return saved[name]
+    if provider_secret_revision(config_dir, name):
+        return ""
+    return os.environ.get(name, fallback)
+
+
 def provider_credential_current(config_dir: Path, name: str, value: str, revision: str) -> bool:
     """Check inside the dotenv lock; credentials never leave this comparison."""
     if provider_secret_revision(config_dir, name) != revision:
@@ -358,6 +368,11 @@ class WebVerificationConfig:
 
 @dataclass
 class WebFetchConfig:
+    # None preserves legacy fetch routing until an explicit settings choice.
+    settings_provider: str | None = None
+    exa_fallback: bool | None = None
+    crawl4ai_enabled: bool = True
+    exa_enabled: bool = True
     timeout_seconds: float = 30.0
     max_download_bytes: int = 2_000_000
     max_content_characters: int = 20_000
@@ -368,6 +383,10 @@ class WebFetchConfig:
 @dataclass
 class WebSearchConfig:
     strategy: str = "quality"
+    # None retains existing config routing. Explicit UI choices affect search only.
+    settings_provider: str | None = None
+    settings_fallbacks: list[str] | None = None
+    default_results: int = 12  # Existing agent tool default; explicit counts still win.
     stop_when_sufficient: bool = True
     provider_order: list[str] = field(default_factory=lambda: list(DEFAULT_WEB_PROVIDER_ORDER))
     allow_explicit_provider_fallback: bool = False
@@ -1196,5 +1215,29 @@ def load_config() -> Config:
             "allow_network_lookup",
             cfg.runtime_context.location.allow_network_lookup,
         )
+    )
+    from .fetch_settings import apply_fetch_settings
+    from .search_settings import apply_search_settings
+
+    try:
+        preferences = read_settings(cfg.data_dir / "chat-preferences.json")
+    except OSError:
+        preferences = {}
+    apply_search_settings(cfg, preferences.get("search_settings"))
+    apply_fetch_settings(cfg, preferences.get("fetch_settings"))
+    availability = preferences.get("web_provider_availability")
+    if isinstance(availability, dict):
+        for name, provider in cfg.web_providers.items():
+            if isinstance(availability.get(name), bool):
+                provider.enabled = availability[name]
+    # Fetch and Search share Exa's configured reference; saved removals also
+    # override inherited environment/TOML credentials on ordinary startup.
+    exa_reference = cfg.web_providers["exa"].api_key_env or "EXA_API_KEY"
+    cfg.exa_api_key = provider_secret_value(
+        cfg.config_dir, exa_reference,
+        cfg.exa_api_key if exa_reference == "EXA_API_KEY" else "",
+    )
+    cfg.crawl4ai_api_key = provider_secret_value(
+        cfg.config_dir, "CRAWL4AI_API_KEY", cfg.crawl4ai_api_key
     )
     return cfg

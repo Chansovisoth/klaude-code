@@ -65,18 +65,21 @@ def exa_search(
     ][:max_results]
 
 
-def exa_fetch(base_url: str, api_key: str, url: str, max_characters: int = 15_000) -> str:
-    r = httpx.post(
+def exa_fetch(base_url: str, api_key: str, url: str, max_characters: int = 15_000,
+              *, timeout_seconds: float = 60.0, max_response_bytes: int = 2_000_000) -> str:
+    from .fetch import FetchPageError
+    from .provider_http import post_json
+
+    data = post_json(
         f"{base_url.rstrip('/')}/contents",
         headers=_headers(api_key),
-        json={"urls": [url], "text": True},
-        timeout=60,
+        payload={"urls": [url], "text": True},
+        timeout=timeout_seconds, max_bytes=max_response_bytes,
     )
-    r.raise_for_status()
-    results = r.json().get("results", [])
-    if not results:
-        raise RuntimeError(f"Exa returned no content for {url}")
+    results = data.get("results", [])
+    if not isinstance(results, list) or not results or not isinstance(results[0], dict):
+        raise FetchPageError("Exa returned no content", failure_class="empty_extraction")
     text = results[0].get("text") or ""
-    if not text.strip():
-        raise RuntimeError(f"Exa returned empty content for {url}")
+    if not isinstance(text, str) or not text.strip():
+        raise FetchPageError("Exa returned empty content", failure_class="empty_extraction")
     return text.strip()[:max_characters]

@@ -116,6 +116,10 @@ class SourceRegistry:
         except ValueError:
             return
 
+    def clear_failures(self) -> None:
+        """A changed fetch configuration can repair a previous failed attempt."""
+        self._failures_by_url.clear()
+
     def register_source(self, document: dict[str, Any]) -> SourceRecord:
         requested_url = canonicalize_public_url(str(document["requested_url"]))
         final_url = canonicalize_public_url(str(document.get("final_url") or requested_url))

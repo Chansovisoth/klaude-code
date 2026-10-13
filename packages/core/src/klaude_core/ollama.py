@@ -8,142 +8,69 @@ client library redesigns itself.
 from __future__ import annotations
 
 import json
-import socket
-import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
 
+from .http_model_transport import CancellableHTTPTransport
+
 
 class OllamaError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class OllamaIncompleteResponse(OllamaError):
     """An assembled response ended without completion; no calls were returned."""
 
 
-class Ollama:
-    def __init__(self, base_url: str = "http://localhost:11434", timeout: float = 600.0):
-        self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-        self._client = httpx.Client(base_url=self.base_url, timeout=timeout)
-        self._chat_client_factory = lambda: httpx.Client(
-            base_url=self.base_url,
-            timeout=self.timeout,
-        )
-        self.last_chat_metadata: dict[str, Any] = {}
-        self._active_client: httpx.Client | None = None
-        self._active_response: httpx.Response | None = None
-        self._active_socket: Any = None
-        self._active_response_lock = threading.Lock()
+def _native_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Translate retained Chat Completions calls to Ollama's object arguments.
 
-    def _track_request(
-        self,
-        client: httpx.Client | None,
-        response: httpx.Response | None = None,
-    ) -> None:
-        with self._active_response_lock:
-            self._active_client = client
-            self._active_response = response
-            self._active_socket = None
-
-    def _request_trace(self, client: httpx.Client) -> Callable[[str, dict[str, Any]], None]:
-        """Track the connection before response headers (including model loading)."""
-        def trace(event: str, info: dict[str, Any]) -> None:
-            if event in {"http11.response_closed.started", "http2.response_closed.started"}:
-                return
-            connection = None
-            if event in {
-                "connection.connect_tcp.complete",
-                "connection.connect_unix_socket.complete",
-                "connection.start_tls.complete",
-            }:
-                stream = info.get("return_value")
-                if stream is not None:
-                    connection = stream.get_extra_info("socket")
-            if connection is None and not event.endswith(".started"):
-                return
-            with self._active_response_lock:
-                cancelled = self._active_client is not client
-                if not cancelled and connection is not None:
-                    self._active_socket = connection
-            if cancelled:
-                if connection is not None:
+    Model switches keep the common history. Do not mutate that history or pass
+    a JSON string where Ollama's native message schema requires an object.
+    """
+    result = []
+    for message in messages:
+        item = dict(message)
+        item.pop("deepseek_continuation", None)
+        item.pop("anthropic_continuation", None)
+        calls = message.get("tool_calls")
+        if isinstance(calls, list):
+            normalized = []
+            for call in calls:
+                if not isinstance(call, dict) or not isinstance(call.get("function"), dict):
+                    raise OllamaError("Invalid tool call in retained history")
+                function = dict(call["function"])
+                arguments = function.get("arguments", {})
+                if isinstance(arguments, str):
                     try:
-                        connection.shutdown(socket.SHUT_RDWR)
-                    except OSError:
-                        pass
-                raise OllamaError("ollama chat request cancelled")
-        return trace
+                        arguments = json.loads(arguments)
+                    except ValueError:
+                        raise OllamaError("Invalid tool arguments in retained history") from None
+                if not isinstance(arguments, dict):
+                    raise OllamaError("Invalid tool arguments in retained history")
+                function["arguments"] = arguments
+                normalized.append({**call, "function": function})
+            item["tool_calls"] = normalized
+        result.append(item)
+    return result
 
-    def _attach_response(self, client: httpx.Client, response: httpx.Response) -> None:
-        with self._active_response_lock:
-            if self._active_client is not client:
-                raise OllamaError("ollama chat request cancelled")
-            self._active_response = response
 
-    def _finish_request(self, client: httpx.Client) -> None:
-        with self._active_response_lock:
-            if self._active_client is client:
-                self._active_client = None
-                self._active_response = None
-                self._active_socket = None
+class Ollama(CancellableHTTPTransport):
+    def __init__(self, base_url: str = "http://localhost:11434", timeout: float = 600.0, *,
+                 api_key: str = "", trust_env: bool = True):
+        self.api_key = api_key
+        self.trust_env = trust_env
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+        super().__init__(base_url, timeout, headers=headers, trust_env=trust_env)
 
-    def cancel_active(self) -> bool:
-        """Close the active response stream so a steering turn can proceed."""
-        with self._active_response_lock:
-            client = self._active_client
-            response = self._active_response
-            connection = self._active_socket
-            # Detach first so repeated cancellation is idempotent and a close
-            # callback cannot race a later request into being cleared.
-            self._active_client = None
-            self._active_response = None
-            self._active_socket = None
-        if client is None and response is None:
-            return False
-        if connection is not None:
-            try:
-                connection.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-        if response is not None:
-            # close() alone need not wake a recv blocked in another thread.
-            stream = response.extensions.get("network_stream")
-            if stream is not None:
-                try:
-                    connection = stream.get_extra_info("socket")
-                    if connection is not None:
-                        connection.shutdown(socket.SHUT_RDWR)
-                except (AttributeError, OSError):
-                    pass
-            try:
-                response.close()
-            except Exception:
-                # Closing is only a best-effort wake-up mechanism. The owning
-                # worker still observes its cancellation flag at a safe event
-                # boundary, and terminal input must remain usable if an HTTP
-                # transport raises while being torn down.
-                pass
-        if client is not None:
-            try:
-                client.close()
-            except Exception:
-                pass
-        return True
-
-    def close(self) -> None:
-        """Release idle and active HTTP transports owned by this client."""
-        self.cancel_active()
-        try:
-            self._client.close()
-        except Exception:
-            # Cleanup is best effort during child teardown and process exit.
-            pass
+    def _cancel_error(self) -> RuntimeError:
+        return OllamaError("ollama chat request cancelled")
 
     def chat(
         self,
@@ -159,7 +86,9 @@ class Ollama:
         # Consume Ollama's streaming transport internally even though this
         # method returns one assembled message. That makes an in-flight local
         # generation cancellable when the user steers the persistent TUI.
-        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+        payload: dict[str, Any] = {
+            "model": model, "messages": _native_messages(messages), "stream": True,
+        }
         if tools:
             payload["tools"] = tools
         if options:
@@ -182,7 +111,8 @@ class Ollama:
                 if response.status_code != 200:
                     response.read()
                     raise OllamaError(
-                        f"ollama /api/chat {response.status_code}: {response.text[:300]}"
+                        f"ollama /api/chat {response.status_code}: {response.text[:300]}",
+                        status_code=response.status_code,
                     )
                 for line in response.iter_lines():
                     if not line:
@@ -506,7 +436,9 @@ class Ollama:
         think: bool | str | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Stream one tool-free chat turn as Ollama message fragments."""
-        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+        payload: dict[str, Any] = {
+            "model": model, "messages": _native_messages(messages), "stream": True,
+        }
         if options:
             payload["options"] = options
         if think is not None:

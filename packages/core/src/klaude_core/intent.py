@@ -8,7 +8,7 @@ from re import Pattern
 _NEGATED_ACTION_PREFIX = re.compile(
     r"(?:\b(?:do|does|did|can|could|should|would|will|must|please)\s+not\b|"
     r"\b(?:don['’]?t|dont|never|without)\b|\bno\s+need\s+to\b)"
-    r"(?:\s+(?:[a-z0-9_-]+|and|or|just|any|the|this|that)){0,5}\s*$",
+    r"(?:\s+(?:[a-z0-9_-]+|and|or|just|any|the|this|that),?){0,5}\s*$",
     re.IGNORECASE,
 )
 _WORKSPACE_ACTION = re.compile(
@@ -55,7 +55,7 @@ def has_nonnegated_action(text: str, action: str | Pattern[str]) -> bool:
     """
     pattern = re.compile(action, re.IGNORECASE) if isinstance(action, str) else action
     for match in pattern.finditer(text):
-        clause_prefix = re.split(r"[.;:!?\n]", text[: match.start()])[-1]
+        clause_prefix = re.split(r"[.;:!?\n]|\bbut\b", text[: match.start()], flags=re.I)[-1]
         if not _NEGATED_ACTION_PREFIX.search(clause_prefix):
             return True
     return False
@@ -82,6 +82,13 @@ def explicit_local_file_read_request(text: str) -> bool:
         without_urls,
         r"\b(?:read|open|inspect|review|check|analy[sz]e|follow|"
         r"carry\s+out|implement|execute)\b",
+    )
+
+
+def explicit_public_page_read_request(text: str) -> bool:
+    """A named URL read remains distinct from permission to search for sources."""
+    return has_nonnegated_action(
+        text, r"\b(?:fetch|open|read|visit)\b[^.;!?\n]{0,80}https?://"
     )
 
 

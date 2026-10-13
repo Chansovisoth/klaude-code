@@ -191,7 +191,12 @@ def test_parallel_tool_response_stops_at_the_nonexpandable_call_budget():
     events = list(agent.run("Inspect both values"))
 
     assert executed == ["first"]
-    assert len([event for event in events if event.kind == "tool_result"]) == 1
+    results = [event.payload for event in events if event.kind == "tool_result"]
+    assert len(results) == 2
+    assert results[0]["metadata"]["executed"] is True
+    assert results[1]["metadata"]["execution_governor_stopped"] is True
+    assert [message["tool_call_id"] for message in ollama.calls[1]["messages"]
+            if message["role"] == "tool"] == ["call-1", "call-2"]
     assert agent.last_turn_budget["tool_calls_used"] == 1
     assert agent.last_turn_budget["stop_reason"] == "tool-call budget reached"
 
@@ -261,8 +266,10 @@ def test_exact_provider_tokens_accumulate_and_stop_post_budget_tools():
 
     assert executed == []
     tool_results = [event.payload for event in events if event.kind == "tool_result"]
-    assert len(tool_results) == 1
-    assert tool_results[0]["metadata"]["executed"] is False
+    assert len(tool_results) == 2
+    assert all(result["metadata"]["executed"] is False for result in tool_results)
+    assert all(result["metadata"]["execution_governor_stopped"] is True
+               for result in tool_results)
     assert [event.payload["content"] for event in events if event.kind == "text"] == [
         "Token-bounded final report."
     ]

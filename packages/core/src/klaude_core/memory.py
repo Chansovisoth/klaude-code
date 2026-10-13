@@ -223,6 +223,10 @@ class Memory:
             "(session_id TEXT PRIMARY KEY, name TEXT NOT NULL)"
         )
         self.db.execute(
+            "CREATE TABLE IF NOT EXISTS session_archive "
+            "(session_id TEXT PRIMARY KEY, archived_at REAL NOT NULL)"
+        )
+        self.db.execute(
             """CREATE TABLE IF NOT EXISTS session_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -993,6 +997,11 @@ class Memory:
         with self._db_lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
+                if self.db.execute(
+                    "SELECT 1 FROM session_archive WHERE session_id=?", (session_id,)
+                ).fetchone():
+                    self.db.rollback()
+                    return False
                 row = self.db.execute(
                     "SELECT owner_client_id, owner_lease_until, turn_id FROM session_live "
                     "WHERE session_id=?",
@@ -1095,7 +1104,9 @@ class Memory:
     def last_session_id(self) -> str | None:
         with self._db_lock:
             row = self.db.execute(
-                "SELECT session_id FROM turns ORDER BY ts DESC LIMIT 1"
+                "SELECT session_id FROM turns WHERE NOT EXISTS "
+                "(SELECT 1 FROM session_archive AS a WHERE a.session_id=turns.session_id) "
+                "ORDER BY ts DESC LIMIT 1"
             ).fetchone()
         return row[0] if row else None
 
@@ -1125,7 +1136,9 @@ class Memory:
                 "SELECT t.session_id, MAX(t.ts), "
                 "(SELECT content FROM turns AS first WHERE first.session_id=t.session_id "
                 "AND first.role='user' ORDER BY first.ts, first.rowid LIMIT 1) "
-                "FROM turns AS t GROUP BY t.session_id ORDER BY MAX(t.ts) DESC, t.session_id"
+                "FROM turns AS t WHERE NOT EXISTS "
+                "(SELECT 1 FROM session_archive AS a WHERE a.session_id=t.session_id) "
+                "GROUP BY t.session_id ORDER BY MAX(t.ts) DESC, t.session_id"
             ).fetchall()
             names = dict(self.db.execute("SELECT session_id, name FROM session_names"))
             active = {
@@ -1178,6 +1191,22 @@ class Memory:
                 (session_id, name),
             )
 
+    def rename_session_if_current(self, session_id: str, name: str, expected_name: str) -> bool:
+        name = " ".join(name.split())
+        if not name or len(name)>80:
+            raise ValueError("AI session name must contain 1–80 characters")
+        # One conditional statement: concurrent manual rename wins, including
+        # the race where the session previously had no explicit title.
+        with self._db_lock, self.db:
+            cursor = self.db.execute(
+                "INSERT INTO session_names (session_id,name) SELECT ?,? "
+                "WHERE COALESCE((SELECT name FROM session_names WHERE session_id=?),'')=? "
+                "ON CONFLICT(session_id) DO UPDATE SET name=excluded.name "
+                "WHERE session_names.name=?",
+                (session_id,name,session_id,expected_name,expected_name),
+            )
+            return cursor.rowcount==1
+
     def fork_session(self, source: str, target: str) -> None:
         with self._db_lock, self.db:
             if self.db.execute("SELECT 1 FROM turns WHERE session_id=?", (target,)).fetchone():
@@ -1209,7 +1238,56 @@ class Memory:
             self.db.execute("DELETE FROM session_events WHERE session_id=?", (session_id,))
             self.db.execute("DELETE FROM session_live WHERE session_id=?", (session_id,))
             self.db.execute("DELETE FROM session_clients WHERE session_id=?", (session_id,))
+            self.db.execute("DELETE FROM session_archive WHERE session_id=?", (session_id,))
         return turns
+
+    def session_archived(self, session_id: str) -> bool:
+        with self._db_lock:
+            return self.db.execute(
+                "SELECT 1 FROM session_archive WHERE session_id=?", (session_id,)
+            ).fetchone() is not None
+
+    def change_session_archive(self, session_id: str, operation: str) -> None:
+        """Atomically archive/restore/delete, excluding active worker leases.
+
+        Archive changes browsing visibility only. Turns, events, names and recall
+        remain intact. Deletion requires the record to still be archived; a stale
+        confirmation cannot delete a session another client has restored.
+        """
+        if operation not in {"archive", "restore", "delete"}:
+            raise ValueError("Unknown session action")
+        with self._db_lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                if not self.db.execute(
+                    "SELECT 1 FROM turns WHERE session_id=? LIMIT 1", (session_id,)
+                ).fetchone():
+                    raise ValueError("Session no longer exists; reload the list")
+                active = self.db.execute(
+                    "SELECT 1 FROM session_live WHERE session_id=? "
+                    "AND owner_client_id<>'' AND owner_lease_until>?",
+                    (session_id, time.time()),
+                ).fetchone()
+                if active:
+                    raise ValueError("Session has an active worker; wait for it to finish")
+                archived = self.session_archived(session_id)
+                if archived != (operation != "archive"):
+                    raise ValueError("Session archive state changed; reload the list")
+                if operation == "archive":
+                    self.db.execute(
+                        "INSERT INTO session_archive VALUES (?, ?)", (session_id, time.time())
+                    )
+                elif operation == "restore":
+                    self.db.execute("DELETE FROM session_archive WHERE session_id=?", (session_id,))
+                else:
+                    # Same transaction and lock as the state/lease checks above.
+                    for table in ("turns", "session_names", "session_events", "session_live",
+                                  "session_clients", "session_archive"):
+                        self.db.execute(f"DELETE FROM {table} WHERE session_id=?", (session_id,))
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
 
     def session_counts(self) -> dict[str, int]:
         with self._db_lock:
@@ -1235,6 +1313,7 @@ class Memory:
             self.db.execute("DELETE FROM session_events")
             self.db.execute("DELETE FROM session_live")
             self.db.execute("DELETE FROM session_clients")
+            self.db.execute("DELETE FROM session_archive")
         return {"sessions": sessions, "turns": turns}
 
     def session_tail(self, session_id: str, limit: int = 8) -> list[dict]:
@@ -1254,6 +1333,8 @@ class Memory:
             rows = self.db.execute(
                 "SELECT session_id, MAX(ts), "
                 "SUM(CASE WHEN role IN ('user','assistant') THEN 1 ELSE 0 END) FROM turns "
+                "WHERE NOT EXISTS (SELECT 1 FROM session_archive AS a "
+                "WHERE a.session_id=turns.session_id) "
                 "GROUP BY session_id "
                 "HAVING SUM(CASE WHEN role IN ('user','assistant') THEN 1 ELSE 0 END) > 0 "
                 "ORDER BY MAX(ts) DESC LIMIT ?",

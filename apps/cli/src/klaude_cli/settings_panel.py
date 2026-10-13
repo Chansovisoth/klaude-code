@@ -70,8 +70,11 @@ class PanelRow:
     search_terms: str = ""
     label_badge: str = ""
     control: RowControl | None = None
+    mixed: bool = False
 
     def __post_init__(self) -> None:
+        if self.mixed and self.kind != RowKind.TOGGLE:
+            raise ValueError("Mixed state requires a toggle row")
         if self.kind == RowKind.TOGGLE and type(self.checked) is not bool:
             raise ValueError("Toggle rows require a boolean checked state")
         if self.status_tone not in {"neutral", "success", "warning", "error"}:
@@ -92,7 +95,8 @@ class PanelRow:
 
     @property
     def effective_value(self) -> str:
-        return toggle_text(self.checked is True) if self.kind == RowKind.TOGGLE else self.value
+        return toggle_text(self.checked is True, mixed=self.mixed) \
+            if self.kind == RowKind.TOGGLE else self.value
 
     @property
     def selectable(self) -> bool:
@@ -270,6 +274,9 @@ def _table_widths(
 ) -> tuple[int, int, int]:
     available = width - 7  # selector, two column gaps, unused final terminal cell
     name = min(40, max(20, available // 3))
+    if headers is not None and not headers[2]:
+        # Two-column inventories should use the remaining space for their value.
+        return name, available - name, 0
     source_column = headers is not None and headers[1].upper() == "SOURCE"
     value = min(26 if source_column else 18,
                 max(14 if source_column else 9,
@@ -347,15 +354,17 @@ def _label_fragments(row: PanelRow, label: str, style: str) -> tuple[tuple[str, 
     return ((style, label),)
 
 
-def toggle_text(checked: bool, *, unicode_blocks: bool = True) -> str:
+def toggle_text(checked: bool, *, unicode_blocks: bool = True, mixed: bool = False) -> str:
     block = "■" if unicode_blocks else "X"
+    if mixed:
+        return f"[ {block} ] MIXED"
     return f"[  {block}] ON" if checked else f"[{block}  ] OFF"
 
 
 def _value_fragments(
     row: PanelRow, value: str, style: str, *, unicode_blocks: bool
 ) -> tuple[tuple[str, str], ...]:
-    if row.kind == RowKind.TOGGLE and row.checked is True and row.enabled:
+    if row.kind == RowKind.TOGGLE and row.checked is True and row.enabled and not row.mixed:
         block = "■" if unicode_blocks else "X"
         before, found, after = value.partition(block)
         if found:
@@ -423,12 +432,13 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
                 selected_line, context_line = start, last_section_line
             continue
         value = (
-            toggle_text(row.checked is True, unicode_blocks=unicode_blocks)
+            toggle_text(row.checked is True, unicode_blocks=unicode_blocks, mixed=row.mixed)
             if row.kind == RowKind.TOGGLE
             else row.value
         )
         start = len(lines)
         parts: tuple[tuple[str, str], ...]
+        info_value_lines: list[str] = []
         if row.kind == RowKind.SECTION:
             last_section_line = start
             heading = _fit(row.label.upper(), width - 2).rstrip()
@@ -456,9 +466,12 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
                 if row.kind == RowKind.STATUS else "class:panel.muted"
             )
             if row.value:
+                label=_fit(row.label,max(1,width//2)).rstrip()
+                if get_cwidth(label)+get_cwidth(row.value)+4>width:
+                    info_value_lines=_wrapped(row.value,max(1,width-4))
                 parts = (
-                    (info_style, f"  {_fit(row.label, max(1, width // 2)).rstrip()}"),
-                    (_value_style(row), f"  {row.value}"),
+                    (info_style, f"  {label}"),
+                    (_value_style(row), "" if info_value_lines else f"  {row.value}"),
                 )
             else:
                 info_lines = _wrapped(row.label, width - 2)
@@ -516,6 +529,9 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
                 ) + _label_fragments(row, label_lines[0] if label_lines else "", label_style)
         lines.append(parts)
         owners.append(row.id)
+        for value_line in info_value_lines:
+            lines.append(((_value_style(row),"    "+value_line),))
+            owners.append(row.id)
         if row.kind in {RowKind.INFO, RowKind.STATUS} and not row.value:
             for extra in info_lines[1:]:
                 lines.append(((info_style, f"  {extra}"),))
