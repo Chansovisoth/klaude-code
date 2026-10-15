@@ -411,12 +411,18 @@ def test_endpoint_switch_requires_new_snapshot_authorization(image_lab):
 
 
 @pytest.mark.parametrize("image_lab", ["anthropic"], indirect=True)
-def test_anthropic_size_limit_is_applied_before_snapshot_save(image_lab):
+def test_large_anthropic_source_is_retained_but_prepared_delivery_fits_limit(image_lab):
     _, connection, agent, source, _, _, _ = image_lab
     source.write_bytes(png() + b"x" * ANTHROPIC_IMAGE_BYTES)
-    with pytest.raises(ValueError, match="7,500,000"):
-        compose(image_lab)
-    assert not agent.image_context.store.path.exists()
+    value = compose(image_lab)
+    projected, count = agent.image_context.project([
+        {"role": "user", "content": "Inspect", "image_inputs": value["image_inputs"]}
+    ])
+    assert count == 1
+    part = projected[-1]["image_content"][0]
+    assert len(base64.b64decode(part["data"])) <= ANTHROPIC_IMAGE_BYTES
+    item = agent.image_context.store.get(value["image_inputs"][0]["id"])
+    assert item["size"] > ANTHROPIC_IMAGE_BYTES
 
 
 def test_malformed_capability_is_never_promoted_to_supported():

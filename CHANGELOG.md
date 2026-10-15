@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Rename Models & AI to Models, AI Defaults to Model Defaults, and Agent Tools
+  to Tools. Move Search into Agent directly above Tools, and Appearance below
+  Advanced. Fill empty model roles from verified available metadata in owned
+  background work while preserving current selections, explicit inheritance,
+  Vision's enable switch and the active chat model.
+- Prepare large PNG/JPEG/static WebP/GIF attachments automatically while preserving
+  private originals: full bounded decoding, orientation/transparency normalization,
+  metadata stripping, task-sensitive detail, explicit frames and source-pixel crops.
+  Share verified request budgets with compaction, retain failed image attempts
+  through retry/resume, report typed provider failures and actual routed models,
+  and keep image paths from activating unrelated coding tools. Fix cancellable
+  private-worker input stalling on payloads larger than the pipe buffer.
+- Discover native Ollama capabilities automatically in AI Defaults and Manage
+  Models settings. Show Vision, text-only, tools, thinking and embedding support;
+  distinguish server image generation/audio from Klaude consumers. Keep checks
+  bounded and cancellable, label failed checks as unverified, and disable known
+  incompatible Vision choices without loading models for inference.
+- Add Library directly below Memory in Settings, with `/settings library` access
+  and Back returning to the same Settings row. Reuse the existing workspace;
+  direct `/library` entry continues to close to chat.
 - Fix offline vLLM setup discovery when uv is installed in a managed tool cache.
   Retain its explicit launcher path through owned workers and keep restricted
   subprocess PATH, executable revision checks and secret isolation.

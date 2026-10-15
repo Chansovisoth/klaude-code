@@ -1,5 +1,6 @@
 """Reviewed Media uses declared image evidence without chat or tool execution."""
 
+import io
 import queue
 from dataclasses import asdict, replace
 
@@ -12,6 +13,7 @@ from klaude_core.config import provider_secret_revision, save_provider_secret
 from klaude_core.library_artifacts import ArtifactStore
 from klaude_core.model_connections import connection_registry
 from klaude_core.model_management import write_registry
+from PIL import Image
 
 from . import test_chat_image_providers as providers
 
@@ -158,30 +160,23 @@ def test_http_deadline_is_bounded_before_headers(image_lab, monkeypatch):
         vision.analyze(cfg, spec)
 
 
-def test_context_is_an_admission_bound(image_lab, monkeypatch):
-    original = vision.image
-
-    def large(*args):
-        item, data = original(*args)
-        return {**item, "width": 2048, "height": 2048}, data
-
-    monkeypatch.setattr(vision, "image", large)
-    with pytest.raises(ValueError, match="context estimate"):
-        reviewed(image_lab)
+def test_context_is_an_admission_bound_for_the_prepared_image(image_lab):
+    image = io.BytesIO()
+    Image.new("RGB", (2048, 2048), "white").save(image, format="PNG")
+    image_lab[3].write_bytes(image.getvalue())
+    _, _, spec = reviewed(image_lab, context=2048, output=128)
+    prepared = spec["preparation"][0]
+    assert prepared["source_width"] == 2048 and prepared["width"] < 1024
+    vision.check_input(prepared, spec["models"][0], spec["question"], 2048, 128)
     assert not [p for _, p, _ in image_lab[4] if "messages" in p]
 
 
 @pytest.mark.parametrize("image_lab", ["anthropic"], indirect=True)
-def test_anthropic_raw_byte_limit_is_checked_before_review(image_lab, monkeypatch):
-    original = vision.image
-
-    def large(*args):
-        item, data = original(*args)
-        return {**item, "size": 7_500_001}, data
-
-    monkeypatch.setattr(vision, "image", large)
-    with pytest.raises(ValueError, match="7,500,000"):
-        reviewed(image_lab)
+def test_anthropic_prepared_byte_limit_is_checked_before_review(image_lab):
+    image_lab[3].write_bytes(image_lab[3].read_bytes() + b"x" * 7_500_001)
+    _, item, spec = reviewed(image_lab)
+    assert item["size"] > 7_500_000
+    assert spec["preparation"][0]["size"] <= 7_500_000
     assert not [p for _, p, _ in image_lab[4] if "messages" in p]
 
 

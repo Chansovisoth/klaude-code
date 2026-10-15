@@ -100,7 +100,7 @@ class VisionPanel:
                     "Optional AI tag suggestions" if self.tagging else "Explicit image analysis",
                     description="Sends the stored image to the reviewed Vision endpoint. "
                     "Select suggestions to save separately from manual tags; no automatic changes."
-                    if self.tagging else "Sends the stored PNG/JPEG and question "
+                    if self.tagging else "Sends a prepared copy of the image and question "
                     "to the reviewed endpoint. "
                     "No tools, indexing, tags or chat changes. Result stays private to this panel.",
                 ),
@@ -141,6 +141,15 @@ class VisionPanel:
                            if model.get("profile_source") else " · declared vision support"),
                     )
                 )
+                preparations = self.spec.get("preparation", [])
+                if index < len(preparations):
+                    prepared = preparations[index]
+                    rows.append(PanelRow(
+                        "prepared:" + str(index), RowKind.INFO, "Prepared image",
+                        f"{prepared['source_width']}×{prepared['source_height']} → "
+                        f"{prepared['width']}×{prepared['height']} · {prepared['detail']}",
+                        description="Original retained · resized pixels may omit fine detail",
+                    ))
             rows += [
                 PanelRow(
                     "policy",

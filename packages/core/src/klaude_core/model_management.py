@@ -275,13 +275,13 @@ def apply_model_change(cfg: Any, change: ModelChange) -> dict[str, Any]:
         research_affected = affected_role(defaults.research)
         if any(affected_role(ref) for ref in (defaults.vision, *defaults.vision_fallbacks)):
             raise SettingsConflictError(
-                "Vision model is affected; change or clear Vision choices in AI Defaults first"
+                "Vision model is affected; change or clear Vision choices in Model Defaults first"
             )
         if research_affected and (
             change.research_expected != defaults.research or not change.unset_research
         ):
             raise SettingsConflictError(
-                "Research model is affected; explicitly unset it or change AI Defaults"
+                "Research model is affected; explicitly unset it or change Model Defaults"
             )
         utility_affected = affected_role(defaults.utility)
         removed_fallbacks = tuple(ref for ref in defaults.fallbacks if affected_role(ref))
@@ -290,7 +290,7 @@ def apply_model_change(cfg: Any, change: ModelChange) -> dict[str, Any]:
                 raise SettingsConflictError("Utility defaults changed; reload and review again")
         if utility_affected and not change.unset_utility:
             raise SettingsConflictError(
-                "Utility override is affected; explicitly unset it or change AI Defaults"
+                "Utility override is affected; explicitly unset it or change Model Defaults"
             )
         updated_defaults = replace(
             defaults,

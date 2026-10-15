@@ -67,6 +67,25 @@ a separate explicitly authorized operation.
 
 ## User-Facing Terms
 
+Settings groups are Models, Agent, Advanced, then Appearance. Search is the first
+Agent row, directly above Tools. Model Defaults is the public name; existing
+`ai_defaults` storage/controller IDs and `/settings ai defaults` remain compatible.
+`/settings model defaults` is the preferred spelling. Opening Model Defaults checks
+live enabled endpoints for missing Chat/Utility/Research/Vision roles in an owned
+metadata-only job. Local and already-selected compatible models are preferred;
+declared parameter counts order remaining local choices, without claiming hardware
+fit. Vision requires fresh exact-model image/Standard-mode verification. Empty roles
+stay empty when no verified candidate is found. Existing choices and explicitly
+saved inheritance/clears are preserved using `model_default_selections` markers in
+chat-preferences.json. Ordered compare-and-save writes recheck endpoint, credentials
+and disabled models; they do not enable Vision, change the active session, select
+fallbacks, load models or generate. Scans cover at most 8 endpoints and 32 native
+models per endpoint with 4 concurrent catalog reads, existing 8-model/4-read capability
+batches, 40s scheduling and a 60s owned-worker bound. Leaving rejects unaccepted
+results; accepted writes drain. Image generation retains its separate server setup.
+Implementation: CLI default_model_selection/ai_default_settings, core ai_defaults;
+evidence: `docs/model-defaults-navigation-validation.md`.
+
 Use `library` in CLI help, README examples, prompts, and user-facing text for a
 named knowledge bucket. Keep `collection` only where compatibility or existing
 storage APIs require it.
@@ -125,16 +144,20 @@ Top-level commands currently include:
   Originals, exported/opened copies and learned knowledge remain independent.
   Research reports use the same private store and artifact lifecycle.
 - `klaude library analyze MEDIA_ID QUESTION [--context N] [--output-tokens N]
-  [--yes]`: reviewed pixel analysis using AI Defaults → Vision on native Ollama,
+  [--yes]`: reviewed pixel analysis using Model Defaults → Vision on native Ollama,
   Anthropic Messages, OpenRouter, reviewed OpenAI Responses models or declared
   compatible HTTP endpoints.
   Vision starts disabled, with an explicit endpoint/model and at most three
   ordered explicit fallbacks. Selection checks exact-model declared image support
   through the shared core vision inspector: `/api/show`, native Anthropic model
   capabilities or compatible catalog modalities/configured native peers;
-  model names never imply capability. Unarchived PNG/JPEG input is limited to
-  8 MiB, 4 megapixels and 4096 pixels per side, with current revisions/checksums.
-  Header checks are not a complete client decoder. Questions are private and
+  model names never imply capability. Unarchived PNG/JPEG/static WebP/GIF sources
+  accept up to 32 MiB, 40 megapixels and 32768 pixels per side. A fully decoding,
+  bounded cancellable subprocess prepares private RGB derivatives, normalizes EXIF
+  orientation/transparency and strips metadata. Source bytes remain unchanged.
+  Prepared PNG/JPEG fits the request budget, 4 megapixels/4096 side and 7,500,000
+  bytes; Auto uses at most 1024 side, detailed 2048, original 4096 subject to provider
+  limits. Animated sources need an explicit frame in chat. Questions are private and
   at most 1000 printable characters. Back/No reviews show exact image/endpoints/
   models and budgets: default 4096 context/512 output, editable 2048–32768/128–2048.
   The shared owned worker and cancellable HTTP transport bound each attempt to
@@ -147,7 +170,7 @@ Top-level commands currently include:
   limits are checked before review/send. Thinking-required Anthropic models are
   unavailable to this thinking-disabled Media consumer, while chat retains its
   supported Thinking modes. Shared metadata/prepare/analysis worker bounds are
-  15/60/110 seconds per applicable operation/model, retaining 90-second generation.
+  15/120/130 seconds per applicable operation/model, retaining 90-second generation.
   Only
   reviewed network/temporary failures permit fallbacks; typed HTTPX statuses join
   the existing policy. Roles/image/endpoint/credentials are rechecked; Vision
@@ -179,14 +202,24 @@ Top-level commands currently include:
   native Ollama peer at the same root/auth scope can verify an otherwise unknown
   compatible catalog through `/api/show`; explicit negative evidence is retained.
   Model inventories label Images as declared, unsupported or unknown; tool support
-  remains independent. Anthropic uses image-before-text native base64 sources,
+  remains independent. Model Defaults and Models settings additionally inspect native
+  Ollama `/api/show` capabilities in owned metadata-only batches (8 models, 4
+  concurrent reads, 20s per job, at most 1000 models per endpoint). Scoped results
+  remain stable during browsing and are reused for 60s across navigation; refresh
+  is explicit. Vision/text-only/tool/thinking/embedding labels follow declarations,
+  never model names. Image generation/audio are labeled server capabilities, not
+  additional Klaude consumers. Known non-vision entries cannot select the Vision
+  role; unknown checks remain retryable and selection still verifies fresh support.
+  Session/endpoint/credential changes reject stale results; leaving cancels work.
+  Evidence: `docs/model-capabilities-validation.md`.
+  Anthropic uses image-before-text native base64 sources,
   compatible requests use image_url data URIs. Anthropic bounds raw images to
   7,500,000 bytes; other existing PNG/JPEG dimensions/count bounds remain intact.
   Metadata verification is bounded, cancellable and cached for 30 seconds.
   Chat uses its own Runtime budget, with no model/fallback switch. It privately
   saves immutable Media snapshots associated with the session and stores bounded
   references in owner-only model_content, never base64 in public history/search/
-  export. PNG/JPEG bounds match Media analysis; at most two distinct images are
+  export. Source/preparation bounds match Media analysis; at most two distinct images are
   supplied per request. Restore/follow-ups retain pixels after source deletion;
   tags/archive preserve bytes, deletion/corruption removes availability. Endpoint/
   credential changes require reattachment; unsupported providers omit old pixels
@@ -196,7 +229,20 @@ Top-level commands currently include:
   requests. Failed preparation retains attachments and an empty-composer prompt
   for retry; clean one-shot preparation failures exit 1. Stored snapshots may
   remain after later failure/cancellation and are managed independently in Media.
-  Core chat_images/agent/ollama and CLI main own S6a2; evidence:
+  Core chat_images/agent/ollama and CLI main own S6a2.
+  The attachment reliability follow-up adds `/attach --detail auto|detailed|original`,
+  `--frame N` and `--crop x,y,width,height`, plus explicit stored `media:ID` reuse
+  and filename reactivation after source deletion. Only delivered image mentions
+  are excluded from intent routing; coding and named text-file tools remain intact.
+  Compaction and image admission share core request_budget, with verified cloud
+  limits and a labeled 32768 unknown-cloud estimate, never a silent local allocation
+  increase. Failed image attempts retain private references/question through retry
+  and resume. Compatible/OpenRouter typed context failures allow one smaller
+  preparation; short transient pre-output failures allow one bounded retry. Partial
+  output, quota, auth and policy errors require explicit user retry. Actual routed
+  model and allowlisted error type remain visible; failed preflight clears old usage.
+  Private worker input uses an owned writer to avoid large-pipe polling deadlocks.
+  Current evidence: `docs/image-attachment-reliability-validation.md`; historical:
   `docs/s6a2-chat-images-validation.md`. Core image_content/chat_image_support and
   the Anthropic/compatible runtimes own S6a3a; evidence and fixture/live distinctions:
   `docs/s6a3-http-chat-images-validation.md`. S6a3b extends reviewed Media through
@@ -296,7 +342,7 @@ Top-level commands currently include:
   [--abandon] [--yes]`:
   S6b1 connects an
   existing unauthenticated stable-diffusion.cpp native HTTP server. Settings →
-  AI Defaults → Image generation owns the separate draft enable/endpoint/Test/
+  Model Defaults → Image generation owns the separate draft enable/endpoint/Test/
   observed loaded-model pin/Save/Reload controls. Library → Media → Generate image
   supplies the prompt, bounded dimensions/steps/seed and Back-focused review.
   Native capability checks precede acceptance; automatic sampler/scheduler defaults
@@ -674,9 +720,9 @@ Top-level commands currently include:
   to one worker, including remote endpoints; their actual allocation, reasoning,
   GPU/thread controls remain server-owned. Native runtimes and local embeddings
   remain separate. S2a Add/Added settings, endpoint maintenance and model
-  visibility/pinning and S2b AI Defaults are implemented. S2c's DeepSeek and
+  visibility/pinning and S2b Model Defaults are implemented. S2c's DeepSeek and
   native Anthropic slices are implemented and validated locally. S3a Web Search
-  and URL Fetch settings are implemented and validated locally. S3b Agent Tools
+  and URL Fetch settings are implemented and validated locally. S3b Tools
   execution, registry groups and Settings navigation migration are implemented.
   Evidence: `docs/s3b-agent-tools-validation.md`. S4a's Library session/knowledge
   foundation, Documents/Media storage and explicit Knowledge TUI consumers are
@@ -699,7 +745,7 @@ Top-level commands currently include:
   defaults to the private `DEEPSEEK_API_KEY` reference. No DeepSeek connection is
   silently seeded into an existing registry; legacy defaults/deletions remain intact.
   Registered DeepSeek models use qualified `deepseek@CONNECTION/MODEL` identities
-  in session selection and AI Defaults. DeepSeekRuntime reuses the bounded HTTPX
+  in session selection and Model Defaults. DeepSeekRuntime reuses the bounded HTTPX
   stream/cancellation transport without the optional cloud SDKs. Standard mode
   explicitly disables upstream thinking; thinking maps low to low and medium/high
   to high. It retains at most 256,000 reasoning characters privately, publishing
@@ -820,7 +866,9 @@ Chat slash commands currently include:
   `docs/s5c-ssh-key-setup-validation.md`, `docs/s5c-remote-gpu-validation.md` and
   `docs/s5c-remote-vllm-validation.md` and `docs/s5c-remote-adoption-validation.md`.
 
-- `/library [VIEW]`: open the Library workspace outside Settings, ordered
+- `/library [VIEW]`: open the Library workspace, also reached from Settings →
+  Library directly below Memory (`/settings library`). Settings entry returns
+  through Back to the Library row; direct `/library` entry closes to chat. Ordered
   Sessions, Knowledge, Documents, Research, Media, Archive. Sessions/Archive have
   bounded 100-record pages, full-store search over names/public turns, last-eight
   public-turn previews, resume, archive/restore and confirmed archived deletion
@@ -901,7 +949,7 @@ Chat slash commands currently include:
 - `/keybinds`: print only keyboard controls directly. Slash commands belong in
   `/help` and the `/` completion popup.
 - `/settings [CATEGORY]`: configure categorized Theme, Input Field, Divider, Spinner, Models,
-  Providers, Search, Agent Tools, MCPs, Skills, Memory, Permissions, and Runtime controls. Its
+  Providers, Search, Tools, MCPs, Skills, Memory, Permissions, and Runtime controls. Its
   home page is a grouped, aligned overview that shows the live value or a
   concise status for every category. Theme and Spinner parent summaries display
   Default when values match their defaults; selection pages retain actual choices.
@@ -916,14 +964,14 @@ Chat slash commands currently include:
   counts from its existing owned background inventory, with loading/unavailable states.
   Memory shows the bounded saved-fact count and automatic-memory flag as
   `1 saved, ON`; its overview worker returns counts without exposing fact text.
-  MODELS & AI groups Models, AI Defaults and Search. AGENT groups
-  Agent Tools, MCPs, Skills, Memory and Permissions. ADVANCED contains Provider
+  MODELS groups Models and Model Defaults. AGENT groups
+  Search, Tools, MCPs, Skills, Memory, Library and Permissions. ADVANCED contains Provider
   credentials (the legacy Providers landing page) and Runtime. Inside MCPs, the MCP Servers
   heading shows `2 installed, 1 enabled` beside the snapshot age, independently
   of discovered tool counts. The Settings home keeps enabled/total counts.
   MCPs retains `/mcp` and
   `/settings mcp servers`; `/settings mcps` also opens that page.
-  APPEARANCE includes Divider (also `/settings divider`): Show divider hides or
+  APPEARANCE follows ADVANCED and includes Divider (also `/settings divider`): Show divider hides or
   reveals the separator line while retaining speaker/time/session/duration text.
   The Divider page lists Show divider, Line color, Text color, Custom,
   then the built-in `━`, `─`, `━ `, and `─ ` patterns. Presets change only the
@@ -1095,8 +1143,8 @@ Chat slash commands currently include:
   stored replacements/removals override launch environment values.
   Core maintenance lives in model_management, and the UI reuses model_settings
   and the existing session action lane without another writer or secret store.
-  AI Defaults is a separate typed page (`/settings ai defaults`, also
-  `/settings defaults`) with Default Chat, Utility, ordered Utility fallbacks
+  Model Defaults is a separate typed page (`/settings model defaults`, also
+  `/settings ai defaults` and `/settings defaults`) with Default Chat, Utility, ordered Utility fallbacks
   and Utility output, plus Research endpoint/model inheritance. It migrates the
   effective legacy startup preference once
   into `ai_defaults` in chat-preferences.json, preserving explicit unset and
@@ -1533,7 +1581,7 @@ Chat slash commands currently include:
   racing those accepted writes. Appearance uses a separate writer for its own
   file; Tools and remembered-model selections share the preferences writer.
   Startup and line-oriented chat still use synchronous compatibility saves.
-  Agent Tools owns execution and built-in tool availability. `/settings tools`,
+  Tools owns execution and built-in tool availability. `/settings tools`,
   `/settings agent tools` and `/settings agent` open its typed home: Execution,
   Built-in Tools, Activity Updates and links to the existing MCPs/Skills pages.
   Groups derive from `Agent.tools`, exclude external `mcp__` tools and omit
@@ -1547,7 +1595,7 @@ Chat slash commands currently include:
   Knowledge result validation lives in Knowledge & Sessions; web result validation
   remains in Search. Search/URL Fetch link to the availability owner and Back returns
   with their filter/focus intact. MCP/Skills links retain their management/search flows
-  and return to Agent Tools. Inventory rendering and toggles use in-memory snapshots,
+  and return to Tools. Inventory rendering and toggles use in-memory snapshots,
   and field-scoped ordered saves retain failed intent and reject stale acknowledgements.
   All builtin preferences apply before chat and ask model requests. Live disables
   are rechecked in later schemas, native/text recovered calls, capability snapshots,
@@ -3655,7 +3703,7 @@ Development state at handoff:
   Narrow explicit-intent routing now exposes one permission-controlled
   delegation, with up to three independent tasks and conservative cloud
   concurrency; host cancellation and durable, resumable public child outcomes
-  are connected. Agent Tools settings expose Auto or explicit 1-4 worker limits.
+  are connected. Tools settings expose Auto or explicit 1-4 worker limits.
 - Full validation can hang in the optional LanceDB roundtrip under some
   restricted sandboxes. Report the focused and non-LanceDB results separately;
   never describe the knowledge suite as green unless it completed.

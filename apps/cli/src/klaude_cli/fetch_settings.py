@@ -157,7 +157,7 @@ class FetchSettings(SearchSettings):
                     "Tool availability",
                     "ON" if enabled else "OFF",
                     kind=RowKind.NAVIGATION,
-                    description="Manage in Agent Tools",
+                    description="Manage in Tools",
                 ),
                 row(
                     "provider",

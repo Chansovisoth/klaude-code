@@ -247,7 +247,9 @@ def model_binding(cfg: Any, reference: str) -> tuple[Any, str, str]:
     validate_model_reference(cfg, reference)
     backend, identity, model = reference_parts(reference)
     if backend == "openai_codex":
-        raise ResearchError("Research requires a bounded model endpoint; select one in AI Defaults")
+        raise ResearchError(
+            "Research requires a bounded model endpoint; select one in Model Defaults"
+        )
     registry = connection_registry(cfg)
     records = (
         registry.load()

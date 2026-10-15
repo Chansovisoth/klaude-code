@@ -275,6 +275,32 @@ def test_workspace_preserves_filter_focus_draft_and_confirmation_default(memory)
     assert host._library.view == "detail"
 
 
+def test_settings_library_link_returns_to_its_row_and_preserves_chat_entry(memory):
+    host, _calls = library_host(memory)
+    host._panel_composer_draft = ("unsent project draft", [])
+    host._begin_choice("settings", host._settings_categories(), "library")
+    labels = [row.label for row in host._panel.page.rows]
+    assert labels[labels.index("Memory") + 1] == "Library"
+    host._accept_choice()
+    assert host._choice_kind == "library home"
+    assert [row.label for row in host._panel.page.rows[:6]] == [
+        "Sessions", "Knowledge", "Documents", "Research", "Media", "Archive",
+    ]
+    act(host, "view", "documents")
+    host._cancel_choice()
+    assert host._choice_kind == "library home"
+    assert host._panel.page.rows[-1].label == "Back"
+    host._cancel_choice()
+    assert host._choice_kind == "settings"
+    assert host._panel.picker.selected_id == "category:library"
+    host._cancel_choice()
+    assert host.input.text == "unsent project draft"
+    host._library.open()
+    assert host._panel.page.rows[-1].label == "Close"
+    act(host, "close")
+    assert host._choice_kind is None
+
+
 def test_stale_reads_errors_and_navigation_never_publish_wrong_store(memory):
     host, calls = library_host(memory)
     identity = host._library.pending[0]

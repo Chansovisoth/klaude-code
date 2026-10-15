@@ -25,6 +25,16 @@ def store() -> ArtifactStore:
     return ArtifactStore(load_config().data_dir / "library")
 
 
+def preparation_review(spec: dict, index: int) -> None:
+    prepared = spec.get("preparation", [])
+    if index < len(prepared):
+        item = prepared[index]
+        console.print(Text(f"Prepared: {item['source_width']}×{item['source_height']} → "
+                           f"{item['width']}×{item['height']} · {item['detail']}"
+                           " · original retained",
+                           style="dim"))
+
+
 def run(action: Callable[[], Any]) -> Any:
     try:
         return action()
@@ -105,7 +115,7 @@ def analyze_image(
     context: int = 4096,
     output_tokens: int = 512,
 ) -> None:
-    """Review explicit image analysis using AI Defaults Vision; no indexing or tools."""
+    """Review explicit image analysis using Model Defaults Vision; no indexing or tools."""
     cfg = load_config()
     item = run(lambda: ArtifactStore(cfg.data_dir / "library").get(identity))
     spec = vision_work(
@@ -127,6 +137,7 @@ def analyze_image(
         console.print(Text("Context bounds Klaude's input estimate; HTTP server allocation "
                            "stays unchanged.", style="dim"))
     for index, model in enumerate(spec["models"]):
+        preparation_review(spec, index)
         console.print(
             Text(
                 f"{'Model' if not index else 'Fallback ' + str(index)}: "
@@ -162,6 +173,7 @@ def suggest_image_tags(
                        f"{context} context · {output_tokens} output tokens · 90s per model\n"
                        "Suggest visible objects, colors and style tags; no automatic save."))
     for index, model in enumerate(spec["models"]):
+        preparation_review(spec, index)
         console.print(Text(f"{'Model' if not index else 'Fallback ' + str(index)}: "
                            f"{model['reference']} · {model['endpoint']}"))
     if not yes and not typer.confirm("Send this image for tag suggestions?", default=False):

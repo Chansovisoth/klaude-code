@@ -304,7 +304,7 @@ class SessionActionWriter:
                     try:
                         result = save_defaults(update.cfg, update.change)
                     except Exception:
-                        error = "AI Defaults save unconfirmed; reload before retrying"
+                        error = "Model Defaults save unconfirmed; reload before retrying"
                         with self._condition:
                             self._failed = True
                     self.emit(
@@ -435,7 +435,7 @@ class SessionActionWriter:
                             update.session_id,
                             update.identity,
                             None,
-                            "AI Defaults save unconfirmed; reload to verify",
+                            "Model Defaults save unconfirmed; reload to verify",
                         ),
                     )
                     continue

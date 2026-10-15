@@ -1,5 +1,7 @@
 # Odysseus settings and feature plan for Klaude
 
+2026-10-16 follow-up: Model Defaults is the current public name; empty role initialization and the Models → Agent → Advanced → Appearance order are implemented. [Validation](model-defaults-navigation-validation.md). Image attachment reliability is implemented separately: [evidence](image-attachment-reliability-validation.md). Historical phase labels below are retained.
+
 Status: S0 reliability and S1 model connection foundation implemented and validated locally;
 S2a connection pages/maintenance and S2b AI Defaults are implemented and validated locally.
 S2c's DeepSeek and native Anthropic slices are implemented and validated locally.
@@ -37,6 +39,19 @@ Product direction updated: 2026-10-06; artifact/media management belongs in Libr
 Delivery status updated: 2026-10-15; S0–S5 complete for the supported local scope;
 S6a1/S6a2/S6a3a/S6a3b/S6a3c/S6a3d/S6a3e/S6a3f are implemented for their supported scopes;
 remaining paid-provider certification and separately scoped generation extensions follow.
+
+**Latest S6 gate (2026-10-15):** implementation is delivered for the recorded
+scope; account certification is blocked. A fresh real Media CLI run confirms
+OpenAI credits are exhausted; native Anthropic access is not configured, legacy
+Gemini Flash returns HTTP 404 and Flash-Lite preparation timed out.
+[Exact outcomes and unblock requirements](s6-completion-validation.md#final-account-access-audit).
+
+**Feature verification (2026-10-15):** all 71 delivery checklist entries are
+mapped to current source, tests and scoped runtime evidence in the
+[S0–S6 verification report](odysseus-feature-verification.md). Fresh actual
+Gemma/Library/settings/job/CUDA flows and the full local regression gate passed;
+the two nested S6 certification entries remain unchecked.
+
 Physical LAN/platforms and additional installer recipes
 remain separately scoped extensions.
 Live paid-provider certification remains unverified.
@@ -383,7 +398,7 @@ Settings
       Execution
       Built-in Tools
       Activity Updates
-    MCPs · Skills · Memory · Permissions
+    MCPs · Skills · Memory · Library · Permissions
   ADVANCED
     Runtime
 ```
@@ -395,8 +410,10 @@ The Models summary shows connected/enabled endpoint counts and the default
 chat model. Add Models offers two entry actions, so only one form is edited at
 a time. Added Models leads with its inventory controls and endpoint list.
 
-Model Manager, Deep Research, and Library are feature workspaces reached through
-a proposed feature launcher, outside Settings. Library contains Sessions,
+Model Manager, Deep Research, and Library are feature workspaces. Library is also
+reachable directly below Memory in Settings, as requested on 2026-10-15;
+`/settings library` opens the same workspace and Back returns to its Settings
+row. Direct `/library` entry closes to chat. Library contains Sessions,
 Knowledge, Documents, Research, Media, and Archive in that order. Media is a
 Library view, not a separate feature-launcher entry. Configuration links open
 the relevant Settings page and return to the caller. New command entry points,
@@ -1395,13 +1412,16 @@ legacy-provider generation gate. Exact local/CI snapshot boundaries and results:
 - A standalone Gallery, photo/album workspace or canvas/layer editor needs a
   future product decision; it has no delivery milestone in S0–S6.
 
-### Next implementation slice
+### Remaining S6 certification gates
 
 With **S0–S5 and S6a1/S6a2/S6a3a/S6a3b/S6a3c/S6a3d/S6a3e/S6a3f implemented for their scopes**,
-the remaining **S6a3 OpenAI/native Anthropic paid-provider certification**
-require their own explicit capability evidence, endpoint/credential review and actual protocol/
-generation validation. Assess available capability evidence before extending SDK
-pixel delivery; do not infer support from model names. S6a3 remains partial.
+the remaining **S6a3 OpenAI/native Anthropic and legacy Gemini certification**
+requires funded/authorized account access and actual successful generation.
+The adapters and protocol/recovery paths already exist. The final account-access
+audit above identifies external blockers; no further S6 implementation slice is
+currently identified. Once access changes, use explicit endpoint/model reviews
+and the existing CLI/TUI scenarios, without substituting models to claim a pass.
+S6a3 remains partial until those live gates pass.
 S6b1/S6b2's native local consumer now has actual CPU generation/cancellation/export
 evidence. The final pass also validates a supported upstream-GGML CUDA build and
 real native GPU CLI/TUI generation. Broader model/budget quality evidence and
@@ -1493,9 +1513,11 @@ existing locked unit, Ruff, and production-source mypy validation via `make chec
 Run `make package-smoke` when package/dependency/entrypoint changes warrant it.
 Report hanging, unavailable-service, or incomplete checks separately.
 
-No application test suite was run for this planning-only change. Current source
-inspection does not prove the planned feature behavior. Future completion
-requires real UI/session evidence alongside automated checks.
+The original planning-only change ran no application tests. Subsequent
+implementation and fresh feature verification are recorded in the
+[S0–S6 verification report](odysseus-feature-verification.md), including exact
+runtime/test scope and the remaining account-blocked S6 gates. Source inspection
+alone does not prove feature behavior.
 
 ## 10. Source index
 

@@ -54,7 +54,7 @@ def defaults_from_preferences(cfg: Any, saved: dict[str, Any]) -> AIDefaults:
         )
         return AIDefaults(model_reference(chat) if chat else None)
     if not isinstance(raw, dict) or "chat" not in raw:
-        raise ValueError("AI Defaults are invalid; review the saved configuration")
+        raise ValueError("Model Defaults are invalid; review the saved configuration")
     chat, utility, fallbacks = raw.get("chat"), raw.get("utility"), raw.get("fallbacks", [])
     if not isinstance(fallbacks, (list, tuple)) or len(fallbacks) > 3:
         raise ValueError("Utility supports at most three explicit fallbacks")
@@ -115,6 +115,7 @@ class DefaultsChange:
     expected: str | None | tuple[str, ...] | int
     # Public definition/credential revisions captured by the selector.
     bindings: tuple[tuple[str, str, str], ...] = ()
+    automatic: bool = False
 
 
 def save_defaults(cfg: Any, change: DefaultsChange) -> dict[str, Any]:
@@ -130,13 +131,22 @@ def save_defaults(cfg: Any, change: DefaultsChange) -> dict[str, Any]:
         "vision_enabled",
         "vision_fallbacks",
     }:
-        raise ValueError("Invalid AI Defaults field")
+        raise ValueError("Invalid Model Defaults field")
     registry = connection_registry(cfg)
     registry.migrate(cfg)
     path = cfg.data_dir / "chat-preferences.json"
     with settings_lock(registry.path), settings_lock(path), settings_lock(cfg.config_dir / ".env"):
         saved = read_settings(path)
         defaults = defaults_from_preferences(cfg, saved)
+        selections = saved.get("model_default_selections", {})
+        selections = selections if isinstance(selections, dict) else {}
+        if change.automatic and (
+            change.field not in {"chat", "utility", "research", "vision"}
+            or change.value is None
+            or getattr(defaults, change.field) is not None
+            or selections.get(change.field) == "manual"
+        ):
+            return defaults.public()
         if getattr(defaults, change.field) != change.expected:
             raise SettingsConflictError("AI default changed; reload and select again")
         candidate = {**defaults.public(), change.field: change.value}
@@ -170,6 +180,13 @@ def save_defaults(cfg: Any, change: DefaultsChange) -> dict[str, Any]:
             if expected is None or expected != (connection.revision, current_credentials):
                 raise SettingsConflictError("Endpoint or credentials changed; reload models")
         saved["ai_defaults"] = updated.public()
+        if change.field in {"chat", "utility", "research", "vision"}:
+            saved["model_default_selections"] = {
+                **{key: value for key, value in selections.items()
+                   if key in {"chat", "utility", "research", "vision"}
+                   and value in {"manual", "automatic"}},
+                change.field: "automatic" if change.automatic else "manual",
+            }
         # Keep the old unset marker meaningful for older clients without changing
         # last_model, which is session history rather than a default now.
         saved["require_model_selection"] = updated.chat is None

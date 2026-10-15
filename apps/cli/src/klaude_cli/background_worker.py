@@ -198,6 +198,20 @@ def execute(request: dict[str, Any], progress=None) -> object:
         from klaude_core.utility import run_utility
 
         return run_utility(request)
+    if kind == "model_capabilities":
+        from klaude_cli.model_capabilities import read_capabilities
+
+        return read_capabilities(request)
+    if kind == "model_default_candidates":
+        for name, value in request.get("environment_keys", {}).items():
+            if (re.fullmatch(r"[A-Z][A-Z0-9_]{0,99}", name)
+                    and name not in {"HOME", "PATH", "PYTHONPATH", "PYTHONHOME"}
+                    and (not name.startswith("KLAUDE_") or name.startswith("KLAUDE_MODEL_"))
+                    and isinstance(value, str) and len(value) <= 8192):
+                os.environ[name] = value
+        from klaude_cli.default_model_selection import read_default_candidates
+
+        return read_default_candidates(request)
     if kind in {"model_settings_inventory", "model_settings_test"}:
         from klaude_cli.model_settings import read_inventory, test_catalog
 

@@ -1,4 +1,4 @@
-"""AI Defaults pages and explicit, owned session utility actions."""
+"""Model Defaults pages and explicit, owned session utility actions."""
 
 from __future__ import annotations
 
@@ -13,12 +13,13 @@ from klaude_core.ai_defaults import (
     defaults_from_preferences,
     read_defaults,
 )
-from klaude_core.image_content import IMAGE_BACKENDS, image_capability_label
+from klaude_core.image_content import IMAGE_BACKENDS
 from klaude_core.model_connections import ModelConnection, validate_model_id
 from klaude_core.model_management import model_choice, reference_parts
 from klaude_core.model_runtime import ModelInfo, models_from_records
 from klaude_core.vision import INSPECT_TIMEOUT
 
+from .model_capabilities import ModelCapabilityInventory
 from .model_settings import row as model_row
 from .session_actions import AIDefaultUpdate, SessionSettingUpdate, SessionTitleUpdate
 from .settings_panel import PanelAction, PanelPage, PanelRow, RowControl, RowKind
@@ -80,6 +81,7 @@ class AIDefaultSettings:
         self.connections: dict[str, ModelConnection] = {}
         self.registered = False
         self.models: list[ModelInfo] = []
+        self.capabilities = ModelCapabilityInventory(self, "ai-defaults")
         self.choices: dict[str, Any] = {}
         self.authenticated: dict[str, bool] = {}
         self.credential_revisions: dict[str, str] = {}
@@ -96,6 +98,10 @@ class AIDefaultSettings:
         self.vision_return: Any = None
         self.preparing_utility = ""
         self.utility_started_at = 0.0
+        self.automatic_scan: tuple[str, str] | None = None
+        self.automatic_queue: list[dict[str, Any]] = []
+        self.initialize_empty = False
+        self.automatic_save = False
 
     @property
     def visible(self) -> bool:
@@ -103,17 +109,27 @@ class AIDefaultSettings:
 
     def show(self, view: str | None = None, focus: str = "") -> None:
         if view is not None:
+            if view != "home":
+                self.initialize_empty = False
+                if self.automatic_scan:
+                    self.host._background_jobs.cancel("ai-defaults:automatic")
+                    self.automatic_scan = None
+                    self.automatic_queue.clear()
+                    self.feedback = None
             self.view = view
+        self.capabilities.sync(self.connections.get(self.target) if self.view == "models" else None)
         self.host._open_panel(self.page(), "ai defaults " + self.view, focus)
         if self.feedback:
             self.host._set_panel_feedback(*self.feedback)
 
     def open(self) -> None:
         self.vision_return = None
+        self.initialize_empty = True
         self.show("home")
         self.refresh()
 
     def refresh(self, *, show: bool = True) -> None:
+        self.capabilities.invalidate()
         cfg = self.host.cfg
         environment = self.host._model_settings.environment_keys()
         environment.update(
@@ -147,7 +163,7 @@ class AIDefaultSettings:
         return f"{connection.name if connection else identity} / {model}"
 
     def page(self) -> PanelPage:
-        crumbs: tuple[str, ...] = ("Settings", "AI Defaults")
+        crumbs: tuple[str, ...] = ("Settings", "Model Defaults")
         defaults = self.defaults
         rows: list[PanelRow]
         if self.view == "utility":
@@ -257,7 +273,7 @@ class AIDefaultSettings:
                     "input",
                     RowKind.INFO,
                     "Image input",
-                    "PNG/JPEG · 8 MiB · 4 megapixels",
+                    "PNG/JPEG/WebP/GIF · 32 MiB · 40 MP · prepared to fit",
                     description="Library → Media → Analyze image, or chat /attach and @PATH. "
                     "Chat requires an image-capable active model; provider limits apply",
                 ),
@@ -340,6 +356,11 @@ class AIDefaultSettings:
                 "Model",
             )
             rows = [row("manual", "Enter model ID")]
+            if item.backend == "ollama":
+                rows.append(row("capabilities-reload", "Refresh capabilities",
+                                "Checking…" if self.capabilities.pending else ""))
+            if self.role.startswith("vision"):
+                rows.append(PanelRow("vision-purpose", RowKind.INFO, "Purpose", "Read images"))
             rows.extend(
                 [
                     PanelRow("models-heading", RowKind.SECTION, "MODELS"),
@@ -351,31 +372,32 @@ class AIDefaultSettings:
                     model.connection_id == item.id
                     and model_choice(self.choices, item.id, model.model_id)["enabled"]
                 ):
+                    images = self.capabilities.image_support(model)
+                    usable = self.role == "chat" or not model.capabilities.requires_thinking
+                    chat = self.capabilities.chat_support(model)
+                    if chat is False:
+                        usable = False
+                    if self.role.startswith("vision") and images is False:
+                        usable = False
                     rows.append(
                         row(
                             "model:" + model.model_id,
                             model.model_id,
-                            "Available" if self.role == "chat"
-                            or not model.capabilities.requires_thinking else "Unavailable",
-                            description=(image_capability_label(model.capabilities.supports_images,
-                                                               model.capabilities.images_evidence)
-                                         + " · checked before saving"
-                                         + (" · Thinking required; Vision unavailable"
-                                            if model.capabilities.requires_thinking else ""))
-                            if self.role.startswith("vision")
-                            else "Tools: "
-                            + model.capabilities.tools_evidence
-                            + " · " + image_capability_label(model.capabilities.supports_images,
-                                                            model.capabilities.images_evidence)
-                            + (
+                            "No vision" if self.role.startswith("vision") and images is False
+                            else "Not chat" if chat is False
+                            else "Unavailable" if not usable
+                            else "Unverified" if self.role.startswith("vision") and images is None
+                            else "Available",
+                            description=self.capabilities.description(model) + (
                                 " · Thinking required"
                                 + ("; "
-                                   + ("Research" if self.role.startswith("research") else "Utility")
+                                   + ("Vision" if self.role.startswith("vision") else "Research"
+                                      if self.role.startswith("research") else "Utility")
                                    + " unavailable" if self.role != "chat" else "")
                                 if model.capabilities.requires_thinking
                                 else ""
                             ),
-                            enabled=self.role == "chat" or not model.capabilities.requires_thinking,
+                            enabled=usable,
                             kind=RowKind.NAVIGATION,
                             section="models-heading",
                             target=model.model_id,
@@ -475,7 +497,11 @@ class AIDefaultSettings:
                 self.show(action.target)
         elif kind == "reload":
             self.unconfirmed = False
+            self.initialize_empty = True
             self.refresh()
+        elif kind == "capabilities-reload":
+            self.capabilities.invalidate()
+            self.show()
         elif kind in {"chat", "utility", "research", "vision", "add-fallback"}:
             self.role = self.fallback_field if kind == "add-fallback" else kind
             self.show("endpoints")
@@ -574,7 +600,7 @@ class AIDefaultSettings:
         self.show("endpoints")
         self.refresh()
 
-    def submit(self, value: str | None | tuple[str, ...] | int) -> None:
+    def submit(self, value: str | None | tuple[str, ...] | int, *, automatic: bool = False) -> None:
         if self.role == "research-job":
             if value is not None and not isinstance(value, str):
                 raise ValueError("Choose one research model")
@@ -596,7 +622,10 @@ class AIDefaultSettings:
             _backend, identity, _model = reference_parts(reference)
             item = self.connections[identity]
             bindings.append((reference, item.revision, self.credential_revisions.get(identity, "")))
-        change = DefaultsChange(self.role, value, getattr(old, self.role), tuple(bindings))
+        change = DefaultsChange(
+            self.role, value, getattr(old, self.role), tuple(bindings), automatic
+        )
+        self.automatic_save = automatic
         identity = uuid.uuid4().hex
         self.pending = (identity, change)
         self.defaults = updated
@@ -604,13 +633,16 @@ class AIDefaultSettings:
             AIDefaultUpdate(self.host.session_id, identity, self.host.cfg, change)
         )
         self.feedback = (
-            ("Saving AI Defaults…", "neutral")
+            ("Saving Model Defaults…", "neutral")
             if accepted
             else ("Save unconfirmed; reload defaults", "warning")
         )
         if not accepted:
             self.pending = None
             self.unconfirmed = True
+        if automatic:
+            self.show()
+            return
         self.show(
             "fallbacks"
             if self.role in {"fallbacks", "vision_fallbacks"}
@@ -625,15 +657,41 @@ class AIDefaultSettings:
         if not self.pending or identity != self.pending[0]:
             return
         self.pending = None
+        automatic, self.automatic_save = self.automatic_save, False
         self.unconfirmed = bool(error)
         if not error:
             self.defaults = defaults_from_preferences(self.host.cfg, {"ai_defaults": result})
-        self.feedback = (error, "warning") if error else ("AI Defaults saved", "success")
+        self.feedback = (error, "warning") if error else ("Model Defaults saved", "success")
+        if automatic:
+            if error or session != self.host.session_id:
+                self.automatic_queue.clear()
+            else:
+                self.save_next_automatic()
         if self.visible and session == self.host.session_id:
             self.show()
         self.host._start_next()
 
     def accept(self, key: str, identity: str, result: Any, error: str) -> None:
+        if key == "ai-defaults:automatic":
+            if self.automatic_scan != (identity, self.host.session_id):
+                return
+            self.automatic_scan = None
+            if not self.visible or self.view != "home":
+                return
+            if error or not isinstance(result, dict):
+                self.feedback = (
+                    "Automatic model selection unavailable; reload to retry", "warning"
+                )
+            elif not self.pending:
+                self.automatic_queue = result.get("proposals", [])
+                self.save_next_automatic()
+                if not self.pending:
+                    self.feedback = ("No additional verified role models found", "neutral")
+            self.show()
+            return
+        if key == self.capabilities.key:
+            self.capabilities.accept(identity, result, error)
+            return
         if key == "ai-defaults:vision":
             pending = self.vision_check
             if pending is None or pending[0] != identity:
@@ -665,7 +723,7 @@ class AIDefaultSettings:
             return
         self.inventory = None
         if error or not isinstance(result, dict):
-            self.feedback = ("AI Defaults unavailable; reload to retry", "warning")
+            self.feedback = ("Model Defaults unavailable; reload to retry", "warning")
         else:
             self.connections = {
                 item.id: item
@@ -696,6 +754,9 @@ class AIDefaultSettings:
             else:
                 self.start_utility(task)
         elif self.visible and self.host._settings_input_request is None:
+            if self.initialize_empty and not error:
+                self.initialize_empty = False
+                self.start_automatic_selection()
             self.show()
         else:
             library = getattr(self.host, "_library", None)
@@ -708,9 +769,52 @@ class AIDefaultSettings:
         self.refresh(show=False)
 
     def leave(self) -> None:
+        self.host._background_jobs.cancel("ai-defaults:automatic")
+        self.automatic_scan = None
+        self.automatic_queue.clear()
+        self.initialize_empty = False
+        self.capabilities.cancel()
         if not self.new_session_pending and not self.preparing_utility:
             self.host._background_jobs.cancel("ai-defaults:inventory")
             self.inventory = None
+
+    def start_automatic_selection(self) -> None:
+        if self.view != "home" or self.defaults is None or self.pending or self.unconfirmed:
+            return
+        roles = [role for role in ("chat", "utility", "research", "vision")
+                 if getattr(self.defaults, role) is None]
+        if not roles:
+            return
+        cfg = self.host.cfg
+        identity = self.host._background_jobs.submit("ai-defaults:automatic", {
+            "kind": "model_default_candidates", "config_dir": str(cfg.config_dir),
+            "data_dir": str(cfg.data_dir), "ollama_url": cfg.ollama_url,
+            "roles": dict(cfg.models), "chat_ref": self.chat_ref(), "requested_roles": roles,
+            "credential_revisions": self.credential_revisions,
+            "environment_keys": self.host._model_settings.environment_keys(),
+        }, timeout=60)
+        self.automatic_scan = (identity, self.host.session_id)
+        self.feedback = ("Checking available models for empty roles…", "neutral")
+
+    def save_next_automatic(self) -> None:
+        if self.pending or self.defaults is None:
+            return
+        while self.automatic_queue:
+            proposal = self.automatic_queue.pop(0)
+            role, reference = proposal.get("role"), proposal.get("reference")
+            if role not in {"chat", "utility", "research", "vision"}:
+                continue
+            if getattr(self.defaults, role) is not None or not isinstance(reference, str):
+                continue
+            _backend, identity, _model = reference_parts(reference)
+            connection = self.connections.get(identity)
+            binding = [reference, connection.revision,
+                       self.credential_revisions.get(identity, "")] if connection else []
+            if proposal.get("binding") != binding:
+                continue
+            self.role = role
+            self.submit(reference, automatic=True)
+            return
 
     def cancel_utility(self) -> None:
         active = bool(self.preparing_utility or self.utility)
@@ -733,7 +837,7 @@ class AIDefaultSettings:
             return
         if not self.chat_ref() or self.pending or self.unconfirmed:
             self.host._append(
-                "\n[warning] Choose a model and confirm AI Defaults before using Utility.\n"
+                "\n[warning] Choose a model and confirm Model Defaults before using Utility.\n"
             )
             return
         if self.defaults is None:

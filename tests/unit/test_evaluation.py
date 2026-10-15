@@ -13,9 +13,12 @@ class Runtime:
 
     def __init__(self, responses, metadata=None):
         self.responses = iter(responses)
-        self.last_chat_metadata = metadata or {}
+        self.metadata = metadata or {}
+        self.last_chat_metadata = {}
 
     def chat(self, *_args, **_kwargs):
+        # Usage is published by a completed request, never preloaded as stale data.
+        self.last_chat_metadata = dict(self.metadata)
         return next(self.responses)
 
 

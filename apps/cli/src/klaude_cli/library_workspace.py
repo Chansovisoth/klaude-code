@@ -1,4 +1,4 @@
-"""Library navigation over distinct durable stores, outside Settings."""
+"""Library navigation over durable stores, reached from chat or Settings."""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ def back(view: str) -> PanelRow:
 class LibraryWorkspace:
     def __init__(self, host: Any):
         self.host = host
+        self.from_settings = False
         self.view = "home"
         self.parent = "sessions"
         self.target = ""
@@ -54,9 +55,10 @@ class LibraryWorkspace:
     def visible(self) -> bool:
         return str(self.host._choice_kind).startswith("library ")
 
-    def open(self, view: str = "home") -> None:
+    def open(self, view: str = "home", *, from_settings: bool = False) -> None:
         if view not in {"home", *(item.lower() for item in VIEWS)}:
             raise ValueError("Use /library [sessions|knowledge|documents|research|media|archive]")
+        self.from_settings = from_settings
         scope = str(getattr(self.host.memory, "sessions_db", ""))
         if self.scope != scope:
             self.leave()
@@ -194,7 +196,11 @@ class LibraryWorkspace:
                 )
                 for name, description in zip(VIEWS, descriptions, strict=True)
             ]
-            rows.append(action_row("close", "Close", control=RowControl.CLOSE))
+            rows.append(
+                action_row("settings", "Back", control=RowControl.BACK)
+                if self.from_settings
+                else action_row("close", "Close", control=RowControl.CLOSE)
+            )
         elif self.view in {"sessions", "archive", "knowledge"}:
             crumbs += (self.view.title(),)
             rows = [action_row("reload", "Reload", description="Refresh this store's inventory")]
@@ -498,7 +504,13 @@ class LibraryWorkspace:
         kind = action.kind.removeprefix("library-")
         if kind == "view":
             self.leave()
-            self.open(action.target)
+            self.open(action.target, from_settings=self.from_settings)
+        elif kind == "settings":
+            self.leave()
+            self.from_settings = False
+            self.host._begin_choice(
+                "settings", self.host._settings_categories(), "library", restore=True
+            )
         elif kind == "close":
             self.leave()
             self.host._cancel_choice()

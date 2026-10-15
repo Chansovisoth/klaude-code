@@ -4003,6 +4003,9 @@ class Agent:
 
     def restore_session(self, turns: list[dict[str, Any]]) -> None:
         """Restore saved dialogue while keeping this runtime's system prompt."""
+        image_context = getattr(self, "image_context", None)
+        if image_context is not None:
+            image_context.restore_attempt(turns)
         self.messages = [m for m in self.messages if m.get("role") == "system"][:1]
         self._restored_unfinished_task = ""
         self._workspace_task_goal = ""
@@ -4126,6 +4129,15 @@ class Agent:
         self._compact_history([], force=True, ollama_options=options)
 
     @property
+    def request_budget(self):
+        from .request_budget import request_budget
+
+        options = (self._last_request_options
+                   if self._last_request_model == self.model_info.request_identity
+                   else self.ollama_options)
+        return request_budget(self.model_info, options)
+
+    @property
     def request_context_window(self) -> int | None:
         """The most recent request's allocation, scoped to its provider/model."""
         discovered = self.model_info.capabilities.context_window
@@ -4157,17 +4169,15 @@ class Agent:
         if len(self.messages) <= 2:
             return
         effective_ollama_options = ollama_options or self.ollama_options
-        configured_window = self.model_info.capabilities.context_window
-        num_ctx = int(configured_window or 128_000)
+        from .request_budget import request_budget
+
+        budget = request_budget(self.model_info, effective_ollama_options)
+        num_ctx = budget.context
         local = self.model_info.uses_configured_context
         if local:
             # An advertised maximum is not the context allocated to this request.
             num_ctx = min(num_ctx, int(effective_ollama_options.get("num_ctx", 8192)))
-        output_reserve = int(
-            effective_ollama_options.get("num_predict", 2048)
-            if local
-            else min(16_384, max(4_096, num_ctx // 8))
-        )
+        output_reserve = budget.output
         # Source code and tool schemas get a conservative two-character
         # estimate on Ollama. Natural-language system instructions get three:
         # counting that prose like dense code can exhaust the estimated budget
@@ -4205,7 +4215,8 @@ class Agent:
         for unit in reversed(units):
             cost = sum(
                 len(str(message.get("content", "")))
-                + image_cost(message) * chars_per_token
+                + image_cost(message, backend=self.model_info.backend,
+                             model=self.model_info.model_id) * chars_per_token
                 + sum(
                     len(str(message.get(key, "")))
                     for key in (
@@ -4262,16 +4273,29 @@ class Agent:
         read_only: bool = False,
         scope: TurnScope | str | None = None,
     ):
-        from .chat_images import unpack_input
+        from .chat_images import image_request_text, unpack_input
 
         private_input = user_message
+        image_context = getattr(self, "image_context", None)
+        if isinstance(private_input, str) and image_context is not None:
+            try:
+                private_input = image_context.resolve_retry(private_input)
+            except (OSError, ValueError) as exc:
+                yield AgentEvent("error", {"message": str(exc)})
+                return
         user_message, image_inputs = unpack_input(private_input)
         input_content = user_message
         if isinstance(private_input, dict):
             user_message = str(private_input.get("request", user_message))
-        image_context = getattr(self, "image_context", None)
+        if image_inputs:
+            user_message = image_request_text(user_message, image_inputs)
         if image_context is not None:
             image_context.reset()
+            image_context.attempt = (
+                private_input if image_inputs and isinstance(private_input, dict) else None
+            )
+            image_context.repair_scale = 1.0
+            image_context.repair_tokens = None
         original_tools = self.tools
         original_prompt = self.messages[0]["content"]
         requested_scope = (
@@ -4303,16 +4327,22 @@ class Agent:
             )
         prior_scope = self.active_turn_scope
         self.active_turn_scope = effective_scope
+        completed, failed = False, False
         try:
-            yield from self._run(
+            for event in self._run(
                 user_message,
                 registered_tools=set(original_tools),
                 validate_code_answer=effective_scope == TurnScope.STANDARD,
                 turn_scope=effective_scope,
                 image_inputs=image_inputs,
                 input_content=input_content,
-            )
+            ):
+                failed |= event.kind == "error"
+                completed |= event.kind == "done"
+                yield event
         finally:
+            if image_context is not None:
+                image_context.finish(failed or not completed or self.cancellation_check())
             # Recovery and governor instructions describe only this turn's
             # protocol/state. Keep real dialogue and tool pairs for follow-ups,
             # without carrying a discarded response format into a new request.
@@ -4334,6 +4364,8 @@ class Agent:
     ):
         """Generator of AgentEvent — clients iterate and render."""
         self.last_request_usage = None
+        if hasattr(self.ollama, "last_chat_metadata"):
+            self.ollama.last_chat_metadata.clear()
         source_use_note = self._restored_source_use_note or prior_answer_source_note(self.messages)
         previous_user = next(
             (
@@ -4699,6 +4731,7 @@ class Agent:
         capability_claim_retried = False
         tools_disabled_for_turn = False
         streamed_any = False
+        image_recovery_attempted = False
         continued_content: list[str] = []
         request_options = dict(self.ollama_options)
         code_request = _code_work_request(user_message)
@@ -5144,6 +5177,10 @@ class Agent:
                 "image_pixels_available": bool(count),
                 "image_count": count,
             }
+            provider = self.last_turn_capabilities.get("provider", {})
+            provider["context_window"] = self.request_context_window
+            provider["input_context_budget"] = self.request_budget.context
+            provider["context_budget_source"] = self.request_budget.source
             if projected and projected[0].get("role") == "system":
                 declaration = (
                     f"\n<image_input_state>Input modalities: {count} image pixel inputs are "
@@ -5935,6 +5972,8 @@ class Agent:
                         )
                     )
             request_metadata_before = getattr(self.ollama, "last_chat_metadata", None)
+            if hasattr(self.ollama, "last_chat_metadata"):
+                self.ollama.last_chat_metadata.clear()
             workspace_planner = getattr(self.ollama, "chat_workspace_plan", None)
             planning_request = bool(
                 execution_state is not None
@@ -5950,6 +5989,17 @@ class Agent:
                 response_arguments = {s['function']['name']: s['function']['parameters']
                                       for s in schemas}
                 request_messages = model_messages()
+                image_context = getattr(self, "image_context", None)
+                if image_context is not None and image_context.prepared:
+                    for prepared in image_context.prepared:
+                        if (prepared["width"], prepared["height"]) != (
+                            prepared["source_width"], prepared["source_height"]
+                        ) or prepared.get("crop") is not None or prepared.get("frame") is not None:
+                            yield AgentEvent("progress", {"stage": (
+                                f"Image prepared: {prepared['source_width']}"
+                                f"×{prepared['source_height']} → {prepared['width']}"
+                                f"×{prepared['height']} ({prepared['detail']})"
+                            )})
                 if self.capability_observer is not None:
                     try:
                         self.capability_observer(dict(self.last_turn_capabilities))
@@ -6084,6 +6134,35 @@ class Agent:
                 return
             except Exception as e:  # surface, don't crash the session
                 observe_runtime_usage(failed=True)
+                from .compatible_runtime import CompatibleModelError
+
+                image_context = getattr(self, "image_context", None)
+                if (isinstance(e, CompatibleModelError) and image_inputs_supplied
+                        and image_context is not None and not image_recovery_attempted
+                        and not e.output_started and not streamed_this_response
+                        and not self.cancellation_check()):
+                    if e.error_type in {"context_length_exceeded", "image_too_large"}:
+                        from .image_content import image_token_estimate
+
+                        costs = [image_token_estimate(p["width"], p["height"],
+                                 backend=self.model_info.backend, model=self.model_info.model_id)
+                                 for p in image_context.prepared]
+                        image_context.repair_tokens = max(512, min(costs, default=1024) // 2)
+                        image_recovery_attempted = True
+                        yield AgentEvent("retry", {"reason": "provider image/context limit; "
+                                                   "one smaller prepared request"})
+                        continue
+                    if (e.error_type in {"rate_limit_exceeded", "provider_overloaded",
+                                         "provider_unavailable"}
+                            and (e.retry_after is None or 0 <= e.retry_after <= 2)):
+                        image_recovery_attempted = True
+                        deadline = time.monotonic() + (e.retry_after or .25)
+                        while time.monotonic() < deadline and not self.cancellation_check():
+                            time.sleep(.05)
+                        if not self.cancellation_check():
+                            yield AgentEvent("retry", {"reason": "temporary image provider "
+                                                       "rejection; one bounded retry"})
+                            continue
                 if (
                     self.model_info.backend == 'ollama'
                     and isinstance(e, OllamaIncompleteResponse)

@@ -83,7 +83,9 @@ uv run klaude       # or: uv tool install --editable apps/cli && klaude
 Inside the interactive chat, use `/help` to print the command reference
 without asking the model to summarize it.
 
-`/library` opens the durable-information workspace: **Sessions, Knowledge,
+**Settings → Library**, directly below Memory, or `/settings library` opens the
+durable-information workspace. Back returns to Settings; `/library` opens it
+directly from chat. Library contains **Sessions, Knowledge,
 Documents, Research, Media, Archive**. Sessions supports full-store text search,
 100-record pages, recent public-turn previews, resume and archive. Archive keeps
 conversation content and provides restore or separately confirmed permanent
@@ -107,7 +109,7 @@ private report excerpt; the public conversation shows the report name and your
 question. Citation quotes are checked against fetched excerpts; review the
 model's interpretation and coverage, especially with smaller local models.
 
-Choose a Research endpoint/model in **Settings → AI Defaults**, or inherit the
+Choose a Research endpoint/model in **Settings → Model Defaults**, or inherit the
 session model. **Settings → Search → Deep Research** controls provider, report
 output, extraction concurrency/timeouts, run deadline and advanced work budgets.
 Defaults suit bounded local runs: 2 rounds, 6 queries, 8 sources, 8,192 context
@@ -297,9 +299,17 @@ session lists and `/resume`; restore one before continuing it. Archiving retains
 existing memory-recall behavior. **Stored ≠ indexed; Imported ≠ learned;
 Archived ≠ deleted.** Library browsing never learns content automatically.
 
-**Image analysis:** Settings → AI Defaults → Vision selects an explicit
+**Image analysis:** Settings → Model Defaults → Vision selects an explicit
 image-capable model and optional ordered fallbacks; Vision starts OFF.
-Import a PNG/JPEG into Library → Media, open its detail and choose **Analyze
+Opening Model Defaults fills empty role choices from available verified models,
+preferring local and already selected compatible models. Existing choices and
+explicit inheritance/clears remain intact. No suitable model leaves the role
+unselected. Selecting a default does not turn Vision on or switch the open chat.
+The Ollama model list checks server metadata automatically and labels Vision,
+text-only, Tools and Thinking support before selection. **Refresh capabilities**
+rechecks without loading a model. Image generation is configured separately;
+unknown metadata remains unverified rather than being guessed from model names.
+Import a PNG/JPEG/static WebP/GIF into Library → Media, open its detail and choose **Analyze
 image**. Edit the private question/budgets and review the exact image/model/
 endpoint before sending. Results remain private to the panel, with no tools,
 chat turns, indexing or automatic tags. CLI access shares the same reviewed flow:
@@ -308,8 +318,11 @@ chat turns, indexing or automatic tags. CLI access shares the same reviewed flow
 klaude library analyze MEDIA_ID "Describe this screenshot" --context 4096 --output-tokens 512
 ```
 
-PNG/JPEG inputs are bounded to 8 MiB/4 megapixels, or 7,500,000 raw bytes on
-Anthropic. Native Ollama, Anthropic Messages, compatible HTTP endpoints and
+Sources accept up to 32 MiB/40 megapixels. A bounded decoder prepares a working
+copy to fit the request, normalizes orientation/transparency and strips metadata;
+the private original is unchanged. Reviews show source and prepared dimensions.
+Delivered PNG/JPEG is bounded to 4 megapixels and 7,500,000 bytes. Native Ollama,
+Anthropic Messages, compatible HTTP endpoints and
 OpenRouter require declared image support. Configured fallbacks are shown before
 sending and run only on network/timeouts or temporary service failures. Context allocates
 native Ollama's window; HTTP servers use it as Klaude's input estimate and retain
@@ -332,7 +345,7 @@ models described below support chat, while Media keeps its thinking-off contract
 [OpenAI protocol validation and account limits](docs/s6a3d-openai-vision-validation.md).
 [Gemini protocol validation and account limits](docs/s6a3e-gemini-vision-validation.md).
 
-**Local image generation:** Settings → AI Defaults → Image generation configures
+**Local image generation:** Settings → Model Defaults → Image generation configures
 an existing stable-diffusion.cpp native server. Generation starts OFF; Test checks
 capabilities without generating, and Save pins its observed loaded model. Library
 → Media → Generate image reviews the prompt, endpoint/model, size, steps and seed
@@ -387,6 +400,16 @@ removing a terminal receipt retains the image and sends no server cancellation.
 endpoint with declared image support, or a reviewed native OpenAI/Gemini model above.
 Use `/attach screenshot.png` or inline
 `@screenshot.png`; one-shot input also supports `klaude ask "Describe @screenshot.png"`.
+PNG/JPEG/static WebP/GIF sources are prepared automatically within the limits above.
+Use `/attach --detail detailed screenshot.png` for small text, or
+`/attach --crop 100,200,800,600 screenshot.png` for a source-pixel crop. Coordinates
+follow EXIF orientation. Animated sources require `/attach --frame 0 animation.gif`.
+`--detail original` requests the largest permitted working copy; it still respects
+provider/context limits. A saved `media:ID`, or its filename after source deletion,
+can be explicitly attached again. After a failed image turn, `try again` reuses its
+saved question and pixels; context failures get one smaller preparation, while
+partial responses, credit/authentication failures and refusals require explicit retry.
+[Attachment reliability validation and remaining limits](docs/image-attachment-reliability-validation.md).
 Chat uses its active model and Runtime budgets, with no automatic model/fallback
 switch. Up to two images are delivered per request. Explicitly sending an image
 saves a private Media snapshot and small session references, enabling follow-ups
@@ -537,7 +560,7 @@ Custom animations accept compact graphemes (`⠋⠙⠹`) or explicit quoted fram
 (`"⢎⡰", "⢎⡡"`); the latter preserves spaces and multi-character frames.
 Set a custom interval in milliseconds (blank defaults to 100), preview it, then
 choose Apply spinner. `/settings spinner` opens this page directly.
-**Agent Tools** (`/settings tools` or `/settings agent tools`) starts with
+**Tools** (`/settings tools` or `/settings agent tools`) starts with
 Execution, Built-in Tools, Activity Updates, and links to MCPs and Skills. Execution configures
 steps per message (default 20, custom 1–64), a finite Auto tool-call ceiling
 (`max(4, steps × 2)`) or custom 1–256, and subagent workers. Advanced offers
@@ -553,13 +576,13 @@ selected tool. Group switches show ON, OFF, or MIXED and enable a mixed group
 on the first press. Availability changes never grant permission. Disabled tools
 stay absent from subsequent model schemas, recovered calls, and delegated workers.
 MCPs and Skills keep their existing management pages. Settings now groups
-Appearance, Models & AI, Agent, and Advanced; `/settings providers` remains
+Appearance, Models, Agent, and Advanced; `/settings providers` remains
 available under Advanced as Provider credentials. Model Manager → Discover links
 to that same Hugging Face credential owner. Search and URL Fetch link to the
 availability owner.
 [S3b validation](docs/s3b-agent-tools-validation.md).
 
-Search owns web-result validation; Agent Tools → Built-in Tools → Knowledge &
+Search owns web-result validation; Tools → Built-in Tools → Knowledge &
 Sessions owns local-knowledge result validation.
 Turning validation off exposes unvalidated discovery leads, but retains the normal transport,
 provenance, and fetch safety limits. Activity Updates is enabled by default for
@@ -569,7 +592,7 @@ defaults to on. Input Field → Height → Enter min/max accepts two whole numbe
 (for example `2 10`). The composer grows between those limits; valid limits
 satisfy `1 ≤ min ≤ max ≤ 12`, with defaults of 8 and 12. Enter saves, Escape or
 Ctrl+C cancels, and typing `reset to default` restores both defaults.
-Agent Tools → Execution exposes Subagent workers: Auto uses one worker for
+Tools → Execution exposes Subagent workers: Auto uses one worker for
 Ollama and compatible endpoints (including remote endpoints), or two for native
 cloud providers, while an explicit 1–4 value is available for quota and hardware
 tuning. Only audited independent read-only workspace inspections can overlap;
@@ -963,10 +986,10 @@ runtimes separately. Context allocation and server-specific reasoning, GPU, and
 thread controls remain server settings; Klaude uses a bounded conversation
 budget without claiming it changed the server's allocation. Unknown compatible
 servers default to one worker, with the existing explicit concurrency override.
-Add/Added Models settings and AI Defaults are implemented. See the
+Add/Added Models settings and Model Defaults are implemented. See the
 [S1 validation](docs/s1-model-connections-validation.md),
 [connection UI validation](docs/s2-model-settings-validation.md) and
-[AI Defaults validation](docs/s2b-ai-defaults-validation.md) for evidence and limits.
+[Model Defaults validation](docs/s2b-ai-defaults-validation.md) for evidence and limits.
 
 DeepSeek is available under Add Models → Add API Models → Provider, or
 `/model` → Cloud → DeepSeek → Add DeepSeek endpoint. Its key is entered through
@@ -1051,7 +1074,7 @@ while the transcript retains completed `[EXPLORED]`, `[EDITED]`, `[RAN]`, and
 `[LEARNED]` milestones.
 These updates describe observable tool activity only—not private model
 reasoning—and remain visible to clients following or resuming the session. They
-can be disabled under `/settings` → Agent Tools → Activity Updates.
+can be disabled under `/settings` → Tools → Activity Updates.
 
 Tavily integration status:
 

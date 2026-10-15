@@ -14,6 +14,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from klaude_core.process_input import PrivateProcessInput
+
 MAX_JOB_OUTPUT = 2_000_000
 
 
@@ -71,6 +73,7 @@ class OwnedBackgroundJobs:
         process: subprocess.Popen[bytes] | None = None
         result = None
         error = ""
+        writer = None
         try:
             if job.cancel.is_set():
                 return
@@ -90,7 +93,7 @@ class OwnedBackgroundJobs:
                 env=environment,
                 start_new_session=True,
             )
-            payload: bytes | None = json.dumps(request).encode()
+            writer = PrivateProcessInput(process, json.dumps(request).encode())
             deadline = time.monotonic() + timeout
             consumed = 0
 
@@ -117,7 +120,7 @@ class OwnedBackgroundJobs:
                     error = "Background job timed out; retry"
                     break
                 try:
-                    output, _ = process.communicate(payload, timeout=0.05)
+                    output, _ = process.communicate(None, timeout=0.05)
                     if len(output) > MAX_JOB_OUTPUT or process.returncode:
                         error = "Background job failed; retry"
                     else:
@@ -128,7 +131,6 @@ class OwnedBackgroundJobs:
                         error = "Background job unavailable; retry" if response.get("error") else ""
                     break
                 except subprocess.TimeoutExpired as exc:
-                    payload = None
                     if exc.output:
                         progress(exc.output)
             if job.cancel.is_set():
@@ -138,6 +140,8 @@ class OwnedBackgroundJobs:
         finally:
             if process is not None:
                 self._stop_process(process)
+            if writer is not None:
+                writer.close()
             with self._lock:
                 self._active.pop(job.id, None)
             if job.notify_cancel and job.cancel.is_set():

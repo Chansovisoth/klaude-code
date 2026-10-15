@@ -178,7 +178,7 @@ def prepare(
 ) -> dict:
     settings = read(cfg)
     if not settings["enabled"]:
-        raise ValueError("Image generation is OFF; configure AI Defaults → Image generation")
+        raise ValueError("Image generation is OFF; configure Model Defaults → Image generation")
     evidence = inspect(settings["endpoint"])
     if evidence["model"] != settings["model"]:
         raise ValueError(

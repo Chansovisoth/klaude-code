@@ -224,7 +224,7 @@ class ResearchPanel:
                     "Research model",
                     value=self.host._ai_defaults.label(self.host._ai_defaults.defaults.research)
                     if self.host._ai_defaults.defaults and self.host._ai_defaults.defaults.research
-                    else "Same as chat · AI Defaults",
+                    else "Same as chat · Model Defaults",
                 ),
             ]
             labels = {

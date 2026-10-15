@@ -2088,6 +2088,9 @@ def _agent_context_window(agent, *, active_request: bool = True) -> int:
     requested = getattr(agent, "request_context_window", None) if active_request else None
     if isinstance(requested, int) and requested > 0:
         return requested
+    budget = getattr(agent, "request_budget", None)
+    if budget is not None and active_request:
+        return int(budget.context)
     if getattr(model_info, "backend", "ollama") != "ollama":
         capabilities = getattr(model_info, "capabilities", None)
         discovered = int(getattr(capabilities, "context_window", 0) or 0)
@@ -2283,6 +2286,12 @@ def _chat_status(
         ("Context", f"~{used:,} / {context:,} tokens · {context_percent}%"),
         ("Context left", f"~{max(0, context - used):,} tokens"),
     ]
+    routed = _agent_model_metadata(agent).get("routed_model")
+    if isinstance(routed, str) and routed != agent.model:
+        runtime_rows.append(("Responding model", routed))
+    request_budget = getattr(agent, "request_budget", None)
+    if request_budget is not None and request_budget.source == "estimated":
+        runtime_rows.append(("Context budget", "Local estimate · provider limit unknown"))
     workspace_rows = [
         ("Workspace", str(getattr(agent, "workdir", Path.cwd()))),
     ]
@@ -2560,6 +2569,8 @@ def _public_model_metadata(metadata: object) -> dict[str, Any]:
         for key in (
             "provider",
             "response_id",
+            "routed_model",
+            "error_type",
             "status",
             "prompt_eval_count",
             "eval_count",
@@ -2912,7 +2923,7 @@ CLI_COMMANDS = (
     ),
     CommandSpec("library analyze", CommandSurface.CLI,
                 "library analyze MEDIA_ID QUESTION [--context N] [--output-tokens N] [--yes]",
-                "Review image analysis using AI Defaults Vision; "
+                "Review image analysis using Model Defaults Vision; "
                 "no tools or indexing."),
     CommandSpec("library suggest-tags", CommandSurface.CLI,
                 "library suggest-tags MEDIA_ID [--save] [--select 1,3] "
@@ -3183,7 +3194,7 @@ CHAT_COMMANDS = (
         "settings",
         CommandSurface.CHAT,
         "/settings [CATEGORY]",
-        "Configure Appearance, Models & AI, Agent Tools, MCPs, Skills, Memory, "
+        "Configure Appearance, Models, Tools, MCPs, Skills, Memory, Library, "
         "Permissions, provider credentials, and Runtime.",
         examples=(
             "/settings",
@@ -3191,12 +3202,12 @@ CHAT_COMMANDS = (
             "/settings divider",
             "/settings spinner",
             "/settings models",
-            "/settings ai defaults",
+            "/settings model defaults",
             "/settings providers",
             "/settings search",
-            "/settings agent tools",
-            "/settings tools",
+                        "/settings tools",
             "/settings mcps",
+            "/settings library",
             "/settings runtime",
         ),
     ),
@@ -3303,9 +3314,11 @@ CHAT_COMMANDS = (
     CommandSpec(
         "attach",
         CommandSurface.CHAT,
-        "/attach PATH",
+        "/attach [--detail auto|detailed|original] [--frame N] "
+        "[--crop x,y,width,height] PATH_OR_MEDIA_ID",
         "Attach a file or folder as context; @PATH also works inline.",
-        examples=("/attach README.md", "/attach ../other-project"),
+        examples=("/attach README.md", "/attach --detail detailed screenshot.png",
+                  "/attach --crop 0,0,800,600 screenshot.png"),
     ),
     CommandSpec(
         "theme",
@@ -5801,7 +5814,7 @@ def _explicit_workspace_target(text: str) -> bool:
 def _looks_like_public_lookup_term(user_message: str) -> bool:
     stripped = user_message.strip().strip("?.!,")
     text = stripped.lower()
-    if not stripped or len(stripped) > 80:
+    if not stripped or len(stripped) > 80 or "[attached image]" in text:
         return False
     if (
         _is_direct_response_request(stripped)
@@ -6489,7 +6502,8 @@ def _heuristic_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str
         "history",
         "anniversary",
     )
-    if not selected and any(word in text for word in claim_followup_words):
+    if (not selected and "[attached image]" not in text
+            and any(word in text for word in claim_followup_words)):
         add("query_knowledge", "web_search", "fetch_url")
 
     local_entity_words = (
@@ -6505,7 +6519,8 @@ def _heuristic_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str
         "cambodia",
         "phnom penh",
     )
-    if not selected and any(word in text for word in local_entity_words):
+    if (not selected and "[attached image]" not in text
+            and any(word in text for word in local_entity_words)):
         add("search_sessions", "query_knowledge", "web_search", "fetch_url")
 
     lookup_starters = (
@@ -6520,7 +6535,8 @@ def _heuristic_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str
         "when was",
         "why is",
     )
-    if not selected and any(word in text for word in lookup_starters):
+    if (not selected and "[attached image]" not in text
+            and any(word in text for word in lookup_starters)):
         add("search_sessions", "query_knowledge", "web_search", "fetch_url")
 
     if _explicitly_disallows_retrieval(user_message):
@@ -7936,7 +7952,8 @@ def _render(
         from klaude_core.chat_images import inline_paths
 
         paths = inline_paths(user_msg, Path(agent.workdir))
-        if paths:
+        if (paths or getattr(agent.image_context, "failed", None)
+                or getattr(agent.image_context, "known", [])):
             try:
                 effective_message = agent.image_context.compose(user_msg, paths, session_id)
             except (OSError, ValueError) as exc:
@@ -13640,6 +13657,51 @@ class PersistentChatTUI:
         context_summary = f"{self.agent.ollama_options.get('num_ctx', 8192):,} context"
         runtime = f"{device} · {context_summary}"
         rows = [
+            PanelRow("section:assistant", RowKind.SECTION, "MODELS",
+                     legacy_label=_choice_section("MODELS")),
+            PanelRow("category:models", RowKind.NAVIGATION, "Models", model_detail,
+                     action=PanelAction("category", "models"), section_id="section:assistant",
+                     legacy_label=f"Models: {model_detail}"),
+            PanelRow("category:ai defaults", RowKind.NAVIGATION, "Model Defaults",
+                     "New sessions and optional utility work",
+                     action=PanelAction("category", "ai defaults"), section_id="section:assistant",
+                     legacy_label="Model Defaults"),
+            PanelRow("section:agent", RowKind.SECTION, "AGENT",
+                     legacy_label=_choice_section("AGENT")),
+            PanelRow("category:search", RowKind.NAVIGATION, "Search",
+                     search_summary,
+                     action=PanelAction("category", "search"), section_id="section:agent",
+                     legacy_label="Search"),
+            PanelRow("category:tools", RowKind.NAVIGATION, "Tools", tools_summary,
+                     action=PanelAction("category", "agent tools"), section_id="section:agent",
+                     legacy_label="Tools: availability, providers, and validation"),
+            PanelRow("category:mcp servers", RowKind.NAVIGATION, "MCPs", mcp_detail,
+                     action=PanelAction("category", "mcp servers"),
+                     section_id="section:agent", legacy_label=f"MCP servers: {mcp_detail}",
+                     search_terms="MCP servers"),
+            PanelRow("category:skills", RowKind.NAVIGATION, "Skills", skills_summary,
+                     action=PanelAction("category", "skills"), section_id="section:agent",
+                     legacy_label="Skills: installed inventory"),
+            PanelRow("category:memory", RowKind.NAVIGATION, "Memory", memory_summary,
+                     action=PanelAction("category", "memory"), section_id="section:agent",
+                     legacy_label=f"Memory: {memory_state}"),
+            PanelRow("category:library", RowKind.NAVIGATION, "Library",
+                     "Sessions, knowledge, documents and media",
+                     action=PanelAction("category", "library"), section_id="section:agent",
+                     legacy_label="Library"),
+            PanelRow("category:permissions", RowKind.NAVIGATION, "Permissions", permission_preset,
+                     action=PanelAction("category", "permissions"),
+                     section_id="section:agent",
+                     legacy_label=f"Permissions: {permission_preset}"),
+            PanelRow("section:advanced", RowKind.SECTION, "ADVANCED",
+                     legacy_label=_choice_section("ADVANCED")),
+            PanelRow("category:providers", RowKind.NAVIGATION, "Provider credentials", providers,
+                     action=PanelAction("category", "providers"), section_id="section:advanced",
+                     legacy_label=f"Providers: {providers}"),
+            PanelRow("category:runtime", RowKind.NAVIGATION, "Runtime", device,
+                     context_summary,
+                     action=PanelAction("category", "runtime"), section_id="section:advanced",
+                     legacy_label=f"Runtime: {runtime}"),
             PanelRow("section:appearance", RowKind.SECTION, "APPEARANCE",
                      legacy_label=_choice_section("APPEARANCE")),
             PanelRow("category:theme", RowKind.NAVIGATION, "Theme", theme_summary,
@@ -13657,47 +13719,6 @@ class PersistentChatTUI:
                      f"{spinner_summary}, {self.appearance.spinner.animation.interval} ms",
                      action=PanelAction("category", "spinner"), section_id="section:appearance",
                      legacy_label="Spinner"),
-            PanelRow("section:assistant", RowKind.SECTION, "MODELS & AI",
-                     legacy_label=_choice_section("MODELS & AI")),
-            PanelRow("category:models", RowKind.NAVIGATION, "Models", model_detail,
-                     action=PanelAction("category", "models"), section_id="section:assistant",
-                     legacy_label=f"Models: {model_detail}"),
-            PanelRow("category:ai defaults", RowKind.NAVIGATION, "AI Defaults",
-                     "New sessions and optional utility work",
-                     action=PanelAction("category", "ai defaults"), section_id="section:assistant",
-                     legacy_label="AI Defaults"),
-            PanelRow("category:search", RowKind.NAVIGATION, "Search",
-                     search_summary,
-                     action=PanelAction("category", "search"), section_id="section:assistant",
-                     legacy_label="Search"),
-            PanelRow("section:agent", RowKind.SECTION, "AGENT",
-                     legacy_label=_choice_section("AGENT")),
-            PanelRow("category:tools", RowKind.NAVIGATION, "Agent Tools", tools_summary,
-                     action=PanelAction("category", "agent tools"), section_id="section:agent",
-                     legacy_label="Tools: availability, providers, and validation"),
-            PanelRow("category:mcp servers", RowKind.NAVIGATION, "MCPs", mcp_detail,
-                     action=PanelAction("category", "mcp servers"),
-                     section_id="section:agent", legacy_label=f"MCP servers: {mcp_detail}",
-                     search_terms="MCP servers"),
-            PanelRow("category:skills", RowKind.NAVIGATION, "Skills", skills_summary,
-                     action=PanelAction("category", "skills"), section_id="section:agent",
-                     legacy_label="Skills: installed inventory"),
-            PanelRow("category:memory", RowKind.NAVIGATION, "Memory", memory_summary,
-                     action=PanelAction("category", "memory"), section_id="section:agent",
-                     legacy_label=f"Memory: {memory_state}"),
-            PanelRow("category:permissions", RowKind.NAVIGATION, "Permissions", permission_preset,
-                     action=PanelAction("category", "permissions"),
-                     section_id="section:agent",
-                     legacy_label=f"Permissions: {permission_preset}"),
-            PanelRow("section:advanced", RowKind.SECTION, "ADVANCED",
-                     legacy_label=_choice_section("ADVANCED")),
-            PanelRow("category:providers", RowKind.NAVIGATION, "Provider credentials", providers,
-                     action=PanelAction("category", "providers"), section_id="section:advanced",
-                     legacy_label=f"Providers: {providers}"),
-            PanelRow("category:runtime", RowKind.NAVIGATION, "Runtime", device,
-                     context_summary,
-                     action=PanelAction("category", "runtime"), section_id="section:advanced",
-                     legacy_label=f"Runtime: {runtime}"),
             PanelRow("reset-all", RowKind.ACTION, "Reset appearance settings",
                      action=PanelAction("reset-all"), legacy_label=RESET_THEME_CHOICE),
             PanelRow("close", RowKind.NAVIGATION, "Close", action=PanelAction("close"),
@@ -13752,6 +13773,9 @@ class PersistentChatTUI:
             return
         if category == "agent tools":
             self._agent_settings.open()
+            return
+        if category == "library":
+            self._library.open(from_settings=True)
             return
         if category == "url fetch":
             if not hasattr(self, "_fetch_settings"):
@@ -18065,6 +18089,7 @@ class PersistentChatTUI:
                 "spinner": "spinner",
                 "model": "models",
                 "models": "models",
+                "model defaults": "ai defaults",
                 "ai defaults": "ai defaults",
                 "defaults": "ai defaults",
                 "provider": "providers",
@@ -18077,6 +18102,7 @@ class PersistentChatTUI:
                 "mcps": "mcp servers",
                 "mcp servers": "mcp servers",
                 "memory": "memory",
+                "library": "library",
                 "skill": "skills",
                 "skills": "skills",
                 "tools": "agent tools",
@@ -18091,15 +18117,15 @@ class PersistentChatTUI:
             if requested not in category_aliases:
                 self._append(
                     "\n[error] Settings category must be theme, input, divider, spinner, "
-                    "models, ai defaults, providers, search, "
-                    "memory, skills, MCP, tools, permissions, runtime, or reset.\n"
+                    "models, model defaults, providers, search, "
+                    "memory, library, skills, MCP, tools, permissions, runtime, or reset.\n"
                 )
                 return
             category = category_aliases[requested]
             if category:
                 self._open_settings_category(category)
             else:
-                self._begin_choice("settings", self._settings_categories(), "theme")
+                self._begin_choice("settings", self._settings_categories(), "models")
             return
         if text == "/mcp":
             self._open_settings_category("mcp servers")
@@ -18213,8 +18239,11 @@ class PersistentChatTUI:
             )
             return
         try:
-            path = self._resolve_attachment_path(path_text)
-        except OSError as exc:
+            from klaude_core.chat_images import attachment_path
+
+            path = attachment_path(path_text, Path(getattr(self.agent, "workdir", Path.cwd())),
+                                   getattr(self.agent, "image_context", None))
+        except (OSError, ValueError) as exc:
             self._append(f"\n[error] cannot attach path: {exc}\n")
             return
         self._pending_attachments.append(path)
@@ -18515,6 +18544,8 @@ class PersistentChatTUI:
             effective_message = model_message if model_message is not None else user_msg
             self.agent.cancellation_check = cancel_event.is_set
             context = getattr(self.agent, "image_context", None)
+            if hasattr(self.agent.ollama, "last_chat_metadata"):
+                self.agent.ollama.last_chat_metadata.clear()
             if attachment_paths:
                 self._emit("activity", "preparing attachments")
                 if context is not None:
@@ -18524,6 +18555,8 @@ class PersistentChatTUI:
                 else:
                     attached = self._attachment_context(attachment_paths)
                     effective_message = str(effective_message) + "\n\n" + attached
+            elif context is not None and isinstance(effective_message, str):
+                effective_message = context.resolve_retry(effective_message)
             if attachment_paths and cancel_event.is_set():
                 raise RuntimeError("Attachment preparation cancelled")
             self.memory.start_session_turn(
@@ -20083,7 +20116,7 @@ def chat(
     try:
         defaults = migrate_defaults(cfg)
     except (OSError, ValueError) as exc:
-        console.print(Text(f"AI Defaults unavailable: {exc}",style="red"))
+        console.print(Text(f"Model Defaults unavailable: {exc}",style="red"))
         raise typer.Exit(1) from exc
     remembered_model = defaults.chat
     requested_model = model or remembered_model or ""
@@ -20246,17 +20279,16 @@ def chat(
                 _print_preformatted_text(format_chat_keybind_reference())
             continue
         if command == "/attach":
-            value = argument.strip().strip('"')
+            value = argument.strip()
             if not value:
                 console.print(Text("Use /attach PATH; it will be included with the next message."))
                 continue
             base = Path(getattr(agent, "workdir", Path.cwd())).resolve()
-            candidate = Path(value).expanduser()
             try:
-                path = (candidate if candidate.is_absolute() else base / candidate).resolve(
-                    strict=True
-                )
-            except OSError as exc:
+                from klaude_core.chat_images import attachment_path
+
+                path = attachment_path(value, base, getattr(agent, "image_context", None))
+            except (OSError, ValueError) as exc:
                 console.print(Text(f"Error: cannot attach path: {exc}"))
                 continue
             line_attachments.append(path)
@@ -20330,7 +20362,7 @@ def chat(
                     memory.log_turn(session_id,"system",{
                         "event":"session_update","detail":detail+"\n"+result["text"]})
             except (OSError,ValueError,sqlite3.Error):
-                console.print(Text("AI Utility unavailable; review AI Defaults",style="yellow"))
+                console.print(Text("AI Utility unavailable; review Model Defaults",style="yellow"))
             continue
         if command in {"/compact", "/recap", "/status", "/memory", "/skills"}:
             try:

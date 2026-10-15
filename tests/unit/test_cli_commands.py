@@ -3256,7 +3256,7 @@ def test_settings_include_memory_skills_and_provider_categories():
     categories = tui._settings_categories()
 
     assert "\0section:APPEARANCE" in categories
-    assert "\0section:MODELS & AI" in categories
+    assert "\0section:MODELS" in categories
     assert "\0section:AGENT" in categories
     assert "\0section:ADVANCED" in categories
     assert any(value.startswith("Models:") for value in categories)
@@ -3668,7 +3668,14 @@ def test_settings_choice_sections_are_visible_and_not_selectable():
     tui = _fake_persistent_tui()
     tui._begin_choice("settings", tui._settings_categories(), "tools")
     headings = [row.label for row in tui._panel.page.rows if row.kind == RowKind.SECTION]
-    assert headings == ["APPEARANCE", "MODELS & AI", "AGENT", "ADVANCED"]
+    assert headings == ["MODELS", "AGENT", "ADVANCED", "APPEARANCE"]
+    rows = list(tui._panel.page.rows)
+    search = next(row for row in rows if row.id == "category:search")
+    tools = next(row for row in rows if row.id == "category:tools")
+    assert search.section_id == tools.section_id == "section:agent"
+    assert rows.index(search) + 1 == rows.index(tools)
+    assert tools.label == "Tools"
+    assert next(row for row in rows if row.id == "category:ai defaults").label == "Model Defaults"
     assert not tui._panel.row().kind == RowKind.SECTION
     for row in tui._panel.page.rows:
         if row.kind == RowKind.SECTION:
@@ -7086,13 +7093,14 @@ def test_persistent_tui_choice_response_preserves_invalid_typed_option():
     tui = _fake_persistent_tui()
     tui._begin_choice("settings", ["theme", "input field"], "theme")
     tui._panel.search_active = True
-    tui._set_input("unknown")
+    # "unknown" legitimately fuzzy-matches the Library's "knowledge" summary.
+    tui._set_input("zzzz-no-such-option-zzzz")
     tui._refresh_choice_filter()
 
     tui._submit_choice_response()
 
     assert tui._choice_kind == "settings"
-    assert tui.input.text == "unknown"
+    assert tui.input.text == "zzzz-no-such-option-zzzz"
     assert tui._panel.picker.no_matches
 
 
@@ -10970,7 +10978,7 @@ def test_settings_permission_mcp_breadcrumb_and_parent_focus_restore():
         ("mcp servers", "MCPs"),
         ("memory", "Memory"),
         ("skills", "Skills"),
-        ("tools", "Agent Tools"),
+        ("tools", "Tools"),
         ("permissions", "Permissions"),
         ("runtime", "Runtime"),
     ],
@@ -10992,10 +11000,10 @@ def test_every_settings_category_uses_dedicated_panel(category, title):
 def test_settings_heading_underlines_only_the_title():
     tui = _fake_persistent_tui()
     tui._begin_choice("settings", tui._settings_categories(), "models")
-    heading = next(row for row in tui._panel_body().lines if "MODELS & AI" in str(row))
+    heading = next(row for row in tui._panel_body().lines if "MODELS" in str(row))
     assert heading == (
         ("class:panel.heading-marker", "▪ "),
-        ("class:panel.section", "MODELS & AI"),
+        ("class:panel.section", "MODELS"),
     )
     style = tui.application.style
     assert style.get_attrs_for_style_str("class:panel.section").underline is True
@@ -11051,7 +11059,7 @@ def test_settings_subpages_keep_panel_focus_and_toggle_state(tmp_path):
     tui._picker.focus("agent execution settings")
     tui._apply_picker_state()
     tui._accept_choice()
-    assert tui._panel.page.breadcrumb == ("Settings", "Agent Tools", "Execution")
+    assert tui._panel.page.breadcrumb == ("Settings", "Tools", "Execution")
 
     tui._open_settings_category("providers")
     provider = next(row for row in tui._panel.page.rows if row.label == "Tavily")
@@ -14993,7 +15001,7 @@ def test_ai_defaults_selection_saves_role_without_touching_session(tmp_path):
     controller.accept("ai-defaults:inventory", controller.inventory[0], snapshot, "")
     assert controller.defaults.chat == "ollama@default-ollama/gpt-oss:20b"
     controller.saved((tui.session_id, controller.pending[0], controller.defaults.public(), ""))
-    assert controller.feedback == ("AI Defaults saved", "success")
+    assert controller.feedback == ("Model Defaults saved", "success")
     assert tui.agent.ollama is original
 
 

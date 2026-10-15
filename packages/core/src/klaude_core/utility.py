@@ -124,7 +124,7 @@ def run_utility(request: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Unsupported utility task")
     defaults = read_defaults(cfg)
     if request.get("defaults") is not None and defaults.public() != request["defaults"]:
-        return {"error": "AI Defaults changed; retry the utility action"}
+        return {"error": "Model Defaults changed; retry the utility action"}
     dialogue, prior_name = public_dialogue(cfg.data_dir / "sessions.db", request["session_id"])
     if not dialogue:
         return {"error": "No saved public conversation to summarize"}
@@ -145,12 +145,12 @@ def run_utility(request: dict[str, Any]) -> dict[str, Any]:
         except ValueError:
             if index:
                 continue
-            return {"error": "Utility model disabled or removed; review AI Defaults"}
+            return {"error": "Utility model disabled or removed; review Model Defaults"}
         connection = connections.get(identity)
         if connection is None or connection.backend != backend or not connection.enabled:
             if index:
                 continue
-            return {"error": "Utility endpoint unavailable; review AI Defaults"}
+            return {"error": "Utility endpoint unavailable; review Model Defaults"}
         if backend == "openai_codex":
             if index:
                 continue
@@ -288,7 +288,7 @@ def run_utility(request: dict[str, Any]) -> dict[str, Any]:
 
             if isinstance(exc, CompatibleModelError) and "output limit reached" in str(exc):
                 return {
-                    "error": "Utility output limit reached; raise Utility output in AI Defaults",
+                    "error": "Utility output limit reached; raise Utility output in Model Defaults",
                     "attempts": attempts,
                 }
             if not timed_out.is_set() and not eligible_failure(exc):

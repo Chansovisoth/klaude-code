@@ -1,6 +1,6 @@
 # Klaude WebUI Preparation — Feature and Settings Inventory
 
-**Audit date:** 2026-10-15 · **Product:** klaude-code 0.2.0a4
+**Audit date:** 2026-10-15 (maintenance updates through 2026-10-16) · **Product:** klaude-code 0.2.0a4
 **Repository:** `/home/klaude/klaude-code` · **Branch:** `klaude/20260908-1448`
 **Base revision:** `0234b116f4380cb87c1b1cf39959725493e227ee`
 **Source of truth:** the live worktree, including 108 pre-existing modified/untracked paths. This document is not a description of the base commit alone. Source line references describe this worktree and may shift after subsequent changes.
@@ -11,7 +11,13 @@
 AI tags, native CPU/CUDA generation/recovery and private image-job management. Relevant
 feature/command entries and registry totals below are updated; original audit
 verification remains historical. Current evidence and remaining provider/hardware
-gates: [S6 completion validation](s6-completion-validation.md).
+gates: [S6 completion validation](s6-completion-validation.md). The subsequent
+[S0–S6 feature verification](odysseus-feature-verification.md) maps all roadmap
+checkboxes to source/tests and fresh or historical runtime evidence. Settings now
+links Library directly below Memory, reusing the same workspace and retaining a
+Back path to Settings; `/library` remains available from chat.
+
+**Attachment/settings maintenance (2026-10-16):** bounded full image decoding and request-sized derivatives, explicit crop/frame/detail, failed-turn retry and shared budgets are implemented. Model Defaults replaces the public AI Defaults label, Search sits above Tools under Agent, and Appearance follows Advanced. Existing storage keys/aliases remain compatible. [Attachment evidence](image-attachment-reliability-validation.md), [defaults/navigation evidence](model-defaults-navigation-validation.md).
 
 ## Contents
 
@@ -29,7 +35,7 @@ gates: [S6 completion validation](s6-completion-validation.md).
 
 ## 1. Executive Summary
 
-Klaude is a local-first coding/agent environment with interactive and one-shot execution, scoped tools and permissions, bounded read-only subagents, eight model connection backends, local knowledge and web retrieval, durable sessions/memory, Skills, external MCP clients and two restricted MCP servers. Model Manager includes native Ollama lifecycle operations, installed **llama.cpp and vLLM**, trusted CPU/CUDA source builds, offline vLLM wheel installation, local/remote serving, SSH diagnostics/key trust/enrollment and existing-server adoption. Library separates Sessions, Knowledge, Documents, Research, Media and Archive. Image analysis/chat attachments support declared-capability provider paths; the native local image-generation consumer has actual CPU generation/export evidence. Optional AI tagging and private image-job management are now implemented; GPU/cloud certification boundaries remain explicit.
+Klaude is a local-first coding/agent environment with interactive and one-shot execution, scoped tools and permissions, bounded read-only subagents, eight model connection backends, local knowledge and web retrieval, durable sessions/memory, Skills, external MCP clients and two restricted MCP servers. Model Manager includes native Ollama lifecycle operations, installed **llama.cpp and vLLM**, trusted CPU/CUDA source builds, offline vLLM wheel installation, local/remote serving, SSH diagnostics/key trust/enrollment and existing-server adoption. Library separates Sessions, Knowledge, Documents, Research, Media and Archive. Image analysis/chat attachments support declared-capability provider paths; the native local image-generation consumer has actual CPU/CUDA generation/export evidence. Optional AI tagging and private image-job management are now implemented; wider hardware and cloud certification boundaries remain explicit.
 
 ### Scope and evidence levels
 
@@ -112,7 +118,7 @@ Provider/model capabilities determine supported reasoning controls and whether S
 
 Bounds model steps, tool calls, optional token use and subagent concurrency; reports known usage without treating missing provider counters as zero.
 
-- **Current entry:** Settings → Agent Tools → execution controls; /status
+- **Current entry:** Settings → Tools → execution controls; /status
 - **Configuration/defaults:** 20 steps; tool calls 0=Auto (normally 2×steps, minimum 4); tokens 0=no cap; concurrency 0=Auto
 - **Dependencies:** TurnGovernor; provider usage metadata
 - **Implementation:** [packages/core/src/klaude_core/execution.py:TurnGovernor](../packages/core/src/klaude_core/execution.py#L69); [packages/core/src/klaude_core/agent_settings.py:EXECUTION_LIMITS](../packages/core/src/klaude_core/agent_settings.py#L7)
@@ -124,7 +130,7 @@ Bounds model steps, tool calls, optional token use and subagent concurrency; rep
 
 Selects per-turn schemas from enabled registered tools, intent and scope; supplies truthful capability and skill guidance to the model.
 
-- **Current entry:** Automatic; Agent Tools switches
+- **Current entry:** Automatic; Tools switches
 - **Configuration/defaults:** tool_availability; permissions; enabled MCP/Skills
 - **Dependencies:** CLI tool registry; core capability snapshot
 - **Implementation:** [packages/core/src/klaude_core/capabilities.py](../packages/core/src/klaude_core/capabilities.py#L1); [packages/core/src/klaude_core/agent.py:active_schemas](../packages/core/src/klaude_core/agent.py#L4764); [packages/core/src/klaude_core/agent.py:capability_snapshot](../packages/core/src/klaude_core/agent.py#L4803); [apps/cli/src/klaude_cli/main.py:_build_agent](../apps/cli/src/klaude_cli/main.py#L7126)
@@ -318,7 +324,7 @@ Per-tool allow/ask/deny policies, presets, one-time decisions and temporary proc
 
 Global/per-group switches control future callable schemas without changing permission grants; separate web/knowledge result validation switches.
 
-- **Current entry:** Settings → Agent Tools
+- **Current entry:** Settings → Tools
 - **Configuration/defaults:** tool_availability.<name> default true; tool_validation.web_search/knowledge_search true
 - **Dependencies:** Actual live registered tools
 - **Implementation:** [packages/core/src/klaude_core/tool_settings.py:BUILTIN_TOOL_GROUPS](../packages/core/src/klaude_core/tool_settings.py#L10); [packages/core/src/klaude_core/agent_settings.py](../packages/core/src/klaude_core/agent_settings.py#L1); [apps/cli/src/klaude_cli/main.py:_apply_tool_availability_preferences](../apps/cli/src/klaude_cli/main.py#L1785)
@@ -416,23 +422,30 @@ Draft Test probes catalog without generation; saved endpoints support Probe all,
 
 Lists qualified models per endpoint with capabilities, filtering/grouping, enabled/hidden/pinned preferences and cached catalogs.
 
+Model Defaults/Models settings also inspect native Ollama `/api/show` in owned,
+bounded background batches. They show declared Vision, text-only, Tools,
+Thinking and Embeddings capabilities; server image generation/audio are labeled
+separately from implemented Klaude consumers. Known non-vision models cannot be
+selected for the Vision role. Missing/failed metadata remains unverified, with
+fresh selection-time verification retained. This adds no persisted setting.
+
 - **Current entry:** /model; Models → current model / endpoint models
 - **Configuration/defaults:** model_choices.<connection>.<model>.enabled=true/hidden=false/pinned=false
-- **Dependencies:** Declared catalog metadata; revision-scoped cache
+- **Dependencies:** Declared catalog metadata; revision-scoped cache; native Ollama metadata checks through [apps/cli/src/klaude_cli/model_capabilities.py](../apps/cli/src/klaude_cli/model_capabilities.py)
 - **Implementation:** [apps/cli/src/klaude_cli/model_settings.py](../apps/cli/src/klaude_cli/model_settings.py#L1); [packages/core/src/klaude_core/model_management.py:choices_from_payload](../packages/core/src/klaude_core/model_management.py#L43); [packages/core/src/klaude_core/model_runtime.py:ModelInfo](../packages/core/src/klaude_core/model_runtime.py#L149)
 - **Limits/notes:** No automatic substitution when an explicit model or endpoint becomes unavailable. Cache freshness and unknown capabilities need visible states.
 
-#### F031. AI Defaults and role inheritance
+#### F031. Model Defaults and role inheritance
 
 **Status:** Implemented · **WebUI:** REQUIRED · **Suggested surface:** Models and provider connections
 
-Default Chat governs new sessions; optional Utility and Research inherit chat when unset; Vision has explicit enable/model and ordered fallbacks.
+Default Chat governs new sessions; optional Utility and Research inherit chat when explicitly unset; Vision has a separate enable/model and ordered fallbacks. Opening Model Defaults fills previously empty roles from live eligible metadata, preferring local/current compatible choices. Explicit clears/inheritance and existing models are preserved; Vision remains OFF until enabled. Missing/unverified models leave roles empty.
 
-- **Current entry:** Settings → AI Defaults
+- **Current entry:** Settings → Model Defaults
 - **Configuration/defaults:** ai_defaults chat/utility/research/vision; output_tokens512; up to 3 explicit utility/vision fallbacks
 - **Dependencies:** Valid enabled connections/models; capability eligibility
 - **Implementation:** [packages/core/src/klaude_core/ai_defaults.py](../packages/core/src/klaude_core/ai_defaults.py#L1); [apps/cli/src/klaude_cli/ai_default_settings.py](../apps/cli/src/klaude_cli/ai_default_settings.py#L1)
-- **Limits/notes:** Changing Default Chat does not replace the current session model. Research and chat do not silently fall back to another model.
+- **Limits/notes:** Changing Default Chat does not replace the current session model. Research and chat do not silently fall back to another model. Automatic proposals use bounded metadata-only discovery and the existing compare-and-save writer; no inference or current-session switch. See [defaults/navigation validation](model-defaults-navigation-validation.md).
 
 #### F032. Explicit Utility naming and recaps
 
@@ -440,7 +453,7 @@ Default Chat governs new sessions; optional Utility and Research inherit chat wh
 
 Runs bounded title/recap generation using public recent dialogue only; supports explicit reviewed fallback chain and usage result.
 
-- **Current entry:** /rename --ai; /recap --ai; AI Defaults → Utility test
+- **Current entry:** /rename --ai; /recap --ai; Model Defaults → Utility test
 - **Configuration/defaults:** 512 output tokens, 128–2048; up to 24 turns/6000 chars of public dialogue
 - **Dependencies:** Utility-eligible runtime; owned worker
 - **Implementation:** [packages/core/src/klaude_core/utility.py:public_dialogue](../packages/core/src/klaude_core/utility.py#L29); [packages/core/src/klaude_core/utility.py:runtime_for_utility](../packages/core/src/klaude_core/utility.py#L56); [apps/cli/src/klaude_cli/ai_default_settings.py](../apps/cli/src/klaude_cli/ai_default_settings.py#L1)
@@ -1038,7 +1051,7 @@ Exposes reusable web/search/fetch/Hub and knowledge/query/learn/docs/skills tool
 
 Durable-information workspace separates Sessions, Knowledge, Documents, Research, Media and Archive while retaining each subsystem’s meaning.
 
-- **Current entry:** /library [VIEW]; Library panel; library commands
+- **Current entry:** Settings → Library (directly below Memory); /settings library; /library [VIEW]; library commands
 - **Configuration/defaults:** VIEWS constant; view filters/sort/query state
 - **Dependencies:** Sessions; knowledge; ArtifactStore; research
 - **Implementation:** [apps/cli/src/klaude_cli/library_workspace.py:VIEWS](../apps/cli/src/klaude_cli/library_workspace.py#L19); [apps/cli/src/klaude_cli/library_workspace.py:LibraryWorkspace](../apps/cli/src/klaude_cli/library_workspace.py#L32)
@@ -1087,7 +1100,7 @@ Applies manual tags, reversible archive and confirmed permanent deletion of arch
 Reviews exact pixels/endpoints/models/context/output and invokes Vision with declared support, cancellation and eligible explicit fallbacks; results stay private/unsaved.
 
 - **Current entry:** library analyze MEDIA_ID QUESTION; Media → Analyze image
-- **Configuration/defaults:** Vision off by default;4096context/512output; PNG/JPEG≤8MiB/4MP/4096side;90s generation
+- **Configuration/defaults:** Vision off by default;4096context/512output; PNG/JPEG/static WebP/GIF sources≤32MiB/40MP; prepared PNG/JPEG≤7,500,000B/4MP/4096side;90s generation
 - **Dependencies:** Configured supported Vision model; exact image revision; owned worker
 - **Implementation:** [packages/core/src/klaude_core/vision.py](../packages/core/src/klaude_core/vision.py#L1); [apps/cli/src/klaude_cli/vision_panel.py](../apps/cli/src/klaude_cli/vision_panel.py#L1); [packages/core/src/klaude_core/image_content.py](../packages/core/src/klaude_core/image_content.py#L1); [packages/core/src/klaude_core/ai_defaults.py](../packages/core/src/klaude_core/ai_defaults.py#L1)
 - **Limits/notes:** HTTP context is conservative local admission, not server allocation. Thinking-required models unavailable to thinking-disabled Media consumer; no tools/history/indexing/tag mutations. Forms load unknown role metadata without claiming disabled state; host-written redacted failures wrap visibly and retain input for explicit retry.
@@ -1096,10 +1109,10 @@ Reviews exact pixels/endpoints/models/context/output and invokes Vision with dec
 
 **Status:** Implemented · **WebUI:** ADAPT · **Suggested surface:** Library artifacts and media
 
-Supplies actual immutable PNG/JPEG snapshots to explicitly selected image-capable chat model; saved refs support follow-ups/resume after original source deletion.
+Supplies immutable PNG/JPEG/WebP/GIF source snapshots with fully decoded request-sized PNG/JPEG working copies to explicitly selected image-capable chat model; saved refs support follow-ups/resume after original source deletion.
 
-- **Current entry:** /attach PATH; inline @PATH; ask inline image path
-- **Configuration/defaults:** Vision enabled; max2distinct images per request; same pixel limits; chat runtime budget
+- **Current entry:** /attach [--detail auto|detailed|original] [--frame N] [--crop x,y,width,height] PATH_OR_MEDIA_ID; inline @PATH; ask inline image path
+- **Configuration/defaults:** Vision enabled; max2distinct images per request; same source/preparation limits; shared request/compaction budget
 - **Dependencies:** Fresh exact-model image evidence; private Media snapshots; provider image adapter
 - **Implementation:** [packages/core/src/klaude_core/chat_images.py:ChatImages](../packages/core/src/klaude_core/chat_images.py#L145); [packages/core/src/klaude_core/chat_image_support.py](../packages/core/src/klaude_core/chat_image_support.py#L1); [packages/core/src/klaude_core/openai_images.py](../packages/core/src/klaude_core/openai_images.py#L1); [packages/core/src/klaude_core/gemini_images.py](../packages/core/src/klaude_core/gemini_images.py#L1); [packages/core/src/klaude_core/openrouter_images.py](../packages/core/src/klaude_core/openrouter_images.py#L1)
 - **Limits/notes:** No silent switch to Vision model/fallbacks in chat. Endpoint/credential changes require reattachment; deleted/corrupt bytes unavailable, recaps not visual evidence.
@@ -1110,7 +1123,7 @@ Supplies actual immutable PNG/JPEG snapshots to explicitly selected image-capabl
 
 Shared inspector checks native Ollama, compatible/native-peer, Anthropic, exact OpenAI/Gemini profiles and OpenRouter modalities before pixels are sent.
 
-- **Current entry:** AI Defaults → Vision selection; analysis/attachment preparation
+- **Current entry:** Model Defaults → Vision selection; analysis/attachment preparation
 - **Configuration/defaults:** Exact IDs/root/auth scope;30s metadata cache; provider context/output limits
 - **Dependencies:** Model catalog/show endpoints; checked-in reviewed profiles
 - **Implementation:** [packages/core/src/klaude_core/vision.py:inspect_model](../packages/core/src/klaude_core/vision.py#L155); [packages/core/src/klaude_core/image_profiles.py](../packages/core/src/klaude_core/image_profiles.py#L1); [packages/core/src/klaude_core/image_content.py](../packages/core/src/klaude_core/image_content.py#L1); [packages/core/src/klaude_core/chat_image_support.py](../packages/core/src/klaude_core/chat_image_support.py#L1)
@@ -1118,19 +1131,19 @@ Shared inspector checks native Ollama, compatible/native-peer, Anthropic, exact 
 
 #### F086. Local image-service settings
 
-**Status:** Partial · **WebUI:** ADAPT · **Suggested surface:** Library artifacts and media
+**Status:** Implemented · **WebUI:** ADAPT · **Suggested surface:** Library artifacts and media
 
 Connects an already running stable-diffusion.cpp native image API, tests capabilities without generation, saves explicit enabled endpoint and pinned loaded model.
 
-- **Current entry:** library image-service; AI Defaults → Image generation; Media → Generate image settings
+- **Current entry:** library image-service; Model Defaults → Image generation; Media → Generate image settings
 - **Configuration/defaults:** config/image-generation.json: enabled false, endpoint/model/revision empty
 - **Dependencies:** Existing unauthenticated trusted local/LAN native service
 - **Implementation:** [packages/core/src/klaude_core/image_generation.py:read](../packages/core/src/klaude_core/image_generation.py#L52); [packages/core/src/klaude_core/image_generation.py:inspect](../packages/core/src/klaude_core/image_generation.py#L115); [apps/cli/src/klaude_cli/generation_panel.py](../apps/cli/src/klaude_cli/generation_panel.py#L1)
-- **Limits/notes:** Protocol/CLI/TUI fixture coverage exists; no real diffusion inference validated in current prior report. No authentication, engine install, workflow import or automatic model load.
+- **Limits/notes:** Native CPU/CUDA inference and CLI/TUI settings/review flows are validated for the recorded profiles; see [S6 evidence](s6-completion-validation.md). Additional service/authentication adapters remain deferred. No authentication, engine install, workflow import or automatic model load.
 
 #### F087. Reviewed image generation and provenance
 
-**Status:** Partial · **WebUI:** ADAPT · **Suggested surface:** Library artifacts and media
+**Status:** Implemented · **WebUI:** ADAPT · **Suggested surface:** Library artifacts and media
 
 Reviews prompt/model/dimensions/steps/seed; submits one native image job, polls, imports one bounded PNG and records provenance atomically.
 
@@ -1161,7 +1174,7 @@ Retains private job receipts; local status reads, supported per-job cancellation
 Shared PanelPage/Row/Action/State gives typed navigation, info/toggle/action/table sections, search/filter, status tones, review focus and background result scoping.
 
 - **Current entry:** /settings [CATEGORY]; setting subpages
-- **Configuration/defaults:** Current categories: Appearance, Models & AI, Agent, Advanced
+- **Configuration/defaults:** Current categories, in order: Models, Agent (Search before Tools), Advanced, Appearance
 - **Dependencies:** CLI settings adapters; settings writers; owned workers
 - **Implementation:** [apps/cli/src/klaude_cli/settings_panel.py:PanelPage](../apps/cli/src/klaude_cli/settings_panel.py#L122); [apps/cli/src/klaude_cli/settings_panel.py:PanelState](../apps/cli/src/klaude_cli/settings_panel.py#L148); [apps/cli/src/klaude_cli/main.py:_settings_home_page](../apps/cli/src/klaude_cli/main.py#L13537)
 - **Limits/notes:** Logical action/state semantics reusable; prompt_toolkit rendering, terminal cell measurement and picker keys are terminal-specific.
@@ -1300,7 +1313,7 @@ Generation adapters beyond the first native local consumer and paid OpenAI/Anthr
 - **Configuration/defaults:** No invented provider/key/quality settings
 - **Dependencies:** Explicit service/model capabilities and live validation
 - **Implementation:** [docs/odysseus-settings-and-features-plan.md](../docs/odysseus-settings-and-features-plan.md#L1); [docs/s6b-local-generation-validation.md](../docs/s6b-local-generation-validation.md#L1)
-- **Limits/notes:** OpenAI/Anthropic adapters already exist for supported Vision scopes; absence of live paid generation evidence is not proof adapters are broken.
+- **Limits/notes:** OpenAI/Anthropic adapters already exist for supported Vision scopes; absence of live paid generation evidence is not proof adapters are broken. The latest real Media CLI audit confirms exhausted OpenAI credits, no configured native Anthropic access, legacy Gemini Flash HTTP 404 and Flash-Lite preparation timeout. [Current account gates](s6-completion-validation.md#final-account-access-audit).
 
 #### F100. Gallery canvas, speech and email writing style
 
@@ -1325,7 +1338,7 @@ SETTINGS
         └── Enable / Disable
 ```
 
-**Planned, not implemented.** Existing settings home sections are APPEARANCE, MODELS & AI, AGENT and ADVANCED; INTERFACE and a hosting preference do not currently exist. `PersistentChatTUI._settings_home_page` constructs typed navigation rows, `_open_settings_category` dispatches controllers, `PanelPage`/`PanelAction` model pages/actions, and `SettingsWriter` plus `settings_store` implement ordered private atomic persistence. These are concrete integration seams for a future TUI hosting control. They are not an authorization to add the field here.
+**Planned, not implemented.** Existing settings home sections are APPEARANCE, MODELS, AGENT and ADVANCED; INTERFACE and a hosting preference do not currently exist. `PersistentChatTUI._settings_home_page` constructs typed navigation rows, `_open_settings_category` dispatches controllers, `PanelPage`/`PanelAction` model pages/actions, and `SettingsWriter` plus `settings_store` implement ordered private atomic persistence. These are concrete integration seams for a future TUI hosting control. They are not an authorization to add the field here.
 
 The new toggle must persist across restarts, remain reachable from the TUI while the WebUI is disabled, start/stop only browser hosting and leave core CLI/TUI functionality available. It should reuse existing model connections, Agent/tool semantics, sessions and configuration authorities. **Default enabled state, exact persistence key/file, port, bind address, startup/daemon ownership and security controls remain undecided.** No current `web.provider`, Search switch, MCP callback or managed-model server flag is this preference. Enabling browser hosting neither enables internet access nor authorizes public exposure.
 
@@ -1393,7 +1406,7 @@ The following tables list **actual exact paths/keys**, type, source default, val
 | standard | gpt-oss:20b | qwen3:4b | minicpm-v | nomic-embed-text |
 | full | qwen3-coder:30b | qwen3:4b | minicpm-v | nomic-embed-text |
 
-`models.override.<role>` replaces preset roles. The legacy `vision` preset **does not enable** AI Defaults → Vision or authorize pixel transmission. `models.fast` does not by itself imply a periodic Utility task. General `num_predict` defaults to 2048; effective code output defaults to at least 4096 unless explicitly overridden. Model/provider reasoning behavior remains capability-dependent.
+`models.override.<role>` replaces preset roles. The legacy `vision` preset **does not enable** Model Defaults → Vision or authorize pixel transmission. `models.fast` does not by itself imply a periodic Utility task. General `num_predict` defaults to 2048; effective code output defaults to at least 4096 unless explicitly overridden. Model/provider reasoning behavior remains capability-dependent.
 
 **Complete built-in permission defaults** (unknown/external tools default Ask; presets operate on current registry):
 
@@ -1639,7 +1652,7 @@ Default provider order: `["brave", "ddgs", "searxng", "brave_api", "google", "pa
 | S159 `permissions.<tool>` | Implemented | str | `Inherited DEFAULT_PERMISSIONS/TOML` | allow \| ask \| deny; only applicable registered names | data/chat-preferences.json; After successful acknowledged save; next applicable request | Metadata / private dialogue when relevant; TUI; persisted JSON | REQUIRED | [packages/core/src/klaude_core/permissions.py](../packages/core/src/klaude_core/permissions.py#L1); [apps/cli/src/klaude_cli/main.py:_apply_saved_permissions](../apps/cli/src/klaude_cli/main.py#L1828) — Unknown/MCP tools default ask; availability remains independent. |
 | S160 `display.activity_updates` | Implemented | bool | `true` | Boolean; old display.reasoning_activity accepted as fallback | data/chat-preferences.json; After successful acknowledged save; next applicable request | Metadata / private dialogue when relevant; TUI; persisted JSON | ADAPT | [apps/cli/src/klaude_cli/main.py:_activity_updates_enabled](../apps/cli/src/klaude_cli/main.py#L1812) — Controls useful activity summaries; it is separate from terminal spinner animation. |
 | S161 `composer_mode` | Implemented | str | `standard` | standard \| vim | data/chat-preferences.json; After successful acknowledged save; next applicable request | Metadata / private dialogue when relevant; TUI; persisted JSON | TUI-ONLY | [apps/cli/src/klaude_cli/main.py:_composer_mode](../apps/cli/src/klaude_cli/main.py#L1823) |
-| S162 `last_model` | Implemented | str\|null | `Absent; migration uses configured coder` | Qualified model reference or legacy model ID | data/chat-preferences.json; After successful acknowledged save; next applicable request | Metadata / private dialogue when relevant; TUI; persisted JSON | INTERNAL | [packages/core/src/klaude_core/ai_defaults.py:defaults_from_preferences](../packages/core/src/klaude_core/ai_defaults.py#L47); [apps/cli/src/klaude_cli/main.py:_save_last_chat_model](../apps/cli/src/klaude_cli/main.py#L1692) — Legacy startup/migration record; AI Defaults.chat and saved session runtime are newer authoritative choices. |
+| S162 `last_model` | Implemented | str\|null | `Absent; migration uses configured coder` | Qualified model reference or legacy model ID | data/chat-preferences.json; After successful acknowledged save; next applicable request | Metadata / private dialogue when relevant; TUI; persisted JSON | INTERNAL | [packages/core/src/klaude_core/ai_defaults.py:defaults_from_preferences](../packages/core/src/klaude_core/ai_defaults.py#L47); [apps/cli/src/klaude_cli/main.py:_save_last_chat_model](../apps/cli/src/klaude_cli/main.py#L1692) — Legacy startup/migration record; Model Defaults.chat and saved session runtime are newer authoritative choices. |
 | S163 `require_model_selection` | Implemented | bool | `Absent/false` | True requires explicit startup selection | data/chat-preferences.json; After successful acknowledged save; next applicable request | Metadata / private dialogue when relevant; TUI; persisted JSON | INTERNAL | [packages/core/src/klaude_core/ai_defaults.py:defaults_from_preferences](../packages/core/src/klaude_core/ai_defaults.py#L47); [packages/core/src/klaude_core/model_management.py](../packages/core/src/klaude_core/model_management.py#L1) |
 | S164 `search_settings.tavily_depth` | Implemented | str | `basic (provider config may override)` | basic \| advanced | data/chat-preferences.json; After successful acknowledged save; next applicable request | Metadata / private dialogue when relevant; TUI; persisted JSON | REQUIRED | [packages/core/src/klaude_core/search_settings.py:public_search_settings](../packages/core/src/klaude_core/search_settings.py#L55) |
 | S165 `search_settings.searxng_url` | Implemented | str | `Inherited services.searxng_url` | HTTP(S)≤2048; no auth/query/fragment; valid nonzero port | data/chat-preferences.json; After successful acknowledged save; next applicable request | Metadata / private dialogue when relevant; TUI; persisted JSON | REQUIRED | [packages/core/src/klaude_core/search_settings.py:service_url](../packages/core/src/klaude_core/search_settings.py#L32) — Separate override of the same service; not a new search provider. |
@@ -1661,6 +1674,8 @@ Default provider order: `["brave", "ddgs", "searxng", "brave_api", "google", "pa
 | S181 `research.queries` | Implemented | int | `6` | 1–12 | data/chat-preferences.json; After successful acknowledged save; next applicable request | Metadata / private dialogue when relevant; TUI; persisted JSON | REQUIRED | [packages/core/src/klaude_core/research.py:ResearchDefaults](../packages/core/src/klaude_core/research.py#L31); [packages/core/src/klaude_core/research.py:research_defaults](../packages/core/src/klaude_core/research.py#L58) |
 | S182 `research.sources` | Implemented | int | `8` | 1–16 | data/chat-preferences.json; After successful acknowledged save; next applicable request | Metadata / private dialogue when relevant; TUI; persisted JSON | REQUIRED | [packages/core/src/klaude_core/research.py:ResearchDefaults](../packages/core/src/klaude_core/research.py#L31); [packages/core/src/klaude_core/research.py:research_defaults](../packages/core/src/klaude_core/research.py#L58) |
 | S183 `research.context_tokens` | Implemented | int | `8192` | 4096–65536 | data/chat-preferences.json; After successful acknowledged save; next applicable request | Metadata / private dialogue when relevant; TUI; persisted JSON | REQUIRED | [packages/core/src/klaude_core/research.py:ResearchDefaults](../packages/core/src/klaude_core/research.py#L31); [packages/core/src/klaude_core/research.py:research_defaults](../packages/core/src/klaude_core/research.py#L58) |
+
+`model_default_selections` (Implemented, INTERNAL): private global `data/chat-preferences.json` map, default `{}`, keys `chat|utility|research|vision`, values `manual|automatic`. No direct editor. Successful role saves update it immediately; explicit manual null prevents later automatic replacement. Endpoint/key/model and field checks precede automatic writes. Source: [core ai_defaults.save_defaults](../packages/core/src/klaude_core/ai_defaults.py), [CLI default_model_selection](../apps/cli/src/klaude_cli/default_model_selection.py). This is an additional setting beyond the original audit totals.
 
 ### Model endpoint definitions
 
@@ -1749,10 +1764,10 @@ Default provider order: `["brave", "ddgs", "searxng", "brave_api", "google", "pa
 
 | ID / key or field family | Status | Type | Source default / effective fallback | Accepted values / validation | Persistence scope / effect | Sensitivity / exposure | WebUI | Source / dependencies and notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| S232 `enabled` | Partial | bool | `false` | Enabled requires tested endpoint and pinned model | config/image-generation.json; Acknowledged save; prepare/send recheck exact model/revision | Trusted host/model metadata; AI Defaults/Media; CLI library image-service; JSON | REQUIRED | [packages/core/src/klaude_core/image_generation.py:DEFAULTS](../packages/core/src/klaude_core/image_generation.py#L29); [packages/core/src/klaude_core/image_generation.py:save](../packages/core/src/klaude_core/image_generation.py#L66) — Partial native service consumer; real model inference not yet validated in existing report. |
-| S233 `endpoint` | Partial | str | `""` | HTTP(S)≤500; normalized native root; no credentials/query/fragment; trusted local/LAN | config/image-generation.json; Acknowledged save; prepare/send recheck exact model/revision | Trusted host/model metadata; AI Defaults/Media; CLI library image-service; JSON | REQUIRED | [packages/core/src/klaude_core/image_generation.py:DEFAULTS](../packages/core/src/klaude_core/image_generation.py#L29); [packages/core/src/klaude_core/image_generation.py:save](../packages/core/src/klaude_core/image_generation.py#L66) — Partial native service consumer; real model inference not yet validated in existing report. |
-| S234 `model` | Partial | str | `""` | Pinned loaded model≤200printable; enabled requires nonempty | config/image-generation.json; Acknowledged save; prepare/send recheck exact model/revision | Trusted host/model metadata; AI Defaults/Media; CLI library image-service; JSON | REQUIRED | [packages/core/src/klaude_core/image_generation.py:DEFAULTS](../packages/core/src/klaude_core/image_generation.py#L29); [packages/core/src/klaude_core/image_generation.py:save](../packages/core/src/klaude_core/image_generation.py#L66) — Partial native service consumer; real model inference not yet validated in existing report. |
-| S235 `revision` | Partial | str | `""` | Opaque random save revision; not a user-editable choice | config/image-generation.json; Acknowledged save; prepare/send recheck exact model/revision | Trusted host/model metadata; AI Defaults/Media; CLI library image-service; JSON | INTERNAL | [packages/core/src/klaude_core/image_generation.py:DEFAULTS](../packages/core/src/klaude_core/image_generation.py#L29); [packages/core/src/klaude_core/image_generation.py:save](../packages/core/src/klaude_core/image_generation.py#L66) — Partial native service consumer; real model inference not yet validated in existing report. |
+| S232 `enabled` | Partial | bool | `false` | Enabled requires tested endpoint and pinned model | config/image-generation.json; Acknowledged save; prepare/send recheck exact model/revision | Trusted host/model metadata; Model Defaults/Media; CLI library image-service; JSON | REQUIRED | [packages/core/src/klaude_core/image_generation.py:DEFAULTS](../packages/core/src/klaude_core/image_generation.py#L29); [packages/core/src/klaude_core/image_generation.py:save](../packages/core/src/klaude_core/image_generation.py#L66) — Partial native service consumer; real model inference not yet validated in existing report. |
+| S233 `endpoint` | Partial | str | `""` | HTTP(S)≤500; normalized native root; no credentials/query/fragment; trusted local/LAN | config/image-generation.json; Acknowledged save; prepare/send recheck exact model/revision | Trusted host/model metadata; Model Defaults/Media; CLI library image-service; JSON | REQUIRED | [packages/core/src/klaude_core/image_generation.py:DEFAULTS](../packages/core/src/klaude_core/image_generation.py#L29); [packages/core/src/klaude_core/image_generation.py:save](../packages/core/src/klaude_core/image_generation.py#L66) — Partial native service consumer; real model inference not yet validated in existing report. |
+| S234 `model` | Partial | str | `""` | Pinned loaded model≤200printable; enabled requires nonempty | config/image-generation.json; Acknowledged save; prepare/send recheck exact model/revision | Trusted host/model metadata; Model Defaults/Media; CLI library image-service; JSON | REQUIRED | [packages/core/src/klaude_core/image_generation.py:DEFAULTS](../packages/core/src/klaude_core/image_generation.py#L29); [packages/core/src/klaude_core/image_generation.py:save](../packages/core/src/klaude_core/image_generation.py#L66) — Partial native service consumer; real model inference not yet validated in existing report. |
+| S235 `revision` | Partial | str | `""` | Opaque random save revision; not a user-editable choice | config/image-generation.json; Acknowledged save; prepare/send recheck exact model/revision | Trusted host/model metadata; Model Defaults/Media; CLI library image-service; JSON | INTERNAL | [packages/core/src/klaude_core/image_generation.py:DEFAULTS](../packages/core/src/klaude_core/image_generation.py#L29); [packages/core/src/klaude_core/image_generation.py:save](../packages/core/src/klaude_core/image_generation.py#L66) — Partial native service consumer; real model inference not yet validated in existing report. |
 
 ### Serving/adoption request controls
 
@@ -1872,7 +1887,7 @@ These are backend API/implementation controls, not hidden global preference keys
 | Agent scopes | standard/plan/review/init/evaluation/subagent/research; scope restricts capabilities independently of permission choices. | INTERNAL — [packages/core/src/klaude_core/capabilities.py:TurnScope](../packages/core/src/klaude_core/capabilities.py#L14) |
 | Working source/context budgets | Bounded recent dialogue/excerpts, current source revision receipts, paired tool outputs and image admission. No general exposed slider for every cache/threshold. | INTERNAL — [packages/core/src/klaude_core/workspace_execution.py](../packages/core/src/klaude_core/workspace_execution.py#L1); [packages/core/src/klaude_core/working_sources.py](../packages/core/src/klaude_core/working_sources.py#L1); [packages/core/src/klaude_core/request_context.py](../packages/core/src/klaude_core/request_context.py#L1) |
 | Research question and queue | Question1–1500 printable; queue≤10; explicit start/resume; accepted model/provider/revisions retained. | ADAPT — [packages/core/src/klaude_core/research.py](../packages/core/src/klaude_core/research.py#L1) |
-| Media/attachment bounds | PNG/JPEG≤8MiB,≤4MP,≤4096side;≤2 distinct chat images; source bytes private; header checks are not full client decoding. | INTERNAL — [packages/core/src/klaude_core/image_content.py](../packages/core/src/klaude_core/image_content.py#L1); [packages/core/src/klaude_core/chat_images.py](../packages/core/src/klaude_core/chat_images.py#L1) |
+| Media/attachment bounds | PNG/JPEG/static WebP/GIF sources≤32MiB/40MP/32768side; isolated full decoding; prepared PNG/JPEG≤7,500,000B/4MP/4096side;≤2 distinct chat images; source bytes private. Auto/detail/original, explicit frame/crop; no codec guarantee beyond tested formats. | INTERNAL — [packages/core/src/klaude_core/image_content.py](../packages/core/src/klaude_core/image_content.py#L1); [packages/core/src/klaude_core/chat_images.py](../packages/core/src/klaude_core/chat_images.py#L1) |
 | Native Media HTTP bounds | 90s generation;15/60/110s applicable metadata/prepare/outer workers; response1MB/event256KB/text32kchars; Anthropic raw7,500,000byte limit. | INTERNAL — [packages/core/src/klaude_core/vision.py](../packages/core/src/klaude_core/vision.py#L1); [apps/cli/src/klaude_cli/vision_panel.py](../apps/cli/src/klaude_cli/vision_panel.py#L1) |
 | Library import/list/preview | 32MiB regular file import;100record pages; bounded metadata/text previews; exact typed artifact IDs; no auto-indexing. | ADAPT — [packages/core/src/klaude_core/library_artifacts.py](../packages/core/src/klaude_core/library_artifacts.py#L1) |
 | Owned jobs/build/servers | Different bounded per-operation workers; two live servers/client; retained builds8; serving history32; revision/time/byte/disk guards. Not user-editable arbitrary worker payloads. | INTERNAL — [apps/cli/src/klaude_cli/background_jobs.py](../apps/cli/src/klaude_cli/background_jobs.py#L1); [apps/cli/src/klaude_cli/setup_jobs.py](../apps/cli/src/klaude_cli/setup_jobs.py#L1); [apps/cli/src/klaude_cli/serving_jobs.py](../apps/cli/src/klaude_cli/serving_jobs.py#L1); [packages/core/src/klaude_core/model_dependencies.py](../packages/core/src/klaude_core/model_dependencies.py#L1) |
@@ -2548,7 +2563,7 @@ Manage document and image copies; no automatic indexing.
 
 #### klaude library analyze
 
-Review explicit image analysis using AI Defaults Vision; no indexing or tools.
+Review explicit image analysis using Model Defaults Vision; no indexing or tools.
 
 **WebUI:** ADAPT → Library · **Implementation:** [apps/cli/src/klaude_cli/library_commands.py:99](../apps/cli/src/klaude_cli/library_commands.py#L99)
 
@@ -3100,7 +3115,7 @@ All 44 records are retained, including usage variants and hidden exit aliases. A
 | `/library [VIEW]` | Browse Sessions, Knowledge, Documents, Research, Media and Archive; artifact storage is still in development. | public | ADAPT | [apps/cli/src/klaude_cli/main.py:CHAT_COMMANDS](../apps/cli/src/klaude_cli/main.py#L3089) |
 | `/model-manager` | Open Model Manager for downloads, serving and server settings. | public | ADAPT | [apps/cli/src/klaude_cli/main.py:CHAT_COMMANDS](../apps/cli/src/klaude_cli/main.py#L3089) |
 | `/keybinds` | Show keyboard shortcuts. | public | ADAPT | [apps/cli/src/klaude_cli/main.py:CHAT_COMMANDS](../apps/cli/src/klaude_cli/main.py#L3089) |
-| `/settings [CATEGORY]` | Configure Appearance, Models & AI, Agent Tools, MCPs, Skills, Memory, Permissions, provider credentials, and Runtime. | public | ADAPT | [apps/cli/src/klaude_cli/main.py:CHAT_COMMANDS](../apps/cli/src/klaude_cli/main.py#L3089) |
+| `/settings [CATEGORY]` | Configure Appearance, Models, Tools, MCPs, Skills, Memory, Library, Permissions, provider credentials, and Runtime. | public | ADAPT | [apps/cli/src/klaude_cli/main.py:CHAT_COMMANDS](../apps/cli/src/klaude_cli/main.py#L3089) |
 | `/model` | Select an available Cloud or Local chat model and reasoning effort. | public | ADAPT | [apps/cli/src/klaude_cli/main.py:CHAT_COMMANDS](../apps/cli/src/klaude_cli/main.py#L3089) |
 | `/model NAME` | Switch to an available Cloud or Local chat model while keeping history. | public ; aliases ['/model [NAME]'] | ADAPT | [apps/cli/src/klaude_cli/main.py:CHAT_COMMANDS](../apps/cli/src/klaude_cli/main.py#L3089) |
 | `/mode [standard\|thinking]` | Choose Standard or Thinking mode for the active model. | public | ADAPT | [apps/cli/src/klaude_cli/main.py:CHAT_COMMANDS](../apps/cli/src/klaude_cli/main.py#L3089) |
@@ -3164,11 +3179,11 @@ Exact implementation: [apps/cli/src/klaude_cli/main.py:_build_key_bindings](../a
 
 | Menu/controller | Existing pages and actions | WebUI classification / suggested surface |
 | --- | --- | --- |
-| Settings home | Appearance: Theme, Input Field, Divider, Spinner; Models & AI: Models, AI Defaults, Search; Agent: Agent Tools, MCPs, Skills, Memory, Permissions; Advanced: Provider credentials, Runtime; scoped Reset appearance | ADAPT Settings; terminal appearance excluded; INTERFACE absent |
+| Settings home | Appearance: Theme, Input Field, Divider, Spinner; Models: Models, Model Defaults, Search; Agent: Tools, MCPs, Skills, Memory, Library, Permissions; Advanced: Provider credentials, Runtime; scoped Reset appearance | ADAPT Settings; terminal appearance excluded; INTERFACE absent |
 | Models | Current model/mode/effort, Add Local/API endpoint draft, Test/Add, Added Models/Probe/Clear offline, endpoint detail, enable/disable/delete reviews, model enable/hidden/pin inventory | REQUIRED Connections / model selector |
-| AI Defaults | Chat, Utility + fallbacks/output/test, Research, Vision enable/model/fallbacks, image-service settings, explicit Utility session actions | REQUIRED AI Defaults; ADAPT tests/reviews |
+| Model Defaults | Chat, Utility + fallbacks/output/test, Research, Vision enable/model/fallbacks, image-service settings, explicit Utility session actions | REQUIRED Model Defaults; ADAPT tests/reviews |
 | Search | Provider/results/fallback order/provider keys/Tavily depth/SearXNG URL; URL Fetch submenu and connection tests; Deep Research parameters/role link | REQUIRED Search settings |
-| Agent Tools | Execution/advanced budgets, current usage, grouped tool switches/mixed state, tool detail and permission link, web/knowledge validation, managed MCP/Skills links | REQUIRED tools/settings; ADAPT progress |
+| Tools | Execution/advanced budgets, current usage, grouped tool switches/mixed state, tool detail and permission link, web/knowledge validation, managed MCP/Skills links | REQUIRED tools/settings; ADAPT progress |
 | MCPs | Search registry/query/sort/detail/repository stars/setup inputs/install review; Add command/HTTP/bearer/OAuth; Import; Manage Filter/Reload/Update all/detail/toggle/update/removal/auth | ADAPT Integrations |
 | Skills | Search source/query/sort/paging/detail/source verification/install; Import/drop inbox; Manage Filter/Reload/Update all/detail/toggle/update/delete | ADAPT Integrations |
 | Memory/Permissions | Facts list/search/add/edit/delete; automatic capture; presets/per-tool/MCP server group policies; reset/custom states | REQUIRED Memory and Permissions |
@@ -3273,7 +3288,7 @@ These are current supported sequences, not a WebUI implementation plan. A browse
 
 - Distinguish empty list, unavailable server, missing credential, unsupported capability, stale revision, permission denial, dirty-tree protection, rate limit, malformed response, validation failure, cancelled, partial and unknown side effect.
 - Reload/review again after stale identity/digest/key/definition, rather than replaying old permission or silently switching models.
-- Failed attachment preparation preserves prompt/attachments for retry; clean one-shot preparation failure exits1. Tool pairs/private continuation and actual source/pixel availability govern resumed requests.
+- Failed attachment preparation preserves prompt/attachments; accepted failed image turns retain private references/question for explicit retry and restore. Typed compatible-provider recovery is bounded to pre-output requests; routed model/error code are safe metadata. Clean one-shot preparation failure exits1. Tool pairs/private continuation and actual source/pixel availability govern resumed requests.
 - Work is accepted only into its captured root/session/draft scope; stale background results must not replace another session/form. Cleanup gates conflicting work; server process/group ownership is explicit.
 - Scope of each timeout/retry differs; do not create a second browser retry loop around non-idempotent pull/serve/write/enroll/generate operations.
 
@@ -3377,7 +3392,7 @@ Exact names/paths are owned by source resolvers; arbitrary host paths and enviro
 6. **Public/private payload separation is not a browser serializer.** Private model_content, raw auth/storage paths, image bytes and worker payloads must not be serialized indiscriminately. Existing UI uses sanitized public views.
 7. **Cross-client support has a defined scope.** Session event/watch/lease support is real, but there is no general remote account sync, multi-user ACL, or transaction serializing every model operation and concurrent Git checkout change. Repository tool mutations do have a flock; preserve it.
 8. **Some requested interaction expectations are absent.** No public conversation import or completed-message edit/retry/branch-at-message UI; no general PTY terminal; no photo canvas/layers; speech/email writing consumers deferred. Optional AI tags are implemented as described in F098. Do not label these implemented by analogy to other products.
-9. **Provider and hardware validation remains scoped.** Implemented cloud/vision adapters do not imply all paid providers/models were live-tested. Native generation’s real diffusion gate remains open; Linux/loopback SSH validation is not universal LAN/GPU certification.
+9. **Provider and hardware validation remains scoped.** Implemented cloud/vision adapters do not imply all paid providers/models were live-tested. Native image generation has actual CPU/CUDA evidence for its recorded profiles; wider model/quality/hardware coverage remains separate. Linux/loopback SSH validation is not universal LAN/GPU certification. Remaining native OpenAI/Anthropic and legacy Gemini generation gates require usable account access; see [the latest audit](s6-completion-validation.md#final-account-access-audit).
 10. **Coding success remains model-dependent.** Prior benchmark failure for small local models is a known limitation; planner/repair/validation infrastructure improves orchestration but does not prove full task semantics. This audit did not repeat that benchmark.
 
 ### Potential risks and preliminary integration recommendations (not newly observed vulnerabilities)
@@ -3412,7 +3427,7 @@ Preliminary logical grouping only; this is **not** a final navigation tree, comp
   - MCP Search/Add/Import/Manage/auth/update; Skills Search/Import/Manage/source/update.
 - **Settings**
   - **INTERFACE → Web UI → Enable/Disable (planned hosting control, available from TUI even off).** Browser appearance/accessibility can be separate from terminal Appearance.
-  - **Models & AI:** Connections/Added Models, active versus Default Chat, Utility/Research/Vision roles/fallbacks, image-generation service, provider credentials.
+  - **Models:** Connections/Added Models, active versus Default Chat, Utility/Research/Vision roles/fallbacks, image-generation service, provider credentials.
   - **Agent:** execution budgets, built-in tool availability, validation, permissions, memory capture.
   - **Search & Knowledge:** Search provider/results/fallbacks/credentials, URL Fetch, Research defaults, ingestion/crawler/embedding and advanced relevance/location policy.
   - **Runtime & privacy:** placement/context/threads/GPU hints, model reasoning/sampling compatibility, runtime context/location, storage/diagnostic metadata.

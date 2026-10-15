@@ -99,6 +99,7 @@ def test_repeated_lost_native_calls_fail_with_no_execution():
         last_chat_metadata = {'done_reason': 'length'}
 
         def chat(self, *args, **kwargs):
+            self.last_chat_metadata = {'done_reason': 'length'}
             return {'role': 'assistant', 'content': 'Preparing changes.'}
 
     writes = []

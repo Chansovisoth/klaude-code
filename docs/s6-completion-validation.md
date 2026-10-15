@@ -11,6 +11,21 @@ another “continue” at each boundary. The subsequent phase-verification reque
 explicitly authorizes a reviewed checkpoint commit/push to main. WebUI
 implementation and unrelated worktree cleanup remain outside this work.
 
+**Latest status (2026-10-15, resumed from `4a64ce6`):** the planned S6
+implementation slices are delivered for their recorded scopes. The remaining
+cross-account generation gate is **blocked on external account access**, not an
+unimplemented image adapter. A fresh real Media CLI check now confirms exhausted
+OpenAI credits; Anthropic has no configured connection/key, legacy Gemini Flash
+returns HTTP 404, and Flash-Lite timed out during preparation. See the
+[final account-access audit](#final-account-access-audit) for exact outcomes and
+the requirements to finish certification. S6 is not marked fully certified.
+
+The subsequent [S0–S6 feature verification](odysseus-feature-verification.md)
+maps every roadmap checkbox and records fresh real Gemma image/session/tag
+flows, native CUDA generation/export/lifecycle, actual settings/recovery/job
+walkthroughs and a completed full local regression run. Provider/account limits
+remain explicit and are not closed by local feature checks.
+
 ## S6c: optional AI tags
 
 ### Product behavior
@@ -175,12 +190,11 @@ Implementation: core `image_generation.history`, `refresh`, `forget`; CLI
 - Anthropic credentials are absent in the current configuration. No paid
   Anthropic generation claim is made. The user has been asked to configure
   credentials through Klaude, without pasting keys into chat.
-- OpenAI credentials are configured, but current actual CLI rechecks returned a
-  preparation timeout and HTTP400; a subsequent bounded diagnostic had no usable
-  error identifier. A separate minimal valid-image native request could not
-  connect (`Network is unreachable`). These are not generation passes. The prior
-  account-credit failure remains historical evidence, not a verified current
-  diagnosis for HTTP400. Tests preserve native error/cancellation behavior.
+- OpenAI credentials are configured. The latest real CLI check with the valid
+  RGB fixture reached the API and returned **exhausted credits**, exit 1. This is
+  current billing evidence, superseding the uncertain timeout diagnosis from the
+  preceding continuation. Earlier HTTP400 evidence used a malformed QA fixture
+  and does not establish a product defect. No successful generation is claimed.
 - Legacy Gemini account access remains unverified as recorded in S6a3e; current
   Gemini chat evidence does not certify legacy Media models. No silent newer
   model, Thinking mode or provider substitution is introduced.
@@ -458,7 +472,85 @@ to ignore the previous failures. Evidence:
 `/tmp/klaude-s6-ci-workflow-final.json`,
 `/tmp/klaude-s6-fixed-ci/{jobs,status,result}.json`.
 
-This evidence-only documentation update does not change the validated Python
+This evidence-only documentation update did not change the validated Python
 source or tests. Passing CI and fixture recovery do **not** certify paid-provider
-generation: the OpenAI network timeout, missing Anthropic credentials and legacy
-Gemini account-access limits remain as described above.
+generation. At that checkpoint, the OpenAI network timeout, missing Anthropic
+credentials and legacy Gemini account-access limits remained open; the fresh
+account audit below supersedes the OpenAI timeout diagnosis.
+
+## Final account-access audit
+
+Date: 2026-10-15. Base: `4a64ce696ba0e0825fa5670609d2449955304648`,
+with a clean starting worktree. This follows the request to finish the rest of
+S6. The roadmap's only unchecked S6 delivery gate is successful native
+OpenAI/Anthropic and legacy Gemini generation; no additional implementation
+slice is currently identified in the delivered S6 scope.
+
+### Fresh real CLI outcomes
+
+All attempted image requests used the same valid 192×128, 839-byte RGB PNG,
+SHA256 `08495da3512a52229de30d36fb32933e88a6b7fac10cf454739836a9dde331b8`,
+the existing provider credentials and exact reviewed model IDs. Each actual
+`library analyze MEDIA_ID QUESTION --output-tokens 128 --yes` used isolated
+settings, 4096 context, no configured fallback and no model substitution.
+
+| Provider / exact model | Observed outcome | CLI exit | Wall time | Required to complete the open gate |
+| --- | --- | --- | --- | --- |
+| OpenAI / `gpt-4.1-mini` | API reached; `OpenAI credits exhausted; check billing and limits` | 1 | 14.16 s | Funded API credentials, then successful native chat/Media generation |
+| Native Anthropic | No configured connection/key; no request attempted | — | — | Configure authorized native Anthropic API access in Klaude; inspect exact-model capabilities before live chat/Media testing |
+| Gemini / `gemini-2.5-flash` | Metadata preparation succeeded; generation unavailable, HTTP 404 | 1 | 11.95 s | An account entitled to this exact legacy model, then successful native generation |
+| Gemini / `gemini-2.5-flash-lite` | Preparation timed out, before the review/send stage | 1 | 13.66 s | A reachable metadata endpoint and generation access; this timeout does not establish entitlement either way |
+
+The OpenAI failure confirms that the prior safe-diagnostic fix also works on a
+real provider billing response through the owned Media worker. It is not a
+generation pass. No automatic fallback or repeated generation retry was added.
+Gemini's fresh Media run retained artifact metadata and production settings;
+temporary credential copies were removed. OpenAI's temporary credential copy
+was likewise removed. Nothing was indexed, tagged or added to chat by these
+Media requests.
+
+The official [OpenAI exact-model page](https://developers.openai.com/api/docs/models/gpt-4.1-mini)
+was fetched and confirms image input and Responses support; documentation cannot
+grant credits or generation access. Google's
+[Flash model page](https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash)
+was also fetched: it explicitly limits the 2.5 models to accounts that actively
+used them in the past. Current Gemini Thinking-chat success does not certify
+these legacy Standard-only Media profiles. The model page does not establish
+this account's Flash-Lite entitlement after a metadata timeout.
+
+Machine-local evidence:
+
+- OpenAI: `.klaude/data/s6-valid-openai-56cp52ka/result.json` and `probe.log`;
+  driver `/tmp/klaude_s6_valid_openai_probe.py`.
+- Gemini: `.klaude/data/s6-final-gemini-az59rl0c/result.json`, per-model CLI logs;
+  driver `/tmp/klaude_s6_final_gemini_check.py`.
+- Official pages: `/tmp/klaude-s6-final-openai-model.html` and
+  `/tmp/klaude-s6-final-gemini-model.html`. Browser retrieval stalled; bounded
+  direct HTTPS retrieval succeeded. Only the fetched pages support the
+  documentation claims above.
+
+### Remaining work and validation boundary
+
+The user was asked to configure Anthropic access and restore OpenAI API credits
+through Klaude/provider settings without pasting secrets into chat. Until access
+changes, repeating these generation calls cannot complete the gate. No billing
+change, account purchase or replacement credential is available to the agent.
+Legacy Gemini certification likewise requires a qualifying account; silently
+switching to newer models would not meet this gate.
+
+After account access is restored, rerun the existing native CLI/TUI image,
+private follow-up/resume and Media scenarios against each exact reviewed model;
+record actual outputs, limits, cancellation and clean exit behavior before
+checking off the remaining S6a3 certification item. No new adapter or larger
+system prompt is justified by the current external failures.
+
+This pass changes documentation only, including correction of stale WebUI
+inventory entries that still described native generation as unvalidated.
+Production source and tests remain identical to the fully passing
+[`86f57a3` CI revision](https://github.com/Chansovisoth/klaude-code/actions/runs/38749647608).
+That existing Python 3.11–3.13/lint/types/packaging result is retained; no new
+full-suite run or cloud-generation success is claimed for this audit.
+Documentation checks passed: whitespace validation, relative-file links and
+Markdown fence balance. The inventory retains its 103 feature-group identifiers;
+the native service/generation statuses now correctly say Implemented, with
+hardware/quality and account-certification limits still explicit.

@@ -70,7 +70,7 @@ class GenerationPanel:
     def page(self) -> PanelPage:
         view = self.library.view
         crumbs: tuple[str, ...] = (
-            ("Settings", "AI Defaults", "Image generation")
+            ("Settings", "Model Defaults", "Image generation")
             if self.return_settings
             else ("Library", "Media", "Generate image")
         )

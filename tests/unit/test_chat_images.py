@@ -258,7 +258,8 @@ def test_compaction_counts_images_and_preserves_tool_pairs(vision_lab):
     agent = agent_for(vision_lab)
     try:
         value = envelope(vision_lab, agent)
-        ref = {**value["image_inputs"][0], "width": 2048, "height": 2048}
+        ref = {**value["image_inputs"][0], "width": 2048, "height": 2048,
+               "options": {"detail": "original"}}
         agent.messages += [
             {"role": "user", "content": "Study this screenshot", "image_inputs": [ref]},
             {"role": "assistant", "content": "Earlier visual description"},
@@ -335,7 +336,7 @@ def test_image_metadata_does_not_route_tools_and_coding_intent_retains_tools(vis
         routed = []
         agent.tool_selector = lambda text, _tools: routed.append(text) or []
         list(agent.run(value))
-        assert routed[0] == value["request"]
+        assert routed[0] == value["request"] + "\n[attached image]"
         assert "Attached image" not in routed[0]
         names = ("read_file", "list_dir", "workspace_info", "grep", "write_file", "edit_file")
         tools = {name: Tool(name, name, {"type": "object"}, lambda: "") for name in names}

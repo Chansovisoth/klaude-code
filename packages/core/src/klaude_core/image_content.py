@@ -12,8 +12,12 @@ IMAGE_BACKENDS = frozenset({
 })
 
 
-def image_token_estimate(width: int, height: int) -> int:
+def image_token_estimate(width: int, height: int, *, backend: str = "", model: str = "") -> int:
     """Conservative local admission estimate; server tokenization remains provider owned."""
+    if backend == "openai_api" and model in {"gpt-4.1-mini", "gpt-4.1-mini-2025-04-14"}:
+        import math
+
+        return math.ceil(((width + 31) // 32) * ((height + 31) // 32) * 1.62)
     return max(512, ((width + 15) // 16) * ((height + 15) // 16))
 
 

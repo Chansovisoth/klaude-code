@@ -1,4 +1,4 @@
-"""Typed Agent Tools execution pages using authoritative live state."""
+"""Typed Tools execution pages using authoritative live state."""
 
 from __future__ import annotations
 
@@ -150,7 +150,7 @@ class AgentSettings:
         self.save({("tool_availability", name): enabled for name in names}, focus)
 
     def page(self) -> PanelPage:
-        crumbs: tuple[str, ...] = ("Settings", "Agent Tools")
+        crumbs: tuple[str, ...] = ("Settings", "Tools")
         rows: list[PanelRow] = []
         agent = self.host.agent
         if self.view == "home":

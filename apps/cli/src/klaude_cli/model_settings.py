@@ -17,7 +17,6 @@ from urllib.parse import urlsplit
 
 from klaude_core.ai_defaults import AIDefaults, defaults_from_preferences, read_defaults
 from klaude_core.config import provider_secret_revision
-from klaude_core.image_content import image_capability_label
 from klaude_core.model_connections import (
     DEFAULT_IDS,
     DEFAULT_URLS,
@@ -45,6 +44,7 @@ from klaude_core.model_runtime import (
     models_from_records,
 )
 
+from .model_capabilities import ModelCapabilityInventory
 from .session_actions import ModelConnectionAdd, ModelConnectionUpdate
 from .settings_panel import PanelAction, PanelPage, PanelRow, RowControl, RowKind
 
@@ -298,6 +298,7 @@ class ModelSettings:
         self.target = ""
         self.connections: dict[str, ModelConnection] | None = None
         self.models: list[ModelInfo] = []
+        self.capabilities = ModelCapabilityInventory(self, "model-settings")
         self.authenticated: dict[str, bool] = {}
         self.credential_revisions: dict[str, str] = {}
         self.registered = False
@@ -345,6 +346,10 @@ class ModelSettings:
             self.view = view
         if target is not None:
             self.target = target
+        self.capabilities.sync(
+            (self.connections or {}).get(self.target)
+            if self.view == "catalog" and not self.request else None
+        )
         self.host._open_panel(self.page(), "model settings " + self.view, focus)
         if self.feedback:
             self.host._set_panel_feedback(*self.feedback)
@@ -398,6 +403,7 @@ class ModelSettings:
         self.batch_active = False
 
     def leave(self) -> None:
+        self.capabilities.cancel()
         self.cancel_test()
         self.jobs.cancel("model-settings:inventory")
         self.loading = False
@@ -644,14 +650,14 @@ class ModelSettings:
                             model.model_id,
                             "Current"
                             if isinstance(current, ModelInfo) and current.ref == model.ref
+                            else "Not chat"
+                            if self.capabilities.chat_support(model) is False
                             else "Enabled"
                             if choice["enabled"]
                             else "Disabled",
                             description=" · ".join(
                                 [
-                                    "Tools: " + model.capabilities.tools_evidence,
-                                    image_capability_label(model.capabilities.supports_images,
-                                                           model.capabilities.images_evidence),
+                                    self.capabilities.description(model),
                                     *(
                                         name.capitalize()
                                         for name in ("pinned", "hidden")
@@ -1065,12 +1071,16 @@ class ModelSettings:
                 )
             crumbs += (connection.name, "Manage models", self.model_id)
             choice = model_choice(self.choices, connection.id, self.model_id)
+            info = next((model for model in self.models if model.connection_id == connection.id
+                         and model.model_id == self.model_id), None)
+            chat = self.capabilities.chat_support(info) if info is not None else None
             rows = [
                 row(
                     "use-model",
                     "Use for this session",
-                    enabled=connection.enabled and choice["enabled"],
-                    description="Retains conversation; running work is unchanged",
+                    enabled=connection.enabled and choice["enabled"] and chat is not False,
+                    description="This model does not declare chat completion"
+                    if chat is False else "Retains conversation; running work is unchanged",
                 ),
                 *(
                     row(
@@ -1089,10 +1099,10 @@ class ModelSettings:
                 PanelRow(
                     "capabilities",
                     RowKind.INFO,
-                    "Tool capability",
+                    "Capabilities",
                     next(
                         (
-                            model.capabilities.tools_evidence
+                            self.capabilities.description(model)
                             for model in self.models
                             if model.connection_id == connection.id
                             and model.model_id == self.model_id
@@ -1487,6 +1497,9 @@ class ModelSettings:
             self.notify("Endpoint save unconfirmed; reload before retrying", "error")
 
     def accept(self, key: str, identity: str, result: Any, error: str) -> None:
+        if key == self.capabilities.key:
+            self.capabilities.accept(identity, result, error)
+            return
         if key == "model-settings:inventory":
             if self.inventory_session != self.host.session_id:
                 return
@@ -1546,6 +1559,7 @@ class ModelSettings:
             self.registered = True
             self.credential_revisions[connection.id] = str(result.get("credential_revision", ""))
             if succeeded:
+                self.capabilities.invalidate()
                 self.models = [
                     model for model in self.models if model.connection_id != connection.id
                 ]
@@ -1624,6 +1638,8 @@ class ModelSettings:
             connection_source=connection.source,
             credential_revision=self.credential_revisions.get(connection.id, ""),
         )
+        if self.capabilities.chat_support(info) is False:
+            raise ValueError("This model does not declare chat completion support")
         if not self.registered:
             info = replace(info, connection_id="", connection_revision="", credential_revision="")
         self.cancel_test()
