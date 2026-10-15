@@ -1382,8 +1382,9 @@ The explicit launcher hint now survives owned workers, retaining executable
 review/revision checks and restricted subprocess PATH. Media preserves known
 redacted provider reasons, wraps errors at narrow widths, retains retry input
 and loads unknown Vision-role labels through owned metadata inventory. Actual
-CLI/TUI fixture checks passed. The corrected valid-image OpenAI recheck timed
-out; Anthropic credentials remain absent. Those results do not close the paid/
+CLI/TUI fixture checks passed; checkpoint `86f57a3` passed fresh Python 3.11–3.13
+CI, lint/types and five-wheel packaging. The corrected valid-image OpenAI recheck
+timed out; Anthropic credentials remain absent. Those results do not close the paid/
 legacy-provider generation gate. Exact local/CI snapshot boundaries and results:
 [S6 follow-up](s6-completion-validation.md#resumed-s6-verification-ci-tool-discovery-and-provider-diagnostics).
 

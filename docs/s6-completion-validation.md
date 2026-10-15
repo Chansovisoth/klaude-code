@@ -383,7 +383,7 @@ Evidence: `/tmp/klaude_s6_valid_openai_probe.py`,
 Anthropic still has no configured key; the user was asked to configure it through
 Klaude rather than paste it into chat. Legacy Gemini access is not newly certified.
 S6's cross-account generation gate therefore remains open. Final local/CI gates
-for these corrections will be recorded after their actual completion.
+for these corrections are recorded below.
 
 ### Final narrow-form and initial-role corrections
 
@@ -428,11 +428,37 @@ No native cloud generation is implied by those fixtures.
   Log: `/tmp/klaude-s6-resume-final-focused.log`. Actual final CLI/TUI recovery
   and nonstandard-uv CLI flows passed as described above.
 - Final lint/type/distribution and fresh Python 3.11–3.13 CI results are recorded
-  only when completed. The old checkpoint's failing matrix is not reported as
-  validation of the corrected source.
+  below. The old checkpoint's failing matrix is not reported as validation of
+  the corrected source.
 
 Final source lint and production mypy (146 files) passed after all UI changes.
 The final frozen/offline five-wheel build/install/import/installed-CLI smoke also
-passed: `/tmp/klaude-s6-resume-distribution.log`. A fresh checkpoint matrix is
-required for the complete final source; the core full run and later focused UI
-checks above are intentionally reported separately.
+passed: `/tmp/klaude-s6-resume-distribution.log`. The core full run and later
+focused UI checks above are intentionally reported separately.
+
+### Final checkpoint CI result
+
+The complete corrected source was committed and pushed to main as
+`86f57a35e8a4ea4e690bc1131ae70546e0125d83`. Its fresh
+[CI run](https://github.com/Chansovisoth/klaude-code/actions/runs/38749647608)
+completed successfully on **2026-10-15 at 14:23:29 UTC**:
+
+| Gate | Observed result |
+| --- | --- |
+| Locked unit suite, Python 3.11 | Passed |
+| Locked unit suite, Python 3.12 | Passed |
+| Locked unit suite, Python 3.13 | Passed |
+| Ruff and production mypy | Passed |
+| Five-wheel build/install/import and installed-CLI smoke | Passed |
+
+Both workflow and per-job metadata identify that exact source revision. This
+establishes the full final-source CI gate, including the UI corrections made
+after the local full-suite run. The matrix was neither narrowed nor configured
+to ignore the previous failures. Evidence:
+`/tmp/klaude-s6-ci-workflow-final.json`,
+`/tmp/klaude-s6-fixed-ci/{jobs,status,result}.json`.
+
+This evidence-only documentation update does not change the validated Python
+source or tests. Passing CI and fixture recovery do **not** certify paid-provider
+generation: the OpenAI network timeout, missing Anthropic credentials and legacy
+Gemini account-access limits remain as described above.
