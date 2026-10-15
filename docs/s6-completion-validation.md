@@ -282,3 +282,157 @@ image-service/auth profiles, other platforms and broader model-quality studies
 remain explicit extensions, rather than silently claimed completed features.
 The planned WebUI toggle/server, Gallery/canvas editing and AI Tidy are not
 implemented by this checkpoint.
+
+## Resumed S6 verification: CI tool discovery and provider diagnostics
+
+Date: 2026-10-15. Resumed from committed checkpoint
+`920fc322e025a39d6e3caf6682b2f3318009e381`; the starting worktree was clean.
+This continues the remaining certification work rather than repeating the earlier
+CPU/CUDA, Gemma, image-job or tagging walkthroughs.
+
+### Checkpoint CI failure and actual cause
+
+The [checkpoint CI](https://github.com/Chansovisoth/klaude-code/actions/runs/38735456253)
+failed on Python 3.11, 3.12 and 3.13: each reported **10 failed, 3,485 passed,
+20 skipped**. Packaging and lint/types passed. All ten failures were offline
+vLLM recipe/removal cases, failing before their intended validation because the
+installer discovery omitted GitHub's managed tool-cache location. This was not a
+Python-version incompatibility or a new Vision parser failure. The prior local
+3,496-test success did not establish a green CI matrix.
+
+The recipe searched only `~/.local/bin`, `/usr/local/bin`, `/usr/bin` and `/bin`.
+[uv documents its `UV` variable](https://docs.astral.sh/uv/reference/environment/)
+as the executable used to launch it, propagated into subprocesses. Local
+`uv run` inspection confirmed that behavior; the official reference was fetched
+and read after the browser redirect stalled.
+
+- Discovery now honors that explicit path before its existing standard-directory
+  fallback. The existing regular/executable/absolute checks, resolved identity,
+  fingerprint and acceptance-time revision checks still apply. A relative or
+  missing explicit path fails instead of silently selecting another installer.
+- Owned workers retain only this additional non-secret path hint. Build/install
+  execution keeps the fixed restricted PATH and provider-secret exclusion;
+  arbitrary project PATH entries are not added to executable discovery.
+- A new regression hides all standard-directory uv candidates and uses a
+  launcher outside them, then performs a real offline install of small synthetic
+  QA wheels. Invalid explicit paths and worker propagation are also checked.
+- Actual CLI used a fresh HOME, restricted PATH and a tool-cache symlink: decline
+  created no setup, accepted install returned ready in **3.80 s** across the two
+  scenarios. Wheel hashes and the app environment were retained, and a private
+  environment canary did not reach installed code. This is an actual CLI/owned
+  worker check using **QA wheel fixtures**, not new upstream vLLM inference.
+
+Evidence: `/tmp/klaude-s6-ci-retry.zip`, the three extracted
+`/tmp/klaude-s6-ci-*_Tests_(Python_*).txt.log` files,
+`/tmp/klaude_s6_ci_download.py`, `/tmp/klaude_s6_uv_cli.py`,
+`/tmp/klaude-s6-uv-cli-gz_eptgo/result.json`. GitHub/API/log-host connections
+failed intermittently; bounded curl retries retrieved the actual logs. No
+network, authentication or CI installation settings were changed to hide failures.
+
+### Known provider reasons were lost at the owned-worker boundary
+
+The OpenAI adapter already classified an exhausted-credit response using a
+bounded envelope and a fixed redacted label. `vision.execute` discarded that
+`CompatibleModelError` message and returned generic failure. HTTP authentication
+rejections similarly lost their more specific controlled diagnostic. This
+boundary serves both Media analysis and optional AI-tag generation.
+
+The worker now retains messages from that existing host-written/redacted error
+class (including its Anthropic subtype). Unknown runtime exceptions remain
+redacted, and returned text retains the 240-character bound. Raw provider error
+bodies are not copied into the public diagnostic. Fallback eligibility still
+runs on typed failure/status evidence before formatting; credit exhaustion still
+cannot authorize a temporary-failure fallback.
+
+Before the fixes, the nine added/strengthened checks reported **8 failed,
+1 passed**; afterward the affected recipe/removal/worker/OpenAI/Vision/tag
+selection reported **155 passed**. Actual CLI and bare-TUI session
+**TEST KLAUDE FEATURES S6 RECOVERY** additionally used a declared compatible HTTP
+fixture with a private error body/key. The CLI exited 1 with an authentication
+reason. TUI failure retained input, and an explicit reviewed retry succeeded.
+There were exactly three generation POSTs: CLI failure, TUI failure, accepted
+retry; no automatic retries occurred. Image metadata/checksum, workspace sentinel
+and zero chat turns were retained; TUI exited 0. This is protocol/UI evidence,
+not paid-provider inference.
+
+Evidence: `/tmp/klaude_s6_vision_error_tui.py`,
+`/tmp/klaude-s6-vision-error-tui-final.log`,
+`.klaude/data/s2-models-vshwfohq/recovery-result.json` and 40/70/120-column
+captures. The first harness attempt used Anthropic capability metadata for a
+compatible endpoint and was correctly rejected; the fixture was corrected to
+`architecture.input_modalities`, without weakening production capability checks.
+
+### Corrected live OpenAI probe and remaining account gates
+
+The earlier one-pixel probe fixture had an invalid IDAT CRC. Its HTTP400 result
+cannot establish a provider-account or Klaude payload defect. No production
+payload or image-decoding rule was changed to compensate for that test error.
+
+A new synthetic **192×128 RGB PNG**, 839 bytes, has valid constructed chunk CRCs
+and SHA256 `08495da3512a52229de30d36fb32933e88a6b7fac10cf454739836a9dde331b8`.
+Actual `library analyze` with the same explicit `gpt-4.1-mini`, 128 output tokens
+and isolated settings exited 1 in **11.12 s** with a clean timeout. One bounded
+minimal native Responses diagnostic using those same valid pixels returned
+`ConnectTimeout` in **3.08 s**. Neither is generation evidence or a current
+billing diagnosis. The temporary credential copy was removed after the CLI run;
+production defaults and keys were unchanged. No model substitution occurred.
+
+Evidence: `/tmp/klaude_s6_valid_openai_probe.py`,
+`/tmp/klaude_s6_openai_valid_raw.py`,
+`.klaude/data/s6-valid-openai-zch_kf9f/{result,raw-valid-result}.json`.
+Anthropic still has no configured key; the user was asked to configure it through
+Klaude rather than paste it into chat. Legacy Gemini access is not newly certified.
+S6's cross-account generation gate therefore remains open. Final local/CI gates
+for these corrections will be recorded after their actual completion.
+
+### Final narrow-form and initial-role corrections
+
+The first error captures showed the original shared footer clipping the reason
+at 40 columns and a retained `/review analysis` filter hiding the input fields.
+Media now wraps the full redacted failure in the form, marks its value as an
+error, and clears only the old form picker state when returning after failure.
+The accepted question and budgets remain intact. Successful/neutral states do
+not get an error row. Three width tests verify the complete text and error style.
+An initial assertion used the status-style class for a value; the test was
+corrected to the renderer's actual error-value class, with 3/3 passing afterward.
+
+A second capture exposed another existing state bug: before AI Defaults had
+been opened, the form displayed `OFF / Not selected` from an uninitialized cache
+even though saved Vision settings authorized the request. Opening the consumer
+now coalesces a missing snapshot through the existing owned defaults inventory;
+unknown values say Loading/Not loaded, and only an actual disabled value says
+OFF. Accepted inventory redraws a still-visible idle Vision panel in the same
+session without interrupting input or model work. No catalog discovery, image
+request or model generation is added by this local-metadata load.
+
+The final actual CLI/TUI rerun additionally required the saved enabled model to
+appear before opening Settings. Complete `(HTTP 401)` and Request failed text
+were visible at 40/70/120 columns, the filter was cleared, private error text/key
+remained absent, and explicit retry still made exactly the third POST and exited
+cleanly. Final evidence: `/tmp/klaude-s6-vision-error-tui-complete.log`,
+`.klaude/data/s2-models-2s6j186j/recovery-result.json` and width captures.
+No native cloud generation is implied by those fixtures.
+
+### Validation snapshot boundaries for the resumed pass
+
+- Core-fix `make check`: **3,501 passed, 19 skipped**, 658.71 s pytest; Ruff and
+  production mypy on 146 files passed. Wrapper elapsed: 662.04 s. Log:
+  `/tmp/klaude-s6-resume-check.log`; receipt:
+  `/tmp/klaude-s6-resume-check-result.json`.
+- That full run began before the narrow-form changes: its source receipt flags
+  `vision_panel.py` and `test_vision.py` changing during execution. The subsequent
+  defaults-label correction also postdates that run. It therefore establishes
+  the core-fix gate, **not a full unchanged-source gate for the final UI**.
+- Final affected Vision/OpenAI/AI Defaults/tag selection: **94 passed** in
+  59.14 s, including the additional loading-state and three-width cases.
+  Log: `/tmp/klaude-s6-resume-final-focused.log`. Actual final CLI/TUI recovery
+  and nonstandard-uv CLI flows passed as described above.
+- Final lint/type/distribution and fresh Python 3.11–3.13 CI results are recorded
+  only when completed. The old checkpoint's failing matrix is not reported as
+  validation of the corrected source.
+
+Final source lint and production mypy (146 files) passed after all UI changes.
+The final frozen/offline five-wheel build/install/import/installed-CLI smoke also
+passed: `/tmp/klaude-s6-resume-distribution.log`. A fresh checkpoint matrix is
+required for the complete final source; the core full run and later focused UI
+checks above are intentionally reported separately.

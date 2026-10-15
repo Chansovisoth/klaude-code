@@ -1376,6 +1376,17 @@ scopes, but is not fully certified across all provider accounts.
 selected endpoint and budgets remain explicit. Importing/viewing Media starts
 no automatic model calls or knowledge indexing.
 
+**Resumed certification/reliability follow-up (2026-10-15):** the published
+checkpoint's CI exposed uv discovery failing outside standard install paths.
+The explicit launcher hint now survives owned workers, retaining executable
+review/revision checks and restricted subprocess PATH. Media preserves known
+redacted provider reasons, wraps errors at narrow widths, retains retry input
+and loads unknown Vision-role labels through owned metadata inventory. Actual
+CLI/TUI fixture checks passed. The corrected valid-image OpenAI recheck timed
+out; Anthropic credentials remain absent. Those results do not close the paid/
+legacy-provider generation gate. Exact local/CI snapshot boundaries and results:
+[S6 follow-up](s6-completion-validation.md#resumed-s6-verification-ci-tool-discovery-and-provider-diagnostics).
+
 ### Deferred product extensions
 
 - Email writing style and speech controls need separately designed consumers.

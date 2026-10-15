@@ -75,10 +75,12 @@ class OwnedBackgroundJobs:
             if job.cancel.is_set():
                 return
             # Secrets travel only through a private pipe, never argv/environment.
+            # UV is the non-secret launcher path needed by dependency reviews.
             environment = {
                 key: value
                 for key, value in os.environ.items()
-                if key in {"PATH", "HOME", "LANG", "LC_ALL", "KLAUDE_CODEX_BIN", "CODEX_HOME"}
+                if key in {"PATH", "HOME", "LANG", "LC_ALL", "UV",
+                           "KLAUDE_CODEX_BIN", "CODEX_HOME"}
             }
             process = subprocess.Popen(
                 [sys.executable, "-m", "klaude_cli.background_worker"],

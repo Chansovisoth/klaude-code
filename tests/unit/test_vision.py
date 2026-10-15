@@ -201,6 +201,41 @@ def test_vision_roles_protect_model_visibility_and_native_deletion(vision_lab):
     assert any("Vision" in roles for roles in role_models(cfg, connection).values())
 
 
+@pytest.mark.parametrize("width", [40, 70, 120])
+def test_failed_request_details_wrap_in_the_form_instead_of_only_the_footer(vision_lab, width):
+    cfg, _, _, item, *_ = vision_lab
+    message = "Model authentication failed (HTTP 401)"
+    host = SimpleNamespace(_ai_defaults=SimpleNamespace(defaults=read_defaults(cfg), label=str))
+    library = SimpleNamespace(host=host, view="vision-form", feedback=(message, "error"))
+    panel = VisionPanel(library)
+    panel.item = item
+    body = render_body(PanelState(panel.page()), width)
+    text = "".join(piece for line in body.lines for _, piece in line)
+    assert "".join(message.split()) in "".join(text.split())
+    assert any(style == "class:panel.value.error" for line in body.lines for style, _ in line)
+
+
+def test_opening_vision_loads_unknown_defaults_once_without_reporting_disabled(vision_lab):
+    _, _, _, item, *_ = vision_lab
+    calls = []
+    owner = SimpleNamespace(defaults=None, inventory=None)
+
+    def refresh(*, show):
+        calls.append(show)
+        owner.inventory = ("metadata-job", "session")
+
+    owner.refresh = refresh
+    host = SimpleNamespace(_ai_defaults=owner)
+    library = SimpleNamespace(host=host, view="vision-form", leave=lambda: None,
+                              show=lambda *_args: None)
+    panel = VisionPanel(library)
+    panel.open(item)
+    panel.open(item)
+    assert calls == [False]
+    setting = next(row for row in panel.page().rows if row.id == "settings")
+    assert setting.value == "Loading…" and setting.description == ""
+
+
 def test_review_paging_keeps_back_and_has_explicit_models_and_budgets(vision_lab):
     cfg, connection, _, item, *_ = vision_lab
     host = SimpleNamespace(_ai_defaults=SimpleNamespace(defaults=read_defaults(cfg)))

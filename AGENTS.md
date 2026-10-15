@@ -159,6 +159,11 @@ Top-level commands currently include:
   cleanup-aware Cancel and bounded private results. Navigation retains accepted
   work; session/store changes reject stale results. Settings returns to the Media
   form retaining its question. Results are not saved, indexed or added to chat.
+  Uninitialized role labels load through the existing owned defaults inventory,
+  without reporting unknown settings as OFF or starting model work. Known
+  redacted provider failures retain their actionable reasons through workers;
+  full failure text wraps in the form, stale picker filters clear, and accepted
+  questions/budgets remain available for explicit retry.
   Core vision and CLI vision_panel own S6a1; real qwen3.5:4b CLI/TUI pixel evidence
   and limits: `docs/s6a-local-vision-validation.md`. Installed local Gemma 4 E2B/E4B
   also passed real native one-shot/Media colors and screenshot reading, plus TUI
@@ -454,7 +459,12 @@ Top-level commands currently include:
   compilers fail rather than using an override flag. CUDA builds retain the same
   snapshot, static library, 1–8 job and 30-minute deadline conventions as CPU.
   vLLM uses one complete trusted local wheel closure, selected installed Linux
-  Python 3.10–3.13 and installed uv. Bounded ZIP/metadata/hash checks and offline
+  Python 3.10–3.13 and installed uv. Discovery honors the absolute `UV` launcher
+  supplied by `uv run`, including managed tool caches, or searches the existing
+  standard locations when unset. Owned metadata workers retain this non-secret
+  hint; executable resolution/fingerprints and review rechecks still apply.
+  Build/install subprocesses retain their restricted PATH and omit provider keys.
+  Bounded ZIP/metadata/hash checks and offline
   dependency/platform resolution precede persistent writes. At most 128 wheels,
   2 GiB per wheel, 8 GiB compressed and 32 GiB expanded are accepted; disk review
   requires compressed + twice expanded + 2 GiB free, with the shared runtime disk

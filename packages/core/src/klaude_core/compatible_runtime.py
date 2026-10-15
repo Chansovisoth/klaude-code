@@ -13,6 +13,8 @@ from .model_runtime import chat_completion_messages, validated_chat_calls
 
 
 class CompatibleModelError(RuntimeError):
+    """Host-written, redacted diagnostics; never include raw provider bodies."""
+
     def __init__(self, message: str, *, status_code: int | None = None):
         super().__init__(message)
         self.status_code = status_code

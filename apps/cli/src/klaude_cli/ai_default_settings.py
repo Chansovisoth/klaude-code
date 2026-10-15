@@ -697,6 +697,11 @@ class AIDefaultSettings:
                 self.start_utility(task)
         elif self.visible and self.host._settings_input_request is None:
             self.show()
+        else:
+            library = getattr(self.host, "_library", None)
+            if (library is not None and library.visible and library.vision.active
+                    and not library.vision.busy and self.host._settings_input_request is None):
+                library.show()
 
     def new_session(self) -> None:
         self.new_session_pending = self.host.session_id

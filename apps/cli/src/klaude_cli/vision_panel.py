@@ -63,6 +63,9 @@ class VisionPanel:
         self.library.show(
             "vision-result" if self.result else "vision-form", "back" if self.result else ""
         )
+        owner = self.host._ai_defaults
+        if owner.defaults is None and owner.inventory is None:
+            owner.refresh(show=False)
 
     def page(self) -> PanelPage:
         view, defaults = self.library.view, self.host._ai_defaults.defaults
@@ -71,12 +74,18 @@ class VisionPanel:
         )
         rows = [PanelRow("image", RowKind.INFO, "Image", self.item.get("name", "Image"))]
         if view == "vision-form":
+            feedback = getattr(self.library, "feedback", None)
+            if feedback and feedback[1] == "error":
+                rows.append(PanelRow("failure", RowKind.INFO, "Request failed",
+                                     str(feedback[0]), value_tone="error"))
             rows += [
                 row(
                     "settings",
                     "Vision settings",
-                    value="ON" if defaults and defaults.vision_enabled else "OFF",
-                    description=self.host._ai_defaults.label(defaults.vision if defaults else None),
+                    value=("ON" if defaults.vision_enabled else "OFF") if defaults else (
+                        "Loading…" if self.host._ai_defaults.inventory else "Not loaded"
+                    ),
+                    description=self.host._ai_defaults.label(defaults.vision) if defaults else "",
                 ),
                 PanelRow("purpose", RowKind.INFO, "Task", "Suggest objects, colors and style tags")
                 if self.tagging else row("question", "Question", value=self.question),
@@ -385,6 +394,9 @@ class VisionPanel:
                 self.library.feedback = (
                     data.get("message", "Image analysis failed"),
                     "neutral" if status == "cancelled" else "error",
+                )
+                self.host._panel_states.pop(
+                    "library:vision-form:" + self.item.get("id", ""), None
                 )
                 self.library.show("vision-form")
         elif status == "complete":

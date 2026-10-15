@@ -540,7 +540,7 @@ Reviews a complete local trusted binary wheel closure, resolves offline and inst
 
 - **Current entry:** model-manager install-vllm; Dependencies → NVIDIA vLLM
 - **Configuration/defaults:** Linux Python3.10–3.13; up to128 wheels /8GiB compressed /32GiB expanded; setup disk review
-- **Dependencies:** Installed uv and supported Python; trusted wheels; installed CUDA runtime requirements
+- **Dependencies:** Installed uv (explicit `UV` launcher hint or standard locations) and supported Python; trusted wheels; installed CUDA runtime requirements
 - **Implementation:** [packages/core/src/klaude_core/model_recipes.py:wheels](../packages/core/src/klaude_core/model_recipes.py#L166); [packages/core/src/klaude_core/model_recipes.py:install](../packages/core/src/klaude_core/model_recipes.py#L278); [apps/cli/src/klaude_cli/dependency_panel.py](../apps/cli/src/klaude_cli/dependency_panel.py#L1)
 - **Limits/notes:** Does not mutate app/system environments or fetch interpreters/packages. Engine checks do not prove GPU inference/model fit.
 
@@ -1090,7 +1090,7 @@ Reviews exact pixels/endpoints/models/context/output and invokes Vision with dec
 - **Configuration/defaults:** Vision off by default;4096context/512output; PNG/JPEG≤8MiB/4MP/4096side;90s generation
 - **Dependencies:** Configured supported Vision model; exact image revision; owned worker
 - **Implementation:** [packages/core/src/klaude_core/vision.py](../packages/core/src/klaude_core/vision.py#L1); [apps/cli/src/klaude_cli/vision_panel.py](../apps/cli/src/klaude_cli/vision_panel.py#L1); [packages/core/src/klaude_core/image_content.py](../packages/core/src/klaude_core/image_content.py#L1); [packages/core/src/klaude_core/ai_defaults.py](../packages/core/src/klaude_core/ai_defaults.py#L1)
-- **Limits/notes:** HTTP context is conservative local admission, not server allocation. Thinking-required models unavailable to thinking-disabled Media consumer; no tools/history/indexing/tag mutations.
+- **Limits/notes:** HTTP context is conservative local admission, not server allocation. Thinking-required models unavailable to thinking-disabled Media consumer; no tools/history/indexing/tag mutations. Forms load unknown role metadata without claiming disabled state; host-written redacted failures wrap visibly and retain input for explicit retry.
 
 #### F084. Chat and one-shot image attachments
 
@@ -1834,6 +1834,7 @@ Environment inputs below are not all persistent UI settings. Credential variable
 | `KLAUDE_DATA_DIR` | Unset; resolver defaults in §3.1 | Explicit data/session/artifact root | Process/startup; changing requires constructing/restarting root-bound services; host paths private | OPTIONAL | [packages/core/src/klaude_core/config.py](../packages/core/src/klaude_core/config.py#L1) |
 | `KLAUDE_WEB_PROVIDER` | quality fallback when config web.provider absent | Legacy provider preference; TOML explicit provider takes precedence | Process/env; alias of web.provider | DEPRECATED | [packages/core/src/klaude_core/config.py:load_config](../packages/core/src/klaude_core/config.py#L730) |
 | `KLAUDE_CODEX_BIN` | Executable discovery when unset | External Codex broker binary override | Process/auth setup; executable trust | OPTIONAL | [packages/core/src/klaude_core/codex_auth.py](../packages/core/src/klaude_core/codex_auth.py#L1); [apps/cli/src/klaude_cli/main.py](../apps/cli/src/klaude_cli/main.py#L1) |
+| `UV` | Launching uv supplies its absolute executable path; otherwise standard installed locations | Locate the exact installer for offline vLLM setup, including managed tool caches | Non-secret process/owned-worker hint; resolved, fingerprinted and rechecked at review/execution; relative/missing explicit paths fail; does not expand child PATH or install software automatically | INTERNAL | [packages/core/src/klaude_core/model_recipes.py:wheels](../packages/core/src/klaude_core/model_recipes.py#L172); [apps/cli/src/klaude_cli/background_jobs.py](../apps/cli/src/klaude_cli/background_jobs.py#L75) |
 | `KLAUDE_ONLINE_DOCS_FILE` | Resolved config/online-docs.txt | Explicit online docs seed list path | CLI/docs setup; read next invocation | OPTIONAL | [apps/cli/src/klaude_cli/main.py:_online_docs_file](../apps/cli/src/klaude_cli/main.py#L8267); [scripts/knowledge/install-online-docs.sh](../scripts/knowledge/install-online-docs.sh#L1) |
 | `KLAUDE_LOG_DIR` | Repository logs directory in helper script | Online-docs helper log destination, not a universal app logging preference | scripts/knowledge/install-online-docs.sh only | OPTIONAL | [scripts/knowledge/install-online-docs.sh](../scripts/knowledge/install-online-docs.sh#L1) |
 | `KLAUDE_MCP_ALLOW_WRITES` | Empty/disabled; only exact 1 enables | Enables restricted knowledge MCP ingestion mutations | Knowledge MCP process startup; permissions still workspace-bound | OPTIONAL | [packages/knowledge/src/klaude_knowledge/mcp_server.py:_mcp_writes_enabled](../packages/knowledge/src/klaude_knowledge/mcp_server.py#L24) |

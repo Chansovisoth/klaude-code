@@ -283,6 +283,7 @@ def test_owned_jobs_cancel_reap_and_never_publish_obsolete_results(monkeypatch, 
         def __init__(self, args, **kwargs):
             assert all("private-key" not in str(arg) for arg in args)
             assert "OPENAI_API_KEY" not in kwargs["env"]
+            assert kwargs["env"].get("UV") == "/opt/tool-cache/uv"
             self.stdin, self.stdout = io.BytesIO(), io.BytesIO()
             processes.append(self)
 
@@ -296,6 +297,7 @@ def test_owned_jobs_cancel_reap_and_never_publish_obsolete_results(monkeypatch, 
             return self.returncode
 
     monkeypatch.setenv("OPENAI_API_KEY", "ambient-secret")
+    monkeypatch.setenv("UV", "/opt/tool-cache/uv")
     monkeypatch.setattr(module.subprocess, "Popen", Process)
     monkeypatch.setattr(module.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
     events = queue.Queue()

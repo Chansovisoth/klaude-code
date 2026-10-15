@@ -501,6 +501,25 @@ def test_credit_exhaustion_is_not_a_temporary_fallback(lab):
     assert [p["model"] for _, p, _ in lab.calls if "input" in p] == [MODEL]
 
 
+@pytest.mark.parametrize(
+    ("status", "code", "expected"),
+    [(429, "credit_balance_exhausted", "credits exhausted"),
+     (401, "invalid_api_key", "HTTP 401")],
+)
+def test_owned_vision_errors_retain_redacted_provider_diagnostics(lab, status, code, expected):
+    _, _, spec = review(lab)
+    lab.mode.update(http=status, error_code=code)
+    result = vision.execute({
+        "operation": "analyze", "config_dir": str(lab.cfg.config_dir),
+        "data_dir": str(lab.cfg.data_dir), "roles": lab.cfg.models,
+        "ollama_url": lab.cfg.ollama_url, "spec": spec,
+    })
+    assert result["status"] == "error" and expected in result["message"]
+    assert "private-provider-body" not in result["message"]
+    assert "fixture-private-key" not in result["message"]
+    assert len([p for _, p, _ in lab.calls if "input" in p]) == 1
+
+
 def test_chat_rejects_output_budget_above_documented_limit_before_network(lab):
     import base64
 

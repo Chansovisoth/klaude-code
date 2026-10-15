@@ -15,6 +15,7 @@ from urllib.parse import quote
 import httpx
 
 from .ai_defaults import read_defaults
+from .compatible_runtime import CompatibleModelError
 from .http_model_transport import CancellableHTTPTransport
 from .image_content import (
     ANTHROPIC_IMAGE_BYTES,
@@ -612,7 +613,7 @@ def execute(request: dict) -> dict:
             "Vision endpoint timed out; retry explicitly or review its configured fallback"
             if isinstance(exc, (httpx.TimeoutException, TimeoutError))
             else str(exc)
-            if isinstance(exc, ValueError)
+            if isinstance(exc, (ValueError, CompatibleModelError))
             else f"Vision endpoint returned HTTP {exc.response.status_code}; no complete answer"
             if isinstance(exc, httpx.HTTPStatusError)
             else f"Vision endpoint returned HTTP {status_code}; no complete answer"

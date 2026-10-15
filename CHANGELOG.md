@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Fix offline vLLM setup discovery when uv is installed in a managed tool cache.
+  Retain its explicit launcher path through owned workers and keep restricted
+  subprocess PATH, executable revision checks and secret isolation.
+- Preserve host-written, redacted provider diagnostics in Media analysis and
+  AI-tag workers, including exhausted-credit and authentication failures.
+  Provider bodies stay private; fallback and explicit-retry rules are unchanged.
+- Wrap Media failure details in narrow forms and clear stale picker filters
+  without losing the question/budgets. Load saved Vision roles through owned
+  metadata inventory instead of displaying uninitialized settings as OFF.
 - Validate actual native CUDA image generation through CLI and bare TUI on
   GTX 1650 using the engine's supported upstream-GGML configuration, without
   patching upstream sources or changing Klaude's runtime defaults. Final full

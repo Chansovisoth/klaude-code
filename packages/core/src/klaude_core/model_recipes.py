@@ -208,7 +208,10 @@ def wheels(source: str, data_dir: Path, python: str = "") -> dict:
         raise ValueError(
             "This NVIDIA wheel recipe requires Linux Python 3.10–3.13 on x86_64/aarch64"
         )
-    uv = shutil.which(
+    # uv run supplies its own absolute launcher path, including managed tool
+    # caches. Resolve/fingerprint that exact executable for review; do not
+    # broaden the deterministic PATH used by build/install subprocesses.
+    uv = os.environ.get("UV") or shutil.which(
         "uv",
         path=os.pathsep.join(
             (str(Path.home() / ".local/bin"), "/usr/local/bin", "/usr/bin", "/bin")

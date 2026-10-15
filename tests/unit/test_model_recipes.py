@@ -109,6 +109,37 @@ def test_real_offline_install_preserves_wheels_and_never_changes_app_environment
     assert any(event["stage"] == "Verify engine help" for event in events)
 
 
+def test_uv_launcher_outside_standard_directories_supports_offline_install(wheels, monkeypatch):
+    folder, data = wheels
+    installed = shutil.which("uv")
+    assert installed
+    launcher = folder.parent / "tool-cache" / "uv"
+    launcher.parent.mkdir()
+    launcher.symlink_to(Path(installed).resolve())
+    which = shutil.which
+
+    def standard_directory_lookup(name, path=None):
+        return None if name == "uv" and path is not None else which(name, path=path)
+
+    monkeypatch.setattr(shutil, "which", standard_directory_lookup)
+    monkeypatch.setenv("UV", str(launcher))
+    evidence = prepare(str(folder), data, profile="vllm_cuda")
+    assert evidence["tools"]["uv"] == str(launcher.resolve())
+    result = build(data, uuid.uuid4().hex, evidence, lambda _: None)
+    assert result["status"] == "ok" and result["build"]["state"] == "ready"
+
+
+@pytest.mark.parametrize("hint", ["./uv", "/missing-klaude-uv-fixture"])
+def test_invalid_explicit_uv_hint_cannot_silently_select_another_installer(
+    wheels, monkeypatch, hint
+):
+    folder, data = wheels
+    monkeypatch.setenv("UV", hint)
+    with pytest.raises((ValueError, OSError)):
+        prepare(str(folder), data, profile="vllm_cuda")
+    assert not (data / "model-builds").exists()
+
+
 @pytest.mark.parametrize("changed", ["wheel", "python"])
 def test_changed_wheels_or_interpreter_cannot_install_without_a_new_review(wheels, changed):
     folder, data = wheels
