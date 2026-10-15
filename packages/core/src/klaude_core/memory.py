@@ -524,12 +524,16 @@ class Memory:
             )
             self.db.commit()
 
-    def record_session_update(self, session_id: str, client_id: str, detail: str) -> None:
+    def record_session_update(
+        self, session_id: str, client_id: str, detail: str, *, runtime: dict | None = None
+    ) -> None:
         """Publish setting history and observer event in one transaction."""
         if not detail or len(detail) > 2048:
             raise ValueError("Session setting detail must contain 1-2048 characters")
         now = time.time()
         with self._db_lock, self.db:
+            if runtime is not None:
+                self._store_session_runtime(session_id, runtime)
             self.db.execute(
                 "INSERT INTO turns (session_id, ts, role, content, model_content) "
                 "VALUES (?,?,?,?,NULL)",
@@ -586,9 +590,14 @@ class Memory:
         visible_content: object,
         *,
         model_content: object | None = None,
+        runtime: dict | None = None,
     ) -> int:
         """Save a user turn and announce it as one atomic database change."""
         payload = json.dumps({"text": _as_text(visible_content)}, ensure_ascii=False)
+        from .session_runtime import decode
+
+        if runtime is not None and decode(runtime) is None:
+            raise ValueError("Invalid session runtime state")
         with self._db_lock, self.db:
             self.db.execute(
                 "INSERT INTO turns "
@@ -611,7 +620,35 @@ class Memory:
                 "VALUES (?,?,?,?,?,?)",
                 (session_id, turn_id, client_id, time.time(), "user_started", payload),
             )
+            if runtime is not None:
+                self._store_session_runtime(session_id, runtime)
         return int(cursor.lastrowid or 0)
+
+    def _store_session_runtime(self, session_id: str, runtime: dict) -> None:
+        from .session_runtime import PREFIX, decode
+
+        if decode(runtime) is None:
+            raise ValueError("Invalid session runtime state")
+        previous = self.session_runtime(session_id)
+        if previous is None or previous["at"] <= runtime["at"]:
+            self.db.execute(
+                "INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)",
+                (PREFIX + session_id, json.dumps(runtime)),
+            )
+
+    def session_runtime(self, session_id: str) -> dict | None:
+        from .session_runtime import PREFIX, decode
+
+        with self._db_lock:
+            row = self.db.execute(
+                "SELECT value FROM settings WHERE key=?", (PREFIX + session_id,),
+            ).fetchone()
+        if row is None or len(row[0]) > 2048:
+            return None
+        try:
+            return decode(json.loads(row[0]))
+        except (ValueError, TypeError):
+            return None
 
     def session_events_since(
         self,
@@ -849,12 +886,14 @@ class Memory:
                     live = self.session_live_state(session_id)
                 turns.sort(key=lambda item: item["ts"])
                 cursor = self.latest_session_event_id(session_id)
+                runtime = self.session_runtime(session_id)
                 self.db.commit()
             except Exception:
                 self.db.rollback()
                 raise
         return {
             "turns": turns,
+            "runtime": runtime,
             "live": live,
             "clients": clients,
             "event_cursor": cursor,
@@ -1222,6 +1261,9 @@ class Memory:
                 "FROM session_names WHERE session_id=?",
                 (target, source),
             )
+            runtime = self.session_runtime(source)
+            if runtime is not None:
+                self._store_session_runtime(target, runtime)
 
     def delete_session(self, session_id: str) -> int:
         session_id = session_id.strip()
@@ -1239,6 +1281,7 @@ class Memory:
             self.db.execute("DELETE FROM session_live WHERE session_id=?", (session_id,))
             self.db.execute("DELETE FROM session_clients WHERE session_id=?", (session_id,))
             self.db.execute("DELETE FROM session_archive WHERE session_id=?", (session_id,))
+            self.db.execute("DELETE FROM settings WHERE key=?", ("session.runtime." + session_id,))
         return turns
 
     def session_archived(self, session_id: str) -> bool:
@@ -1284,6 +1327,9 @@ class Memory:
                     for table in ("turns", "session_names", "session_events", "session_live",
                                   "session_clients", "session_archive"):
                         self.db.execute(f"DELETE FROM {table} WHERE session_id=?", (session_id,))
+                    self.db.execute(
+                        "DELETE FROM settings WHERE key=?", ("session.runtime." + session_id,)
+                    )
                 self.db.commit()
             except Exception:
                 self.db.rollback()
@@ -1314,6 +1360,7 @@ class Memory:
             self.db.execute("DELETE FROM session_live")
             self.db.execute("DELETE FROM session_clients")
             self.db.execute("DELETE FROM session_archive")
+            self.db.execute("DELETE FROM settings WHERE key GLOB 'session.runtime.*'")
         return {"sessions": sessions, "turns": turns}
 
     def session_tail(self, session_id: str, limit: int = 8) -> list[dict]:

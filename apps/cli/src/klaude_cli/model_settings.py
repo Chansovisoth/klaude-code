@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 
 from klaude_core.ai_defaults import AIDefaults, defaults_from_preferences, read_defaults
 from klaude_core.config import provider_secret_revision
+from klaude_core.image_content import image_capability_label
 from klaude_core.model_connections import (
     DEFAULT_IDS,
     DEFAULT_URLS,
@@ -435,6 +436,8 @@ class ModelSettings:
             rows = [
                 row("added", "Added Models", count, kind=RowKind.NAVIGATION),
                 row("add", "Add Models", kind=RowKind.NAVIGATION),
+                row("manager", "Model Manager", kind=RowKind.NAVIGATION,
+                    description="Manage model downloads and local serving"),
                 row(
                     "session",
                     "Session model",
@@ -647,6 +650,8 @@ class ModelSettings:
                             description=" · ".join(
                                 [
                                     "Tools: " + model.capabilities.tools_evidence,
+                                    image_capability_label(model.capabilities.supports_images,
+                                                           model.capabilities.images_evidence),
                                     *(
                                         name.capitalize()
                                         for name in ("pinned", "hidden")
@@ -775,6 +780,8 @@ class ModelSettings:
             self.show(kind)
         elif kind == "session":
             self.host._open_model_source("settings")
+        elif kind == "manager":
+            self.host._model_manager.open("settings")
         elif kind == "codex":
             self.draft = None
             self.test_result = None

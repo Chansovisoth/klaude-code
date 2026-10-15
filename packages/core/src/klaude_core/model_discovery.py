@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 
+from .image_content import declared_images
 from .model_connections import ModelConnection, validate_model_id
 from .model_runtime import (
     ModelCapabilities,
@@ -203,6 +204,15 @@ def discover_connection(connection: ModelConnection, key: str = "") -> list[Mode
             ) from None
         if not is_chat_model_id(connection.backend, model_id):
             continue
+        try:
+            images = declared_images(entry) \
+                if connection.backend in {"openai_compatible", "openrouter"} else None
+        except ValueError:
+            raise ModelDiscoveryError("malformed", "Malformed image capability metadata") from None
+        if connection.backend == "openai_api":
+            from .image_profiles import OPENAI_IMAGE_REVIEW, openai_image_profile
+
+            images = True if openai_image_profile(connection.base_url, model_id) else None
         # A catalog listing proves neither tool support nor available context.
         models_by_id[model_id] = ModelInfo(
             connection.backend,
@@ -211,7 +221,11 @@ def discover_connection(connection: ModelConnection, key: str = "") -> list[Mode
             ModelCapabilities(
                 effort_levels=("off", "low", "high", "max")
                 if connection.backend == "deepseek"
-                else ("off",)
+                else ("off",),
+                supports_images=images,
+                images_evidence="official-profile:" + OPENAI_IMAGE_REVIEW
+                if connection.backend == "openai_api" and images is True
+                else "catalog:input_modalities" if images is not None else "unknown",
             ),
             connection_id=connection.id,
             connection_revision=connection.revision,

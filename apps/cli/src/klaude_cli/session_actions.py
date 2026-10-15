@@ -12,6 +12,7 @@ from klaude_core.config import save_provider_secret
 from klaude_core.library_artifacts import execute_artifact_change
 from klaude_core.model_connections import ModelConnection, connection_registry
 from klaude_core.model_management import ModelChange, apply_model_change
+from klaude_core.ssh_servers import change as change_ssh_server
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class SessionSettingUpdate:
     session_id: str
     client_id: str
     detail: str
+    runtime: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,15 @@ class AIDefaultUpdate:
 
 
 @dataclass(frozen=True)
+class ImageGenerationUpdate:
+    session_id: str
+    identity: str
+    cfg: Any = field(repr=False, compare=False)
+    candidate: dict
+    revision: str
+
+
+@dataclass(frozen=True)
 class SessionTitleUpdate:
     session_id: str
     identity: str
@@ -103,6 +114,18 @@ class SearchProviderSecret:
     owner: str = "search"
 
 
+@dataclass(frozen=True)
+class SSHServerChange:
+    session_id: str
+    identity: str
+    root: str
+    operation: str
+    definition: dict | None = None
+    target: str = ""
+    revision: str = ""
+    default_revision: str = ""
+
+
 class SessionActionWriter:
     """Accepted actions retain their original scope and drain on close."""
 
@@ -119,8 +142,10 @@ class SessionActionWriter:
             | ModelConnectionAdd
             | ModelConnectionUpdate
             | AIDefaultUpdate
+            | ImageGenerationUpdate
             | SessionTitleUpdate
             | SearchProviderSecret
+            | SSHServerChange
         ] = deque()
         self._closed = False
         self._failed = False
@@ -138,8 +163,9 @@ class SessionActionWriter:
         | ModelConnectionAdd
         | ModelConnectionUpdate
         | AIDefaultUpdate
+        | ImageGenerationUpdate
         | SessionTitleUpdate
-        | SearchProviderSecret,
+        | SearchProviderSecret | SSHServerChange,
     ) -> bool:
         with self._condition:
             if (
@@ -149,7 +175,8 @@ class SessionActionWriter:
                 or self._session_unavailable
                 and not isinstance(
                     update, (LibraryArtifactChange, ModelConnectionAdd, ModelConnectionUpdate,
-                             AIDefaultUpdate, SearchProviderSecret)
+                             AIDefaultUpdate, ImageGenerationUpdate, SearchProviderSecret,
+                             SSHServerChange)
                 )
             ):
                 self._failed = True
@@ -178,6 +205,25 @@ class SessionActionWriter:
                         return
                     update = self._pending.popleft()
                 saved = False
+                if isinstance(update, SSHServerChange):
+                    from pathlib import Path
+
+                    result, error = None, ""
+                    try:
+                        result = change_ssh_server(
+                            Path(update.root), update.operation, definition=update.definition,
+                            target=update.target, revision=update.revision,
+                            default_revision=update.default_revision,
+                        )
+                    except ValueError as exc:
+                        error = str(exc)
+                    except Exception:
+                        error = "SSH setting save unconfirmed; reload before retrying"
+                    if error:
+                        with self._condition:
+                            self._failed = True
+                    self.emit("ssh_server_saved", (update, result, error))
+                    continue
                 if isinstance(update, LibraryArtifactChange):
                     from pathlib import Path
 
@@ -237,6 +283,21 @@ class SessionActionWriter:
                     self.emit("fetch_provider_saved" if update.owner == "fetch"
                               else "search_provider_saved",
                               (update.session_id, update.identity, saved, catalog_ok))
+                    continue
+                if isinstance(update, ImageGenerationUpdate):
+                    from klaude_core.image_generation import save
+
+                    result, error = None, ""
+                    try:
+                        result = save(update.cfg, update.candidate, update.revision)
+                    except ValueError as exc:
+                        error = str(exc)
+                    except Exception:
+                        error = "Image settings save unconfirmed; Reload before retrying"
+                    if error:
+                        with self._condition:
+                            self._failed = True
+                    self.emit("image_generation_saved", (update, result, error))
                     continue
                 if isinstance(update, AIDefaultUpdate):
                     result, error = None, ""
@@ -323,7 +384,8 @@ class SessionActionWriter:
                         saved = True
                     else:
                         connection.record_session_update(
-                            update.session_id, update.client_id, update.detail
+                            update.session_id, update.client_id, update.detail,
+                            **({"runtime": update.runtime} if update.runtime is not None else {}),
                         )
                         saved = True
                 except Exception:
@@ -346,6 +408,11 @@ class SessionActionWriter:
                 updates = list(self._pending)
                 self._pending.clear()
             for update in updates:
+                if isinstance(update, SSHServerChange):
+                    self.emit("ssh_server_saved", (
+                        update, None, "SSH setting save unconfirmed; reload before retrying"
+                    ))
+                    continue
                 if isinstance(update, LibraryArtifactChange):
                     self.emit("library_artifact_saved", (
                         update, None, "Artifact change unconfirmed; reload before retrying"
@@ -354,6 +421,11 @@ class SessionActionWriter:
                 if isinstance(update, LibrarySessionChange):
                     self.emit("library_session_saved", (
                         update, "Session change unconfirmed; reload before retrying"
+                    ))
+                    continue
+                if isinstance(update, ImageGenerationUpdate):
+                    self.emit("image_generation_saved", (
+                        update, None, "Image settings save unconfirmed; Reload"
                     ))
                     continue
                 if isinstance(update, AIDefaultUpdate):

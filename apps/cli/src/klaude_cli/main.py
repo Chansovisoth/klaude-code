@@ -157,6 +157,7 @@ from klaude_core.runtime_context import (
 )
 from klaude_core.search_settings import PROVIDERS as SEARCH_SETTINGS_PROVIDERS
 from klaude_core.search_settings import primary_provider
+from klaude_core.session_runtime import capture as capture_session_runtime
 from klaude_core.settings_store import DELETE, settings_lock, update_settings
 from klaude_core.skill_catalog import SkillRecord
 from klaude_core.tool_settings import (
@@ -276,6 +277,8 @@ from .mcp_search_panel import (
 from .mcp_updates import valid_candidate_payload
 from .memory_panel import memory_detail_page, memory_list_page
 from .model_connections import app as model_connections_app
+from .model_manager import ModelManager
+from .model_manager_commands import app as model_manager_app
 from .model_settings import ModelSettings
 from .pickers import PickerController, PickerRow, match_score
 from .research_commands import app as research_app
@@ -368,6 +371,7 @@ app.add_typer(mcp_app, name="mcp")
 app.add_typer(model_connections_app, name="model-connections")
 app.add_typer(library_app, name="library")
 app.add_typer(research_app, name="research")
+app.add_typer(model_manager_app, name="model-manager")
 mcp_auth_app = typer.Typer(help="Manage OAuth for remote MCP servers.")
 mcp_app.add_typer(mcp_auth_app, name="auth")
 
@@ -2768,6 +2772,76 @@ CLI_COMMANDS = (
         "query",
         "Hybrid-search the knowledge base (no LLM, raw chunks).",
     ),
+    CommandSpec("model-manager", CommandSurface.CLI, "model-manager",
+                "Manage model downloads, local serving and SSH settings."),
+    CommandSpec("model-manager list", CommandSurface.CLI,
+                "model-manager list [--endpoint ID] [--offset N]", "List downloaded models."),
+    CommandSpec("model-manager status", CommandSurface.CLI,
+                "model-manager status [--endpoint ID]", "Check native Ollama service status."),
+    CommandSpec("model-manager pull", CommandSurface.CLI,
+                "model-manager pull MODEL [--endpoint ID] [--yes]", "Review a model download."),
+    CommandSpec("model-manager delete", CommandSurface.CLI,
+                "model-manager delete MODEL [--endpoint ID] [--yes]",
+                "Review downloaded-model deletion."),
+    CommandSpec("model-manager hardware", CommandSurface.CLI, "model-manager hardware",
+                "Inspect this machine's hardware."),
+    CommandSpec("model-manager search", CommandSurface.CLI, "model-manager search QUERY",
+                "Discover Hugging Face GGUF repositories."),
+    CommandSpec("model-manager engines", CommandSurface.CLI,
+                "model-manager engines [--engine ENGINE] [--executable PATH]",
+                "Test an installed serving engine without loading a model."),
+    CommandSpec("model-manager dependencies", CommandSurface.CLI,
+                "model-manager dependencies [--engine ENGINE] [--executable PATH]",
+                "Inspect local engine and build-tool dependencies without installing."),
+    CommandSpec("model-manager builds", CommandSurface.CLI, "model-manager builds",
+                "List retained local engine builds and installations."),
+    CommandSpec("model-manager remove-build", CommandSurface.CLI,
+                "model-manager remove-build ID [--yes]",
+                "Review permanent removal of one unused retained engine build/installation."),
+    CommandSpec("model-manager ssh", CommandSurface.CLI, "model-manager ssh",
+                "SSH settings and diagnostics; remote serving uses model-manager serve."),
+    CommandSpec("model-manager ssh list", CommandSurface.CLI, "model-manager ssh list",
+                "List SSH definitions without connecting."),
+    CommandSpec("model-manager ssh add", CommandSurface.CLI,
+                "model-manager ssh add ID --host HOST --user USER [--identity-file PATH] "
+                "[--known-hosts PATH] [--models-dir PATH] [--agent]", "Save SSH settings."),
+    CommandSpec("model-manager ssh test", CommandSurface.CLI, "model-manager ssh test ID",
+                "Test a verified SSH connection without generation or remote writes."),
+    CommandSpec("model-manager ssh inspect", CommandSurface.CLI, "model-manager ssh inspect ID",
+                "Inspect bounded remote hardware, model-directory and process metadata."),
+    CommandSpec("model-manager ssh default", CommandSurface.CLI, "model-manager ssh default ID",
+                "Choose the diagnostics default; local means This machine."),
+    CommandSpec("model-manager ssh remove", CommandSurface.CLI,
+                "model-manager ssh remove ID [--yes]", "Remove only the SSH definition."),
+    CommandSpec("model-manager ssh host-key", CommandSurface.CLI,
+                "model-manager ssh host-key ID", "Discover unverified host fingerprints."),
+    CommandSpec("model-manager ssh trust", CommandSurface.CLI,
+                "model-manager ssh trust ID FINGERPRINT [--yes]",
+                "Review an independently verified host pin; retain existing trust files."),
+    CommandSpec("model-manager ssh enroll", CommandSurface.CLI,
+                "model-manager ssh enroll ID PUBLIC_KEY_FILE [--yes]",
+                "Review one public-key append using existing verified authentication."),
+    CommandSpec("model-manager build", CommandSurface.CLI,
+                "model-manager build SOURCE [--jobs N] [--profile cpu|cuda] "
+                "[--architectures TARGETS] [--host-compiler PATH] [--yes]",
+                "Review a separate CPU/CUDA build from a local committed source snapshot."),
+    CommandSpec("model-manager install-vllm", CommandSurface.CLI,
+                "model-manager install-vllm WHEELHOUSE [--python PATH] [--yes]",
+                "Review an isolated NVIDIA vLLM installation from hash-checked local wheels."),
+    CommandSpec("model-manager servers", CommandSurface.CLI, "model-manager servers",
+                "List managed server records."),
+    CommandSpec("model-manager adopt", CommandSurface.CLI,
+                "model-manager adopt PID MODEL_ID [--engine ENGINE] [--executable PATH] "
+                "[--port N] [--ssh-server ID] [--local-port N] [--yes]",
+                "Review local/SSH ownership of an isolated server; exiting ends its process."),
+    CommandSpec("model-manager logs", CommandSurface.CLI, "model-manager logs SERVER_ID",
+                "Read a bounded managed-server log tail."),
+    CommandSpec("model-manager serve", CommandSurface.CLI,
+                "model-manager serve MODEL [--engine ENGINE] [--executable PATH] "
+                "[--ssh-server ID] [--local-port N] [--gpu-layers N] [--gpu IDS] "
+                "[--memory FRACTION] [--dtype DTYPE] [--enforce-eager] [--yes]",
+                "Review local or SSH CPU/GPU serving until Ctrl+C; "
+                "see --help for resource fields."),
     CommandSpec(
         "research", CommandSurface.CLI, "research",
         "Run bounded web research and browse saved jobs.",
@@ -2793,6 +2867,19 @@ CLI_COMMANDS = (
         "library",
         "Manage document and image copies without automatic indexing.",
     ),
+    CommandSpec("library image-service", CommandSurface.CLI,
+                "library image-service [--endpoint URL] [--enable|--disable] [--yes]",
+                "Review a local native image service; no generation."),
+    CommandSpec("library generate", CommandSurface.CLI,
+                "library generate PROMPT [--width N] [--height N] [--steps N] [--seed N] [--yes]",
+                "Review one generated PNG and private Media save."),
+    CommandSpec("library generation-status", CommandSurface.CLI,
+                "library generation-status JOB_ID [--cancel|--recover|--refresh|--forget] "
+                "[--abandon] [--yes]",
+                "Inspect, stop or recover completed output from a saved image job."),
+    CommandSpec("library generation-jobs", CommandSurface.CLI,
+                "library generation-jobs [--offset N]",
+                "Browse private image job metadata without contacting servers."),
     CommandSpec(
         "library list",
         CommandSurface.CLI,
@@ -2823,6 +2910,17 @@ CLI_COMMANDS = (
         "library tags ARTIFACT_ID TAGS",
         "Replace comma-separated manual tags.",
     ),
+    CommandSpec("library analyze", CommandSurface.CLI,
+                "library analyze MEDIA_ID QUESTION [--context N] [--output-tokens N] [--yes]",
+                "Review image analysis using AI Defaults Vision; "
+                "no tools or indexing."),
+    CommandSpec("library suggest-tags", CommandSurface.CLI,
+                "library suggest-tags MEDIA_ID [--save] [--select 1,3] "
+                "[--context N] [--output-tokens N] [--yes]",
+                "Review optional Vision tag suggestions; save separately from manual tags."),
+    CommandSpec("library clear-ai-tags", CommandSurface.CLI,
+                "library clear-ai-tags MEDIA_ID [--yes]",
+                "Clear AI tags and their provenance; retain manual tags and pixels."),
     CommandSpec(
         "library archive",
         CommandSurface.CLI,
@@ -3073,6 +3171,8 @@ CHAT_COMMANDS = (
                 "artifact storage is still in development.",
                 examples=("/library", "/library sessions", "/library knowledge",
                           "/library archive")),
+    CommandSpec("model-manager", CommandSurface.CHAT, "/model-manager",
+                "Open Model Manager for downloads, serving and server settings."),
     CommandSpec(
         "keybinds",
         CommandSurface.CHAT,
@@ -3131,7 +3231,7 @@ CHAT_COMMANDS = (
         "effort-level",
         CommandSurface.CHAT,
         "/effort LEVEL",
-        "Set Thinking-mode effort to low, medium, or high.",
+        "Set a supported Thinking effort; some models also offer minimal or max.",
         aliases=("/effort [LEVEL]",),
         examples=("/effort low", "/effort high"),
     ),
@@ -4163,10 +4263,10 @@ def _agent_configuration_context(
         )
     lines.extend(
         [
-            "- Input modalities: this Klaude chat path accepts text context only; "
-            "local image files are not decoded into visual model input.",
-            "- Attachments: text files and directory listings can be attached; never claim "
-            "to see image pixels unless a future active capability explicitly says so.",
+            "- Input modalities: text; image pixels are available only when the current "
+            "model request explicitly declares delivered image input.",
+            "- Attachments: filenames, raw binary bytes and earlier descriptions are not "
+            "visual evidence. Use the current request's image-input declaration.",
             "- Provider toggles describe configuration, not current network health.",
             "- Only call tools whose schemas are present in the current model request.",
             instruction_context,
@@ -5517,7 +5617,7 @@ def _format_model_command_help(*, include_yes: bool = False) -> str:
             "/mode [standard|thinking]",
             "    Choose the active model's reasoning mode.",
             "",
-            "/effort [low|medium|high]",
+            "/effort [LEVEL] (model-supported choices)",
             "    Set effort while Thinking mode is active.",
             "",
             "Examples:",
@@ -6040,7 +6140,7 @@ def _select_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
               if name in tools), *names,
         ]))
     if "read_skill" in tools and not prohibits_skill_read(user_message) and (
-        _tool_use_route(user_message) != ToolUseRoute.DIRECT_RESPONSE
+        (bool(names) or mutation) and _tool_use_route(user_message) != ToolUseRoute.DIRECT_RESPONSE
         or re.search(r"\bskills?\b|SKILL\.md", user_message, re.IGNORECASE)
     ):
         names.append("read_skill")
@@ -6100,7 +6200,10 @@ def _select_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
 def _heuristic_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
     text = user_message.lower()
     route = _tool_use_route(user_message)
-    if re.search(r"\b(?:image|photo|picture|screenshot)\b", text):
+    if (re.search(r"\b(?:image|photo|picture|screenshot)\b", text)
+            and not _workspace_mutation_intent(user_message)
+            and not explicit_workspace_inspection(user_message)
+            and re.search(r"\b(?:file|folder|directory|workspace)\b", text)):
         return [name for name in ("list_dir", "workspace_info") if name in tools]
     if route == ToolUseRoute.DIRECT_RESPONSE:
         return []
@@ -7514,6 +7617,9 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
     # These preferences intentionally affect only this interactive agent's
     # tool instances; config.toml remains the durable administrator default.
     agent.tool_config = cfg
+    from klaude_core.chat_images import ChatImages
+
+    agent.image_context = ChatImages(cfg, agent)
     _apply_tool_availability_preferences(agent, preferences_path)
     apply_execution_settings(agent, _load_runtime_preferences(preferences_path))
     agent.skill_reader = skill_reader
@@ -7819,13 +7925,25 @@ def _render(
     plain: bool = False,
     read_only: bool = False,
     scope: TurnScope | str | None = None,
-    model_message: str | None = None,
+    model_message: str | dict[str, Any] | None = None,
     raise_on_error: bool = False,
 ) -> str:
     builder = getattr(agent, "system_prompt_builder", None)
     if builder:
         agent.set_system_prompt(builder())
     effective_message = model_message if model_message is not None else user_msg
+    if model_message is None and getattr(agent, "image_context", None) is not None:
+        from klaude_core.chat_images import inline_paths
+
+        paths = inline_paths(user_msg, Path(agent.workdir))
+        if paths:
+            try:
+                effective_message = agent.image_context.compose(user_msg, paths, session_id)
+            except (OSError, ValueError) as exc:
+                console.print(Text(str(exc), style="red"))
+                if raise_on_error:
+                    raise typer.Exit(1) from exc
+                return ""
     client_id = f"line-{uuid.uuid4().hex}"
     turn_id = uuid.uuid4().hex
     live_lifecycle = all(
@@ -7867,12 +7985,15 @@ def _render(
         return ""
     if live_lifecycle:
         try:
+            from klaude_core.session_runtime import capture
+
             memory.start_session_turn(
                 session_id,
                 client_id,
                 turn_id,
                 user_msg,
                 model_content=(effective_message if effective_message != user_msg else None),
+                **({"runtime": capture(agent)} if isinstance(memory, Memory) else {}),
             )
             cancel_transports = getattr(agent, "cancel_active_transports", None)
             lease_keeper = SessionLeaseKeeper(
@@ -8488,6 +8609,10 @@ def _bound_model_info(cfg, info: ModelInfo) -> ModelInfo:
                            connection_source=default_connection.source, credential_revision=(
                                provider_secret_revision(cfg.config_dir, default_connection.key_env)
                                if default_connection.key_env else ""))
+    if info.backend == "gemini_api":
+        from klaude_core.model_runtime import gemini_capabilities
+
+        info = replace(info, capabilities=gemini_capabilities(info.model_id, info.capabilities))
     return info
 
 
@@ -8562,7 +8687,7 @@ def _set_agent_model(
     agent.model_info = info
     agent.runtime = runtime
     agent.ollama = runtime
-    if info.backend == "anthropic" and (
+    if info.capabilities.thinking_types is not None and (
         getattr(agent, "reasoning_mode", "standard") not in _session_reasoning_modes(agent)
     ):
         agent.reasoning_effort = _session_effort_choices(agent)[0]
@@ -8634,19 +8759,21 @@ def _apply_session_effort(agent: Agent, cfg, effort: str) -> None:
     agent.ollama_code_think = value
 
 
-def _session_reasoning_modes(agent: Agent) -> tuple[str, ...]:
+def _session_reasoning_modes(agent: Any) -> tuple[str, ...]:
     info = getattr(agent, "model_info", None)
     types = getattr(getattr(info, "capabilities", None), "thinking_types", None)
-    if getattr(info, "backend", "") == "anthropic" and types:
+    if types:
         return tuple(mode for mode in REASONING_MODES if
                      mode == "standard" and "disabled" in types or mode == "thinking"
                      and any(value in types for value in ("enabled", "adaptive")))
     return tuple(REASONING_MODES)
 
 
-def _session_effort_choices(agent: Agent) -> tuple[str, ...]:
+def _session_effort_choices(agent: Any) -> tuple[str, ...]:
     info = getattr(agent, "model_info", None)
-    if info is not None and getattr(info, "backend", "") == "anthropic":
+    if info is not None and (
+        info.capabilities.thinking_types is not None or info.backend == "anthropic"
+    ):
         return tuple(level for level in info.capabilities.effort_levels if level != "off") \
             or tuple(EFFORT_CHOICES)
     return tuple(EFFORT_CHOICES)
@@ -8664,6 +8791,46 @@ def _apply_session_mode(agent: Agent, cfg, mode: str) -> None:
         agent.ollama_code_think = False
         return
     _apply_session_effort(agent, cfg, getattr(agent, "reasoning_effort", "medium"))
+
+
+def _restore_session_runtime(agent: Agent, cfg, runtime: dict | None, turns: list[dict]) -> bool:
+    """Restore an explicit session choice without discovery, fallback or default writes."""
+    from types import SimpleNamespace
+
+    from klaude_core.session_runtime import decode, legacy
+
+    state = decode(runtime) if runtime is not None else legacy(turns)
+    if runtime is not None and state is None:
+        raise ValueError("Saved model selection is invalid; select a session model")
+    if state is None:
+        return False
+    local = _agent_local_ollama(agent)
+    reference = state["model"]
+    qualified = split_model_ref(reference)
+    if qualified:
+        info = _resolve_requested_chat_model(cfg, local, reference)
+    else:
+        backend, _, model_id = reference.partition("/")
+        info = _resolve_chat_model(_available_chat_models(cfg, local, False), reference)
+        info = info or _bound_model_info(cfg, ModelInfo(backend, model_id, model_id))
+    if info is None:
+        raise ValueError("Saved model is unavailable; select a session model")
+    info = _bound_model_info(cfg, info)
+    for field, actual in (("definition", info.connection_revision),
+                          ("credentials", info.credential_revision)):
+        if state[field] and state[field] != actual:
+            raise ValueError("Saved model connection changed; select a session model")
+    probe = SimpleNamespace(model_info=info)
+    if state["mode"] not in _session_reasoning_modes(probe) or (
+        state["mode"] == "thinking" and state["effort"] not in _session_effort_choices(probe)
+    ):
+        raise ValueError("Saved reasoning setting is unavailable; select a session model")
+    _set_agent_model(agent, cfg, local, info, validated=True)
+    if state["mode"] == "thinking":
+        _apply_session_effort(agent, cfg, state["effort"])
+    else:
+        _apply_session_mode(agent, cfg, "standard")
+    return True
 
 
 def _choose_effort(agent: Agent, cfg, requested: str = "") -> str | None:
@@ -9084,6 +9251,7 @@ class PersistentChatTUI:
         self._session_io = SessionIOCoordinator(memory, self._emit)
         self._session_actions = SessionActionWriter(memory, self._emit)
         self._model_settings = ModelSettings(self)
+        self._model_manager = ModelManager(self)
         self._ai_defaults = AIDefaultSettings(self)
         self._search_settings = SearchSettings(self)
         self._fetch_settings = FetchSettings(self)
@@ -9958,7 +10126,8 @@ class PersistentChatTUI:
             navigation_hints="↑↓ move · ENTER resume · / search · ESC cancel"
             if kind == "session" else
             concise_hints
-            if kind.startswith("library ") or kind in {SEARCH_KIND, DETAIL_KIND, INSTALL_KIND,
+            if kind.startswith(("library ", "model manager ")) or kind in {
+                        SEARCH_KIND, DETAIL_KIND, INSTALL_KIND,
                         "mcp settings",
                         "skills settings", "skills import", "mcp manage list",
                         "skills manage list"} else "",
@@ -11093,7 +11262,10 @@ class PersistentChatTUI:
         knowledge_task = self._library.knowledge.task
         knowledge_active = knowledge_task is not None
         worker_active = (self.running or self._watching_remote or debug_active
-                         or utility_active or knowledge_active or self._library.research.busy)
+                         or utility_active or knowledge_active or self._library.research.busy
+                         or getattr(getattr(self._library, "vision", None), "busy", False)
+                         or getattr(getattr(self._library, "generation", None), "busy", False)
+                         or getattr(getattr(self, "_model_manager", None), "busy", False))
         activity = "working" if utility_active else self.activity
         if knowledge_task is not None:
             activity = "waiting for cancellation" if self._library.knowledge.stopping else (
@@ -11102,6 +11274,15 @@ class PersistentChatTUI:
         if self._library.research.busy:
             activity = ("waiting for cancellation"
                         if self._library.research.stopping else "researching")
+        if getattr(getattr(self._library, "generation", None), "busy", False):
+            activity = ("waiting for cancellation" if self._library.generation.stopping
+                        else "generating image")
+        if getattr(getattr(self._library, "vision", None), "busy", False):
+            activity = ("waiting for cancellation"
+                        if self._library.vision.stopping else "analyzing image")
+        if getattr(getattr(self, "_model_manager", None), "busy", False):
+            activity = ("waiting for cancellation" if self._model_manager.cancelling
+                        else "managing models")
         if (
             self._activity_started_at is not None
             and _live_activity_label(activity) == "RUNNING"
@@ -11314,7 +11495,8 @@ class PersistentChatTUI:
             ):
                 height = self.panel_body_window.render_info.window_height \
                     if self.panel_body_window.render_info else 12
-                if self._panel.scroll_row(-max(1, height - 1), self._panel_body()):
+                if self._panel.scroll_row(-max(1, height - 1), self._panel_body()) \
+                        or self._panel.page.scrollable_body:
                     self.application.invalidate()
                     return
             if self._choice_kind in {"text theme", "permission preset"} and (
@@ -11332,7 +11514,8 @@ class PersistentChatTUI:
             ):
                 height = self.panel_body_window.render_info.window_height \
                     if self.panel_body_window.render_info else 12
-                if self._panel.scroll_row(max(1, height - 1), self._panel_body()):
+                if self._panel.scroll_row(max(1, height - 1), self._panel_body()) \
+                        or self._panel.page.scrollable_body:
                     self.application.invalidate()
                     return
             if self._choice_kind in {"text theme", "permission preset"} and (
@@ -11429,7 +11612,12 @@ class PersistentChatTUI:
 
         @bindings.add("c-c")
         def cancel(event) -> None:
-            if self._library.research.task and not self._settings_input_request:
+            if (self._model_manager.ssh.checking and self._model_manager.ssh.active
+                    and not self._settings_input_request):
+                self._model_manager.ssh.stop()
+            elif (self._model_manager.busy and not self._settings_input_request):
+                self._model_manager.stop()
+            elif self._library.research.task and not self._settings_input_request:
                 self._library.research.stop()
             elif self._library.knowledge.busy and not self._settings_input_request:
                 self._library.knowledge.stop()
@@ -12393,7 +12581,7 @@ class PersistentChatTUI:
                 self._append(
                     f"\n[session] {info.ref} selected for the next prompt · "
                     + ("thinking required; lowest supported effort. "
-                       if info.backend == "anthropic" and info.capabilities.requires_thinking
+                       if info.capabilities.requires_thinking
                        else "standard mode. ") +
                     "Current work keeps its original model.\n"
                 )
@@ -12497,7 +12685,7 @@ class PersistentChatTUI:
         update = f"model {info.ref} · standard · conversation retained"
         self._append(f"\n[session] {update}\n")
         self._session_actions.submit(SessionSettingUpdate(
-            self.session_id, self.client_id, update
+            self.session_id, self.client_id, update, runtime=capture_session_runtime(self.agent)
         ))
         return True
 
@@ -12576,7 +12764,7 @@ class PersistentChatTUI:
         if model_changed:
             self._append("\n[session] Session model applied; Default Chat is unchanged.\n")
         if not self._session_actions.submit(SessionSettingUpdate(
-            self.session_id, self.client_id, update
+            self.session_id, self.client_id, update, runtime=capture_session_runtime(self.agent)
         )):
             self.status_error = "Session setting history unavailable; change active locally"
             self._append(f"\n[warning] {self.status_error}.\n")
@@ -12702,6 +12890,11 @@ class PersistentChatTUI:
             "effort",
         }
         choice_kind = self._choice_kind or ""
+        if (choice_kind == "providers settings"
+                and getattr(getattr(self, "_model_manager", None), "owner_return", False)):
+            self._model_manager.owner_return = False
+            self._model_manager.show("discover", "hf-credentials")
+            return
         if choice_kind == "mcp remove confirmation":
             self._apply_panel_action(PanelAction("mcp-remove-list"))
             return
@@ -13868,6 +14061,36 @@ class PersistentChatTUI:
             self._apply_panel_action(row.action)
 
     def _apply_panel_action(self, action: PanelAction) -> None:
+        if action.kind.startswith("ssh-setup-"):
+            try:
+                self._model_manager.ssh.setup.action(action)
+            except (ValueError, RuntimeError) as exc:
+                self._set_panel_feedback(str(exc), "error")
+            return
+        if action.kind.startswith("ssh-"):
+            try:
+                self._model_manager.ssh.action(action)
+            except (ValueError, RuntimeError) as exc:
+                self._set_panel_feedback(str(exc), "error")
+            return
+        if action.kind.startswith("dependency-"):
+            try:
+                self._model_manager.dependencies.action(action)
+            except (ValueError, RuntimeError) as exc:
+                self._set_panel_feedback(str(exc), "error")
+            return
+        if action.kind.startswith("serving-"):
+            try:
+                self._model_manager.serving.action(action)
+            except (ValueError, RuntimeError) as exc:
+                self._set_panel_feedback(str(exc), "error")
+            return
+        if action.kind.startswith("model-manager-"):
+            try:
+                self._model_manager.action(action)
+            except (ValueError, RuntimeError) as exc:
+                self._set_panel_feedback(str(exc), "error")
+            return
         if action.kind.startswith("library-"):
             try:
                 self._library.action(action)
@@ -15168,6 +15391,8 @@ class PersistentChatTUI:
             )
 
     def _cancel_inventory_job(self, kind: str | None) -> None:
+        if kind and kind.startswith("model manager "):
+            self._model_manager.leave()
         if kind and kind.startswith("library "):
             self._library.leave()
         if kind and kind.startswith("fetch settings "):
@@ -15232,6 +15457,12 @@ class PersistentChatTUI:
         key, identity, result, error = cast(tuple[str, str, Any, str], payload)
         if self.shutting_down or not self._background_jobs.current(key, identity):
             return
+        if key.startswith("model-manager:"):
+            self._model_manager.accept(key, identity, result, error)
+            return
+        if key == "serving:read":
+            self._model_manager.serving.accept(identity, result, error)
+            return
         if key == "library":
             self._library.accept(identity, result, error)
             return
@@ -15243,6 +15474,12 @@ class PersistentChatTUI:
             return
         if key == "library:knowledge":
             self._library.knowledge.accept(identity, result, error)
+            return
+        if key == "library:generation":
+            self._library.generation.accept(identity, result, error)
+            return
+        if key == "library:vision":
+            self._library.vision.accept(identity, result, error)
             return
         if key == "fetch-settings:test":
             self._fetch_settings.accept(identity, result, error)
@@ -15828,6 +16065,11 @@ class PersistentChatTUI:
                 "model-settings", "ai-defaults", "search-settings", "fetch-settings",
                 "agent-settings",
                 "library",
+                "model-manager",
+                "serving-field",
+                "dependency-field",
+                "ssh-field",
+                "ssh-setup-field",
             }),
         }
         self.application.layout.focus(self.input)
@@ -15902,6 +16144,51 @@ class PersistentChatTUI:
             self._settings_input_request = None
             try:
                 self._model_settings.answer(str(callback[1]), value)
+            except (ValueError, RuntimeError) as exc:
+                self._settings_input_request = request
+                self.status_error = str(exc)
+                self.application.invalidate()
+            return
+        if isinstance(callback, tuple) and len(callback) == 2 and callback[0] == "model-manager":
+            self._settings_input_request = None
+            try:
+                self._model_manager.answer(str(callback[1]), value)
+            except (ValueError, RuntimeError) as exc:
+                self._settings_input_request = request
+                self.status_error = str(exc)
+                self.application.invalidate()
+            return
+        if isinstance(callback, tuple) and len(callback) == 2 and callback[0] == "serving-field":
+            self._settings_input_request = None
+            try:
+                self._model_manager.serving.answer(str(callback[1]), value)
+            except (ValueError, RuntimeError) as exc:
+                self._settings_input_request = request
+                self.status_error = str(exc)
+                self.application.invalidate()
+            return
+        if isinstance(callback, tuple) and len(callback) == 2 and callback[0] == "dependency-field":
+            self._settings_input_request = None
+            try:
+                self._model_manager.dependencies.answer(str(callback[1]), value)
+            except (ValueError, RuntimeError) as exc:
+                self._settings_input_request = request
+                self.status_error = str(exc)
+                self.application.invalidate()
+            return
+        if isinstance(callback, tuple) and len(callback) == 2 and callback[0] == "ssh-setup-field":
+            self._settings_input_request = None
+            try:
+                self._model_manager.ssh.setup.answer(str(callback[1]), value)
+            except (ValueError, RuntimeError) as exc:
+                self._settings_input_request = request
+                self.status_error = str(exc)
+                self.application.invalidate()
+            return
+        if isinstance(callback, tuple) and len(callback) == 2 and callback[0] == "ssh-field":
+            self._settings_input_request = None
+            try:
+                self._model_manager.ssh.answer(str(callback[1]), value)
             except (ValueError, RuntimeError) as exc:
                 self._settings_input_request = request
                 self.status_error = str(exc)
@@ -16625,6 +16912,11 @@ class PersistentChatTUI:
             self.application.invalidate()
             return
         if selected == "back":
+            if (kind == "providers settings"
+                    and getattr(getattr(self, "_model_manager", None), "owner_return", False)):
+                self._model_manager.owner_return = False
+                self._model_manager.show("discover", "hf-credentials")
+                return
             if self._agent_settings.return_from_owner(kind):
                 return
             category = SETTINGS_CATEGORY_FOR_KIND.get(kind, "theme")
@@ -17114,6 +17406,9 @@ class PersistentChatTUI:
             self.running
             or self._library.knowledge.busy
             or self._library.research.busy
+            or getattr(getattr(self._library, "vision", None), "busy", False)
+                         or getattr(getattr(self._library, "generation", None), "busy", False)
+            or getattr(getattr(self, "_model_manager", None), "busy", False)
             or self._watching_remote
             or self._ollama_control_action
             or self._ai_defaults.utility
@@ -17240,6 +17535,19 @@ class PersistentChatTUI:
         self.ui_state.output_tokens = 0
         self._clear_session_view()
         self._append(_restored_transcript(session_id, turns, self._divider_width()))
+        try:
+            restored = _restore_session_runtime(
+                self.agent, self.cfg, snapshot.get("runtime"), turns
+            )
+            if restored:
+                self._startup_unselected = False
+                self._next_prompt_model = None
+                self.ui_state.update_from_agent(self.agent)
+        except Exception as exc:
+            self._startup_unselected = True
+            self._next_prompt_model = None
+            self.status_error = str(exc)
+            self._append(f"\n[error] {self.status_error}\n")
         live = snapshot["live"]
         active_clients = [
             state
@@ -17602,7 +17910,15 @@ class PersistentChatTUI:
             self._enqueue(text.removeprefix("/queue ").strip(), force_queue=True)
             return
         if text == "/cancel":
-            if self._library.research.task:
+            if self._model_manager.ssh.checking and self._model_manager.ssh.active:
+                self._model_manager.ssh.stop()
+            elif self._model_manager.busy:
+                self._model_manager.stop()
+            elif getattr(getattr(self._library, "generation", None), "busy", False):
+                self._library.generation.stop()
+            elif getattr(getattr(self._library, "vision", None), "busy", False):
+                self._library.vision.stop()
+            elif self._library.research.task:
                 self._library.research.stop()
             elif self._library.knowledge.busy:
                 self._library.knowledge.stop()
@@ -17661,6 +17977,9 @@ class PersistentChatTUI:
             except ValueError as exc:
                 self._append("\n[error] " + str(exc) + "\n")
             return
+        if text == "/model-manager":
+            self._model_manager.open()
+            return
         if text == "/model" or text.startswith("/model "):
             requested = text.removeprefix("/model").strip()
             if requested:
@@ -17703,34 +18022,37 @@ class PersistentChatTUI:
             return
         if text == "/mode" or text.startswith("/mode "):
             requested = text.removeprefix("/mode").strip().lower()
+            modes = _session_reasoning_modes(self.agent)
             if requested:
-                if requested not in REASONING_MODES:
-                    self._append("\n[error] Mode must be standard or thinking.\n")
+                if requested not in modes:
+                    self._append("\n[error] Unavailable mode; choose " + ", ".join(modes) + ".\n")
                     return
                 _apply_session_mode(self.agent, self.cfg, requested)
                 self.ui_state.update_from_agent(self.agent)
                 self._append(f"\n[session] mode {requested}\n")
             else:
                 current = getattr(self.agent, "reasoning_mode", "standard")
-                self._begin_choice("mode", [*REASONING_MODES, CANCEL_CHOICE], current)
+                self._begin_choice("mode", [*modes, CANCEL_CHOICE], current)
             return
         if text == "/effort" or text.startswith("/effort "):
             requested = text.removeprefix("/effort").strip().lower()
+            efforts = _session_effort_choices(self.agent)
             if getattr(self.agent, "reasoning_mode", "standard") != "thinking":
                 self._append(
                     "\n[error] Effort is available in Thinking mode. Use /mode thinking first.\n"
                 )
                 return
             if requested:
-                if requested not in EFFORT_CHOICES:
-                    self._append("\n[error] Effort must be low, medium, or high.\n")
+                if requested not in efforts:
+                    self._append("\n[error] Unavailable effort; choose "
+                                 + ", ".join(efforts) + ".\n")
                     return
                 _apply_session_effort(self.agent, self.cfg, requested)
                 self.ui_state.update_from_agent(self.agent)
                 self._append(f"\n[session] effort {_agent_effort_label(self.agent)}\n")
             else:
                 current = _effort_value_label(self.agent.ollama_code_think)
-                self._begin_choice("effort", [*EFFORT_CHOICES, CANCEL_CHOICE], current)
+                self._begin_choice("effort", [*efforts, CANCEL_CHOICE], current)
             return
         if text == "/settings" or text.startswith("/settings "):
             requested = text.removeprefix("/settings").strip().lower()
@@ -17905,38 +18227,14 @@ class PersistentChatTUI:
 
     def _inline_attachment_paths(self, text: str) -> tuple[Path, ...]:
         """Resolve whitespace-delimited @paths without treating email as an attachment."""
-        paths: list[Path] = []
-        for match in re.finditer(r'(?<!\S)@(?:"([^"\n]+)"|([^\s]+))', text):
-            path_text = (match.group(1) or match.group(2)).rstrip(".,;:!?)")
-            try:
-                path = self._resolve_attachment_path(path_text)
-            except OSError:
-                continue
-            if path not in paths:
-                paths.append(path)
-        return tuple(paths)
+        from klaude_core.chat_images import inline_paths
+
+        return inline_paths(text, Path(getattr(self.agent, "workdir", None) or Path.cwd()))
 
     def _attachment_context(self, paths: tuple[Path, ...]) -> str:
-        parts: list[str] = []
-        for path in paths:
-            if path.is_file():
-                try:
-                    text = path.read_text(encoding="utf-8", errors="replace")[:32768]
-                except OSError as exc:
-                    parts.append(f"[Attached file unavailable: {path} ({exc})]")
-                else:
-                    parts.append(f"[Attached file: {path}]\n{text}")
-            elif path.is_dir():
-                try:
-                    entries = list(sorted(path.rglob("*"), key=lambda item: str(item)))[:200]
-                    listing = "\n".join(
-                        str(item.relative_to(path)) + ("/" if item.is_dir() else "")
-                        for item in entries
-                    )
-                    parts.append(f"[Attached folder: {path}]\n{listing}")
-                except OSError as exc:
-                    parts.append(f"[Attached folder unavailable: {path} ({exc})]")
-        return "\n\n".join(parts)
+        from klaude_core.chat_images import text_attachments
+
+        return text_attachments(paths)
 
     def _enqueue(self, text: str, *, steer: bool = False, force_queue: bool = False) -> None:
         if not text:
@@ -17974,6 +18272,9 @@ class PersistentChatTUI:
             or self._setup_job is not None
             or self._library.knowledge.busy
             or self._library.research.busy
+            or getattr(getattr(self._library, "vision", None), "busy", False)
+                         or getattr(getattr(self._library, "generation", None), "busy", False)
+            or getattr(getattr(self, "_model_manager", None), "busy", False)
             or self._mcp_mutation_pending is not None
             or self._mcp_catalog_unconfirmed
             or self._queue_edit_index is not None
@@ -18036,11 +18337,8 @@ class PersistentChatTUI:
             *getattr(turn, "attachments", ()),
             *self._inline_attachment_paths(user_msg),
         )
-        attachment_context = self._attachment_context(tuple(dict.fromkeys(attachment_paths)))
         generated_model_message = getattr(turn, "model_message", None)
-        agent_message = generated_model_message or (
-            f"{user_msg}\n\n{attachment_context}" if attachment_context else user_msg
-        )
+        agent_message = generated_model_message or user_msg
         self.running = True
         self._turn_id = turn_id
         self._last_lease_renewal = time.monotonic()
@@ -18064,6 +18362,7 @@ class PersistentChatTUI:
             args=(user_msg, self.cancel_requested),
             kwargs={
                 "model_message": agent_message,
+                "attachment_paths": tuple(dict.fromkeys(attachment_paths)),
                 "scope": getattr(turn, "scope", TurnScope.STANDARD),
                 "turn_id": turn_id,
             },
@@ -18151,7 +18450,8 @@ class PersistentChatTUI:
         user_msg: str,
         cancel_event: threading.Event,
         *,
-        model_message: str | None = None,
+        model_message: str | dict[str, Any] | None = None,
+        attachment_paths: tuple[Path, ...] = (),
         read_only: bool = False,
         scope: TurnScope | str | None = None,
         turn_id: str = "",
@@ -18159,6 +18459,7 @@ class PersistentChatTUI:
         assistant_parts: list[str] = []
         streamed = False
         assistant_started = False
+        input_started = False
         pending_metadata: dict[str, dict] = {}
         cancelled = False
         events = None
@@ -18212,13 +18513,31 @@ class PersistentChatTUI:
             if builder:
                 self.agent.set_system_prompt(builder())
             effective_message = model_message if model_message is not None else user_msg
+            self.agent.cancellation_check = cancel_event.is_set
+            context = getattr(self.agent, "image_context", None)
+            if attachment_paths:
+                self._emit("activity", "preparing attachments")
+                if context is not None:
+                    effective_message = context.compose(
+                        str(effective_message), attachment_paths, self.session_id
+                    )
+                else:
+                    attached = self._attachment_context(attachment_paths)
+                    effective_message = str(effective_message) + "\n\n" + attached
+            if attachment_paths and cancel_event.is_set():
+                raise RuntimeError("Attachment preparation cancelled")
             self.memory.start_session_turn(
                 self.session_id,
                 self.client_id,
                 turn_id,
                 user_msg,
                 model_content=(effective_message if effective_message != user_msg else None),
+                **({"runtime": capture_session_runtime(self.agent)}
+                   if isinstance(self.memory, Memory) else {}),
             )
+            input_started = True
+            if isinstance(effective_message, dict) and effective_message.get("image_inputs"):
+                self._emit("chat_images_saved")
             if not cancel_event.is_set():
                 self._emit("activity", "working")
                 self._publish_shared_event("activity", {"text": "working"}, turn_id=turn_id)
@@ -18455,6 +18774,8 @@ class PersistentChatTUI:
                 self._emit("append", f"\n[memory saved] {fact}\n")
         except Exception as exc:
             turn_failed = True
+            if attachment_paths and not input_started:
+                self._emit("attachment_failed", (self.session_id, user_msg, attachment_paths))
             if cancel_event.is_set():
                 cancelled = True
                 self._emit("append", "\n[interrupted]\n")
@@ -18997,14 +19318,19 @@ class PersistentChatTUI:
         )
         spinner_preview = self._spinner_page_open()
         animating = spinner_preview or self.running or self._watching_remote \
+            or self._model_manager.busy \
             or self._library.knowledge.busy \
             or self._library.research.busy \
+            or getattr(getattr(self._library, "vision", None), "busy", False) \
+            or getattr(getattr(self._library, "generation", None), "busy", False) \
             or self._ai_defaults.utility is not None or bool(self._ai_defaults.preparing_utility) \
             or self._setup_job is not None or self._permission_request is not None \
             or self._user_input_request is not None or self._debug_label_started_at is not None
         spinner = self._spinner_preview() if spinner_preview else self.appearance.spinner.animation
         self.application.refresh_interval = min(0.1, spinner.interval / 1000) if animating else 0.1
         self._library.research.poll()
+        self._library.vision.poll()
+        self._library.generation.poll()
         while True:
             try:
                 kind, payload = self._events.get_nowait()
@@ -19012,12 +19338,47 @@ class PersistentChatTUI:
                 break
             if kind == "append":
                 self._append(str(payload))
+            elif kind == "chat_images_saved":
+                self._library.cache.clear()
+                self._append("\n[attached] Image snapshot saved in Library → Media.\n")
+            elif kind == "attachment_failed":
+                session, text, paths = cast(tuple[str, str, tuple[Path, ...]], payload)
+                if session == self.session_id:
+                    for path in paths:
+                        if path not in self._pending_attachments:
+                            self._pending_attachments.append(path)
+                    label = "attachment" if len(paths) == 1 else "attachments"
+                    self._append(f"\n[attached] {len(paths)} {label} retained for retry.\n")
+                    if not self.input.text:
+                        self._set_input(text)
             elif kind == "background_stopped":
                 stopped_key, stopped_identity = cast(tuple[str, str], payload)
+                if stopped_key == "model-manager:ssh-setup-work":
+                    self._model_manager.ssh.setup.stopped(stopped_identity)
+                if stopped_key == "model-manager:dependencies-work":
+                    self._model_manager.dependencies.stopped(stopped_identity)
+                if stopped_key == "model-manager:work":
+                    self._model_manager.stopped(stopped_identity)
                 if stopped_key == "library:research":
                     self._library.research.stopped(stopped_identity)
                 if stopped_key == "library:knowledge":
                     self._library.knowledge.stopped(stopped_identity)
+                if stopped_key == "library:generation":
+                    self._library.generation.stopped(stopped_identity)
+                if stopped_key == "library:vision":
+                    self._library.vision.stopped(stopped_identity)
+            elif kind == "serving_event":
+                serving_id, serving_value = cast(tuple[str, dict], payload)
+                self._model_manager.serving.event(serving_id, serving_value)
+            elif kind == "serving_stopped":
+                serving_id, serving_failed = cast(tuple[str, bool], payload)
+                self._model_manager.serving.stopped(serving_id, serving_failed)
+            elif kind == "background_progress":
+                progress_key, progress_id, progress = cast(tuple[str, str, dict], payload)
+                if progress_key == "model-manager:dependencies-work":
+                    self._model_manager.dependencies.progress(progress_id, progress)
+                if progress_key == "model-manager:work":
+                    self._model_manager.accept_progress(progress_id, progress)
             elif kind == "mcp_mutation_saved":
                 mcp_result = cast(MCPMutationResult, payload)
                 if not self._mcp_mutation_pending or (
@@ -19335,10 +19696,18 @@ class PersistentChatTUI:
                 self._apply_background_result(payload)
             elif kind == "model_connection_saved":
                 self._model_settings.saved(payload)
+            elif kind == "ssh_server_saved":
+                ssh_update, ssh_result, ssh_error = cast(tuple[Any, dict | None, str], payload)
+                if ssh_update.operation == "trust":
+                    self._model_manager.ssh.setup.saved(ssh_update, ssh_result, ssh_error)
+                else:
+                    self._model_manager.ssh.saved(ssh_update, ssh_result, ssh_error)
             elif kind == "model_connection_updated":
                 self._model_settings.updated(payload)
                 if not self._ai_defaults.pending:
                     self._ai_defaults.defaults=None
+            elif kind == "image_generation_saved":
+                self._library.generation.saved(*cast(tuple, payload))
             elif kind == "ai_defaults_saved":
                 self._ai_defaults.saved(payload)
             elif kind == "session_title_saved":
@@ -19596,6 +19965,7 @@ class PersistentChatTUI:
         self._hide_text_theme_preview()
         self.shutting_down = True
         self._background_jobs.close()
+        self._model_manager.serving.jobs.close()
         self._settings_writer.close()
         self._appearance_writer.close()
         self._session_io.close()
@@ -19665,6 +20035,9 @@ class PersistentChatTUI:
             self.application.run(pre_run=prepare_normal_screen)
         finally:
             self._background_jobs.close(wait=True)
+            if notice := self._library.generation.finish_shutdown():
+                output.write_raw("\r\n[image] " + notice + "\r\n")
+            self._model_manager.serving.jobs.close(wait=True)
             if not self._settings_writer.close(wait=True):
                 output.write_raw(
                     "\r\n[warning] Preferences save unconfirmed; verify next launch.\r\n"
@@ -20096,11 +20469,22 @@ def chat(
             _set_agent_session_context(agent, session_id)
             _clear_plain_session_view()
             console.print(Text(_restored_transcript(target, turns, console.width - 1)))
+            try:
+                if _restore_session_runtime(agent, cfg, memory.session_runtime(target), turns):
+                    line_selection_required = False
+                    ui_state.update_from_agent(agent)
+            except Exception as exc:
+                line_selection_required = True
+                console.print(Text(f"Model selection required: {exc}"))
             continue
         if user_msg == "/library" or user_msg.startswith("/library "):
             console.print("Library's navigation workspace is available in interactive klaude. "
                           "Use klaude sessions, klaude sessions --archived, klaude libraries, "
                           "and klaude query for line-oriented browsing.")
+            continue
+        if user_msg == "/model-manager":
+            console.print("Open /model-manager in interactive klaude; use klaude model-manager "
+                          "--help for download, serving and diagnostic commands.")
             continue
         if user_msg == "/model" or user_msg.startswith("/model "):
             target = user_msg.removeprefix("/model").strip()
@@ -20111,10 +20495,8 @@ def chat(
                     f"model {_agent_model_ref(agent)} · "
                     f"{getattr(agent, 'reasoning_mode', 'standard')} · conversation retained"
                 )
-                memory.log_turn(
-                    session_id,
-                    "system",
-                    {"event": "session_update", "detail": update},
+                memory.record_session_update(
+                    session_id, "", update, runtime=capture_session_runtime(agent),
                 )
                 console.print(
                     f"[green]switched to {agent.model}[/] "
@@ -20130,13 +20512,9 @@ def chat(
                 continue
             if _choose_effort(agent, cfg, target) is not None:
                 ui_state.update_from_agent(agent)
-                memory.log_turn(
-                    session_id,
-                    "system",
-                    {
-                        "event": "session_update",
-                        "detail": f"effort {_agent_effort_label(agent)}",
-                    },
+                memory.record_session_update(
+                    session_id, "", f"effort {_agent_effort_label(agent)}",
+                    runtime=capture_session_runtime(agent),
                 )
                 console.print(f"[green]effort: {_agent_effort_label(agent)}[/]")
             continue
@@ -20144,13 +20522,9 @@ def chat(
             target = user_msg.removeprefix("/mode").strip()
             if _choose_mode(agent, cfg, target) is not None:
                 ui_state.update_from_agent(agent)
-                memory.log_turn(
-                    session_id,
-                    "system",
-                    {
-                        "event": "session_update",
-                        "detail": f"mode {agent.reasoning_mode}",
-                    },
+                memory.record_session_update(
+                    session_id, "", f"mode {agent.reasoning_mode}",
+                    runtime=capture_session_runtime(agent),
                 )
                 console.print(f"[green]mode: {agent.reasoning_mode}[/]")
             continue
@@ -20170,23 +20544,16 @@ def chat(
         if _handle_explicit_memory_request(user_msg, agent, memory, session_id):
             continue
         model_message = None
-        if line_attachments:
-            attachment_parts: list[str] = []
-            for path in tuple(dict.fromkeys(line_attachments)):
-                if path.is_file():
-                    attachment_parts.append(
-                        f"[Attached file: {path}]\n"
-                        + path.read_text(encoding="utf-8", errors="replace")[:32768]
-                    )
-                elif path.is_dir():
-                    entries = sorted(path.rglob("*"), key=lambda item: str(item))[:200]
-                    listing = "\n".join(
-                        str(item.relative_to(path)) + ("/" if item.is_dir() else "")
-                        for item in entries
-                    )
-                    attachment_parts.append(f"[Attached folder: {path}]\n{listing}")
-            if attachment_parts:
-                model_message = user_msg + "\n\n" + "\n\n".join(attachment_parts)
+        from klaude_core.chat_images import inline_paths
+
+        paths = tuple(dict.fromkeys((*line_attachments,
+                                     *inline_paths(user_msg, Path(agent.workdir)))))
+        if paths:
+            try:
+                model_message = agent.image_context.compose(user_msg, paths, session_id)
+            except (OSError, ValueError) as exc:
+                console.print(Text(str(exc), style="red"))
+                continue
             line_attachments.clear()
         _render(
             agent,

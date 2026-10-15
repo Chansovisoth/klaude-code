@@ -131,6 +131,14 @@ class ArtifactStore:
                     "tags TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0, "
                     "revision INTEGER NOT NULL DEFAULT 1, content BLOB NOT NULL)"
                 )
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS generated_images (artifact TEXT UNIQUE NOT NULL, "
+                    "job TEXT UNIQUE NOT NULL, provenance TEXT NOT NULL)"
+                )
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS image_tags (artifact TEXT UNIQUE NOT NULL, "
+                    "generated_tags TEXT NOT NULL, provenance TEXT NOT NULL)"
+                )
                 db.commit()
             try:
                 yield db
@@ -151,8 +159,20 @@ class ArtifactStore:
         for key in ("name", "filename", "origin", "session", "job", "model"):
             result[key] = plain(str(result[key]))
         result["tags"] = [plain(str(tag), 40) for tag in result["tags"][:20]]
+        result["ai_tags"] = [plain(str(tag), 40) for tag in
+                             json.loads(result.get("ai_tags", "[]"))[:20]]
         result["date"] = time.strftime("%Y-%m-%d %H:%M", time.localtime(result["created"]))
         return result
+
+    @staticmethod
+    def tag_columns(db: sqlite3.Connection) -> tuple[str, str]:
+        # Old stores remain readable without a migration or other write on browse.
+        exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='image_tags' "
+                            "AND type='table'").fetchone()
+        return (
+            "coalesce(generated_tags,'[]') AS ai_tags",
+            " LEFT JOIN image_tags ON image_tags.artifact=artifacts.id",
+        ) if exists else ("'[]' AS ai_tags", "")
 
     def listing(
         self,
@@ -177,20 +197,21 @@ class ArtifactStore:
         if format:
             where += " AND instr(mime,?)=1"
             values.append(format[:100])
-        if query:
-            where += (
-                " AND (instr(lower(name),lower(?))>0 OR "
-                "instr(lower(tags),lower(?))>0 OR instr(lower(origin),lower(?))>0 "
-                "OR instr(lower(mime),lower(?))>0)"
-            )
-            values += [query[:200]] * 4
         order = {"newest": "created DESC", "oldest": "created ASC", "name": "name COLLATE NOCASE"}[
             sort
         ]
         with self.database() as db:
+            ai, join = self.tag_columns(db)
+            if query:
+                columns = ["name", "tags", "origin", "mime"] + (["generated_tags"] if join else [])
+                where += " AND (" + " OR ".join(
+                    f"instr(lower({column}),lower(?))>0" for column in columns
+                ) + ")"
+                values += [query[:200]] * len(columns)
             rows = db.execute(
-                "SELECT rowid,id,kind,name,filename,mime,size,sha256,created,origin,"
-                "session,job,model,width,height,tags,archived,revision FROM artifacts "
+                "SELECT artifacts.rowid,id,kind,name,filename,mime,size,sha256,created,origin,"
+                "session,job,model,width,height,tags,archived,revision," + ai
+                + " FROM artifacts" + join + " "
                 "WHERE " + where + " ORDER BY " + order + ",id LIMIT ? OFFSET ?",
                 (*values, PAGE_SIZE + 1, max(0, min(offset, 1_000_000))),
             ).fetchall()
@@ -203,15 +224,63 @@ class ArtifactStore:
         if not ID.fullmatch(identity):
             raise ValueError("Invalid artifact ID")
         with self.database() as db:
+            ai, join = self.tag_columns(db)
             row = db.execute(
-                "SELECT rowid,id,kind,name,filename,mime,size,sha256,created,origin,"
-                "session,job,model,width,height,tags,archived,revision "
-                "FROM artifacts WHERE id=?",
+                "SELECT artifacts.rowid,id,kind,name,filename,mime,size,sha256,created,origin,"
+                "session,job,model,width,height,tags,archived,revision," + ai + " "
+                "FROM artifacts" + join + " WHERE id=?",
                 (identity,),
             ).fetchone()
         if row is None:
             raise ValueError("Artifact no longer exists; reload the list")
         return self.metadata(row)
+
+    def store_generated_image(self, data: bytes, spec: dict, remote: str) -> dict[str, Any]:
+        """Atomically retain pixels and private reviewed generation provenance."""
+        with self.database(write=True) as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute(
+                "SELECT artifact FROM generated_images WHERE job=?", (spec["id"],)
+            ).fetchone()
+            if existing is not None:
+                return self.get(existing["artifact"])
+            item = self._insert(
+                data, "media", "generated-" + spec["id"][:12] + ".png",
+                "Generated image · stable-diffusion.cpp", spec["session"], spec["id"],
+                spec["settings"]["model"], db=db,
+            )
+            db.execute(
+                "INSERT INTO generated_images (artifact,job,provenance) VALUES (?,?,?)",
+                (item["id"], spec["id"], json.dumps({**spec, "remote_id": remote})),
+            )
+        return item
+
+    def generated_for_job(self, identity: str) -> dict[str, Any] | None:
+        regular_path(self.path)
+        if not self.path.exists():
+            return None
+        with self.database() as db:
+            if not db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='generated_images'"
+            ).fetchone():
+                return None
+            row = db.execute(
+                "SELECT artifact FROM generated_images WHERE job=?", (identity,)
+            ).fetchone()
+        return self.get(row[0]) if row is not None else None
+
+    def generation_info(self, identity: str) -> dict[str, Any]:
+        """Read provenance only on explicit generated-image inspection."""
+        self.get(identity)
+        with self.database() as db:
+            if not db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='generated_images'"
+            ).fetchone():
+                return {}
+            row = db.execute(
+                "SELECT provenance FROM generated_images WHERE artifact=?", (identity,)
+            ).fetchone()
+        return json.loads(row[0]) if row is not None else {}
 
     def _insert(
         self,
@@ -300,7 +369,9 @@ class ArtifactStore:
     def change(
         self, identity: str, revision: int, operation: str, value: str = ""
     ) -> dict[str, Any]:
-        if not ID.fullmatch(identity) or operation not in {"tags", "archive", "restore", "delete"}:
+        if not ID.fullmatch(identity) or operation not in {
+            "tags", "clear_ai_tags", "archive", "restore", "delete"
+        }:
             raise ValueError("Unknown artifact change")
         tags = manual_tags(value) if operation == "tags" else []
         with self.database(write=True) as db:
@@ -318,18 +389,78 @@ class ArtifactStore:
             ):
                 raise ValueError("Archive state changed; reload before retrying")
             if operation == "delete":
+                db.execute("DELETE FROM generated_images WHERE artifact=?", (identity,))
+                db.execute("DELETE FROM image_tags WHERE artifact=?", (identity,))
                 db.execute("DELETE FROM artifacts WHERE id=?", (identity,))
+            elif operation == "clear_ai_tags":
+                db.execute("DELETE FROM image_tags WHERE artifact=?", (identity,))
+                db.execute("UPDATE artifacts SET revision=revision+1 WHERE id=?", (identity,))
             elif operation == "tags":
                 db.execute(
                     "UPDATE artifacts SET tags=?,revision=revision+1 WHERE id=?",
                     (json.dumps(tags, ensure_ascii=False), identity),
                 )
+                prior = db.execute("SELECT generated_tags,provenance FROM image_tags "
+                                   "WHERE artifact=?", (identity,)).fetchone()
+                if prior:
+                    manual = {tag.casefold() for tag in tags}
+                    retained = [tag for tag in json.loads(prior[0]) if tag.casefold() not in manual]
+                    sources = json.loads(prior[1])
+                    db.execute("UPDATE image_tags SET generated_tags=?,provenance=? "
+                               "WHERE artifact=?",
+                               (json.dumps(retained), json.dumps({t: sources[t] for t in retained}),
+                                identity))
             else:
                 db.execute(
                     "UPDATE artifacts SET archived=?,revision=revision+1 WHERE id=?",
                     (int(operation == "archive"), identity),
                 )
         return {"id": identity} if operation == "delete" else self.get(identity)
+
+    def tagging_info(self, identity: str) -> dict:
+        self.get(identity)
+        with self.database() as db:
+            _, join = self.tag_columns(db)
+            if not join:
+                return {}
+            row = db.execute("SELECT provenance FROM image_tags WHERE artifact=?",
+                             (identity,)).fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def apply_ai_tags(
+        self, identity: str, revision: int, checksum: str, tags: list[str], provenance: dict
+    ) -> dict:
+        from .image_tags import checked_tags
+
+        tags = checked_tags(tags)
+        encoded = json.dumps(provenance)
+        if len(encoded) > 4000:
+            raise ValueError("Tag provenance exceeds its bound")
+        with self.database(write=True) as db:
+            db.execute("BEGIN IMMEDIATE")
+            item = db.execute("SELECT revision,sha256,kind,archived,tags FROM artifacts WHERE id=?",
+                              (identity,)).fetchone()
+            if (item is None or item["revision"] != revision or item["sha256"] != checksum
+                    or item["kind"] != "media" or item["archived"]):
+                raise ValueError("Image changed; reload and review tags again")
+            old = db.execute("SELECT generated_tags,provenance FROM image_tags WHERE artifact=?",
+                             (identity,)).fetchone()
+            saved, sources = (json.loads(old[0]), json.loads(old[1])) if old else ([], {})
+            manual = {tag.casefold() for tag in json.loads(item["tags"])}
+            saved = [tag for tag in saved if tag.casefold() not in manual]
+            known = {tag.casefold() for tag in saved} | manual
+            for tag in tags:
+                if tag.casefold() not in known:
+                    saved.append(tag)
+                    sources[tag] = provenance
+                    known.add(tag.casefold())
+            if len(saved) > 20:
+                raise ValueError("Keep at most 20 AI tags; clear existing AI tags before retrying")
+            sources = {tag: sources[tag] for tag in saved}
+            db.execute("INSERT OR REPLACE INTO image_tags VALUES (?,?,?)",
+                       (identity, json.dumps(saved), json.dumps(sources)))
+            db.execute("UPDATE artifacts SET revision=revision+1 WHERE id=?", (identity,))
+        return self.get(identity)
 
     def preview(self, identity: str) -> dict[str, Any]:
         item = self.get(identity)

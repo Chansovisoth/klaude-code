@@ -7,12 +7,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .generation_panel import GenerationPanel
 from .library_artifact_panel import ArtifactPanel
 from .library_inventory import PAGE_SIZE, public_text
 from .library_knowledge_panel import KnowledgePanel
 from .research_panel import ResearchPanel
 from .session_actions import LibrarySessionChange
 from .settings_panel import PanelAction, PanelPage, PanelRow, RowControl, RowKind
+from .vision_panel import VisionPanel
 
 VIEWS = ("Sessions", "Knowledge", "Documents", "Research", "Media", "Archive")
 
@@ -45,6 +47,8 @@ class LibraryWorkspace:
         self.artifacts = ArtifactPanel(self)
         self.knowledge = KnowledgePanel(self)
         self.research = ResearchPanel(self)
+        self.vision = VisionPanel(self)
+        self.generation = GenerationPanel(self)
 
     @property
     def visible(self) -> bool:
@@ -159,6 +163,10 @@ class LibraryWorkspace:
         self.show()
 
     def page(self) -> PanelPage:
+        if self.generation.active:
+            return self.generation.page()
+        if self.vision.active:
+            return self.vision.page()
         if self.research.active and not self.artifacts.active:
             return self.research.page()
         if self.knowledge.active:
@@ -472,6 +480,12 @@ class LibraryWorkspace:
         )
 
     def action(self, action: PanelAction) -> None:
+        if action.kind.startswith("library-generation-"):
+            self.generation.handle(action)
+            return
+        if action.kind.startswith("library-vision-"):
+            self.vision.handle(action)
+            return
         if action.kind.startswith("library-research-"):
             self.research.handle(action)
             return
@@ -555,6 +569,12 @@ class LibraryWorkspace:
             self.show()
 
     def answer(self, kind: str, value: str | None) -> None:
+        if kind.startswith("generation-"):
+            self.generation.answer(value, kind.removeprefix("generation-"))
+            return
+        if kind.startswith("vision-"):
+            self.vision.answer(value, kind.removeprefix("vision-"))
+            return
         if kind.startswith("research-"):
             self.research.answer(kind.removeprefix("research-"), value)
             return

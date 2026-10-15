@@ -13,7 +13,7 @@ import json
 import re
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -88,7 +88,7 @@ def normalize_token_usage(metadata: object) -> tuple[int, int] | None:
 
 def is_chat_model_id(backend: str, model_id: str) -> bool:
     """Conservatively exclude endpoint-specific models from chat pickers."""
-    if backend not in {"openai_api", "openai_codex", "openrouter"}:
+    if backend not in {"openai_api", "openai_codex", "openrouter", "gemini_api"}:
         return True
     value = model_id.casefold()
     return not any(
@@ -118,11 +118,31 @@ class ModelCapabilities:
     tools_evidence: str = "unknown"
     thinking_types: tuple[str, ...] | None = None
     max_output_tokens: int | None = None
+    supports_images: bool | None = None
+    images_evidence: str = "unknown"
 
     @property
     def requires_thinking(self) -> bool:
         return self.thinking_types is not None and bool(self.thinking_types) \
             and "disabled" not in self.thinking_types
+
+
+def gemini_capabilities(model: str, current: ModelCapabilities | None = None) -> ModelCapabilities:
+    """Apply exact reviewed native capabilities without catalog discovery or model changes."""
+    from .image_profiles import GEMINI_ROOT, gemini_image_profile
+
+    caps = current or ModelCapabilities()
+    profile = gemini_image_profile(GEMINI_ROOT, model)
+    if profile is None:
+        return caps
+    return replace(
+        caps, supports_images=True, images_evidence="official-profile:" + profile["reviewed"],
+        thinking_types=profile["thinking_types"], effort_levels=profile["effort_levels"],
+        context_window=min(caps.context_window or profile["context_window"],
+                           profile["context_window"]),
+        max_output_tokens=min(caps.max_output_tokens or profile["max_output_tokens"],
+                              profile["max_output_tokens"]),
+    )
 
 
 @dataclass(frozen=True)
@@ -217,6 +237,9 @@ def models_from_records(entries: object) -> list[ModelInfo]:
                     for level in thinking) else None,
                 max_output_tokens=output if type(output) is int
                 and 0 < output <= 2_000_000 else None,
+                supports_images=item.get("supports_images")
+                if type(item.get("supports_images")) is bool else None,
+                images_evidence=str(item.get("images_evidence") or "unknown")[:128],
             ), released_at=released, connection_id=connection_id,
             connection_revision=str(item.get("connection_revision") or ""),
             connection_source=item.get("connection_source", "")
@@ -239,6 +262,8 @@ def model_records(models: list[ModelInfo]) -> list[dict[str, Any]]:
             "thinking_types": list(item.capabilities.thinking_types)
             if item.capabilities.thinking_types is not None else None,
             "max_output_tokens": item.capabilities.max_output_tokens,
+            "supports_images": item.capabilities.supports_images,
+            "images_evidence": item.capabilities.images_evidence,
             "released_at": item.released_at,
             "connection_id": item.connection_id,
             "connection_revision": item.connection_revision,
@@ -524,6 +549,9 @@ class OpenAIRuntime(_CancelableResponseRuntime):
         self.last_chat_metadata: dict[str, Any] = {}
         self._prompt_cache_key = self._cache_key(uuid.uuid4().hex)
         self._compaction_threshold: int | None = None
+        self.image_model = ""
+        self._image_transport: Any = None
+        self.stream_response_limit, self.stream_event_limit = 16_000_000, 1_000_000
         self._init_active_response()
 
     @staticmethod
@@ -560,17 +588,67 @@ class OpenAIRuntime(_CancelableResponseRuntime):
 
     def fork_for_child(self) -> OpenAIRuntime:
         """Keep credentials while isolating mutable stream and usage state."""
-        return OpenAIRuntime(self.api_key, base_url=self.base_url,
-                             request_timeout=self.request_timeout)
+        child = OpenAIRuntime(self.api_key, base_url=self.base_url,
+                              request_timeout=self.request_timeout)
+        child.image_model = self.image_model
+        return child
+
+    def cancel_active(self) -> bool:
+        transport = getattr(self, "_image_transport", None)
+        cancelled = bool(transport and transport.cancel_active())
+        return super().cancel_active() or cancelled
+
+    def close(self) -> None:
+        self.cancel_active()
+        if getattr(self, "_image_transport", None) is not None:
+            self._image_transport.close()
+
+    def _request_input(self, model: str, messages: list[dict]) -> list[dict]:
+        images = any(message.get("image_content") is not None for message in messages)
+        if images and (self.backend != "openai_api" or self.image_model != model):
+            raise RuntimeError("Image support has not been verified for this model")
+        return self._input(messages, include_images=images)
 
     def _response_create(self, **kwargs: Any):
+        if any(isinstance(item.get("content"), list) and any(
+            part.get("type") == "input_image" for part in item["content"]
+            if isinstance(part, dict)
+        ) for item in kwargs.get("input", [])):
+            from .image_profiles import OPENAI_ROOT, openai_image_profile
+            from .openai_images import OpenAIImageTransport
+
+            model = kwargs.get("model", "")
+            endpoint = self.base_url or OPENAI_ROOT
+            profile = openai_image_profile(endpoint, model)
+            if self.image_model != model or profile is None:
+                raise RuntimeError("Image support has not been verified for this model/endpoint")
+            if kwargs.get("reasoning"):
+                raise RuntimeError("This reviewed OpenAI image model requires Standard mode")
+            limit = kwargs.get("max_output_tokens")
+            limit = limit if type(limit) is int and limit > 0 else 2048
+            if limit > profile["max_output_tokens"]:
+                raise RuntimeError("Output budget exceeds this image model's documented limit")
+            if self._image_transport is None:
+                self._image_transport = OpenAIImageTransport(
+                    endpoint, self.api_key, self.request_timeout or 600,
+                )
+            transport = self._image_transport
+            transport.stream_response_limit = self.stream_response_limit
+            transport.stream_event_limit = self.stream_event_limit
+            kwargs["max_output_tokens"] = limit
+            return transport.create(kwargs)
         if self.request_timeout is not None and not kwargs.get("stream"):
             with self._client() as client:
                 return client.responses.create(**kwargs)
         return self._client().responses.create(**kwargs)
 
     @classmethod
-    def _input(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _input(
+        cls, messages: list[dict[str, Any]], *, include_images: bool = False,
+    ) -> list[dict[str, Any]]:
+        from .image_content import image_parts
+
+        count = 0
         # Responses function calls are a protocol pair. History compaction,
         # cancellation, or restoration must never send only one side: an
         # orphaned function_call_output makes the entire conversation fail.
@@ -589,6 +667,10 @@ class OpenAIRuntime(_CancelableResponseRuntime):
         complete_call_ids = call_ids & output_ids
         result: list[dict[str, Any]] = []
         for message in messages:
+            parts = image_parts(message) if include_images else []
+            count += len(parts)
+            if count > 2:
+                raise ValueError("Model requests accept at most two images")
             role = message.get("role")
             provider_items = cls._provider_input_items(message)
             has_provider_assistant_items = any(
@@ -631,7 +713,13 @@ class OpenAIRuntime(_CancelableResponseRuntime):
                         }
                     )
             elif role in {"system", "user", "assistant"}:
-                result.append({"role": role, "content": _content(message)})
+                content: Any = _content(message)
+                if parts:
+                    content = [
+                        {"type": "input_image", "detail": "auto", "image_url":
+                         f"data:{part['mime_type']};base64,{part['data']}"} for part in parts
+                    ] + [{"type": "input_text", "text": _content(message)}]
+                result.append({"role": role, "content": content})
         compaction_indexes = [
             index for index, item in enumerate(result) if item.get("type") == "compaction"
         ]
@@ -646,7 +734,15 @@ class OpenAIRuntime(_CancelableResponseRuntime):
             for item in result[:latest]
             if item.get("role") in {"system", "developer"}
         ]
-        return [*current_instructions, *result[latest:]]
+        retained_images = [
+            {"role": "user", "content": [
+                {"type": "input_text", "text": "Retained image pixels from this session."},
+                *[part for part in item["content"] if part.get("type") == "input_image"],
+            ]}
+            for item in result[:latest] if isinstance(item.get("content"), list)
+            and any(part.get("type") == "input_image" for part in item["content"])
+        ] if include_images else []
+        return [*current_instructions, result[latest], *retained_images, *result[latest + 1:]]
 
     @staticmethod
     def _provider_input_items(message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -675,7 +771,7 @@ class OpenAIRuntime(_CancelableResponseRuntime):
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "model": model,
-            "input": self._input(messages),
+            "input": self._request_input(model, messages),
             "tools": self._tools(tools),
             "include": ["reasoning.encrypted_content"],
             # Klaude is local-first. OpenAI Responses are retained by default,
@@ -703,7 +799,7 @@ class OpenAIRuntime(_CancelableResponseRuntime):
     ):
         kwargs: dict[str, Any] = {
             "model": model,
-            "input": self._input(messages),
+            "input": self._request_input(model, messages),
             "stream": True,
             "store": False,
             "include": ["reasoning.encrypted_content"],
@@ -711,6 +807,8 @@ class OpenAIRuntime(_CancelableResponseRuntime):
         }
         if tools:
             kwargs["tools"] = self._tools(tools)
+        if options and type(options.get("num_predict")) is int and options["num_predict"] > 0:
+            kwargs["max_output_tokens"] = options["num_predict"]
         if think not in {None, False, "off", "auto"}:
             kwargs["reasoning"] = {"effort": str(think)}
         response_stream = self._track_active_response(self._response_create(**kwargs))
@@ -964,7 +1062,11 @@ class OpenAIRuntime(_CancelableResponseRuntime):
 def chat_completion_messages(
     messages: list[dict[str, Any]], *, include_reasoning: bool = False,
     deepseek_scope: tuple[str, str] | None = None,
+    include_images: bool = False,
 ) -> list[dict[str, Any]]:
+    from .image_content import image_parts
+
+    image_count = 0
     call_ids = {
         str(call.get("id", ""))
         for message in messages
@@ -980,6 +1082,10 @@ def chat_completion_messages(
     complete_call_ids = call_ids & output_ids
     result: list[dict[str, Any]] = []
     for message in messages:
+        parts = image_parts(message) if include_images else []
+        image_count += len(parts)
+        if image_count > 2:
+            raise ValueError("Model requests accept at most two images")
         role = str(message.get("role", ""))
         if role == "tool":
             call_id = str(message.get("tool_call_id", ""))
@@ -991,6 +1097,12 @@ def chat_completion_messages(
         if role not in {"system", "user", "assistant"}:
             continue
         item: dict[str, Any] = {"role": role, "content": _content(message)}
+        if parts:
+            item["content"] = [
+                {"type": "image_url", "image_url": {
+                    "url": f"data:{part['mime_type']};base64,{part['data']}",
+                }} for part in parts
+            ] + [{"type": "text", "text": _content(message)}]
         calls = message.get("tool_calls")
         if role == "assistant" and isinstance(calls, list) and calls:
             complete_calls = []
@@ -1080,6 +1192,8 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
             raise ValueError("OpenRouter API key is not configured.")
         self.api_key = api_key
         self.last_chat_metadata: dict[str, Any] = {}
+        self.image_model = ""
+        self._image_transport: Any = None
         self._init_active_response()
 
     def _client(self):
@@ -1095,11 +1209,33 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         )
 
     def fork_for_child(self) -> OpenRouterRuntime:
-        return OpenRouterRuntime(self.api_key, base_url=self.base_url,
-                                 request_timeout=self.request_timeout)
+        child = OpenRouterRuntime(self.api_key, base_url=self.base_url,
+                                  request_timeout=self.request_timeout)
+        child.image_model = self.image_model
+        return child
+
+    def _image_client(self, model: str, messages: list[dict]) -> Any:
+        if not any(message.get("image_content") is not None for message in messages):
+            return None
+        if self.image_model != model:
+            raise RuntimeError("Image support has not been verified for this model")
+        if self._image_transport is None:
+            from .openrouter_images import OpenRouterImages
+
+            self._image_transport = OpenRouterImages(
+                self.base_url, self.api_key, self.request_timeout or 600,
+            )
+        self._image_transport.image_model = model
+        return self._image_transport
+
+    def cancel_active(self) -> bool:
+        image_cancelled = bool(self._image_transport and self._image_transport.cancel_active())
+        return super().cancel_active() or image_cancelled
 
     def close(self) -> None:
         self.cancel_active()
+        if self._image_transport is not None:
+            self._image_transport.close()
         if self._bounded_client is not None:
             self._bounded_client.close()
 
@@ -1194,6 +1330,12 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         options: dict[str, Any] | None = None,
         think: bool | str | None = None,
     ) -> dict[str, Any]:
+        image_client = self._image_client(model, messages)
+        if image_client is not None:
+            try:
+                return image_client.chat(model, messages, tools, options, think)
+            finally:
+                self.last_chat_metadata = dict(image_client.last_chat_metadata)
         response_stream = self._track_active_response(
             self._stream(model, messages, tools, think, options=options)
         )
@@ -1239,6 +1381,10 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
             self._clear_active_response(response_stream)
         if not completed:
             raise RuntimeError("OpenRouter stream ended without a completion reason.")
+        if finish_reason == "length":
+            raise RuntimeError("OpenRouter output limit reached")
+        if finish_reason not in {"stop", "tool_calls"}:
+            raise RuntimeError("OpenRouter response did not complete successfully")
         assembled_calls = self._validated_calls(calls)
         self.last_chat_metadata = {
             "provider": self.backend,
@@ -1265,6 +1411,13 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         options: dict[str, Any] | None = None,
         think: bool | str | None = None,
     ):
+        image_client = self._image_client(model, messages)
+        if image_client is not None:
+            try:
+                yield from image_client.chat_stream(model, messages, tools, options, think)
+            finally:
+                self.last_chat_metadata = dict(image_client.last_chat_metadata)
+            return
         response_stream = self._track_active_response(
             self._stream(model, messages, tools, think, options=options)
         )
@@ -1273,6 +1426,7 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         reasoning_details: list[dict[str, Any]] = []
         calls: dict[int, dict[str, Any]] = {}
         completed = False
+        finish_reason = ""
         try:
             for chunk in response_stream:
                 self._raise_chunk_error(chunk)
@@ -1282,6 +1436,7 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
                 for choice in choices:
                     if self._attribute(choice, "finish_reason", None) is not None:
                         completed = True
+                        finish_reason = str(self._attribute(choice, "finish_reason"))
                     delta = self._attribute(choice, "delta", {}) or {}
                     reasoning_details.extend(
                         self._reasoning_details(
@@ -1304,6 +1459,12 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
                             current["function"]["name"] += str(name)
                         if arguments := self._attribute(function, "arguments", ""):
                             current["function"]["arguments"] += str(arguments)
+            if not completed:
+                raise RuntimeError("OpenRouter stream ended without a completion reason.")
+            if finish_reason == "length":
+                raise RuntimeError("OpenRouter output limit reached")
+            if finish_reason not in {"stop", "tool_calls"}:
+                raise RuntimeError("OpenRouter response did not complete successfully")
             assembled_calls = self._validated_calls(calls)
             if reasoning_details:
                 yield {
@@ -1636,6 +1797,7 @@ class GeminiRuntime(_CancelableResponseRuntime):
     """google-genai adapter using manual function calling (no auto execution)."""
 
     backend = "gemini_api"
+    base_url = "https://generativelanguage.googleapis.com"
 
     def __init__(self, api_key: str, *, request_timeout: float | None = None):
         self.request_timeout=request_timeout
@@ -1644,6 +1806,9 @@ class GeminiRuntime(_CancelableResponseRuntime):
             raise ValueError("Gemini API key is not configured.")
         self.api_key = api_key
         self.last_chat_metadata: dict[str, Any] = {}
+        self.image_model = ""
+        self._image_transport: Any = None
+        self.stream_response_limit, self.stream_event_limit = 16_000_000, 1_000_000
         self._init_active_response()
 
     def _sdk(self):
@@ -1656,10 +1821,45 @@ class GeminiRuntime(_CancelableResponseRuntime):
 
     def fork_for_child(self) -> GeminiRuntime:
         """Keep the API credential while isolating mutable response state."""
-        return GeminiRuntime(self.api_key,request_timeout=self.request_timeout)
+        child = GeminiRuntime(self.api_key,request_timeout=self.request_timeout)
+        child.image_model = self.image_model
+        return child
+
+    def _image_client(self, model: str, messages: list[dict]) -> Any:
+        images = any(m.get("image_content") is not None for m in messages)
+        continuation = any(m.get("gemini_continuation") for m in messages)
+        from .image_profiles import gemini_image_profile
+
+        profile = gemini_image_profile(self.base_url, model)
+        if not images and not continuation and (
+            profile is None or profile["thinking_control"] != "level"
+        ):
+            return None
+        if profile is None:
+            if images:
+                raise RuntimeError("No reviewed image profile for this Gemini model/endpoint")
+            return None
+        if images and self.image_model != model:
+            raise RuntimeError("Image support has not been verified for this model")
+        if self._image_transport is None:
+            from .gemini_images import GeminiImages
+
+            self._image_transport = GeminiImages(self.api_key, self.request_timeout or 600)
+        client = self._image_transport
+        client.image_model = self.image_model
+        client.stream_response_limit, client.stream_event_limit = (
+            self.stream_response_limit, self.stream_event_limit,
+        )
+        return client
+
+    def cancel_active(self) -> bool:
+        cancelled = bool(self._image_transport and self._image_transport.cancel_active())
+        return super().cancel_active() or cancelled
 
     def close(self) -> None:
         self.cancel_active()
+        if self._image_transport is not None:
+            self._image_transport.close()
         if self._bounded_client is not None:
             self._bounded_client.close()
 
@@ -1756,6 +1956,12 @@ class GeminiRuntime(_CancelableResponseRuntime):
         options: dict[str, Any] | None = None,
         think: bool | str | None = None,
     ) -> dict[str, Any]:
+        image_client = self._image_client(model, messages)
+        if image_client is not None:
+            try:
+                return image_client.chat(model, messages, tools, options, think)
+            finally:
+                self.last_chat_metadata = dict(image_client.last_chat_metadata)
         response = self._request(model, messages, tools, False, think, options=options)
         self.last_chat_metadata = {
             "provider": "gemini_api",
@@ -1795,6 +2001,13 @@ class GeminiRuntime(_CancelableResponseRuntime):
         options: dict[str, Any] | None = None,
         think: bool | str | None = None,
     ):
+        image_client = self._image_client(model, messages)
+        if image_client is not None:
+            try:
+                yield from image_client.chat_stream(model, messages, tools, options, think)
+            finally:
+                self.last_chat_metadata = dict(image_client.last_chat_metadata)
+            return
         response_stream = self._track_active_response(
             self._request(model, messages, tools, True, think, options=options)
         )
@@ -1833,6 +2046,7 @@ class GeminiRuntime(_CancelableResponseRuntime):
 
 def discover_openai_models(api_key: str) -> list[ModelInfo]:
     """Return chat-capable OpenAI API models; an unavailable API is non-fatal."""
+    from .image_profiles import OPENAI_IMAGE_REVIEW, OPENAI_ROOT, openai_image_profile
     if not api_key:
         return []
     try:
@@ -1853,6 +2067,12 @@ def discover_openai_models(api_key: str) -> list[ModelInfo]:
                     "openai_api",
                     model_id,
                     model_id,
+                    capabilities=ModelCapabilities(
+                        supports_images=True if openai_image_profile(OPENAI_ROOT, model_id)
+                        else None,
+                        images_evidence="official-profile:" + OPENAI_IMAGE_REVIEW
+                        if openai_image_profile(OPENAI_ROOT, model_id) else "unknown",
+                    ),
                     released_at=int(getattr(item, "created", 0) or 0),
                 )
             )
@@ -1861,6 +2081,8 @@ def discover_openai_models(api_key: str) -> list[ModelInfo]:
 
 def discover_openrouter_models(api_key: str) -> list[ModelInfo]:
     """Return text chat models from OpenRouter's authenticated public catalog."""
+    from .image_content import declared_images
+
     if not api_key:
         return []
     try:
@@ -1885,6 +2107,12 @@ def discover_openrouter_models(api_key: str) -> list[ModelInfo]:
             item, "architecture", None
         )
         architecture = _metadata_mapping(architecture_value)
+        images = declared_images({"architecture": {
+            **architecture,
+            "input_modalities": architecture.get("input_modalities",
+                                                  getattr(architecture_value,
+                                                          "input_modalities", None)),
+        }})
         output_modalities = architecture.get("output_modalities") or getattr(
             architecture_value, "output_modalities", None
         )
@@ -1915,6 +2143,8 @@ def discover_openrouter_models(api_key: str) -> list[ModelInfo]:
                 capabilities=ModelCapabilities(
                     effort_levels=effort_levels,
                     supports_tools=(not supported or "tools" in supported),
+                    supports_images=images,
+                    images_evidence="catalog:input_modalities" if images is not None else "unknown",
                     context_window=(
                         int(context_length)
                         if isinstance(context_length, int) and context_length > 0
@@ -1931,19 +2161,36 @@ def discover_gemini_models(api_key: str, *, strict: bool = False) -> list[ModelI
     """Return Gemini generate-content models through the official SDK."""
     if not api_key:
         return []
+    client = None
     try:
         runtime = GeminiRuntime(api_key)
         genai, _ = runtime._sdk()
-        listed = genai.Client(api_key=api_key).models.list()
+        # The pager retains the transport, not its owning SDK Client. Keep the
+        # owner alive until all pages are consumed, then explicitly close it.
+        client = genai.Client(api_key=api_key, http_options={
+            "timeout": 5000, "retry_options": {"attempts": 1},
+        })
+        result = []
+        for item in client.models.list():
+            name = getattr(item, "name", "")
+            methods = (getattr(item, "supported_actions", None)
+                       or getattr(item, "supported_generation_methods", ()) or ())
+            model_id = name.removeprefix("models/") if isinstance(name, str) else ""
+            if model_id and is_chat_model_id("gemini_api", model_id) \
+                    and (not methods or "generateContent" in methods):
+                result.append(ModelInfo(
+                    "gemini_api", model_id, model_id,
+                    capabilities=gemini_capabilities(model_id),
+                ))
+        return sorted(result, key=newest_model_first_key)
     except Exception:
         if strict:
             raise
         return []
-    result = []
-    for item in listed:
-        name = getattr(item, "name", "")
-        methods = getattr(item, "supported_generation_methods", ()) or ()
-        model_id = name.removeprefix("models/") if isinstance(name, str) else ""
-        if model_id and (not methods or "generateContent" in methods):
-            result.append(ModelInfo("gemini_api", model_id, model_id))
-    return sorted(result, key=newest_model_first_key)
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass

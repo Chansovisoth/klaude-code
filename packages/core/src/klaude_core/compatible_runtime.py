@@ -23,8 +23,11 @@ class CompatibleRuntime(CancellableHTTPTransport):
 
     backend = "openai_compatible"
 
-    def __init__(self, base_url: str, api_key: str = "", timeout: float = 600.0):
+    def __init__(
+        self, base_url: str, api_key: str = "", timeout: float | httpx.Timeout = 600.0
+    ):
         self.api_key = api_key
+        self.image_model = ""
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
         super().__init__(base_url, timeout, headers=headers, trust_env=False)
 
@@ -32,7 +35,9 @@ class CompatibleRuntime(CancellableHTTPTransport):
         return CompatibleModelError("Model request cancelled")
 
     def fork_for_child(self) -> CompatibleRuntime:
-        return CompatibleRuntime(self.base_url, self.api_key, self.timeout)
+        child = CompatibleRuntime(self.base_url, self.api_key, self.timeout)
+        child.image_model = self.image_model
+        return child
 
     def _request_payload(
         self,
@@ -44,9 +49,12 @@ class CompatibleRuntime(CancellableHTTPTransport):
     ) -> dict[str, Any]:
         limit = options.get("num_predict")
         limit = limit if type(limit) is int and limit > 0 else 2048
+        has_images = any(message.get("image_content") is not None for message in messages)
+        if has_images and self.image_model != model:
+            raise CompatibleModelError("Image support has not been verified for this model")
         payload: dict[str, Any] = {
             "model": model,
-            "messages": chat_completion_messages(messages),
+            "messages": chat_completion_messages(messages, include_images=has_images),
             "stream": True,
             "stream_options": {"include_usage": True},
             "max_tokens": limit,
@@ -70,7 +78,10 @@ class CompatibleRuntime(CancellableHTTPTransport):
         return {}
 
     @staticmethod
-    def _events(response: httpx.Response) -> Iterator[dict[str, Any]]:
+    def _events(
+        response: httpx.Response, *, response_limit: int = 16_000_000,
+        event_limit: int = 1_000_000,
+    ) -> Iterator[dict[str, Any]]:
         # Bound individual events as well as the complete response; malformed
         # servers must not accumulate unbounded lines in httpx.iter_lines().
         buffer = b""
@@ -79,14 +90,14 @@ class CompatibleRuntime(CancellableHTTPTransport):
         for chunk in response.iter_bytes():
             total += len(chunk)
             buffer += chunk
-            if total > 16_000_000 or len(buffer) > 1_000_000:
+            if total > response_limit or len(buffer) > event_limit:
                 raise CompatibleModelError("Model response exceeds its size limit")
             while b"\n" in buffer:
                 line, buffer = buffer.split(b"\n", 1)
                 line = line.rstrip(b"\r")
                 if line.startswith(b"data:"):
                     data.append(line[5:].lstrip())
-                    if sum(map(len, data)) > 1_000_000:
+                    if sum(map(len, data)) > event_limit:
                         raise CompatibleModelError("Model event exceeds its size limit")
                 elif not line and data:
                     raw = b"\n".join(data)
@@ -137,7 +148,10 @@ class CompatibleRuntime(CancellableHTTPTransport):
                         else "request failed"
                     )
                     raise CompatibleModelError(f"Model {label} (HTTP {status})", status_code=status)
-                for event in self._events(response):
+                for event in self._events(
+                    response, response_limit=self.stream_response_limit,
+                    event_limit=self.stream_event_limit,
+                ):
                     if event.get("error"):
                         raise CompatibleModelError("Model server reported a generation error")
                     if isinstance(event.get("usage"), dict):

@@ -16,6 +16,7 @@ from uuid import uuid4
 import httpx
 
 from .http_model_transport import CancellableHTTPTransport
+from .image_content import image_parts
 
 
 class OllamaError(RuntimeError):
@@ -37,6 +38,12 @@ def _native_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result = []
     for message in messages:
         item = dict(message)
+        item.pop("image_inputs", None)
+        if item.pop("image_content", None) is not None:
+            try:
+                item["images"] = [part["data"] for part in image_parts(message)]
+            except ValueError as exc:
+                raise OllamaError(str(exc)) from exc
         item.pop("deepseek_continuation", None)
         item.pop("anthropic_continuation", None)
         calls = message.get("tool_calls")

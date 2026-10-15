@@ -585,7 +585,7 @@ def test_focused_model_help_matches_actual_model_behavior():
         "    preserving this conversation."
     ) in response
     assert "/mode [standard|thinking]" in response
-    assert "/effort [low|medium|high]" in response
+    assert "/effort [LEVEL] (model-supported choices)" in response
     assert "/model qwen3-coder:30b" in response
     assert "Use /models" not in response
     assert "/model list" not in response
@@ -2232,7 +2232,7 @@ def test_inline_attachment_mention_is_delivered_with_its_message(tmp_path, monke
     source.write_text("Use this brief.")
     tui = _fake_persistent_tui()
     tui.agent.workdir = tmp_path
-    delivered: list[tuple[str, str | None, TurnScope | str | None]] = []
+    delivered: list[tuple[str, str | None, TurnScope | str | None, tuple[Path, ...]]] = []
     delivered_event = threading.Event()
 
     def capture(
@@ -2243,8 +2243,9 @@ def test_inline_attachment_mention_is_delivered_with_its_message(tmp_path, monke
         read_only=False,
         scope=None,
         turn_id="",
+        attachment_paths=(),
     ):
-        delivered.append((message, model_message, scope))
+        delivered.append((message, model_message, scope, attachment_paths))
         delivered_event.set()
 
     monkeypatch.setattr(tui, "_run_turn", capture)
@@ -2254,8 +2255,9 @@ def test_inline_attachment_mention_is_delivered_with_its_message(tmp_path, monke
     assert delivered == [
         (
             "Please review @brief.md.",
-            f"Please review @brief.md.\n\n[Attached file: {source.resolve()}]\nUse this brief.",
+            "Please review @brief.md.",
             TurnScope.STANDARD,
+            (source.resolve(),),
         )
     ]
 
@@ -4696,7 +4698,7 @@ def test_settings_models_command_opens_models_landing():
 
     assert tui._choice_kind == "model settings home"
     assert [row.label for row in tui._panel.page.rows] == [
-        "Added Models", "Add Models", "Session model", "Back",
+        "Added Models", "Add Models", "Model Manager", "Session model", "Back",
     ]
 
 
@@ -5612,10 +5614,10 @@ def test_settings_picker_responds_while_session_write_is_blocked(
         method = "record_session_update" if operation == "model" else "set_auto_memory"
         original = getattr(Memory, method)
 
-        def blocked(connection, *args):
+        def blocked(connection, *args, **kwargs):
             entered.set()
             assert release.wait(3)
-            return original(connection, *args)
+            return original(connection, *args, **kwargs)
 
         monkeypatch.setattr(Memory, method, blocked)
         writer = SessionActionWriter(memory, tui._emit)
@@ -5838,6 +5840,25 @@ def test_unauthenticated_cloud_provider_opens_login_action(monkeypatch):
     assert tui._choice_kind == "model"
     assert tui._choice_values[tui._choice_index] == "Login"
     assert tui._panel.page.rows[0].description == "Status: not signed in"
+
+
+@pytest.mark.parametrize("model,lowest", [
+    ("gemini-3.5-flash-lite", "minimal"), ("gemini-3.8-flash", "low"),
+])
+def test_reviewed_gemini_modes_and_efforts_survive_private_session_state(model, lowest):
+    import klaude_cli.main as cli_main
+    from klaude_core.session_runtime import capture, decode
+
+    tui = _fake_persistent_tui()
+    tui.agent.model_info = cli_main._bound_model_info(
+        SimpleNamespace(), ModelInfo("gemini_api", model, model)
+    )
+    assert cli_main._session_reasoning_modes(tui.agent) == ("thinking",)
+    assert cli_main._session_effort_choices(tui.agent)[0] == lowest
+    cli_main._apply_session_mode(tui.agent, tui.cfg, "standard")
+    assert tui.agent.reasoning_mode == "thinking" and tui.agent.ollama_think == lowest
+    state = capture(tui.agent)
+    assert state and decode(state)["effort"] == lowest
 
 
 def test_expired_codex_auth_keeps_model_picker_open(monkeypatch):
@@ -11270,6 +11291,30 @@ def test_picker_back_restores_parent_filter():
     assert tui._choice_kind == "providers settings"
     assert tui.input.text == "openrouter"
     assert "OpenRouter" in tui._choice_values[tui._choice_index]
+
+
+@pytest.mark.parametrize("dismiss", (False, True))
+def test_model_manager_credentials_back_restores_discovery(dismiss):
+    from klaude_cli.settings_panel import PanelAction
+
+    tui = _fake_persistent_tui()
+    tui._model_manager.query = "Small"
+    tui._model_manager.show("discover")
+    tui._model_manager.action(PanelAction("model-manager-hf-credentials"))
+    assert tui._choice_kind == "providers settings"
+    tui._open_provider_key_settings("Hugging Face")
+    tui._dismiss_picker()
+    assert tui._choice_kind == "providers settings"
+    if dismiss:
+        tui._dismiss_picker()
+    else:
+        tui._panel.picker.focus("back")
+        tui._apply_picker_state()
+        tui._accept_choice()
+    assert tui._choice_kind == "model manager discover"
+    assert tui._model_manager.query == "Small"
+    assert tui._panel.picker.selected_id == "hf-credentials"
+    assert not tui._model_manager.owner_return
 
 
 def test_picker_unavailable_selection_preserves_search(tmp_path):

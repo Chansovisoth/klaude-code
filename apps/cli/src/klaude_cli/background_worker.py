@@ -82,8 +82,81 @@ def _skill_description(manifest: Path, data: dict[str, Any]) -> str:
     return clean_text(_frontmatter_scalar(content, "description"), 240)
 
 
-def execute(request: dict[str, Any]) -> object:
+def execute(request: dict[str, Any], progress=None) -> object:
     kind = request.get("kind")
+    if kind == "image_generation":
+        from klaude_core.image_generation import execute as execute_generation
+
+        return execute_generation(request)
+    if kind == "vision":
+        for name, value in request.get("environment_keys", {}).items():
+            if (re.fullmatch(r"[A-Z][A-Z0-9_]{0,99}", name)
+                    and name not in {"HOME", "PATH", "PYTHONPATH", "PYTHONHOME"}
+                    and not name.startswith("KLAUDE_")
+                    and isinstance(value, str) and len(value) <= 8192):
+                os.environ[name] = value
+        from klaude_core.vision import execute as execute_vision
+
+        return execute_vision(request)
+    if kind == "ssh_setup":
+        from klaude_core.ssh_setup import execute as execute_setup
+
+        return execute_setup(request)
+    if kind == "ssh_servers":
+        from klaude_core.ssh_servers import execute as execute_ssh
+
+        return execute_ssh(request)
+    if kind == "model_dependencies":
+        if request.get("operation") in {"prepare_remove", "remove"}:
+            os.environ["KLAUDE_CONFIG_DIR"] = request["config_dir"]
+            os.environ["KLAUDE_DATA_DIR"] = request["data_dir"]
+        from klaude_core.model_dependencies import execute as dependency_execute
+
+        return dependency_execute(request, progress or (lambda _: None))
+    if kind == "serving_read":
+        from klaude_core.managed_serving import (
+            LaunchSpec,
+            prepare,
+            probe_engine,
+            read_log,
+        )
+        from klaude_core.managed_serving import (
+            inventory as serving_inventory,
+        )
+
+        operation = request.get("operation")
+        if request.get("spec", {}).get("ssh_server") and operation in {"probe", "prepare"}:
+            from klaude_core.ssh_serving import inspect as inspect_remote
+
+            return inspect_remote(request)
+        if operation == "probe":
+            try:
+                return probe_engine(request["engine"], request["executable"], owned_group=True)
+            except ValueError as exc:
+                return {"error": str(exc)}
+        if operation == "prepare":
+            try:
+                return {"evidence": prepare(LaunchSpec(**request["spec"]), request["evidence"])}
+            except ValueError as exc:
+                return {"error": str(exc)}
+        if operation == "logs":
+            return {"logs": read_log(Path(request["data_dir"]), request["id"])}
+        if operation == "inventory":
+            return {"servers": serving_inventory(Path(request["data_dir"]))}
+        raise ValueError("Unknown serving read")
+    if kind == "model_manager":
+        os.environ["KLAUDE_CONFIG_DIR"] = request["config_dir"]
+        os.environ["KLAUDE_DATA_DIR"] = request["data_dir"]
+        for name, value in request.get("environment_keys", {}).items():
+            if (re.fullmatch(r"[A-Z][A-Z0-9_]{0,99}", name)
+                    and name not in {"HOME", "PATH", "PYTHONPATH", "PYTHONHOME"}
+                    and (not name.startswith("KLAUDE_") or name.startswith("KLAUDE_MODEL_"))
+                    and isinstance(value, str) and len(value) <= 8192):
+                os.environ[name] = value
+        from klaude_core.config import load_config
+        from klaude_core.ollama_manager import execute_manager
+
+        return execute_manager(load_config(), request, progress or (lambda _: None))
     if kind in {"research_control", "research_run"}:
         os.environ["KLAUDE_CONFIG_DIR"] = request["config_dir"]
         os.environ["KLAUDE_DATA_DIR"] = request["data_dir"]
@@ -488,8 +561,17 @@ def main() -> None:
         if not isinstance(request, dict):
             raise ValueError
         # Optional SDK imports/logging must never corrupt IPC or print keys.
+        public_output = sys.stdout
+
+        def emit_progress(value: dict) -> None:
+            line = json.dumps({"progress": value})
+            if len(line.encode()) > 8192:
+                raise ValueError("Progress event limit")
+            public_output.write(line + "\n")
+            public_output.flush()
+
         with open(os.devnull, "w") as discard, contextlib.redirect_stdout(discard):
-            result = execute(request)
+            result = execute(request, emit_progress)
         response = json.dumps({"result": result})
         if len(response.encode()) > 2_000_000:
             raise ValueError

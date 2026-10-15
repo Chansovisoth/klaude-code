@@ -14,13 +14,15 @@ class CancellableHTTPTransport:
     def __init__(
         self,
         base_url: str,
-        timeout: float = 600.0,
+        timeout: float | httpx.Timeout = 600.0,
         *,
         headers: dict[str, str] | None = None,
         trust_env: bool = True,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.stream_response_limit = 16_000_000
+        self.stream_event_limit = 1_000_000
         self._client = httpx.Client(
             base_url=self.base_url, timeout=timeout, headers=headers, trust_env=trust_env
         )

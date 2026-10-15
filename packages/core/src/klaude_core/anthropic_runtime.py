@@ -12,6 +12,7 @@ import httpx
 
 from .compatible_runtime import CompatibleModelError, CompatibleRuntime
 from .http_model_transport import CancellableHTTPTransport
+from .image_content import ANTHROPIC_IMAGE_BYTES, image_parts
 from .model_connections import DEFAULT_URLS
 from .model_runtime import ModelCapabilities, chat_completion_messages, validated_chat_calls
 
@@ -60,10 +61,19 @@ def catalog_capabilities(entry: dict[str, Any]) -> ModelCapabilities:
         if isinstance(effort.get(name), dict) and effort[name].get("supported") is True
     ]
     output = entry.get("max_tokens")
+    context = entry.get("max_input_tokens")
+    images = capabilities.get("image_input")
+    if images is not None and (
+        not isinstance(images, dict) or type(images.get("supported")) is not bool
+    ):
+        raise ValueError("Invalid Anthropic image support")
     return ModelCapabilities(
         effort_levels=tuple(["off", *levels]) if levels else ("off", "low", "medium", "high"),
         thinking_types=thinking_types,
         max_output_tokens=output if type(output) is int and 0 < output <= 2_000_000 else None,
+        context_window=context if type(context) is int and 0 < context <= 2_000_000 else None,
+        supports_images=images["supported"] if images is not None else None,
+        images_evidence="catalog:image_input" if images is not None else "unknown",
     )
 
 
@@ -74,7 +84,7 @@ class AnthropicRuntime(CancellableHTTPTransport):
         self,
         base_url: str = "",
         api_key: str = "",
-        timeout: float = 600.0,
+        timeout: float | httpx.Timeout = 600.0,
         *,
         connection_scope: str = "",
         model: str = "",
@@ -84,6 +94,7 @@ class AnthropicRuntime(CancellableHTTPTransport):
             raise ValueError("Anthropic API key is not configured")
         self.api_key, self.connection_scope, self.model = api_key, connection_scope, model
         self.capabilities = capabilities or ModelCapabilities()
+        self.image_model = model if self.capabilities.supports_images is True else ""
         super().__init__(
             base_url or DEFAULT_URLS[self.backend],
             timeout,
@@ -98,7 +109,7 @@ class AnthropicRuntime(CancellableHTTPTransport):
         return AnthropicModelError("Model request cancelled")
 
     def fork_for_child(self) -> AnthropicRuntime:
-        return AnthropicRuntime(
+        child = AnthropicRuntime(
             self.base_url,
             self.api_key,
             self.timeout,
@@ -106,18 +117,27 @@ class AnthropicRuntime(CancellableHTTPTransport):
             model=self.model,
             capabilities=self.capabilities,
         )
+        child.image_model = self.image_model
+        return child
 
     def _messages(
         self, model: str, messages: list[dict[str, Any]]
     ) -> tuple[str, list[dict[str, Any]]]:
+        if any(m.get("image_content") is not None and m.get("role") != "user" for m in messages):
+            raise AnthropicModelError("Image input requires a user message")
         originals = iter(
             item for item in messages if item.get("role") in {"system", "user", "assistant"}
         )
         result: list[dict[str, Any]] = []
         system: list[str] = []
+        image_count = 0
         for message in chat_completion_messages(messages):
             role = message["role"]
             source = next(originals) if role != "tool" else {}
+            parts = image_parts(source, max_bytes=ANTHROPIC_IMAGE_BYTES)
+            image_count += len(parts)
+            if image_count > 2 or (parts and self.image_model != model):
+                raise AnthropicModelError("Image support or image count is invalid for this model")
             if role == "system":
                 system.append(message["content"])
                 continue
@@ -170,8 +190,20 @@ class AnthropicRuntime(CancellableHTTPTransport):
                                 "input": arguments,
                             }
                         )
-            elif message["content"]:
-                blocks = [{"type": "text", "text": message["content"]}]
+            else:
+                blocks = [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": part["mime_type"],
+                            "data": part["data"],
+                        },
+                    }
+                    for part in parts
+                ]
+                if message["content"]:
+                    blocks.append({"type": "text", "text": message["content"]})
             if not blocks:
                 continue
             if result and result[-1]["role"] == role:
@@ -300,7 +332,10 @@ class AnthropicRuntime(CancellableHTTPTransport):
                         f"Anthropic request failed (HTTP {response.status_code})",
                         status_code=response.status_code,
                     )
-                for event in CompatibleRuntime._events(response):
+                for event in CompatibleRuntime._events(
+                    response, response_limit=self.stream_response_limit,
+                    event_limit=self.stream_event_limit,
+                ):
                     kind = event.get("type")
                     if kind == "error":
                         code = (

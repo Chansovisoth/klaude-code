@@ -56,6 +56,24 @@ def test_real_owned_worker_reads_only_bounded_skill_metadata(tmp_path):
     assert not jobs._active
 
 
+def test_real_owned_worker_preserves_large_legacy_inventory_results(tmp_path):
+    skills = tmp_path / "skills"
+    for index in range(60):
+        name = f"skill-{index}"
+        folder = skills / name
+        folder.mkdir(parents=True)
+        (folder / "manifest.json").write_text(json.dumps({"name": name, "library": name}))
+    events = queue.Queue()
+    jobs = OwnedBackgroundJobs(lambda kind, value: events.put((kind, value)))
+    identity = jobs.submit("skills", {"kind": "skills", "skills_dir": str(skills)})
+    try:
+        kind, (key, returned, result, error) = events.get(timeout=8)
+        assert (kind, key, returned, error) == ("background_result", "skills", identity, "")
+        assert len(result["skills"]) == 60 and len(json.dumps(result)) > 8192
+    finally:
+        jobs.close(wait=True)
+
+
 def test_skill_inventory_reads_persisted_disabled_state_without_importing_packages(tmp_path):
     skills = tmp_path / "skills"
     (skills / "test").mkdir(parents=True)

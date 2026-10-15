@@ -90,6 +90,26 @@ class OwnedBackgroundJobs:
             )
             payload: bytes | None = json.dumps(request).encode()
             deadline = time.monotonic() + timeout
+            consumed = 0
+
+            def progress(output: bytes) -> bytes:
+                nonlocal consumed
+                if len(output) > MAX_JOB_OUTPUT:
+                    raise ValueError("Background output limit")
+                while b"\n" in output[consumed:]:
+                    line, _ = output[consumed:].split(b"\n", 1)
+                    packet = json.loads(line)
+                    if not isinstance(packet, dict) or set(packet) != {"progress"}:
+                        break
+                    if len(line) > 8192:
+                        raise ValueError("Background event limit")
+                    if not isinstance(packet["progress"], dict):
+                        raise ValueError("Invalid progress event")
+                    consumed += len(line) + 1
+                    if self.current(job.key, job.id) and not job.cancel.is_set():
+                        self.emit("background_progress", (job.key, job.id, packet["progress"]))
+                return output[consumed:]
+
             while not job.cancel.is_set():
                 if time.monotonic() >= deadline:
                     error = "Background job timed out; retry"
@@ -99,14 +119,16 @@ class OwnedBackgroundJobs:
                     if len(output) > MAX_JOB_OUTPUT or process.returncode:
                         error = "Background job failed; retry"
                     else:
-                        response = json.loads(output)
+                        response = json.loads(progress(output))
                         if not isinstance(response, dict):
                             raise ValueError
                         result = response.get("result")
                         error = "Background job unavailable; retry" if response.get("error") else ""
                     break
-                except subprocess.TimeoutExpired:
+                except subprocess.TimeoutExpired as exc:
                     payload = None
+                    if exc.output:
+                        progress(exc.output)
             if job.cancel.is_set():
                 return
         except Exception:  # no credential-bearing exception may reach a UI event

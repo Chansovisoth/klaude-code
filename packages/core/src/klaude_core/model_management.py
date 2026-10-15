@@ -273,6 +273,10 @@ def apply_model_change(cfg: Any, change: ModelChange) -> dict[str, Any]:
             )
 
         research_affected = affected_role(defaults.research)
+        if any(affected_role(ref) for ref in (defaults.vision, *defaults.vision_fallbacks)):
+            raise SettingsConflictError(
+                "Vision model is affected; change or clear Vision choices in AI Defaults first"
+            )
         if research_affected and (
             change.research_expected != defaults.research or not change.unset_research
         ):

@@ -13,9 +13,11 @@ from klaude_core.ai_defaults import (
     defaults_from_preferences,
     read_defaults,
 )
+from klaude_core.image_content import IMAGE_BACKENDS, image_capability_label
 from klaude_core.model_connections import ModelConnection, validate_model_id
 from klaude_core.model_management import model_choice, reference_parts
 from klaude_core.model_runtime import ModelInfo, models_from_records
+from klaude_core.vision import INSPECT_TIMEOUT
 
 from .model_settings import row as model_row
 from .session_actions import AIDefaultUpdate, SessionSettingUpdate, SessionTitleUpdate
@@ -89,6 +91,9 @@ class AIDefaultSettings:
         self.utility: tuple[str, str, str] | None = None
         self.title_pending: tuple[str, str] | None = None
         self.new_session_pending = ""
+        self.fallback_field = "fallbacks"
+        self.vision_check: tuple[str, str, str, str] | None = None
+        self.vision_return: Any = None
         self.preparing_utility = ""
         self.utility_started_at = 0.0
 
@@ -104,6 +109,7 @@ class AIDefaultSettings:
             self.host._set_panel_feedback(*self.feedback)
 
     def open(self) -> None:
+        self.vision_return = None
         self.show("home")
         self.refresh()
 
@@ -185,6 +191,15 @@ class AIDefaultSettings:
                     description="Bounded Deep Research jobs · no automatic fallback",
                 ),
                 row(
+                    "vision-page",
+                    "Vision",
+                    "ON" if defaults and defaults.vision_enabled else "OFF",
+                    enabled=defaults is not None,
+                    description="Explicit Media image analysis · declared image support",
+                ),
+                row("image-generation", "Image generation",
+                    description="Explicit local image service · saved Media output"),
+                row(
                     "fallbacks",
                     "Utility fallbacks",
                     str(len(defaults.fallbacks)) if defaults else "Loading…",
@@ -216,18 +231,52 @@ class AIDefaultSettings:
                 for value in (128, 256, 512, 1024, 2048)
             ]
             rows.append(back("home"))
+        elif self.view == "vision":
+            crumbs += ("Vision",)
+            rows = [
+                row(
+                    "vision-toggle",
+                    "Enable Vision",
+                    "ON" if defaults and defaults.vision_enabled else "OFF",
+                ),
+                row(
+                    "vision",
+                    "Model",
+                    self.label(defaults.vision) if defaults else "Loading…",
+                    description="Media analysis model; chat images use the active Chat model",
+                ),
+                row(
+                    "vision-fallbacks",
+                    "Fallbacks",
+                    str(len(defaults.vision_fallbacks)) if defaults else "0",
+                ),
+                PanelRow(
+                    "budget", RowKind.INFO, "Analysis budget", "4096 context · 512 output tokens"
+                ),
+                PanelRow(
+                    "input",
+                    RowKind.INFO,
+                    "Image input",
+                    "PNG/JPEG · 8 MiB · 4 megapixels",
+                    description="Library → Media → Analyze image, or chat /attach and @PATH. "
+                    "Chat requires an image-capable active model; provider limits apply",
+                ),
+                back("home"),
+            ]
         elif self.view == "endpoints":
             crumbs += (
                 "Default Chat"
                 if self.role == "chat"
                 else "Research"
                 if self.role.startswith("research")
+                else "Vision"
+                if self.role.startswith("vision")
                 else "Utility",
                 "Endpoint",
             )
             rows = (
                 []
-                if self.role == "fallbacks"
+                if self.role in {"fallbacks", "vision_fallbacks"}
                 else [
                     row(
                         "inherit",
@@ -235,6 +284,8 @@ class AIDefaultSettings:
                         if self.role == "chat"
                         else "Research default"
                         if self.role == "research-job"
+                        else "Clear Vision model"
+                        if self.role == "vision"
                         else "Same as chat",
                     )
                 ]
@@ -246,6 +297,8 @@ class AIDefaultSettings:
                 )
                 if self.role != "chat" and item.backend == "openai_codex":
                     usable = False
+                if self.role.startswith("vision") and item.backend not in IMAGE_BACKENDS:
+                    usable = False
                 rows.append(
                     row(
                         "endpoint:" + item.id,
@@ -255,6 +308,8 @@ class AIDefaultSettings:
                         enabled=usable,
                         description="Disabled"
                         if not item.enabled
+                        else "Select a supported image endpoint with documented capabilities"
+                        if self.role.startswith("vision") and item.backend not in IMAGE_BACKENDS
                         else "Utility unavailable"
                         if self.role != "chat" and item.backend == "openai_codex"
                         else "Authentication required"
@@ -262,7 +317,15 @@ class AIDefaultSettings:
                         else "",
                     )
                 )
-            rows.append(back("fallbacks" if self.role == "fallbacks" else "home"))
+            rows.append(
+                back(
+                    "fallbacks"
+                    if self.role in {"fallbacks", "vision_fallbacks"}
+                    else "vision"
+                    if self.role == "vision"
+                    else "home"
+                )
+            )
         elif self.view == "models":
             item = self.connections[self.target]
             crumbs += (
@@ -270,6 +333,8 @@ class AIDefaultSettings:
                 if self.role == "chat"
                 else "Research"
                 if self.role.startswith("research")
+                else "Vision"
+                if self.role.startswith("vision")
                 else "Utility",
                 item.name,
                 "Model",
@@ -290,20 +355,27 @@ class AIDefaultSettings:
                         row(
                             "model:" + model.model_id,
                             model.model_id,
-                            "Enabled",
-                            description="Tools: "
+                            "Available" if self.role == "chat"
+                            or not model.capabilities.requires_thinking else "Unavailable",
+                            description=(image_capability_label(model.capabilities.supports_images,
+                                                               model.capabilities.images_evidence)
+                                         + " · checked before saving"
+                                         + (" · Thinking required; Vision unavailable"
+                                            if model.capabilities.requires_thinking else ""))
+                            if self.role.startswith("vision")
+                            else "Tools: "
                             + model.capabilities.tools_evidence
+                            + " · " + image_capability_label(model.capabilities.supports_images,
+                                                            model.capabilities.images_evidence)
                             + (
-                                " · Thinking required; Utility unavailable"
-                                if model.backend == "anthropic"
-                                and model.capabilities.requires_thinking
+                                " · Thinking required"
+                                + ("; "
+                                   + ("Research" if self.role.startswith("research") else "Utility")
+                                   + " unavailable" if self.role != "chat" else "")
+                                if model.capabilities.requires_thinking
                                 else ""
                             ),
-                            enabled=self.role == "chat"
-                            or not (
-                                model.backend == "anthropic"
-                                and model.capabilities.requires_thinking
-                            ),
+                            enabled=self.role == "chat" or not model.capabilities.requires_thinking,
                             kind=RowKind.NAVIGATION,
                             section="models-heading",
                             target=model.model_id,
@@ -311,7 +383,12 @@ class AIDefaultSettings:
                     )
             rows.append(back("endpoints"))
         elif self.view == "fallback-detail":
-            crumbs += ("Utility fallbacks", self.label(self.fallback))
+            crumbs += (
+                "Vision fallbacks"
+                if self.fallback_field == "vision_fallbacks"
+                else "Utility fallbacks",
+                self.label(self.fallback),
+            )
             rows = [
                 row("up", "Move up"),
                 row("down", "Move down"),
@@ -319,15 +396,21 @@ class AIDefaultSettings:
                 back("fallbacks"),
             ]
         else:
-            crumbs += ("Utility fallbacks",)
+            crumbs += (
+                "Vision fallbacks"
+                if self.fallback_field == "vision_fallbacks"
+                else "Utility fallbacks",
+            )
             rows = [
                 row(
                     "add-fallback",
                     "Add fallback",
-                    enabled=bool(defaults and len(defaults.fallbacks) < 3),
+                    enabled=bool(defaults and len(getattr(defaults, self.fallback_field)) < 3),
                 )
             ]
-            for i, reference in enumerate(defaults.fallbacks if defaults else ()):
+            for i, reference in enumerate(
+                getattr(defaults, self.fallback_field) if defaults else ()
+            ):
                 rows.append(
                     row("fallback:" + str(i), f"{i + 1}. {self.label(reference)}", target=reference)
                 )
@@ -339,12 +422,14 @@ class AIDefaultSettings:
                         "Fallback policy",
                         description="Network, timeout, rate limit or temporary service errors only;"
                         " "
-                        "at most 4 attempts / 45s",
+                        "90s per model; at most 4 explicit attempts"
+                        if self.fallback_field == "vision_fallbacks"
+                        else "at most 4 attempts / 45s",
                     ),
-                    back("home"),
+                    back("vision" if self.fallback_field == "vision_fallbacks" else "home"),
                 ]
             )
-        if self.pending:
+        if self.pending or self.vision_check:
             rows = [
                 replace(item, enabled=False) if item.selectable and not item.footer else item
                 for item in rows
@@ -372,6 +457,13 @@ class AIDefaultSettings:
             self.host._cancel_choice()
             return
         if kind == "back":
+            if self.vision_check:
+                self.host._background_jobs.cancel("ai-defaults:vision")
+                self.vision_check = None
+            if self.view == "vision" and self.vision_return:
+                panel, self.vision_return = self.vision_return, None
+                panel.library.show("vision-form")
+                return
             if self.role == "research-job" and action.target == "home":
                 self.host._library.research.set_model(self.host._library.research.draft["model"])
                 return
@@ -384,10 +476,18 @@ class AIDefaultSettings:
         elif kind == "reload":
             self.unconfirmed = False
             self.refresh()
-        elif kind in {"chat", "utility", "research", "add-fallback"}:
-            self.role = "fallbacks" if kind == "add-fallback" else kind
+        elif kind in {"chat", "utility", "research", "vision", "add-fallback"}:
+            self.role = self.fallback_field if kind == "add-fallback" else kind
             self.show("endpoints")
-        elif kind == "fallbacks":
+        elif kind == "image-generation":
+            self.host._library.generation.open(settings=True)
+        elif kind == "vision-page":
+            self.show("vision")
+        elif kind == "vision-toggle" and self.defaults:
+            self.role = "vision_enabled"
+            self.submit(not self.defaults.vision_enabled)
+        elif kind in {"fallbacks", "vision-fallbacks"}:
+            self.fallback_field = "vision_fallbacks" if kind == "vision-fallbacks" else "fallbacks"
             self.show("fallbacks")
         elif kind == "output":
             self.role = "output_tokens"
@@ -395,7 +495,7 @@ class AIDefaultSettings:
         elif kind.startswith("output:"):
             self.submit(int(action.target))
         elif kind == "inherit":
-            if self.role == "fallbacks":
+            if self.role in {"fallbacks", "vision_fallbacks"}:
                 raise ValueError("Choose an explicit fallback endpoint/model")
             self.submit(None)
         elif kind.startswith("endpoint:"):
@@ -411,7 +511,7 @@ class AIDefaultSettings:
             self.fallback = action.target
             self.show("fallback-detail")
         elif kind in {"up", "down", "remove"} and self.defaults:
-            values = list(self.defaults.fallbacks)
+            values = list(getattr(self.defaults, self.fallback_field))
             index = values.index(self.fallback)
             if kind == "remove":
                 values.pop(index)
@@ -420,7 +520,7 @@ class AIDefaultSettings:
                 if not 0 <= target < len(values):
                     return
                 values[index], values[target] = values[target], values[index]
-            self.role = "fallbacks"
+            self.role = self.fallback_field
             self.submit(tuple(values))
 
     def answer(self, value: str | None) -> None:
@@ -430,7 +530,39 @@ class AIDefaultSettings:
             self.show("models")
 
     def select(self, model: str) -> None:
-        reference = self.connections[self.target].model_ref(model)
+        connection = self.connections[self.target]
+        reference = connection.model_ref(model)
+        if self.role != "chat" and connection.backend == "gemini_api":
+            from klaude_core.model_runtime import gemini_capabilities
+
+            if gemini_capabilities(model).requires_thinking:
+                raise ValueError(
+                    "This model requires Thinking; choose a Standard-mode model for this role"
+                )
+        if self.role.startswith("vision"):
+            connection = self.connections[self.target]
+            identity = self.host._background_jobs.submit(
+                "ai-defaults:vision",
+                {
+                    "kind": "vision",
+                    "operation": "inspect",
+                    "reference": reference,
+                    "config_dir": str(self.host.cfg.config_dir),
+                    "data_dir": str(self.host.cfg.data_dir),
+                    "roles": dict(self.host.cfg.models),
+                    "ollama_url": self.host.cfg.ollama_url,
+                    "expected": {
+                        "connection_revision": connection.revision,
+                        "credential_revision": self.credential_revisions.get(connection.id, ""),
+                    },
+                    "environment_keys": self.host._model_settings.environment_keys(),
+                },
+                timeout=INSPECT_TIMEOUT,
+            )
+            self.vision_check = (identity, self.host.session_id, self.role, reference)
+            self.feedback = ("Checking declared image support…", "neutral")
+            self.show()
+            return
         if self.role == "fallbacks":
             assert self.defaults is not None
             self.submit((*self.defaults.fallbacks, reference))
@@ -455,8 +587,8 @@ class AIDefaultSettings:
             self.host.cfg, {"ai_defaults": {**old.public(), self.role: value}}
         )
         refs = (
-            updated.fallbacks
-            if self.role == "fallbacks"
+            getattr(updated, self.role)
+            if self.role in {"fallbacks", "vision_fallbacks"}
             else ((value,) if isinstance(value, str) else ())
         )
         bindings = []
@@ -480,7 +612,11 @@ class AIDefaultSettings:
             self.pending = None
             self.unconfirmed = True
         self.show(
-            "fallbacks" if self.role == "fallbacks" else "home",
+            "fallbacks"
+            if self.role in {"fallbacks", "vision_fallbacks"}
+            else "vision"
+            if self.role.startswith("vision")
+            else "home",
             "output" if self.role == "output_tokens" else self.role,
         )
 
@@ -498,6 +634,30 @@ class AIDefaultSettings:
         self.host._start_next()
 
     def accept(self, key: str, identity: str, result: Any, error: str) -> None:
+        if key == "ai-defaults:vision":
+            pending = self.vision_check
+            if pending is None or pending[0] != identity:
+                return
+            self.vision_check = None
+            if pending[1] != self.host.session_id or not self.visible:
+                return
+            if error or not isinstance(result, dict) or result.get("status") == "error":
+                self.feedback = (
+                    result.get("message", "Vision capability check failed")
+                    if isinstance(result, dict)
+                    else "Vision capability check failed",
+                    "error",
+                )
+                if self.visible:
+                    self.show()
+                return
+            _, _, self.role, reference = pending
+            self.submit(
+                (*self.defaults.vision_fallbacks, reference)
+                if self.role == "vision_fallbacks" and self.defaults
+                else reference
+            )
+            return
         if key == "ai-defaults:utility":
             self.utility_result(identity, result, error)
             return
@@ -557,6 +717,15 @@ class AIDefaultSettings:
             self.host._append("\n[cancelled] AI Utility cancelled.\n")
 
     def start_utility(self, task: str) -> None:
+        library = getattr(self.host, "_library", None)
+        if getattr(getattr(library, "generation", None), "busy", False):
+            self.host._append("\n[warning] Finish image generation before using Utility.\n")
+            return
+        if getattr(getattr(self.host, "_model_manager", None), "busy", False):
+            self.host._append(
+                "\n[warning] Finish the Model Manager operation before using Utility.\n"
+            )
+            return
         if not self.chat_ref() or self.pending or self.unconfirmed:
             self.host._append(
                 "\n[warning] Choose a model and confirm AI Defaults before using Utility.\n"

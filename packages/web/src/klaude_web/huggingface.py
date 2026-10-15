@@ -62,6 +62,8 @@ def hub_repo_search(
     query: str = "",
     limit: int = 10,
     sort: str = "downloads",
+    *,
+    filter_tag: str = "",
 ) -> list[dict[str, Any]]:
     endpoint, _ = _repo_type(repo_type)
     params: dict[str, Any] = {"limit": max(1, min(limit, 50))}
@@ -69,6 +71,35 @@ def hub_repo_search(
         params["search"] = query
     if sort:
         params["sort"] = sort
+    if filter_tag:
+        if filter_tag != "gguf" or endpoint != "models":
+            raise ValueError("Unsupported model discovery filter")
+        params["filter"] = filter_tag
+        import json
+
+        with httpx.Client(
+            timeout=httpx.Timeout(5, connect=3), trust_env=False, follow_redirects=False
+        ) as client:
+            with client.stream(
+                "GET",
+                f"{base_url.rstrip('/')}/api/{endpoint}",
+                headers=_headers(api_key),
+                params=params,
+            ) as response:
+                response.raise_for_status()
+                body = bytearray()
+                for chunk in response.iter_bytes():
+                    body.extend(chunk)
+                    if len(body) > 1_000_000:
+                        raise ValueError("Hugging Face discovery response exceeded its bound")
+                data = json.loads(body)
+                if (
+                    not isinstance(data, list)
+                    or len(data) > 50
+                    or any(not isinstance(item, dict) for item in data)
+                ):
+                    raise ValueError("Invalid Hugging Face model inventory")
+                return [_compact_repo(base_url, item, endpoint) for item in data]
     r = httpx.get(
         f"{base_url.rstrip('/')}/api/{endpoint}",
         headers=_headers(api_key),

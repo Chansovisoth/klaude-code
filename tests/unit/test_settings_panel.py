@@ -136,8 +136,10 @@ def test_only_enabled_toggle_square_uses_accent_at_each_layout_width():
             fragment for line in body.lines for fragment in line
         ]
         off_fragments = [
-            fragment for line, owner in zip(body.lines, body.row_for_line, strict=True)
-            if owner == "local" for fragment in line
+            fragment
+            for line, owner in zip(body.lines, body.row_for_line, strict=True)
+            if owner == "local"
+            for fragment in line
         ]
         assert ("class:panel.selected class:toggle.on", "■") not in off_fragments
         assert "[■  ] OFF" in "".join(text for _style, text in off_fragments)
@@ -174,49 +176,96 @@ def test_status_has_its_own_style_without_coloring_the_row():
 
 
 def test_nonselectable_status_uses_its_tone_even_when_wrapped():
-    page = PanelPage("search", ("Settings", "Skills", "Search"), (
-        PanelRow("warning", RowKind.STATUS,
-                 "Search timed out while contacting the skill catalog",
-                 status_tone="warning"),
-        PanelRow("info", RowKind.INFO, "Catalog metadata is read-only"),
-    ))
+    page = PanelPage(
+        "search",
+        ("Settings", "Skills", "Search"),
+        (
+            PanelRow(
+                "warning",
+                RowKind.STATUS,
+                "Search timed out while contacting the skill catalog",
+                status_tone="warning",
+            ),
+            PanelRow("info", RowKind.INFO, "Catalog metadata is read-only"),
+        ),
+    )
     body = render_body(PanelState(page), 24)
-    warning_lines = [line for line, owner in zip(body.lines, body.row_for_line, strict=True)
-                     if owner == "warning"]
+    warning_lines = [
+        line
+        for line, owner in zip(body.lines, body.row_for_line, strict=True)
+        if owner == "warning"
+    ]
     assert len(warning_lines) > 1
-    assert all(style == "class:panel.status.warning" for line in warning_lines
-               for style, _ in line)
-    info_lines = [line for line, owner in zip(body.lines, body.row_for_line, strict=True)
-                  if owner == "info"]
-    assert all(style == "class:panel.muted" for line in info_lines
-               for style, _ in line)
+    assert all(style == "class:panel.status.warning" for line in warning_lines for style, _ in line)
+    info_lines = [
+        line for line, owner in zip(body.lines, body.row_for_line, strict=True) if owner == "info"
+    ]
+    assert all(style == "class:panel.muted" for line in info_lines for style, _ in line)
 
 
 def test_narrow_panel_wraps_wide_unicode_by_terminal_cells_without_splitting_graphemes():
     combined = "e\u0301"
-    page = PanelPage("unicode", ("Settings", "Skills"), (
-        PanelRow("info", RowKind.INFO, "説明" * 12,
-                 description=combined * 12),
-        PanelRow("result", RowKind.NAVIGATION, "資料" * 8,
-                 "來源" * 8, "摘要" * 12, action=PanelAction("open")),
-    ), column_headers=("SKILL", "SOURCE", "DESCRIPTION"))
+    page = PanelPage(
+        "unicode",
+        ("Settings", "Skills"),
+        (
+            PanelRow("info", RowKind.INFO, "説明" * 12, description=combined * 12),
+            PanelRow(
+                "result",
+                RowKind.NAVIGATION,
+                "資料" * 8,
+                "來源" * 8,
+                "摘要" * 12,
+                action=PanelAction("open"),
+            ),
+        ),
+        column_headers=("SKILL", "SOURCE", "DESCRIPTION"),
+    )
     for width in (18, 40, 80):
         body = render_body(PanelState(page), width)
-        assert all(get_cwidth("".join(text for _, text in line)) <= width
-                   for line in body.lines)
-        assert "".join(text for line, owner in zip(body.lines, body.row_for_line, strict=True)
-                       if owner == "info" for _, text in line).count(combined) == 12
+        assert all(get_cwidth("".join(text for _, text in line)) <= width for line in body.lines)
+        assert (
+            "".join(
+                text
+                for line, owner in zip(body.lines, body.row_for_line, strict=True)
+                if owner == "info"
+                for _, text in line
+            ).count(combined)
+            == 12
+        )
 
 
 def test_policy_value_tones_color_only_values_at_all_widths():
-    page = PanelPage("policies", ("Settings", "Permissions"), (
-        PanelRow("allow", RowKind.CHOICE, "Read file", "ALLOW",
-                 value_tone="success", action=PanelAction("policy", "allow")),
-        PanelRow("ask", RowKind.CHOICE, "Write file", "ASK",
-                 value_tone="warning", action=PanelAction("policy", "ask")),
-        PanelRow("deny", RowKind.CHOICE, "Run shell", "DENY",
-                 value_tone="error", action=PanelAction("policy", "deny")),
-    ))
+    page = PanelPage(
+        "policies",
+        ("Settings", "Permissions"),
+        (
+            PanelRow(
+                "allow",
+                RowKind.CHOICE,
+                "Read file",
+                "ALLOW",
+                value_tone="success",
+                action=PanelAction("policy", "allow"),
+            ),
+            PanelRow(
+                "ask",
+                RowKind.CHOICE,
+                "Write file",
+                "ASK",
+                value_tone="warning",
+                action=PanelAction("policy", "ask"),
+            ),
+            PanelRow(
+                "deny",
+                RowKind.CHOICE,
+                "Run shell",
+                "DENY",
+                value_tone="error",
+                action=PanelAction("policy", "deny"),
+            ),
+        ),
+    )
     for width in (110, 70, 36, 18):
         body = render_body(PanelState(page), width)
         for identity, policy, tone in (
@@ -227,12 +276,15 @@ def test_policy_value_tones_color_only_values_at_all_widths():
             fragments = [
                 (style, text)
                 for line, owner in zip(body.lines, body.row_for_line, strict=True)
-                if owner == identity for style, text in line
+                if owner == identity
+                for style, text in line
             ]
-            assert any(policy in text and f"class:panel.value.{tone}" in style
-                       for style, text in fragments)
-            assert all("class:panel.value." not in style
-                       for style, text in fragments if policy not in text)
+            assert any(
+                policy in text and f"class:panel.value.{tone}" in style for style, text in fragments
+            )
+            assert all(
+                "class:panel.value." not in style for style, text in fragments if policy not in text
+            )
 
 
 def test_focus_background_follows_wrapped_row_without_recoloring_description():
@@ -240,26 +292,25 @@ def test_focus_background_follows_wrapped_row_without_recoloring_description():
     for width in (110, 70, 36, 18):
         body = render_body(PanelState(page), width)
         focused = [
-            line for line, owner in zip(body.lines, body.row_for_line, strict=True)
+            line
+            for line, owner in zip(body.lines, body.row_for_line, strict=True)
             if owner == "web"
         ]
         assert focused
         assert all(
-            style.startswith("class:panel.selected") for line in focused
-            for style, _text in line
+            style.startswith("class:panel.selected") for line in focused for style, _text in line
         )
-        assert all(
-            sum(len(text) for _style, text in line) <= width
-            for line in focused
-        )
+        assert all(sum(len(text) for _style, text in line) <= width for line in focused)
         assert any(
             "class:panel.muted" in style and "Search when" in text
-            for line in focused for style, text in line
+            for line in focused
+            for style, text in line
         )
         assert not any(
-            "class:panel.selected" in style for line, owner in zip(
-                body.lines, body.row_for_line, strict=True
-            ) if owner == "local" for style, _text in line
+            "class:panel.selected" in style
+            for line, owner in zip(body.lines, body.row_for_line, strict=True)
+            if owner == "local"
+            for style, _text in line
         )
 
 
@@ -293,11 +344,18 @@ def test_footer_group_has_one_noninteractive_blank_line_and_keeps_focus():
             content = [PanelRow("option", RowKind.CHOICE, "Theme", "Autumn")]
             if existing_gap:
                 content.append(PanelRow("gap", RowKind.SEPARATOR, ""))
-            content.extend([
-                PanelRow("reset", RowKind.ACTION, "Restore preferences", footer=True,
-                         action=PanelAction("legacy-choice", "reset to default")),
-                PanelRow("back", RowKind.NAVIGATION, "Back", action=PanelAction("back")),
-            ])
+            content.extend(
+                [
+                    PanelRow(
+                        "reset",
+                        RowKind.ACTION,
+                        "Restore preferences",
+                        footer=True,
+                        action=PanelAction("legacy-choice", "reset to default"),
+                    ),
+                    PanelRow("back", RowKind.NAVIGATION, "Back", action=PanelAction("back")),
+                ]
+            )
             state = PanelState(PanelPage("test", ("Settings",), tuple(content)), "reset")
             body = render_body(state, width)
             reset_line = body.row_for_line.index("reset")
@@ -313,13 +371,20 @@ def _registry_page(
     description: str = "Search code examples and extract public documentation",
 ) -> PanelPage:
     return PanelPage(
-        "registry", ("Settings", "MCP Servers", "Registry"),
+        "registry",
+        ("Settings", "MCP Servers", "Registry"),
         (
             PanelRow("heading", RowKind.SECTION, "Official MCP Registry"),
-            PanelRow("registry:example", RowKind.NAVIGATION,
-                     "io.github.example/documentation-server", "2026.10.2-preview.12",
-                     description, section_id="heading", search_terms="Friendly Browser",
-                     action=PanelAction("open", "example")),
+            PanelRow(
+                "registry:example",
+                RowKind.NAVIGATION,
+                "io.github.example/documentation-server",
+                "2026.10.2-preview.12",
+                description,
+                section_id="heading",
+                search_terms="Friendly Browser",
+                action=PanelAction("open", "example"),
+            ),
             PanelRow("search", RowKind.ACTION, "Search again", footer=True),
             PanelRow("back", RowKind.NAVIGATION, "Back", footer=True),
         ),
@@ -333,24 +398,32 @@ def test_registry_table_wraps_every_field_without_ellipsis(width):
     page = _registry_page(description)
     state = PanelState(page)
     body = render_body(state, width)
-    fragments = [fragment for line, owner in zip(body.lines, body.row_for_line, strict=True)
-                 if owner == "registry:example" for fragment in line]
-    for field, style in ((page.rows[1].label, "panel.label"),
-                         (page.rows[1].value, "panel.value"),
-                         (description, "panel.muted")):
+    fragments = [
+        fragment
+        for line, owner in zip(body.lines, body.row_for_line, strict=True)
+        if owner == "registry:example"
+        for fragment in line
+    ]
+    for field, style in (
+        (page.rows[1].label, "panel.label"),
+        (page.rows[1].value, "panel.value"),
+        (description, "panel.muted"),
+    ):
         rendered = "".join(text for tone, text in fragments if style in tone)
         assert "".join(rendered.split()) == "".join(field.split())
         assert "…" not in rendered
-    assert all(get_cwidth("".join(text for _style, text in line)) <= width
-               for line in body.lines)
+    assert all(get_cwidth("".join(text for _style, text in line)) <= width for line in body.lines)
     assert all("panel.selected" in style for style, _text in fragments)
     header = "".join(text for _style, text in render_header(page, width))
     if width >= 60:
         assert header.count("\n") == 2
         assert all(column.upper() in header for column in page.column_headers)
         heading_fragments = render_header(page, width)
-        assert all(text == text.strip() and " " not in text
-                   for style, text in heading_fragments if style == "class:panel.section")
+        assert all(
+            text == text.strip() and " " not in text
+            for style, text in heading_fragments
+            if style == "class:panel.section"
+        )
     else:
         assert header.count("\n") == 1
     search_line = body.row_for_line.index("search")
@@ -399,13 +472,18 @@ def test_registry_table_long_row_can_scroll_resize_and_restore_focus():
 @pytest.mark.parametrize("width", [24, 70, 110])
 def test_section_comment_is_muted_and_wraps_without_underlining(width):
     comment = "Configuration snapshot 0s old"
-    state = PanelState(PanelPage("mcp", ("Settings", "MCPs"), (
-        PanelRow("configured", RowKind.SECTION, "MCP Servers", description=comment),
-    )))
+    state = PanelState(
+        PanelPage(
+            "mcp",
+            ("Settings", "MCPs"),
+            (PanelRow("configured", RowKind.SECTION, "MCP Servers", description=comment),),
+        )
+    )
     body = render_body(state, width)
     fragments = [fragment for line in body.lines for fragment in line]
-    assert any(style == "class:panel.section" and text == "MCP SERVERS"
-               for style, text in fragments)
+    assert any(
+        style == "class:panel.section" and text == "MCP SERVERS" for style, text in fragments
+    )
     muted = " ".join(text.strip() for style, text in fragments if style == "class:panel.muted")
     assert muted == comment
     assert all(get_cwidth("".join(text for _, text in line)) <= width for line in body.lines)
@@ -421,8 +499,11 @@ def test_installed_skill_heading_has_muted_inventory_count(count):
     heading = next(row for row in page.rows if row.id == "installed")
     assert heading.label == "SKILLS"
     assert heading.description == f"{count} installed, {count} enabled"
-    line = next(line for line in render_body(PanelState(page), 70).lines
-                if ("class:panel.section", "SKILLS") in line)
+    line = next(
+        line
+        for line in render_body(PanelState(page), 70).lines
+        if ("class:panel.section", "SKILLS") in line
+    )
     assert ("class:panel.section", "SKILLS") in line
     assert ("class:panel.heading-marker", ":") not in line
     assert ("class:panel.muted", f"  {count} installed, {count} enabled") in line
@@ -434,12 +515,18 @@ def test_skills_page_clear_import_flow_and_compact_inventory(width):
     from klaude_cli.skills_panel import skills_import_page, skills_manage_page, skills_page
 
     inbox = "/home/klaude/klaude-code/.klaude/data/skills"
-    page = skills_page([
-        {"name": "testing", "library": "testing", "indexed_file_count": 1, "identity": "a"},
-        {"name": "frontend", "library": "shared", "indexed_file_count": 3, "identity": "b"},
-    ])
+    page = skills_page(
+        [
+            {"name": "testing", "library": "testing", "indexed_file_count": 1, "identity": "a"},
+            {"name": "frontend", "library": "shared", "indexed_file_count": 3, "identity": "b"},
+        ]
+    )
     assert [row.id for row in page.rows[:5]] == [
-        "installed", "manage", "search", "import", "back",
+        "installed",
+        "manage",
+        "search",
+        "import",
+        "back",
     ]
     rows = {row.id: row for row in page.rows}
     assert "inbox" not in rows
@@ -452,21 +539,36 @@ def test_skills_page_clear_import_flow_and_compact_inventory(width):
     body = render_body(state, width)
     assert inbox not in "".join(text for line in body.lines for _, text in line)
     body = render_body(PanelState(skills_import_page(inbox)), width)
-    path_lines = [line for line, owner in zip(body.lines, body.row_for_line, strict=True)
-                  if owner == "inbox"]
+    path_lines = [
+        line for line, owner in zip(body.lines, body.row_for_line, strict=True) if owner == "inbox"
+    ]
     assert path_lines
     path_text = "".join(text for line in path_lines for _, text in line)
     assert f"{inbox}, then import".replace(" ", "") in path_text.replace(" ", "")
-    assert all(style == "class:panel.muted" for line in path_lines for style, text in line
-               if "Drop ZIPs" in text or inbox in text)
+    assert all(
+        style == "class:panel.muted"
+        for line in path_lines
+        for style, text in line
+        if "Drop ZIPs" in text or inbox in text
+    )
     assert all(get_cwidth("".join(text for _, text in line)) <= width for line in body.lines)
     assert "klaude import-skill" not in "".join(text for line in body.lines for _, text in line)
-    manage = skills_manage_page([
-        {"name": "testing", "identity": "a", "source_label": "Local ZIP",
-         "description": "Test helpers"},
-        {"name": "frontend", "identity": "b", "source_label": "GitHub · owner/repo",
-         "description": "Frontend design guidance"},
-    ])
+    manage = skills_manage_page(
+        [
+            {
+                "name": "testing",
+                "identity": "a",
+                "source_label": "Local ZIP",
+                "description": "Test helpers",
+            },
+            {
+                "name": "frontend",
+                "identity": "b",
+                "source_label": "GitHub · owner/repo",
+                "description": "Frontend design guidance",
+            },
+        ]
+    )
     state = PanelState(manage)
     state.picker.filter("frontend")
     assert any(row.id == "installed-items" for row in state.picker.visible)
@@ -479,11 +581,22 @@ def test_manage_pages_keep_source_description_and_actions_separate(width):
     from klaude_cli.skills_panel import skill_manage_detail_page, skills_manage_page
 
     description = "A long source description that wraps without losing its meaning"
-    skill = {"name": "guide", "identity": "reviewed", "source_label": "Local ZIP",
-             "description": description, "enabled": False, "indexed_file_count": 3}
-    server = {"name": "docs", "source_label": "Official MCP Registry",
-              "description": description, "enabled": True, "transport": "http",
-              "tool_count": 2}
+    skill = {
+        "name": "guide",
+        "identity": "reviewed",
+        "source_label": "Local ZIP",
+        "description": description,
+        "enabled": False,
+        "indexed_file_count": 3,
+    }
+    server = {
+        "name": "docs",
+        "source_label": "Official MCP Registry",
+        "description": description,
+        "enabled": True,
+        "transport": "http",
+        "tool_count": 2,
+    }
     for page, item_id, detail in (
         (skills_manage_page([skill]), "skill:guide", skill_manage_detail_page(skill)),
         (manage_page([server]), "server:docs", manage_detail_page(server)),
@@ -493,8 +606,9 @@ def test_manage_pages_keep_source_description_and_actions_separate(width):
             "Local ZIP" if page.id == "skills-manage" else "Official MCP Registry"
         )
         assert description in rows[item_id].search_terms
-        assert next(row for row in detail.rows if row.id == "description").description \
-            == description
+        assert (
+            next(row for row in detail.rows if row.id == "description").description == description
+        )
         assert rows[item_id].action is not None
         assert rows[item_id].action.kind.endswith("detail")
         assert rows["update-all"].action is not None
@@ -502,8 +616,10 @@ def test_manage_pages_keep_source_description_and_actions_separate(width):
         state = PanelState(page, item_id)
         body = render_body(state, width)
         table_start = body.row_for_line.index("installed-items")
-        assert all(body.row_for_line.index(control) < table_start
-                   for control in ("filter", "reload", "update-all"))
+        assert all(
+            body.row_for_line.index(control) < table_start
+            for control in ("filter", "reload", "update-all")
+        )
         assert table_start < body.row_for_line.index(item_id)
         assert not rows["installed-items"].selectable
         assert not any(style == "class:panel.section" for style, _ in render_header(page, width))
@@ -511,13 +627,10 @@ def test_manage_pages_keep_source_description_and_actions_separate(width):
             table_header = "".join(text for _, text in body.lines[table_start])
             assert all(column in table_header for column in page.column_headers)
             assert body.context_line == table_start
-        assert all(get_cwidth("".join(text for _, text in line)) <= width
-                   for line in body.lines)
+        assert all(get_cwidth("".join(text for _, text in line)) <= width for line in body.lines)
         assert any(owner == item_id for owner in body.row_for_line)
         assert any("description" in row.id for row in detail.rows)
-        assert {"enabled", "update", "delete", "back"}.issubset(
-            row.id for row in detail.rows
-        )
+        assert {"enabled", "update", "delete", "back"}.issubset(row.id for row in detail.rows)
         assert next(row for row in detail.rows if row.id == "enabled").checked is (
             page.id == "mcp-manage"
         )
@@ -535,18 +648,28 @@ def test_manage_table_breaks_long_names_at_hyphens_and_keeps_registry_source_sho
     from klaude_cli.mcp_management import manage_page
     from klaude_cli.skills_panel import skills_manage_page
 
-    skill = {"name": "frontend-design-direction", "identity": "reviewed",
-             "source_label": "Local ZIP", "enabled": True}
+    skill = {
+        "name": "frontend-design-direction",
+        "identity": "reviewed",
+        "source_label": "Local ZIP",
+        "enabled": True,
+    }
     skill_body = render_body(PanelState(skills_manage_page([skill])), 70)
-    skill_lines = ["".join(text for _, text in line) for line, row in zip(
-        skill_body.lines, skill_body.row_for_line, strict=True
-    ) if row == "skill:frontend-design-direction"]
+    skill_lines = [
+        "".join(text for _, text in line)
+        for line, row in zip(skill_body.lines, skill_body.row_for_line, strict=True)
+        if row == "skill:frontend-design-direction"
+    ]
     assert "frontend-design-" in skill_lines[0]
     assert "direction" in skill_lines[1]
 
-    server = {"name": "firecrawl-mcp-server", "enabled": False,
-              "source_label": "MCP Registry · io.github.firecrawl/firecrawl-mcp-server",
-              "transport": "http", "tool_count": 0}
+    server = {
+        "name": "firecrawl-mcp-server",
+        "enabled": False,
+        "source_label": "MCP Registry · io.github.firecrawl/firecrawl-mcp-server",
+        "transport": "http",
+        "tool_count": 0,
+    }
     page = manage_page([server])
     row = next(row for row in page.rows if row.id == "server:firecrawl-mcp-server")
     assert row.description == "Official MCP Registry"
@@ -571,13 +694,12 @@ def test_mcp_and_skill_search_tables_follow_controls_at_each_width(width):
     from klaude_core.mcp_catalog import MCPCatalogServer
     from klaude_core.skill_catalog import CatalogStatus, SearchRequest, SearchResult, SkillRecord
 
-    skill = SkillRecord("skillsmp", "one", "guide", "A useful guide",
-                        repository="example/skills")
-    server = MCPCatalogServer("org.example/docs", "Docs", "Useful docs",
-                              "1.2.3", "active")
+    skill = SkillRecord("skillsmp", "one", "guide", "A useful guide", repository="example/skills")
+    server = MCPCatalogServer("org.example/docs", "Docs", "Useful docs", "1.2.3", "active")
     pages = (
-        search_page(SearchRequest("guide"), "skillsmp", "stars",
-                    SearchResult(CatalogStatus.OK, (skill,))),
+        search_page(
+            SearchRequest("guide"), "skillsmp", "stars", SearchResult(CatalogStatus.OK, (skill,))
+        ),
         mcp_search_page("docs", (server,), searched=True),
     )
     for page in pages:
@@ -588,8 +710,7 @@ def test_mcp_and_skill_search_tables_follow_controls_at_each_width(width):
         assert "DESCRIPTION" not in header
         assert body.row_for_line.index("query") < body.row_for_line.index("sort")
         assert body.row_for_line.index("sort") < body.row_for_line.index("results-table")
-        assert all(get_cwidth("".join(text for _, text in line)) <= width
-                   for line in body.lines)
+        assert all(get_cwidth("".join(text for _, text in line)) <= width for line in body.lines)
 
 
 @pytest.mark.parametrize("width", [18, 70, 110])
@@ -597,9 +718,15 @@ def test_mcp_and_skill_search_tables_follow_controls_at_each_width(width):
 def test_mcp_delete_back_and_cancel_have_gap_without_reset(width, confirmation):
     from klaude_cli.mcp_management import removal_confirmation, removal_page
 
-    page = removal_confirmation("docs") if confirmation else removal_page([
-        {"name": "docs", "enabled": False},
-    ])
+    page = (
+        removal_confirmation("docs")
+        if confirmation
+        else removal_page(
+            [
+                {"name": "docs", "enabled": False},
+            ]
+        )
+    )
     identity = "cancel" if confirmation else "back"
     state = PanelState(page, identity)
     body = render_body(state, width)
@@ -609,3 +736,39 @@ def test_mcp_delete_back_and_cancel_have_gap_without_reset(width, confirmation):
     assert body.selected_line == index
     state.picker.filter("no matching server")
     assert identity in [row.id for row in state.visible_rows()]
+
+
+@pytest.mark.parametrize("kind", [RowKind.INFO, RowKind.ACTION])
+@pytest.mark.parametrize("width", [70, 120])
+def test_explicit_table_sections_align_readonly_and_action_rows(kind, width):
+    page = PanelPage(
+        "table",
+        ("Inventory",),
+        (
+            PanelRow("reload", RowKind.ACTION, "Reload inventory", action=PanelAction("reload")),
+            PanelRow("scope", RowKind.INFO, "Read-only snapshot", "Retained"),
+            PanelRow("columns", RowKind.TABLE_HEADER, "NAME"),
+            PanelRow(
+                "entry",
+                kind,
+                "demo.gguf",
+                "GGUF",
+                "9 B",
+                section_id="items",
+                action=PanelAction("detail") if kind == RowKind.ACTION else None,
+            ),
+        ),
+        column_headers=("NAME", "TYPE", "SIZE"),
+        table_section_id="items",
+    )
+    state = PanelState(page)
+    body = render_body(state, width)
+    texts = ["".join(text for _, text in line) for line in body.lines]
+    header = next(text for text in texts if "NAME" in text and "TYPE" in text)
+    entry = next(text for text in texts if "demo.gguf" in text)
+    assert entry.index("GGUF") == header.index("TYPE")
+    assert entry.index("9 B") == header.index("SIZE")
+    assert next(i for i, text in enumerate(texts) if "Reload inventory" in text) < texts.index(
+        header
+    )
+    assert next(text for text in texts if "Read-only snapshot" in text).endswith("Retained")

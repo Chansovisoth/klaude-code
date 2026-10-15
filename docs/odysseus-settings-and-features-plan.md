@@ -6,11 +6,39 @@ S2c's DeepSeek and native Anthropic slices are implemented and validated locally
 S3a Web Search and URL Fetch are implemented and validated locally.
 S3b execution controls, registry-derived tool groups and navigation migration are implemented
 and validated locally. [S3b follow-up evidence](s3b-agent-tools-validation.md).
-S4–S6 remain reviewed proposals, with implementation unstarted.
-Reviewed: 2026-10-05. Klaude baseline: `fdb2386`.
+S4a/S4b Library and Research, and S5a/S5b Model Manager are implemented and locally
+validated. S5c's local dependency/CPU-build, SSH settings/diagnostics and owned
+remote CPU serving and reviewed existing-public-key/host-trust slices are
+implemented. CUDA build profiles and offline NVIDIA vLLM wheel setups are also
+implemented; reviewed retained setup removal is also implemented.
+Remote llama.cpp GPU/vLLM profiles and reviewed remote adoption are implemented
+and exercised through actual CLI/TUI inference. S6a1 native Ollama image analysis
+is implemented and exercised through actual CLI/TUI pixels. S6a2 coding-chat
+images and private restore are also implemented and locally validated. S6a3a adds
+native Anthropic/declared compatible HTTP chat images; S6a3b extends reviewed
+Media analysis through the same HTTP adapters. S6a3c adds verified OpenRouter
+chat/Media images with actual free-model generation and resume. S6a3d adds reviewed
+OpenAI Responses chat/Media with real CLI/TUI TLS fixtures; live account generation
+remains unverified; the earlier account probe exhausted credits and current
+rechecks have not produced successful generation. S6a3e adds reviewed Gemini 2.5
+Flash/Flash-Lite native chat/Media with CLI/TUI TLS fixtures; live generation is
+unverified because both legacy IDs returned HTTP 404. S6a3f adds current Gemini
+3.5 Flash-Lite/3.8 Flash Thinking chat with real Google RGB generation and live
+Flash-Lite tool/image/process-resume evidence. S6a remains partial. S6b1 adds a
+reviewed local stable-diffusion.cpp generation consumer with CLI/TUI protocol
+fixtures. S6b2 adds real CPU inference, cancellation/recovery and exact-export
+evidence; the final S6 pass also validated native CUDA CLI/TUI inference. Broader
+image-quality certification remains open. S6b3 adds
+private image-job management. S6c optional AI tags are implemented and verified
+with actual native Gemma CLI/TUI calls. The final combined gate passed: 3,496 tests,
+19 skips, Ruff, production mypy and fresh five-wheel packaging.
+Original review: 2026-10-05. Klaude baseline at review: `fdb2386`.
 Product direction updated: 2026-10-06; artifact/media management belongs in Library.
-Phase grouping updated: 2026-10-13; S0, S1, S2a, S2b and S2c complete locally;
-S3a and S3b complete locally; S4-S6 remain unstarted.
+Delivery status updated: 2026-10-15; S0–S5 complete for the supported local scope;
+S6a1/S6a2/S6a3a/S6a3b/S6a3c/S6a3d/S6a3e/S6a3f are implemented for their supported scopes;
+remaining paid-provider certification and separately scoped generation extensions follow.
+Physical LAN/platforms and additional installer recipes
+remain separately scoped extensions.
 Live paid-provider certification remains unverified.
 
 ## 1. Objective and scope
@@ -25,7 +53,8 @@ Klaude remains a coding/agent environment. Library is its durable information
 workspace; Media manages screenshots and image artifacts used or produced by
 that work. A standalone Gallery and canvas/layer editing are outside this plan.
 
-This document records an implementation plan, not implemented functionality.
+This document records the original scope and dated implementation/validation
+updates; the status and delivery gates below distinguish them.
 It does not advance the separate [agent orchestration plan](agent-orchestration-plan.md):
 its final Phase 1 GPU comparisons remain pending and its later phases remain
 unstarted. Coordinate future runtime changes with that plan's regression gates.
@@ -382,7 +411,7 @@ document does not advertise nonexistent slash commands.
 | Provider model API credentials | Add/Added Models → endpoint authentication | Reuse private credential storage; maintain existing native providers and Codex account authentication. |
 | Providers web-search credentials | Search → provider detail | One editor and one persistence owner per credential. |
 | Providers URL-fetch credentials | Search → URL Fetch → provider detail | Keep fetch availability and transport rules distinct. |
-| Providers Hugging Face token | Model Manager → Settings | Existing Providers entry can link here until Model Manager is implemented. |
+| Providers Hugging Face token | Model Manager → Discover → Hugging Face credentials | S5a links to the existing credential owner with Back to Discover; keep a single store. |
 | Tools web-provider toggles | Search → Providers | Preserve enabled state and existing routing order. |
 | Tools web result validation | Search → Web Search → Advanced | Preserve current behavior and explain that discovery leads are not fetched evidence. |
 | Tools knowledge availability/validation | Agent Tools → Knowledge | Link to Library → Knowledge; keep the existing field semantics. |
@@ -776,7 +805,15 @@ Real native/compatible CLI sessions, fallback/cancellation/restart checks and
 regressions are recorded in the [S2b validation record](s2b-ai-defaults-validation.md).
 
 **Phase numbering:** S4 is Library, then Deep Research; Model Manager is S5.
-S4a and S4b are complete locally; S5 and S6 remain unstarted.
+S4a, S4b, S5a and S5b are complete locally. S5c's local dependency/build and SSH
+settings/diagnostics, owned remote CPU serving and reviewed existing-public-key/
+host-trust, CUDA build and offline NVIDIA vLLM wheel slices are implemented;
+retained setup removal and remote llama.cpp GPU profiles are also implemented;
+remote NVIDIA vLLM serving and reviewed remote adoption are implemented and
+locally validated. S6a1/S6a2/S6a3a/S6a3b/S6a3c/S6a3d/S6a3e/S6a3f native/HTTP analysis and
+chat images are implemented for their scopes; paid-provider generation evidence,
+native CPU/CUDA generation, image jobs and optional tagging are implemented and
+locally validated. Remaining paid-provider certification requires account access.
 
 **S2b: Defaults with functioning consumers**
 
@@ -787,8 +824,10 @@ S4a and S4b are complete locally; S5 and S6 remain unstarted.
 - [x] Display effective selections and fallback use. Keep deterministic
   compaction and avoid extra model calls for simple requests.
 - [x] Add Research endpoint/model controls with its functioning S4b consumer.
-- [ ] Add Vision and Image generation controls with their S6 consumers;
-  preserve the existing embedding role and migration boundary.
+- [x] Add Vision and Image generation controls with their S6 consumers;
+  S6a supplies analysis and S6b1 supplies the first local generation workflow.
+  Actual native CPU/CUDA diffusion inference is validated under S6b.
+  Preserve the existing embedding role and migration boundary.
 
 **S2c: Additional cloud adapters**
 
@@ -815,8 +854,8 @@ become selectable only with an implemented, validated adapter.
 - [x] URL Fetch: its own provider configuration, credentials and availability.
 - [x] Move existing web-provider controls to their single owning page; retain
   current routing/validation semantics and compatibility links.
-- [ ] Add Google PSE/Serper or other new search adapters only as complete,
-  separately tested slices with their actual credential fields.
+- Deferred extension: add Google PSE/Serper or other new search adapters only as
+  complete, separately tested slices with their actual credential fields.
 
 **Web Search slice, 2026-10-13:** typed Search entry and provider/detail/result/
 fallback pages, immediate intent and acknowledged non-secret saves, ordered
@@ -864,7 +903,8 @@ and Enter for purpose/availability/permission detail. MCPs/Skills links return
 to their existing owners; Search/URL Fetch link to one availability owner.
 Knowledge validation remains distinct from Search validation and permission grants.
 Settings uses Appearance, Models & AI, Agent and Advanced; Provider credentials
-remain under Advanced until Model Manager can own Hugging Face settings.
+remain under Advanced; Model Manager → Discover links to the same Hugging Face
+credential owner with contextual Back navigation.
 All built-in availability loads before chat/ask, and live disables are rechecked
 in later schemas, capability snapshots and delegated child intersections.
 [Interaction, protocol and regression evidence](s3b-agent-tools-validation.md).
@@ -949,46 +989,388 @@ cancellation/recovery honestly, with bounded local-model work.
 
 **S5a: Local Ollama lifecycle**
 
-- [ ] Installed-model inventory, discovery/download, progress/cancel, hardware
+- [x] Installed-model inventory, discovery/download, progress/cancel, hardware
   information and Hugging Face credential/settings ownership where relevant.
-- [ ] Native Ollama pull/remove and service health/status; distinguish removing
+- [x] Native Ollama pull/remove and service health/status; distinguish removing
   a connection from explicitly deleting a downloaded model.
+
+**S5a complete locally (2026-10-14):** typed Model Manager workspace and CLI,
+reviewed endpoint-scoped lifecycle, bounded owned progress/cancellation and
+existing Hugging Face credential ownership. The real CLI/TUI walkthrough passed;
+actual Ollama cancellation, retry and QA-tag deletion preserved all 22 original
+models and digests. Hardware measurements remain local and unknown where absent.
+[Scope, validation, evidence and limits](s5a-model-manager-validation.md).
 
 **S5b: Managed serving**
 
-- [ ] Integrate already-installed llama.cpp/vLLM, then owned launch/stop/logs,
+- [x] Integrate already-installed llama.cpp/vLLM, then owned launch/stop/logs,
   validated model/port/device/context fields and supported engine options.
-- [ ] Register served endpoints after a successful health check; explicitly
+- [x] Register served endpoints after a successful health check; explicitly
   adopt existing processes and stop only owned processes.
+
+**S5b complete locally (2026-10-14):** typed launch/adoption reviews, installed
+engine/device checks, bounded local model/resource fields, client-owned helpers,
+health/listener-gated registration, retained status/logs and reviewed owned stop.
+Real llama.cpp CPU serving and `klaude ask` passed; nine real TUI scenarios and
+owner/helper crash regressions passed. All 22 existing Ollama digests were retained.
+At that checkpoint GPU inference was unverified because the driver was unavailable;
+vLLM is protocol-fixture validated, not live-inference validated. The real short
+agent request needed about 191 seconds of CPU prefill for 5,708 prompt tokens.
+[Exact evidence, regression gates and remaining limits](s5b-managed-serving-validation.md).
 
 **S5c: Dependencies and remote servers**
 
-- [ ] Dependency inspection and explicitly requested installation/rebuild.
-- [ ] SSH server configuration, connection testing, model directories and
-  server-scoped hardware/process settings as a separate extension.
+- [x] Local dependency inspection and reviewed llama.cpp CPU build from a
+  committed local snapshot, with owned compilation, logs, cancellation and
+  verified handoff to Serve models.
+- [x] Explicit local NVIDIA CUDA build and isolated vLLM wheel-install recipes,
+  with compiler/target/platform/dependency/hash checks and owned cancellation.
+- [x] Reviewed retained build/install removal and storage reclamation.
+- [x] SSH definitions, strict connection testing, bounded resource/model-directory/
+  process snapshots and a diagnostics default with an explicit consumer.
+- [x] Owned SSH CPU llama.cpp serving, renewable remote lease, verified loopback
+  endpoint/tunnel, confirmed/unconfirmed cleanup and reviewed stop/cancel.
+- [x] Reviewed enrollment of existing Ed25519 public keys and independently
+  verified host pinning, preserving existing trust files/key policies.
+- [x] Owned remote llama.cpp GPU profiles with observed engine device mapping,
+  stale-device rejection, explicit layer/device reviews and native CUDA inference.
+- [x] Reviewed remote NVIDIA vLLM serving with environment-specific CUDA checks,
+  stable GPU UUIDs, local safetensors bundle revisions and explicit resources.
+- [x] Upstream remote vLLM GPU inference validated through actual CLI/TUI over
+  loopback SSH on GTX 1650, with pinned SmolLM2-135M-Instruct and confirmed cleanup.
+- [x] Reviewed remote adoption with exact process/model/listener identity,
+  exclusive acknowledged takeover and witnessed-group cleanup. Observed PIDs
+  alone do not authorize mutation.
+
+**S5c first slice implemented locally (2026-10-14):** actual llama.cpp source
+compilation at `b7ad48ebda2287c778fd826606d7b3b3570f60ab` passed in 294 seconds;
+its separate CPU executable served qwen2.5-coder:3b and returned OK. The source
+worktree and all 22 original Ollama digests were retained. Real TUI walkthroughs
+cover review/cancel, build, bounded logs, serving-draft focus and compiler cleanup.
+At this first-slice milestone, key enrollment, extra installer recipes and build
+removal were unfinished; the follow-up slices below cover them. **S5c is not
+complete as a whole**. [Evidence and boundaries](s5c-dependencies-validation.md).
+
+**S5c SSH settings/diagnostics slice implemented locally (2026-10-14):** reviewed
+private forms, revisioned owner-only definitions, explicit public-key/verified-host
+checks, bounded resource/model/process snapshots and a working diagnostics
+default. Actual OpenSSH CLI/TUI workflows passed, preserving dirty workspace,
+remote original/key files and endpoint selections. Visual inspection caught and
+fixed shared inventory row alignment. GPU measurements, physical LAN-host
+validation, key enrollment and extra installers remain unfinished.
+[Exact evidence and limits](s5c-ssh-validation.md).
+
+**S5c owned remote CPU serving implemented locally (2026-10-14):** reviewed
+server-scoped forms and additive serve CLI options, strict SSH/tunnel ownership,
+remote heartbeats/owned cleanup, health/model/listener-gated endpoint publication,
+private logs, Cancel loading and Back-focused scrolling reviews. Actual
+qwen2.5-coder:3b generation over real loopback SSH returned OK; final run took
+8.11 seconds, confirmed cleanup and preserved 22 original Ollama digests. Real
+restart testing found and fixed TIME_WAIT port-probe behavior; CLI preflight
+scope is now retained. Physical LAN, GPU/vLLM/adoption/key enrollment and extra
+recipes remain uncertified/unfinished. [Evidence](s5c-remote-serving-validation.md).
+
+**S5c reviewed key setup implemented locally (2026-10-14):** candidate Ed25519
+fingerprint discovery, independently verified private host pins and reviewed
+enrollment of one existing public key through current verified authentication.
+Original trust/identity files and authorized-key prefixes/restrictions are
+retained; stale definitions/files and revoked host keys are rejected. Real CLI/
+TUI runs verified new-key authentication, Back-focused reviews, three widths,
+stale remote policy handling and live cancellation with honest uncertain outcomes.
+Key generation/password bootstrap, certificate/jump-host flows, remote GPU/vLLM
+and additional recipes remain outside this slice. **S5c is still partial.**
+[Evidence and remaining limits](s5c-ssh-key-setup-validation.md).
+
+**S5c local engine recipes implemented (2026-10-14):** CUDA architecture/host
+compiler controls, fixed-code compiler checks and separate NVIDIA vLLM environments
+from complete trusted local wheels. Offline dependency/platform checks precede
+copying; installation uses immutable hashes and no ambient credentials/indexes.
+Real CLI/TUI runs cover rejection/recovery, Back-focused reviews, three widths,
+offline fixture installation, engine-correct Serve handoff and cancellation.
+Existing engines, models, source edits and defaults are retained. Setup verification
+does not certify GPU inference/model fit. A real full-source CUDA build at target
+75/GCC 12/eight explicit jobs completed in 769.31 seconds; its managed local GPU
+server returned OK using qwen2.5-coder:3b, stopped cleanly and preserved 22 original
+Ollama digests. Upstream vLLM inference was unverified at that checkpoint; the
+remote-vLLM follow-up below now records actual GPU validation. Setup removal is
+documented below; remote extensions remain unfinished. [Evidence](s5c-engine-recipes-validation.md).
+
+**S5c reviewed setup removal implemented (2026-10-14):** exact ID/path/storage
+reviews, Back/No defaults and shared CLI/TUI owned removal. Recheck filesystem
+receipts, active workers/servers, configured/session/default model roles and
+endpoint aliases. Serialize with server startup and unlink venv symlinks without
+following targets. Preserve original sources/wheels, external weights, roles and
+server history. Interrupted cleanup stays unservable and requires a fresh review;
+restricted Linux process visibility is disclosed. Real CLI/TUI review/removal and
+Ctrl+C partial-removal retry evidence: [validation](s5c-setup-removal-validation.md).
 
 **Gate:** verify actual download cancellation, disk/port/engine failures,
 unavailable hardware, owned-process cleanup, endpoint registration and explicit
 file deletion for each supported slice. Configuration must not imply untested
 hardware fit or tool reliability.
 
+**S5c remote llama.cpp GPU profiles implemented (2026-10-14):** engine-reported
+device mapping, CPU default, explicit layers/IDs, bounded metadata checks and
+fresh device verification before loading. Reuse SSH lease/tunnel/health/cleanup
+with no automatic model or CPU fallback. Real CUDA qwen2.5-coder:3b generation
+over encrypted loopback SSH returned OK, offloaded 37/37 layers, stopped with a
+confirmed receipt and retained 22 Ollama digests. TUI recovery, cancellation and
+40/70/120-column reviews passed. [Evidence](s5c-remote-gpu-validation.md).
+Physical LAN hosts, other backends and remote vLLM/adoption remain separate work.
+
+**S5c reviewed remote NVIDIA vLLM serving implemented (2026-10-14):** reuse the
+existing SSH supervisor/lease/tunnel/worker lifecycle, with an explicit engine
+choice and reviewed local safetensors directory. Remote NVIDIA UUIDs and CUDA in
+the selected environment authorize the GPU profile; stale bundle/environment
+revisions and unavailable/incompatible hardware fail before model loading.
+Precision/memory/eager controls remain user-visible and bounded. Readiness requires
+an owned group listener, including frontend children; no remote installation,
+model/default switch or CPU fallback is introduced. Real TUI reviews/recovery at
+40/70/120 columns and multiprocess SSH fixtures passed. The initial upstream
+install timed out; the follow-up completed verified offline installation and
+real CLI/TUI CUDA inference. Cold-help and cleanup timing failures were corrected.
+Full gates and exact attempt outcomes are in [validation](s5c-remote-vllm-validation.md).
+The following adoption slice covers takeover; physical LAN/other accelerators
+remain uncertified extensions.
+
+**S5c reviewed remote adoption implemented (2026-10-14):** private SSH PID/model/
+port forms, nonmutating inspections and Back/No reviews. Exact same-account,
+isolated process/session, tested executable, owned loopback listener/model and
+tunnel checks precede acknowledged takeover. An exclusive remote ownership guard
+rejects competing clients; failed takeover retains the external server. Existing
+settings/logs are retained; Stop/client/lease loss ends only the witnessed group,
+including ignoring descendants, with honest confirmed/unconfirmed receipts.
+The local client never interprets remote PIDs as local cleanup targets. Actual
+upstream vLLM CLI generation returned Hello!; native CUDA llama.cpp TUI returned
+OK. Review cancellation, three terminal widths, cleanup and retention of all 22
+Ollama digests passed. [Evidence](s5c-remote-adoption-validation.md).
+**S5c is complete locally for the supported Linux recipes and SSH workflows.**
+Physical LAN/other platforms and additional installers need separately scoped
+work; S6's native Vision slice follows below.
+
 ### S6 — Vision and image generation through Library → Media
 
 **S6a: Vision**
 
-- [ ] Working image/screenshot input, analysis adapter, enable switch,
-  capability-aware model selection and explicit role fallbacks.
+- [x] S6a1: explicit native Ollama image/screenshot analysis through Library →
+  Media and CLI, off-by-default switch, declared capability checks, explicit
+  qualified model/fallbacks, reviewed budgets and owned cancellation.
+- [x] S6a2: provider-neutral image messages and image attachments in ordinary
+  coding chat, with private persistence/restore/compaction, provider switches and
+  truthful per-turn pixel capabilities.
+- [ ] S6a3: additional image-capable provider adapters with explicit capability
+  evidence, endpoint/credential reviews and actual protocol/generation validation.
+  - [x] S6a3a: native Anthropic and declared compatible HTTP **chat** image paths;
+    actual compatible Ollama generation, native Anthropic TLS/TUI fixtures,
+    independent session model restoration and bounded follow-up routing.
+  - [x] S6a3b: extend reviewed Media analysis to the supported HTTP adapters,
+    preserving explicit budgets/fallbacks, owned jobs and endpoint reviews.
+  - [x] S6a3c: OpenRouter chat and reviewed Media through verified image/text
+    declarations, bounded transport, private protocol state and actual free-model
+    CLI/TUI generation, follow-ups and process resume.
+  - [x] S6a3d: reviewed exact-ID OpenAI Responses chat/Media profiles and bounded
+    native delivery; real TLS CLI/TUI/settings/cancel/resume fixtures. Live
+    generation remains unverified due to exhausted account credits.
+  - [x] S6a3e: exact reviewed Gemini 2.5 Flash/Flash-Lite profiles and bounded
+    native images/signed continuation; real CLI/TUI TLS fixtures. Live generation
+    remains unverified: both legacy IDs returned HTTP 404 for this account.
+  - [x] S6a3f: exact reviewed current Gemini Thinking chat profiles, native signed
+    text/tool/image continuity and actual Google one-shot/TUI/resume generation.
+    Standard-only consumers remain unavailable to these models.
+  - [ ] Remaining OpenAI/native Anthropic paid-provider generation certification
+    and legacy Gemini access require actual successful generation evidence.
 
-**S6b: Image generation**
+**S6a1 implemented locally (2026-10-14):** actual qwen3.5:4b identified the pixels
+in a synthetic red/green/blue PNG through CLI and the real TUI. Unsupported
+text-only models are rejected during selection; disabled analysis and declined
+reviews send no pixels. Reviews at 40/70/120 columns, private results and clean
+exit passed; all 22 Ollama digests/original image/workspace bytes were retained.
+Fixed typed HTTPX fallback eligibility and an incorrectly short image-request
+read timeout. No chat turns, indexing or tags are created. S6a is partial;
+S6b/S6c remain unstarted. [Evidence](s6a-local-vision-validation.md).
 
-- [ ] Working image-service connections and generation jobs; enabled state,
-  selected model and only quality options supported by that adapter.
-- [ ] Save generated output, provenance and session/task associations into Media.
+**S6a2 implemented locally (2026-10-15):** image attachments in chat/one-shot
+input use the active, explicitly selected image-capable native Ollama model.
+Enabled Vision, declared capabilities, existing Runtime budgets and private
+endpoint-scoped Media snapshots precede pixel delivery. Private references survive
+source deletion, follow-ups and process restart; public history/export omit pixels.
+Other providers omit historical pixels honestly. Failed preparation retains drafts/
+attachments. Intent separation reduced an observed one-shot request from about
+15,600 to 1,500 text characters; native qwen3.5:4b answered the actual pixels.
+The unchanged text-reader-as-vision regression remains covered. Full local unit,
+Ruff and production mypy gates passed. [Evidence](s6a2-chat-images-validation.md).
+
+**S6a3a implemented locally (2026-10-15):** native Anthropic and compatible HTTP
+chat images require fresh declared capabilities at the exact endpoint/model.
+Existing private Media references, approval scopes, Runtime bounds and complete
+tool protocols are reused. Real compatible Ollama gemma4:e2b passed one-shot,
+interactive follow-ups and process resume after source removal. Anthropic passed
+real CLI/TUI TLS protocol fixtures, with no paid generation claim. Resume now
+restores the session model/mode instead of Default Chat; tool-free follow-ups
+retain the user objective instead of turning assistant color names into lookup
+topics. Media analysis remains native Ollama. [Evidence](s6a3-http-chat-images-validation.md).
+
+**S6a3b implemented locally (2026-10-15):** reviewed Media analysis uses shared
+exact-model capability inspection and native Anthropic/compatible runtimes,
+without tools or chat/index/tag writes. Fallbacks, endpoint revisions and image
+identity remain explicit. Context estimates/provider limits precede review/send;
+shared worker bounds include metadata time without enlarging generation budgets.
+Actual compatible Ollama gemma4:e2b identified the pixels through CLI/TUI;
+Anthropic passed native protocol/owned-worker fixtures with canned answers.
+Native model deletion protects compatible role aliases at the same server root.
+Additional SDK adapters and paid certification remain open.
+[Evidence](s6a3b-http-media-validation.md).
+
+**S6a3c implemented (2026-10-15):** OpenRouter chat and reviewed Media require
+fresh exact-model image-input/text-output declarations and preserve private
+snapshots, endpoint/credential scope and existing budgets. Mandatory-reasoning
+models need explicit Thinking mode and cannot serve the Media consumer. A shared
+bounded HTTP image adapter retains complete tool pairs and signed private state;
+text SDK responses also reject failed completion before releasing buffered calls.
+Actual catalog-verified free-model one-shot/TUI/Media, source deletion and process
+resume passed. A live large-catalog failure exposed and fixed a metadata/event
+bound mix-up. A separate rate-limited model failed honestly without a fallback.
+At that slice's completion OpenAI/Gemini still needed exact-model capability
+evidence; S6a3d below adds reviewed OpenAI profiles without model-ID guesses.
+[Evidence](s6a3c-openrouter-vision-validation.md).
+
+**S6a3d implemented locally (2026-10-15):** exact-ID official model documentation
+and fresh authenticated availability checks enable GPT-4.1 Mini images only on
+the official OpenAI endpoint. UI distinguishes documented from declared support.
+Native Responses image transport reuses private continuation and complete tools,
+with bounded cancellation, explicit output and retained pixels across compaction.
+Fix positive streaming output budgets, clean metadata timeouts and quota failure
+classification. Real CLI/TUI TLS fixtures covered settings, review/decline, owned
+Media/cancel, follow-ups and process resume; canned answers do not certify cloud
+generation. Live generation remains unverified: the native API returned HTTP 429
+credit_balance_exhausted. Gemini native images were still unstarted at that point.
+[Evidence](s6a3d-openai-vision-validation.md).
+
+**S6a3e implemented locally (2026-10-15):** official exact-ID profiles and fresh
+identity/method/token-limit checks enable native Gemini 2.5 Flash/Flash-Lite images.
+The existing chat/Media architecture owns pixels, cancellation and settings;
+bounded HTTP handles inlineData, explicit thinking/output budgets, native tools
+and private signed text/function continuation. STOP plus clean EOF precedes tool
+publication; no SDK automatic continuation or Files upload runs. Fix a shared
+HTTP Media usage-envelope bug and include thought tokens in native image output
+usage. TLS one-shot/Media CLI and TUI settings/review/decline/cancel/follow-up/
+process-resume fixtures passed. Live generation is unverified: both IDs returned
+HTTP 404 despite visible metadata; Google's Flash error explicitly restricts new
+users. No newer model was substituted. Newer thinking-required models need their
+own chat/Media contract; S6a3 remains partial. [Evidence](s6a3e-gemini-vision-validation.md).
+Final gates: **3,393 passed, 19 skipped**; Ruff, production mypy on 142 source
+files and all five-wheel packaging/import/installed-CLI smoke checks passed.
+
+**S6a3f implemented locally (2026-10-15):** exact reviewed Gemini 3.5 Flash-Lite
+and 3.8 Flash profiles use native thinking levels and capability-derived session
+mode/effort controls, with bounded minimal effort persisted where supported.
+Native text from the first turn retains signed parts before images arrive;
+parallel call/results remain atomic and grouped, while earlier foreign tool
+results stay historical context without fake signatures. Standard-only consumers
+reject incompatible model choices before generation. Both models completed real
+RGB one-shot tasks. A real Flash-Lite TUI session listed/read a file through
+signed tools, analyzed pixels, retained them after source deletion and resumed
+in a fresh process with minimal effort. [Evidence](s6a3f-current-gemini-validation.md).
+Final full gate: **3,430 passed, 19 skipped**, Ruff and production mypy on 142
+source files passed. A fresh **191-test** native/session/runtime selection covers
+the final request-counter refinement. All five-wheel packaging/import/installed-CLI
+smoke checks passed. Catalog client lifetime/filtering and role availability
+labels were also repaired; mandatory-thinking models remain unavailable to
+Standard-only Media, Utility and Research consumers.
+
+**Local Gemma follow-up validated (2026-10-15):** installed Gemma 4 E2B/E4B passed
+actual native chat/owned Media RGB tasks and screenshot reading. The real TUI
+also retained pixels after original-file deletion, explicit E2B→E4B selection
+and fresh-process resume. No provider adapter or model-name exception was needed;
+existing declared capabilities and bounded Standard-mode requests were sufficient.
+All six CLI commands and both TUI processes exited 0; 130 relevant automated
+regressions passed. E4B's first chat took 66.51 seconds versus 8.12 seconds for
+its next screenshot request; these individual observations are not a controlled
+performance benchmark. Larger Gemma variants were metadata-checked only.
+[Evidence and limits](s6a-gemma-local-validation.md). The subsequent S6b1 slice
+is described below; S6c remains unstarted.
+
+**S6b: Image generation — native CPU/CUDA consumer validated; service extensions remain**
+
+- [x] S6b1: existing native stable-diffusion.cpp endpoint, OFF-by-default settings,
+  tested loaded-model pin, reviewed size/steps/seed, one owned asynchronous job
+  and scoped cancellation. Separate generation settings do not alter chat roles.
+- [x] Atomic private PNG/provenance/session/job storage in Media; existing
+  detail/export/tags/archive/delete lifecycle. Actual CLI/TUI fixture walkthrough
+  covers declines, acceptance, Ctrl+C 130, settings saves and three widths.
+- [x] Actual native CPU image-server inference, queued/running cancellation
+  outcomes and exact export through CLI/TUI. Protocol fixtures are recorded separately.
+- [x] Actual native CUDA CLI/TUI inference, explicit device allocation and exact
+  export on GTX 1650 through the supported upstream-GGML build configuration.
+- Further certification: other model/budget/hardware profiles and broader image
+  quality. The tested model missed requested background colors.
+- Deferred extensions: further services/authentication and model-specific controls
+  require their own evidence; the native adapter does not infer a quality scale.
+
+**S6b1 implemented (2026-10-15):** core image_generation and CLI generation_panel/
+generation_commands reuse the existing owned worker, ordered settings writer and
+artifact store. Unknown replies are retained without resubmission, cancellation
+checks only the accepted native ID, late results cannot replace new session/store
+state, and receipt loss after output commit recovers the already-saved artifact.
+At that checkpoint no image service/weights/installers were introduced; S6b was partial.
+[Implementation, actual CLI/TUI protocol evidence and limits](s6b-local-generation-validation.md).
+Full gate: **3,456 passed, 19 skipped**, Ruff and production mypy on 145 source
+files passed. A final **37-test** generation/settings-writer selection covers
+the last request-state refinements; final five-wheel packaging/import/installed-CLI
+smoke checks passed. These checks do not close the real diffusion-inference gate.
+
+**S6b follow-up (2026-10-15):** corrected completed-during-Cancel outcomes and
+added explicitly reviewed retrieval of already-completed native output through
+`generation-status --recover` and the current TUI result. Recovery shares pixel,
+receipt/binding and atomic publication checks and never submits generation.
+Real CLI/TUI fixture walkthrough (40/70/120 columns), declines, idempotence and
+Ctrl+C/clean exit passed. Initial local gates passed: 3,468 tests, 19 skips, Ruff,
+production mypy on 145 files, and five-wheel packaging.
+[Follow-up evidence](s6b-local-generation-validation.md#s6b-follow-up-cancellation-race-and-explicit-output-recovery).
+
+**S6b2 native validation (2026-10-15):** real stable-diffusion.cpp CPU generation
+and export passed through CLI and bare TUI. Actual capabilities exposed automatic
+sampler defaults and unsupported running cancellation, which the fixture had
+missed. Requests now retain automatic defaults; reviews warn that only queued
+jobs can be stopped. Rejected cancellation still observes the exact job; running,
+completed and cancelled remain distinct. Explicit completed-output recovery never
+resubmits generation. Final review at 40/70/120 columns defaults to Back, with
+endpoint/model visible at 120 columns and paging at narrow widths. The tested
+256-pixel outputs had poor fidelity; inference success is not a quality guarantee.
+An additional 512×512/eight-step CLI image completed in 238.50 seconds of native
+inference and exported exactly; visual inspection found a recognizable but soft
+yellow duck. Sampled peak server RSS was 3.10 GiB with no observed GPU allocation.
+The isolated server was stopped after validation. Full gate: 3,472 passed,
+19 skipped, Ruff/mypy (145 files); final scoped image suite: 43 passed after the
+last review/visibility edits. Final five-wheel packaging passed; exact gate
+timing/snapshot boundaries are recorded in the evidence.
+Upstream CUDA12.0 compilation failed and CUDA diffusion remains unverified; CPU
+was explicitly selected for the isolated test. Further services/authentication,
+model-specific controls remain extensions. The subsequent history/tag slice is below.
+[Native evidence and limits](s6b-local-generation-validation.md#s6b2-actual-native-cpu-generation-and-protocol-corrections).
 
 **S6c: Optional AI tags**
 
-- [ ] Explicit image-tagging action after vision works; distinguish generated
+- [x] Explicit image-tagging action after vision works; distinguish generated
   tags from manual tags and preserve manual choices.
+- [x] Back-focused Vision request, initially unselected suggestions, selected save
+  and separate AI-tag clearing, search and provenance/lifecycle support.
+- [x] Actual Gemma E2B CLI/TUI pixel-to-tag generation and selected persistence;
+  manual-tag retention, declined clear, three widths and clean exit.
+
+**S6b3/S6c implemented (2026-10-15):** image jobs now have a private inventory,
+explicit server status checks, existing output recovery and reviewed receipt
+cleanup, independent of saved images. CLI lists keep full IDs and omit prompts.
+Native Gemma tagging reuses the existing Vision worker/model/budget controls;
+proposals never save automatically and manual choices are retained. Old stores
+stay read-only on browse; accepted writes migrate atomically. Focused regressions
+and actual CLI/TUI flows passed. Final full checks passed: 3,496 tests, 19 skips,
+Ruff, mypy on 146 production files and fresh five-wheel packaging. Native CUDA
+CLI/TUI generation also passed (96.80/62.79 seconds for the two tested budgets);
+the exact test server was stopped afterward. Paid/legacy-provider generation
+certification still requires external account access. S6 is implemented for these
+scopes, but is not fully certified across all provider accounts.
+[Implementation, real-model evidence and limits](s6-completion-validation.md).
 
 **Gate:** actual analysis/generation, cancellation/errors and artifact export;
 selected endpoint and budgets remain explicit. Importing/viewing Media starts
@@ -1003,11 +1385,37 @@ no automatic model calls or knowledge indexing.
 
 ### Next implementation slice
 
-With **S0, S1, S2a, S2b, S2c, S3a, S3b, S4a and S4b complete locally**, the next
-slice is **S5a Model Manager: local Ollama lifecycle**. Library's foundation,
+With **S0–S5 and S6a1/S6a2/S6a3a/S6a3b/S6a3c/S6a3d/S6a3e/S6a3f implemented for their scopes**,
+the remaining **S6a3 OpenAI/native Anthropic paid-provider certification**
+require their own explicit capability evidence, endpoint/credential review and actual protocol/
+generation validation. Assess available capability evidence before extending SDK
+pixel delivery; do not infer support from model names. S6a3 remains partial.
+S6b1/S6b2's native local consumer now has actual CPU generation/cancellation/export
+evidence. The final pass also validates a supported upstream-GGML CUDA build and
+real native GPU CLI/TUI generation. Broader model/budget quality evidence and
+additional services/authentication remain separately scoped extensions.
+Job-history/cleanup and S6c tagging are implemented and locally exercised.
+The upstream remote-vLLM validation now covers actual CLI/TUI CUDA generation
+on GTX 1650 over loopback SSH. Other hosts/models/hardware need separate evidence.
+Local dependency/CPU builds, SSH settings/diagnostics, owned remote CPU serving
+and reviewed existing-public-key/host-trust setup, CUDA build profiles and
+offline NVIDIA vLLM wheel installations, reviewed retained setup removal and
+remote llama.cpp GPU profiles, reviewed remote NVIDIA vLLM serving and reviewed
+remote adoption are implemented and locally validated.
+Additional remote serving profiles need
+their own observed hardware/engine evidence; observed processes do not authorize
+adoption. Library's foundation,
 artifact workflows, explicit Knowledge actions and Deep Research consumers
 passed their recorded local validation gates.
-**S5 Model Manager and S6 have not started.** See the
+**S5c's supported Linux scope and S6a1 native image analysis are complete locally.**
+Reviewed legacy Gemini delivery is implemented but generation access is unverified.
+Reviewed current Gemini Thinking chat has real generation evidence; Standard-only
+Media/Utility/Research retain their existing contracts. S6a3 is partial.
+S6b local generation has native CPU/CUDA inference and protocol evidence; broader
+image-quality validation remains open. S6c tags and S6b3 job management
+are implemented with actual CLI/TUI validation recorded separately.
+Additional online/system/other-platform
+installation paths remain outside the delivered local recipes. See the
 [S1 evidence](s1-model-connections-validation.md) and
 [S2 connection UI evidence](s2-model-settings-validation.md), followed by the
 [S2b AI Defaults evidence](s2b-ai-defaults-validation.md) and
@@ -1020,7 +1428,14 @@ passed their recorded local validation gates.
 [Library foundation evidence](s4a-library-validation.md) and
 [artifact workflow evidence](s4a-artifacts-validation.md) and
 [Knowledge action evidence](s4a-knowledge-validation.md) and
-[Deep Research evidence](s4b-deep-research-validation.md).
+[Deep Research evidence](s4b-deep-research-validation.md) and
+[Model Manager lifecycle evidence](s5a-model-manager-validation.md) and
+[managed serving evidence](s5b-managed-serving-validation.md) and
+[local dependency/build evidence](s5c-dependencies-validation.md) and
+[SSH settings/diagnostic evidence](s5c-ssh-validation.md) and
+[owned SSH CPU serving evidence](s5c-remote-serving-validation.md) and
+[reviewed SSH key setup evidence](s5c-ssh-key-setup-validation.md) and
+[local engine recipe evidence](s5c-engine-recipes-validation.md).
 
 ## 9. Validation plan
 

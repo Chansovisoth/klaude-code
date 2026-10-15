@@ -2,6 +2,234 @@
 
 ## Unreleased
 
+- Validate actual native CUDA image generation through CLI and bare TUI on
+  GTX 1650 using the engine's supported upstream-GGML configuration, without
+  patching upstream sources or changing Klaude's runtime defaults. Final full
+  local checks pass: 3,496 tests, 19 skips, lint/types and five-wheel packaging.
+  Paid/legacy-provider access and broader image-quality certification remain open.
+  [Final S6 phase audit](docs/s6-completion-validation.md).
+- Add optional S6c AI tag suggestions through existing Vision endpoints and
+  budgets. Review pixels, select tags and save explicitly; retain manual tags and
+  per-tag AI provenance separately. Add CLI suggestion/selection/clear commands,
+  metadata search, stale-proposal checks and archive/delete lifecycle support.
+  Actual native Gemma CLI/TUI flows passed.
+- Add Media → Image jobs and CLI generation-jobs, explicit server refresh and
+  reviewed terminal-receipt removal. Preserve full job IDs in narrow CLI output,
+  hide prompts from lists, retain images independently and clear stale removal
+  filters. Actual CLI/TUI protocol walkthrough passed.
+  [S6 follow-up evidence](docs/s6-completion-validation.md).
+
+- Fix native image jobs that complete during cancellation being labeled cancelled.
+  Add reviewed completed-output recovery through CLI `generation-status --recover`
+  and the current TUI result, without resubmitting generation. Reuse atomic Media
+  publication, exact binding/receipt checks and deletion protections. Handle native
+  automatic sampler defaults and queued-only cancellation with explicit review
+  warnings; retain observed running-job state after a rejected cancellation.
+
+- Add S6b1 reviewed local image generation through an existing native
+  stable-diffusion.cpp service. OFF-by-default settings and Library Media reuse
+  owned workers, scoped cancellation, captured roots and ordered settings saves.
+  Store one bounded PNG atomically with private provenance; expose CLI review,
+  status/cancel and the existing artifact lifecycle. Real CLI/TUI protocol
+  fixtures and actual native CPU inference/export passed. Subsequent CUDA
+  CLI/TUI validation is recorded in the final S6 phase audit above.
+  [Evidence](docs/s6b-local-generation-validation.md).
+
+- Add S6a3f current native Gemini image chat for exact reviewed
+  `gemini-3.5-flash-lite` and `gemini-3.8-flash` IDs. Apply declared Thinking
+  modes/efforts to selection, commands and private session restore, including
+  minimal where supported. Preserve native signatures from the first text turn,
+  group parallel tool responses and omit interrupted rounds atomically. Earlier
+  foreign tool results remain historical context without forged signatures.
+  Standard-only Media/Utility/Research reject incompatible roles before model work.
+  Both models passed actual Google RGB analysis; Flash-Lite also passed real TUI
+  read_file, signed continuation, retained-image follow-ups and process resume.
+  [Evidence](docs/s6a3f-current-gemini-validation.md).
+
+- Add S6a3e native Gemini image chat and private Media for exact reviewed
+  `gemini-2.5-flash` and `gemini-2.5-flash-lite` IDs on Google's official root.
+  Fresh metadata checks, bounded inline requests, explicit thinking/output
+  controls, complete-stream tool gates and scoped signed-part replay reuse the
+  existing private image lifecycle and owned Media worker. Fix shared HTTP Media
+  usage normalization and count Gemini image thought tokens in output usage.
+  Real TLS CLI/TUI settings/review/cancel/follow-up/resume fixtures passed.
+  Live generation remains unverified: both legacy IDs returned HTTP 404 and
+  Google reports 2.5 Flash is unavailable to new users. Newer profiles remain
+  separately scoped; no silent model substitution.
+  [Evidence](docs/s6a3e-gemini-vision-validation.md).
+
+- Add S6a3d reviewed native OpenAI Responses images in chat and private Media.
+  Exact source-linked profiles plus authenticated availability checks enable two
+  documented GPT-4.1 Mini IDs only on the official API; unknown/custom/fine-tuned
+  models remain unavailable. Preserve private Responses continuation, complete
+  tool pairs and actual pixels across compaction. Forward streaming output limits,
+  reject incompatible reasoning/budgets and report metadata timeouts cleanly.
+  Distinguish exhausted credits from temporary fallback failures without exposing
+  provider messages. Real CLI/TUI TLS fixtures passed; live generation remains
+  unverified due to exhausted OpenAI credits.
+  [Evidence](docs/s6a3d-openai-vision-validation.md).
+- Add S6a3c OpenRouter chat images and reviewed Media analysis using fresh
+  image-input/text-output declarations, existing private snapshots and bounded
+  cancellable HTTP delivery. Keep endpoint/model selection explicit and reject
+  mandatory reasoning in standard chat or thinking-disabled Media. Fix metadata
+  catalogs incorrectly using the smaller stream-event bound, and prevent SDK
+  tool/private-reasoning publication after incomplete or truncated responses.
+  Actual free-model one-shot, interactive follow-ups, process resume and reviewed
+  Media analysis passed. OpenAI/Gemini image adapters remain pending.
+  [Evidence](docs/s6a3c-openrouter-vision-validation.md).
+- Add S6a3b reviewed Media analysis through Anthropic and declared compatible
+  HTTP endpoints using shared capability inspection, owned workers and explicit
+  fallback reviews. Reuse native provider protocols with tighter response bounds;
+  distinguish local context estimates from server allocation. Reject stale
+  reviews, oversized inputs and thinking-required Media models before sending.
+  Protect native models referenced through compatible endpoint aliases. Real
+  compatible Ollama CLI/TUI analysis and Anthropic protocol fixtures passed,
+  retaining images/model digests and creating no chat turns or saved results.
+  [Evidence](docs/s6a3b-http-media-validation.md).
+- Add S6a3a chat images through native Anthropic Messages and declared compatible
+  HTTP endpoints, with exact-model capability evidence, provider-aware input
+  bounds and preserved private/tool protocols. Model rows show image evidence.
+  Restore explicit session model/mode/revisions independently of Default Chat.
+  Keep tool-free follow-ups anchored to user intent instead of interpreting
+  assistant answers as lookup topics. Real compatible Ollama one-shot, TUI and
+  restart/resume passed; Anthropic TLS protocol/TUI fixtures passed, with paid
+  generation unverified. [Evidence](docs/s6a3-http-chat-images-validation.md).
+- Add S6a2 provider-neutral image messages and native Ollama image attachments
+  in coding chat/one-shot input, with explicit Vision enable/capability checks,
+  private Media snapshots, restore/compaction bounds and endpoint-scoped approval.
+  Preserve failed attachment drafts, tool protocol pairs and public export privacy.
+  Separate intent from image metadata to avoid unnecessary workspace discovery.
+  Real qwen3.5:4b CLI/TUI follow-ups and process resume retained pixels after source
+  deletion. [Evidence](docs/s6a2-chat-images-validation.md).
+- Add S6a1 reviewed native Ollama Vision through Library → Media and
+  `library analyze`, with explicit off-by-default settings/model/fallbacks,
+  declared capability checks, private pixel input/results, bounded editable
+  budgets and owned cancellation. Preserve chat, original artifacts and knowledge.
+  Fix typed HTTPX fallback eligibility and premature Vision read timeouts.
+  Real qwen3.5:4b CLI/TUI pixel analysis passed; other adapters remain S6a3.
+  [Evidence](docs/s6a-local-vision-validation.md).
+- Add reviewed SSH adoption of existing llama.cpp/vLLM servers, with exact
+  process/model/listener checks, exclusive acknowledged ownership, bounded lease
+  cleanup and original log/settings retention. Keep remote PIDs out of local
+  cleanup. Real upstream vLLM CLI and native CUDA llama.cpp TUI generation,
+  cancellation and confirmed Stop passed; evidence:
+  [remote adoption](docs/s5c-remote-adoption-validation.md).
+- Validate upstream vLLM GPU serving through the actual CLI/TUI on GTX 1650.
+  Give heavy vLLM cold imports bounded preflight headroom, reuse one CLI/TUI
+  timeout policy, and align remote/helper/client shutdown windows so delayed
+  cleanup acknowledgements are not preempted by the outer client.
+- Add reviewed remote NVIDIA vLLM serving through the existing SSH owner lease,
+  with environment-specific CUDA checks, stable GPU UUID selection, local bundle
+  revision checks and explicit precision/memory/eager controls. Owned frontend
+  children can provide the verified listener; cancellation/cleanup remain shared.
+  Review values align on wide screens and complete labels stack on narrow ones;
+  offline/telemetry settings and bounded preflight payloads are retained.
+  Evidence and remaining limits: [remote vLLM](docs/s5c-remote-vllm-validation.md).
+- Add reviewed remote llama.cpp GPU offload with explicit layer/device fields,
+  bounded engine device discovery, and fresh inventory checks at review/launch.
+  Keep CPU defaults, exact argument arrays, private minimal environments and the
+  existing SSH owner lease/tunnel/cleanup architecture. Preserve specific remote
+  errors and correct GPU progress; retain requested devices in server details.
+  Move mappings beside GPU fields, page long forms, show short selected values
+  and keep Back focus at paging boundaries. Cancelled probes reap immediately.
+  Real CUDA inference over loopback SSH returned OK with 37/37 layers offloaded;
+  CLI/TUI and regression evidence: `docs/s5c-remote-gpu-validation.md`.
+
+- Add reviewed retained CPU/CUDA build and vLLM environment removal through
+  `model-manager remove-build ID` and Dependencies → Built/installed engines.
+  Show exact scope and estimated storage; default to Back/No. Recheck filesystem
+  revisions, workers, managed servers, model roles and accessible external
+  processes. Serialize acceptance with local server startup; do not follow venv
+  symlinks. Retain an unservable cleanup record after partial removal, with honest
+  cancellation/retry behavior. Preserve original sources/wheels, external weights,
+  model defaults and server history. Fix removal-worker configuration ordering,
+  restricted Linux process inspection and narrow review controls. Evidence:
+  `docs/s5c-setup-removal-validation.md`.
+
+- Add reviewed local CUDA llama.cpp builds with explicit/observed architectures,
+  compiler compatibility probes and a selected CUDA host compiler. Add offline
+  NVIDIA vLLM setup from bounded trusted local wheels into a separate environment,
+  with early dependency/platform resolution, exact-version/hash installation and
+  CUDA/backend/help checks. Reuse the owned setup worker, safe resource defaults,
+  private logs, cancellation, dirty-source snapshots and model-work gates. Add
+  typed recipe forms, paged Back-focused reviews and engine-aware Serve handoff;
+  preserve models, existing environments and defaults. Distinguish setup checks
+  from GPU inference certification. Real full-source CUDA compilation passed;
+  managed qwen2.5-coder:3b GPU generation returned OK and retained 22 Ollama digests.
+  Upstream vLLM inference remains unverified. Evidence and remaining S5c scope:
+  `docs/s5c-engine-recipes-validation.md`.
+
+- Add S5c reviewed Ed25519 host pinning and enrollment of existing public keys
+  through current verified SSH authentication. Add canonical host-key/trust/enroll
+  commands and private Key setup panels. Preserve known-hosts revocations, original
+  trust/identity files and existing authorized-key bytes/restrictions; reject stale
+  definitions/reviews, unsafe paths and ambiguous keys. Use bounded owned jobs,
+  account-anchored descriptors, an advisory lock and a single append. Keep lost
+  receipts/cancelled remote effects explicitly unconfirmed, with no rollback claim.
+  Fix late results interrupting newer setup forms and cramped fingerprint columns.
+  Real CLI/TUI key enrollment, new-key login and Ctrl+C/exit-130 flows are recorded
+  in `docs/s5c-ssh-key-setup-validation.md`. Key generation/password bootstrap,
+  local CUDA/vLLM recipes are recorded above; remote GPU/vLLM profiles remain unfinished.
+
+- Add S5c reviewed remote CPU llama.cpp serving over verified SSH and an owned
+  loopback tunnel, reusing the existing ServingJobs/helper lifecycle. Add
+  --ssh-server/--local-port options to serve and a server-scoped TUI form. Verify
+  executable/model/credential revisions, owned listeners and exact model identity
+  before registering an endpoint. Renew remote owner leases; distinguish confirmed,
+  not-started and unconfirmed cleanup and disable unchanged owned endpoints.
+  Keep HTTP checks off the heartbeat/cancellation loop. Add visible Cancel loading
+  and scrolling for long reviews. Fix CLI preflight config scope and false busy
+  ports after stop by matching reusable bind semantics. Real qwen2.5-coder:3b CPU
+  generation over SSH returned OK and preserved all 22 original Ollama digests.
+  Reviewed key setup/local recipes are recorded above; remote GPU/vLLM work remains pending.
+
+- Add S5c SSH server settings, explicit strict-host-key connection tests and
+  bounded read-only CPU/RAM/disk/model/process diagnostics. Reuse owned workers,
+  private forms and ordered revisioned settings writes; support existing keys
+  or an explicitly selected SSH agent. Add canonical model-manager ssh commands
+  and a diagnostics default with a working Inspect default server consumer.
+  Preserve key/remote-file/model-connection state, reject stale results and retain
+  the true age of inspections across connection retests. Fix shared table
+  alignment for read-only/action rows in declared inventory sections. Real
+  OpenSSH CLI/TUI workflows passed; remote lifecycle and reviewed key setup are
+  recorded above. Online/system installer paths remain outside these local recipes.
+  See the S5c SSH
+  validation record.
+
+- Start S5c with local dependency diagnostics and reviewed llama.cpp CPU builds
+  from immutable committed source snapshots. Add canonical dependencies/builds/
+  build CLI commands and a Model Manager panel, private logs, disk/source/resource
+  bounds, compiler cancellation and verified executable handoff to Serve models.
+  Preserve dirty source and existing engines/models/defaults; reject changed tools,
+  commits and binaries. Real source compilation and model serving passed, retaining
+  all 22 existing Ollama digests. Fix forced-cancel engine probes escaping the
+  owned worker group. Additional GPU/vLLM installers remain pending; the SSH
+  settings/diagnostics slice is recorded above.
+
+- Implement S5b managed serving for installed llama.cpp/vLLM engines: private
+  structured launch/adoption forms, bounded flag/device tests, local weights,
+  loopback ports, explicit CPU/GPU limits, owned helpers and health-gated endpoint
+  registration. Add foreground serve/adopt CLI commands, retained server metadata,
+  bounded redacted logs and reviewed stop. End servers on client lease loss; reap
+  owned groups and reconcile unchanged endpoints after helper failure. Failed
+  adoption preserves external processes, and unavailable GPUs cannot silently
+  fall back to CPU. Test the real installed llama.cpp engine and preserve the
+  existing native fleet; vLLM inference remains unverified because it is not
+  installed. Dependencies/rebuilds/SSH remain S5c.
+
+- Implement S5a Model Manager: endpoint-scoped native Ollama inventory, reviewed
+  downloads/deletion, live progress/cancellation, service status, local hardware
+  and bounded Hugging Face GGUF discovery through existing credentials. Add
+  `/model-manager`, its Models settings link and matching CLI commands. Preserve
+  roles, endpoint aliases and existing models; recheck definitions, credentials,
+  digests and loaded state before mutations. Reuse owned workers with bounded
+  progress and compatible final results, scoped cache invalidation and model-work
+  gates. Fix reused review filters, credential-owner Back navigation and missing
+  table headers. Keep terminal progress in place and captured logs concise.
+  Real Ollama cancellation/retry/deletion preserved all 22 original model digests.
+  Dependencies/SSH (S5c) and S6 remain pending; see the S5a
+  validation record.
+
 - Complete S4b Deep Research: reviewed job forms, durable queues, a Research
   model role and bounded Search defaults, owned execution with progress/cancel,
   metadata-only recovery checkpoints and fresh evidence on resume. Reuse model
@@ -12,7 +240,7 @@
   report-loading/navigation feedback, persisted search/fetch settings and native
   structured planning; preserve model changes and published reports. Reject
   truncated source bodies during Knowledge learning. S4 is complete locally;
-  S5 Model Manager and S6 remain unstarted. See the S4b validation record for
+  the S5a slice above follows it. See the S4b validation record for
   actual CLI/TUI evidence and the remaining small-model coverage limitation.
 
 - Finish S4a's Knowledge consumers: reviewed source learning, hybrid queries and

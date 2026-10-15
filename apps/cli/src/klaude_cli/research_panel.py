@@ -532,12 +532,15 @@ class ResearchPanel:
     def start(self, item: dict | None = None, *, follow: bool = True) -> None:
         item = item or self.item
         if (
-            self.host.running
+            getattr(getattr(self.host, "_model_manager", None), "busy", False)
+            or self.host.running
             or self.host._watching_remote
             or self.library.knowledge.busy
             or self.host._setup_job is not None
             or self.host._skill_action_pending
             or self.host._ai_defaults.utility
+            or getattr(getattr(self.library, "vision", None), "busy", False)
+            or getattr(getattr(self.library, "generation", None), "busy", False)
             or self.host._ai_defaults.preparing_utility
         ):
             self.library.feedback = (

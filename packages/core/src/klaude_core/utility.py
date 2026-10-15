@@ -94,6 +94,9 @@ def eligible_failure(exc: Exception) -> bool:
     for _ in range(4):
         if isinstance(cause, (httpx.NetworkError, httpx.TimeoutException, TimeoutError)):
             return True
+        if (isinstance(cause, httpx.HTTPStatusError)
+                and cause.response.status_code in {429, 500, 502, 503, 504, 529}):
+            return True
         if getattr(cause, "status_code", None) in {429, 500, 502, 503, 504, 529}:
             return True
         if getattr(cause, "code", None) in {429, 500, 502, 503, 504}:
@@ -183,6 +186,11 @@ def run_utility(request: dict[str, Any]) -> dict[str, Any]:
     usage_known = True
     attempts: list[str] = []
     for index, (connection, model, key) in enumerate(candidates):
+        if connection.backend == "gemini_api":
+            from .model_runtime import gemini_capabilities
+
+            if gemini_capabilities(model).requires_thinking:
+                raise ValueError("Utility uses Standard mode; choose a model supporting it")
         if time.monotonic() - start >= 40:
             break
         remaining = 40 - (time.monotonic() - start)

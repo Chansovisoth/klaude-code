@@ -266,7 +266,11 @@ def execute_library(request: dict[str, Any]) -> dict[str, Any]:
         if operation == "artifact-preview":
             return store.preview(request["target"])
         if operation == "artifact-detail":
-            return {"item": store.get(request["target"])}
+            item = store.get(request["target"])
+            provenance = store.generation_info(item["id"])
+            if provenance:
+                item["generation"] = provenance
+            return {"item": item}
         raise ValueError("Unknown artifact read operation")
     if operation in {"sessions", "archive"}:
         return session_inventory(

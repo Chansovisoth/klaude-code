@@ -6,6 +6,8 @@ import hashlib
 import json
 from typing import Any
 
+import httpx
+
 from .compatible_runtime import CompatibleModelError, CompatibleRuntime
 from .model_connections import DEFAULT_URLS
 from .model_runtime import chat_completion_messages
@@ -20,7 +22,7 @@ class DeepSeekRuntime(CompatibleRuntime):
         self,
         base_url: str = "",
         api_key: str = "",
-        timeout: float = 600.0,
+        timeout: float | httpx.Timeout = 600.0,
         *,
         connection_scope: str = "",
     ):

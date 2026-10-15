@@ -129,6 +129,7 @@ class PanelPage:
     table_section_id: str = ""
     scroll_wrapped_rows: bool = False
     scrollable_body: bool = False
+    align_info_values: bool = False
 
     def __post_init__(self) -> None:
         ids = [row.id for row in self.rows]
@@ -233,6 +234,14 @@ class PanelState:
             self.scroll_top = selected - height + 1
         if body.context_line < selected and selected == body.selected_line:
             self.scroll_top = min(self.scroll_top, max(body.context_line, selected - height + 1))
+        # A short wrapped field should show its value alongside its label.
+        # Long results and explicit paging retain their existing line focus.
+        if (self.page.scrollable_body and selected == body.selected_line
+                and self.picker.selected_id is not None):
+            owned = [i for i, owner in enumerate(body.row_for_line)
+                     if owner == self.picker.selected_id]
+            if owned and len(owned) <= height:
+                self.scroll_top = max(self.scroll_top, owned[-1] - height + 1)
         self.scroll_top = max(0, min(self.scroll_top, max(0, len(body.lines) - height)))
         return self.scroll_top
 
@@ -404,6 +413,8 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
     context_line = 0
     last_section_line = 0
     footer_started = False
+    info_width = max((get_cwidth(row.label) for row in rows
+                      if row.kind in {RowKind.INFO, RowKind.STATUS} and row.value), default=0)
     for row in rows:
         footer_row = row.footer or row.effective_control is not None
         if not footer_started and footer_row:
@@ -420,7 +431,11 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
             lines.append(table_header_parts)
             owners.append(row.id)
             continue
-        if state.page.column_headers and row.kind == RowKind.NAVIGATION and not footer_row \
+        table_kind = row.kind == RowKind.NAVIGATION or (
+            bool(state.page.table_section_id)
+            and row.kind in {RowKind.INFO, RowKind.STATUS, RowKind.ACTION, RowKind.CHOICE}
+        )
+        if state.page.column_headers and table_kind and not footer_row \
                 and (not state.page.table_section_id
                      or row.section_id == state.page.table_section_id):
             start = len(lines)
@@ -465,6 +480,24 @@ def render_body(state: PanelState, width: int, *, unicode_blocks: bool = True) -
                 f"class:panel.status.{row.status_tone}"
                 if row.kind == RowKind.STATUS else "class:panel.muted"
             )
+            if row.value and state.page.align_info_values:
+                label_lines = _wrapped(row.label, max(1, width - 2))
+                stacked = width < 55 or info_width + get_cwidth(row.value) + 4 > width
+                label = label_lines[0] if stacked else _fit(row.label, info_width)
+                lines.append(((info_style, "  " + label),
+                              (_value_style(row), "" if stacked else "  " + row.value)))
+                owners.append(row.id)
+                for extra in label_lines[1:]:
+                    lines.append(((info_style, "  " + extra),))
+                    owners.append(row.id)
+                if stacked:
+                    for value_line in _wrapped(row.value, max(1, width - 4)):
+                        lines.append(((_value_style(row), "    " + value_line),))
+                        owners.append(row.id)
+                for description in _wrapped(row.description, max(1, width - 4)):
+                    lines.append((("class:panel.muted", "    " + description),))
+                    owners.append(row.id)
+                continue
             if row.value:
                 label=_fit(row.label,max(1,width//2)).rstrip()
                 if get_cwidth(label)+get_cwidth(row.value)+4>width:

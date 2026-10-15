@@ -6,6 +6,7 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from .image_content import IMAGE_BACKENDS
 from .model_connections import connection_registry, split_model_ref, validate_model_id
 from .model_management import reference_parts, validate_model_reference
 from .settings_store import (
@@ -31,9 +32,16 @@ class AIDefaults:
     fallbacks: tuple[str, ...] = ()
     output_tokens: int = 512
     research: str | None = None
+    vision: str | None = None
+    vision_enabled: bool = False
+    vision_fallbacks: tuple[str, ...] = ()
 
     def public(self) -> dict[str, Any]:
-        return {**asdict(self), "fallbacks": list(self.fallbacks)}
+        return {
+            **asdict(self),
+            "fallbacks": list(self.fallbacks),
+            "vision_fallbacks": list(self.vision_fallbacks),
+        }
 
 
 def defaults_from_preferences(cfg: Any, saved: dict[str, Any]) -> AIDefaults:
@@ -58,12 +66,29 @@ def defaults_from_preferences(cfg: Any, saved: dict[str, Any]) -> AIDefaults:
     identities = [reference_parts(ref) for ref in refs]
     if len(set(identities)) != len(refs) or (primary and reference_parts(primary) in identities):
         raise ValueError("Utility models must be distinct")
+    vision = model_reference(raw["vision"]) if raw.get("vision") is not None else None
+    enabled = raw.get("vision_enabled", False)
+    alternatives = raw.get("vision_fallbacks", [])
+    if (
+        type(enabled) is not bool
+        or not isinstance(alternatives, (tuple, list))
+        or len(alternatives) > 3
+    ):
+        raise ValueError("Vision requires an enable switch and at most three explicit fallbacks")
+    vision_refs = tuple(model_reference(value) for value in alternatives)
+    identities = [reference_parts(ref) for ref in ((vision,) if vision else ()) + vision_refs]
+    if len(set(identities)) != len(identities) \
+            or any(part[0] not in IMAGE_BACKENDS for part in identities):
+        raise ValueError("Vision requires distinct supported image models")
     return AIDefaults(
         model_reference(chat) if chat is not None else None,
         primary,
         refs,
         output,
         model_reference(raw["research"]) if raw.get("research") is not None else None,
+        vision,
+        enabled,
+        vision_refs,
     )
 
 
@@ -95,7 +120,16 @@ class DefaultsChange:
 def save_defaults(cfg: Any, change: DefaultsChange) -> dict[str, Any]:
     from .config import provider_secret_revision
 
-    if change.field not in {"chat", "utility", "fallbacks", "output_tokens", "research"}:
+    if change.field not in {
+        "chat",
+        "utility",
+        "fallbacks",
+        "output_tokens",
+        "research",
+        "vision",
+        "vision_enabled",
+        "vision_fallbacks",
+    }:
         raise ValueError("Invalid AI Defaults field")
     registry = connection_registry(cfg)
     registry.migrate(cfg)
@@ -108,11 +142,12 @@ def save_defaults(cfg: Any, change: DefaultsChange) -> dict[str, Any]:
         candidate = {**defaults.public(), change.field: change.value}
         updated = defaults_from_preferences(cfg, {"ai_defaults": candidate})
         refs = (
-            updated.fallbacks
-            if change.field == "fallbacks"
+            getattr(updated, change.field)
+            if change.field in {"fallbacks", "vision_fallbacks"}
             else (
                 (getattr(updated, change.field),)
-                if change.field != "output_tokens" and getattr(updated, change.field)
+                if change.field not in {"output_tokens", "vision_enabled"}
+                and getattr(updated, change.field)
                 else ()
             )
         )

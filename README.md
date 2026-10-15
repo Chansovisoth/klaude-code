@@ -121,6 +121,168 @@ exits 2, an error exits 1, and Ctrl+C exits 130. Queued jobs start explicitly;
 there is no unattended queue daemon. See the
 [S4b validation and model limitations](docs/s4b-deep-research-validation.md).
 
+Open **`/model-manager`**, or **Settings → Models → Model Manager**, to manage
+downloaded models on an enabled native Ollama endpoint. Installed models has
+Filter, Sort, Reload and Download controls above its inventory. Download and
+deletion reviews show the exact server and model; Back is initially selected.
+Downloads show live progress and support cancellation. Selected or loaded models
+are protected from deletion. Connections, defaults and session history are retained.
+Discover searches Hugging Face GGUF repositories through the existing credentials
+owner. Service status checks Ollama; Hardware describes this machine, including
+unknown measurements when unavailable. Downloading does not load or select a model.
+
+CLI equivalents include `klaude model-manager list`, `status`, `hardware`,
+`search "QUERY"`, `pull MODEL` and `delete MODEL`. Endpoint operations accept
+`--endpoint ID`; mutations ask for confirmation unless `--yes` is supplied.
+Failures exit 1 and Ctrl+C exits 130. Cancellation closes Klaude's request;
+Ollama can retain server download data. See the
+[S5a validation and remaining S5 scope](docs/s5a-model-manager-validation.md).
+**Model Manager → Serve models** provides installed llama.cpp/vLLM engine tests,
+local model paths, reviewed launch/adoption, server status, private log tails and
+reviewed stop. Servers bind to loopback and stop when their owning Klaude client
+exits. Ready endpoints appear in Added Models; choose one explicitly without
+changing Default Chat automatically. CPU/GPU settings are engine-specific, and
+unavailable GPU devices remain unavailable. Model downloads and engine installation
+are separate actions; serving uses existing local weights.
+
+For the CLI, inspect `klaude model-manager engines --executable PATH`, then
+`klaude model-manager serve ABSOLUTE_MODEL_PATH --executable PATH --port 8080`.
+Use `serve --help` for engine/context/CPU/GPU fields; it stays foreground until
+Ctrl+C. `model-manager servers` lists retained records and `logs SERVER_ID` reads
+a bounded tail. `model-manager adopt PID MODEL_ID --executable PATH --port N`
+requires explicit review of an isolated existing server and takes responsibility
+for stopping it on exit. See the
+[S5b validation and limitations](docs/s5b-managed-serving-validation.md).
+**Model Manager → Dependencies** inspects local build tools and selected engines.
+It can build a CPU llama.cpp server from a trusted local checkout's committed
+HEAD, with a Back-focused review and bounded compilation/cancellation. The new
+private executable is separate from existing engines; Use in Serve models fills
+its path without starting a server or changing defaults. Uncommitted source
+edits are excluded and partial/failed builds are retained with private logs.
+
+CLI equivalents are `klaude model-manager dependencies`, `klaude model-manager
+builds` and `klaude model-manager build ABSOLUTE_SOURCE_PATH --jobs 2`.
+Build instructions execute code from that commit; select trusted source. See
+[S5c local dependency/build evidence](docs/s5c-dependencies-validation.md).
+
+Dependencies also offers **Build llama.cpp CUDA engine** and **Install vLLM from
+wheels**. CUDA checks installed NVCC and the selected host compiler using a small
+fixed compilation probe. Enter numeric architectures such as `75;86`, or leave
+them blank to discover available GPUs. A compatible host compiler can be chosen
+explicitly; no compiler safety checks are bypassed. Jobs default to two, with
+1–8 available. For example:
+
+```bash
+klaude model-manager build /absolute/llama.cpp --profile cuda --architectures 75 --host-compiler /usr/bin/g++-12 --jobs 2
+klaude model-manager install-vllm /absolute/wheels --python /usr/bin/python3.12
+```
+
+The NVIDIA vLLM recipe requires a complete trusted local wheel set, including
+CUDA PyTorch, for the selected Linux Python interpreter. It resolves compatibility
+before copying, verifies hashes and installs offline into a new private
+environment. Existing Python installations, model files and defaults are retained.
+Review initially selects Back; cancellation retains partial files and waits for
+owned worker cleanup. Help/backend checks certify the setup checks, not GPU model
+fit or inference. Use in Serve models fills the correct engine/path without
+launching or selecting a model. OS drivers/toolkits and online wheel downloading
+remain explicit external setup. See [recipe evidence](docs/s5c-engine-recipes-validation.md).
+
+**Dependencies → Built/installed engines → Review removal** reclaims one unused
+setup after a review of its exact ID, directory and estimated storage. Back is
+initially selected; long details support PageUp/PageDown. CLI: `klaude
+model-manager remove-build ID [--yes]`; confirmation defaults to No. Removal
+checks running workers/servers, current/default model selections, endpoint aliases
+and accessible external process references again at acceptance. Linux-restricted
+process checks are disclosed. Original source/wheel folders, external model
+weights, defaults and server history remain independent. Cancelled/failed cleanup
+may remove some files; Reload and review again to finish. Incomplete setups cannot
+be served. [Removal evidence and limits](docs/s5c-setup-removal-validation.md).
+
+**Model Manager → Servers** adds SSH definitions with existing key/known-hosts
+references and an opt-in SSH agent. Save stores settings; Test connection and
+Inspect server explicitly connect. Inspect shows bounded CPU/RAM/disk, model
+directory and process metadata; GPU remains Not checked. Use as default controls
+Inspect default server, independently of chat/default models. Serve model
+reviews an installed remote llama.cpp executable, GGUF path and remote/tunnel
+loopback ports. It registers an endpoint after owned listener/model/tunnel checks;
+choose that model explicitly. Cancel loading and reviewed Stop wait for cleanup.
+The server stops on owner exit or SSH lease loss. GPU layers default to 0 for
+CPU. Set a positive layer count and choose GPU IDs from Test engine's remote
+device mapping to request offload. Review and launch recheck that inventory;
+missing/reordered devices fail, with no automatic CPU fallback. Reviews show exact
+device names and layer requests. Existing model/default choices stay unchanged.
+For example:
+
+```bash
+klaude model-manager serve /remote/model.gguf --ssh-server ID --executable /remote/llama-server --gpu-layers 99 --gpu 0
+```
+
+This uses an installed GPU-capable remote llama.cpp engine, not the client GPU.
+Device availability does not guarantee model fit or offload. Long forms/reviews
+support PageUp/PageDown; Cancel loading and reviewed Stop wait for owned cleanup.
+[GPU evidence and limits](docs/s5c-remote-gpu-validation.md).
+
+For an installed NVIDIA vLLM environment, choose **Engine → vllm** in the same
+SSH form. Enter its absolute executable and a local safetensors model directory,
+then test and review the remote UUID mapping, precision, context and memory fraction.
+Eager execution starts ON in the TUI to avoid CUDA graphs; it can be changed.
+The CLI enables it explicitly:
+
+```bash
+klaude model-manager serve /remote/models/model --engine vllm --executable /remote/env/bin/vllm --ssh-server ID --gpu 0 --memory 0.5 --dtype half --enforce-eager
+```
+
+Checks use CUDA in that environment, not the client's GPU. Missing CUDA, stale
+weights/tokenizers/environments and unsupported precision fail before launch;
+no installer, download, CPU fallback or default-model change is automatic.
+The same owned SSH tunnel, cancellation and cleanup apply to frontend workers.
+Upstream vLLM was exercised through the actual CLI/TUI on the local GTX 1650
+using SmolLM2-135M-Instruct, context 512, half precision and eager execution.
+This certifies that configuration over loopback SSH; other hosts/models/settings
+need their own validation. [Remote vLLM evidence and limits](docs/s5c-remote-vllm-validation.md).
+
+To take control of an already-running remote server, choose **Servers → saved
+server → Adopt existing server**. Enter its installed executable, isolated PID,
+exact model ID and loopback/tunnel ports. Inspect and Review leave it running;
+Back/No is the review default. Accepted adoption keeps existing engine settings
+and logs, registers a tunnel endpoint and stops that process group on Stop,
+client exit or SSH lease loss. A failed takeover leaves the external server running.
+
+```bash
+klaude model-manager adopt PID MODEL_ID --engine llama_cpp --executable /remote/bin/llama-server --ssh-server ID --port 8080 --local-port 18080
+```
+
+Native llama.cpp and Python-console vLLM require same-account Linux ownership,
+an isolated session and a healthy loopback listener. Diagnostics never authorize
+adoption. [Real CLI/TUI evidence and limits](docs/s5c-remote-adoption-validation.md).
+
+
+CLI equivalents are `klaude model-manager ssh list`, `add ID --host HOST --user
+USER --identity-file PATH --known-hosts PATH`, `test ID`, `inspect ID`, `default
+ID` and `remove ID`. Use existing verified known hosts; no password prompts or
+automatic host-key trust are introduced. Checks use installed OpenSSH and remote
+Python 3. See [S5c SSH evidence and limits](docs/s5c-ssh-validation.md).
+
+**Servers → saved server → Key setup** discovers Ed25519 host fingerprints and
+requires one independently verified from the server/admin before saving a private
+host pin. Existing known-hosts files remain intact. Enroll public key reviews one
+existing Ed25519 `.pub` file and the exact remote account/authorized-key path,
+then appends through your current verified authentication. Existing entries and
+restrictions are retained; identity selection and testing remain explicit.
+No private-key generation, password or passphrase bootstrap is provided.
+
+CLI equivalents are `klaude model-manager ssh host-key ID`, `trust ID
+SHA256:VERIFIED_FINGERPRINT` and `enroll ID /absolute/key.pub`. Trust/enrollment
+confirmations default to No; `--yes` accepts the reviewed effect explicitly.
+Ctrl+C waits for local cleanup and exits 130; a completed remote append may remain.
+See [key setup evidence and limits](docs/s5c-ssh-key-setup-validation.md).
+
+To serve remote CPU weights, use `klaude model-manager serve /remote/model.gguf
+--ssh-server ID --executable /remote/llama-server --port 8080 --local-port 18080`.
+The command stays foreground until Ctrl+C; the model must be inside that SSH
+definition's configured model directory. Long reviews use PageUp/PageDown. See
+[real SSH serving/model evidence](docs/s5c-remote-serving-validation.md).
+
 Artifact CLI includes `klaude library import PATH` for documents and
 `klaude library import PATH --type media` for images. Use `klaude library list`,
 `klaude library info ARTIFACT_ID`, `klaude library tags ARTIFACT_ID "tag, tag"`,
@@ -134,6 +296,124 @@ Use `klaude sessions archive SESSION_ID`, `klaude sessions --archived`, and
 session lists and `/resume`; restore one before continuing it. Archiving retains
 existing memory-recall behavior. **Stored ≠ indexed; Imported ≠ learned;
 Archived ≠ deleted.** Library browsing never learns content automatically.
+
+**Image analysis:** Settings → AI Defaults → Vision selects an explicit
+image-capable model and optional ordered fallbacks; Vision starts OFF.
+Import a PNG/JPEG into Library → Media, open its detail and choose **Analyze
+image**. Edit the private question/budgets and review the exact image/model/
+endpoint before sending. Results remain private to the panel, with no tools,
+chat turns, indexing or automatic tags. CLI access shares the same reviewed flow:
+
+```bash
+klaude library analyze MEDIA_ID "Describe this screenshot" --context 4096 --output-tokens 512
+```
+
+PNG/JPEG inputs are bounded to 8 MiB/4 megapixels, or 7,500,000 raw bytes on
+Anthropic. Native Ollama, Anthropic Messages, compatible HTTP endpoints and
+OpenRouter require declared image support. Configured fallbacks are shown before
+sending and run only on network/timeouts or temporary service failures. Context allocates
+native Ollama's window; HTTP servers use it as Klaude's input estimate and retain
+their own allocation. Results stay private and no tools run.
+Native OpenAI Responses also supports the reviewed `gpt-4.1-mini` and
+`gpt-4.1-mini-2025-04-14` IDs at `https://api.openai.com/v1`, using official
+model documentation plus fresh authenticated availability checks. Other IDs,
+fine-tunes and custom OpenAI URLs remain unknown. These models use Standard mode.
+Native Gemini also supports the exact `gemini-2.5-flash` and
+`gemini-2.5-flash-lite` IDs on Google's official endpoint, using documented
+capabilities plus fresh model identity and token-limit checks. Requests use
+inline pixels with a 20 MB total encoded-request ceiling and no file upload.
+These legacy models may be unavailable to your account even when metadata is
+visible; our live generation attempts returned HTTP 404. The current Gemini
+models described below support chat, while Media keeps its thinking-off contract.
+[Native Media analysis evidence](docs/s6a-local-vision-validation.md).
+[Local Gemma E2B/E4B image and screenshot validation](docs/s6a-gemma-local-validation.md).
+[HTTP Media analysis evidence and limits](docs/s6a3b-http-media-validation.md).
+[OpenRouter live validation and limits](docs/s6a3c-openrouter-vision-validation.md).
+[OpenAI protocol validation and account limits](docs/s6a3d-openai-vision-validation.md).
+[Gemini protocol validation and account limits](docs/s6a3e-gemini-vision-validation.md).
+
+**Local image generation:** Settings → AI Defaults → Image generation configures
+an existing stable-diffusion.cpp native server. Generation starts OFF; Test checks
+capabilities without generating, and Save pins its observed loaded model. Library
+→ Media → Generate image reviews the prompt, endpoint/model, size, steps and seed
+before submitting one job. Output and private provenance are saved in Media and
+use its normal info/export/archive/delete controls. This first adapter requires
+a server without authentication; it installs nothing and changes no Chat model.
+
+```bash
+klaude library image-service --endpoint http://localhost:8080 --enable
+klaude library generate "A simple tool icon" --width 512 --height 512
+klaude library generation-status JOB_ID
+klaude library generation-status JOB_ID --recover
+klaude library generation-jobs
+klaude library generation-status JOB_ID --refresh
+klaude library generation-status JOB_ID --forget
+```
+
+Reviews default to No/Back. Cancellation targets the accepted job only; lost
+replies can leave its server outcome unconfirmed, without automatic resubmission.
+The tested native server cancels queued jobs only: reviews warn that running
+inference can continue after Cancel or the five-minute client deadline.
+If the server completed before cancellation, Klaude reports that distinct state.
+Explicit recovery reviews the original prompt, endpoint/model and budgets, then
+retrieves the completed PNG without submitting generation again. The current
+service binding must still match; recovery does not restore a deleted Media image.
+Actual native CPU/CUDA generation, CLI/TUI reviews and exact export passed for
+the tested profiles. Cancellation outcomes depend on the server's capabilities;
+output quality and prompt fidelity depend on its model and reviewed budgets.
+[S6b scope, validation and limits](docs/s6b-local-generation-validation.md).
+[CUDA, image jobs and AI-tag validation](docs/s6-completion-validation.md).
+
+**Optional AI tags:** Open a Media image and choose **Suggest AI tags**. Review
+the Vision endpoint and budgets, then select which suggestions to save. AI tags
+are kept separately from manual tags, with model provenance. Manual tags are
+never overwritten; **Clear AI tags** retains manual tags and image bytes.
+Importing, browsing and generating images never start tagging automatically.
+
+```bash
+klaude library suggest-tags MEDIA_ID
+klaude library suggest-tags MEDIA_ID --save --select 1,3
+klaude library clear-ai-tags MEDIA_ID
+```
+
+Image jobs can also be revisited through **Media → Image jobs** after the original
+process closes. Lists contain local metadata only. Explicit server checks,
+cancellation, output recovery and private receipt removal have separate effects;
+removing a terminal receipt retains the image and sends no server cancellation.
+[Tag and image-job evidence](docs/s6-completion-validation.md).
+
+**Images in coding chat:** enable Vision and explicitly choose an image-capable
+**Chat model** on native Ollama, Anthropic, OpenRouter, or a compatible HTTP
+endpoint with declared image support, or a reviewed native OpenAI/Gemini model above.
+Use `/attach screenshot.png` or inline
+`@screenshot.png`; one-shot input also supports `klaude ask "Describe @screenshot.png"`.
+Chat uses its active model and Runtime budgets, with no automatic model/fallback
+switch. Up to two images are delivered per request. Explicitly sending an image
+saves a private Media snapshot and small session references, enabling follow-ups
+and resume after the original is removed. Pixels stay out of public transcript,
+search and Markdown export. Changing endpoints/credentials requires reattachment
+to authorize old pixels. Text-only/other providers receive an unavailable notice.
+No indexing or AI tags start automatically. Anthropic images are capped at
+7,500,000 raw bytes. Compatible catalogs must declare image input, or share an
+already configured native Ollama endpoint that verifies it. Model rows show
+Images as declared, documented, unsupported or unknown. Media analysis supports the same
+HTTP adapters through its separate reviewed Vision model. OpenRouter must declare
+both image input and text output; mandatory-reasoning models require an explicit
+Thinking chat mode and cannot serve thinking-disabled Media analysis.
+Resume restores the session model/mode without changing Default Chat; changed
+connections require a new selection. Reviewed Gemini 2.5 models support Standard
+or Thinking chat. Current `gemini-3.5-flash-lite` and `gemini-3.8-flash` models
+support image chat with **Thinking required**, selected explicitly in the model
+picker. Flash-Lite offers minimal/low/medium/high; Flash offers low/medium/high.
+Minimal still permits thinking. One-shot explicit model selection uses the lowest
+supported effort; runtime output limits include thinking tokens.
+Private Media, Utility and Research use Standard mode and require a different
+compatible role model. Signed Gemini continuation stays private and is never
+reused across models or credentials. Other Gemini IDs and Codex account image
+delivery remain outside these reviewed profiles.
+[Current Gemini live tool/image/resume evidence](docs/s6a3f-current-gemini-validation.md).
+[Chat image evidence, bounds and storage lifecycle](docs/s6a2-chat-images-validation.md).
+[HTTP image adapter evidence and limits](docs/s6a3-http-chat-images-validation.md).
 
 `/settings models` opens Added Models, Add Models and Session model. Add a
 local Ollama/compatible server or a supported API endpoint using a private
@@ -274,8 +554,9 @@ on the first press. Availability changes never grant permission. Disabled tools
 stay absent from subsequent model schemas, recovered calls, and delegated workers.
 MCPs and Skills keep their existing management pages. Settings now groups
 Appearance, Models & AI, Agent, and Advanced; `/settings providers` remains
-available under Advanced as Provider credentials until Model Manager owns
-Hugging Face configuration. Search and URL Fetch link to the availability owner.
+available under Advanced as Provider credentials. Model Manager → Discover links
+to that same Hugging Face credential owner. Search and URL Fetch link to the
+availability owner.
 [S3b validation](docs/s3b-agent-tools-validation.md).
 
 Search owns web-result validation; Agent Tools → Built-in Tools → Knowledge &

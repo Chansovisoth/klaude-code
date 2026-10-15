@@ -124,6 +124,240 @@ Top-level commands currently include:
   changes visibility; permanent deletion requires archive and confirmation.
   Originals, exported/opened copies and learned knowledge remain independent.
   Research reports use the same private store and artifact lifecycle.
+- `klaude library analyze MEDIA_ID QUESTION [--context N] [--output-tokens N]
+  [--yes]`: reviewed pixel analysis using AI Defaults → Vision on native Ollama,
+  Anthropic Messages, OpenRouter, reviewed OpenAI Responses models or declared
+  compatible HTTP endpoints.
+  Vision starts disabled, with an explicit endpoint/model and at most three
+  ordered explicit fallbacks. Selection checks exact-model declared image support
+  through the shared core vision inspector: `/api/show`, native Anthropic model
+  capabilities or compatible catalog modalities/configured native peers;
+  model names never imply capability. Unarchived PNG/JPEG input is limited to
+  8 MiB, 4 megapixels and 4096 pixels per side, with current revisions/checksums.
+  Header checks are not a complete client decoder. Questions are private and
+  at most 1000 printable characters. Back/No reviews show exact image/endpoints/
+  models and budgets: default 4096 context/512 output, editable 2048–32768/128–2048.
+  The shared owned worker and cancellable HTTP transport bound each attempt to
+  90 seconds, with 3-second connects, bounded metadata/response/event/text reads,
+  complete provider termination and no tools/history/indexing/tag changes. HTTP
+  adapters reuse the chat runtimes with tighter 1 MB response/256 KB event/32,000
+  text-character limits. Native Ollama allocates the reviewed context; HTTP
+  endpoints use it as a conservative local input estimate, retaining server-owned
+  allocation. Anthropic's 7,500,000-byte raw limit and declared context/output
+  limits are checked before review/send. Thinking-required Anthropic models are
+  unavailable to this thinking-disabled Media consumer, while chat retains its
+  supported Thinking modes. Shared metadata/prepare/analysis worker bounds are
+  15/60/110 seconds per applicable operation/model, retaining 90-second generation.
+  Only
+  reviewed network/temporary failures permit fallbacks; typed HTTPX statuses join
+  the existing policy. Roles/image/endpoint/credentials are rechecked; Vision
+  models/fallbacks are protected from disable/remove/deletion until changed/cleared.
+  Native model deletion also protects compatible role references at the same
+  normalized server root, including Vision and its explicit fallbacks.
+  CLI exits 0/1/130 for complete/error/Ctrl+C. Library → Media → Analyze image
+  provides private forms, Back-focused reviews, elapsed state, model/queue gates,
+  cleanup-aware Cancel and bounded private results. Navigation retains accepted
+  work; session/store changes reject stale results. Settings returns to the Media
+  form retaining its question. Results are not saved, indexed or added to chat.
+  Core vision and CLI vision_panel own S6a1; real qwen3.5:4b CLI/TUI pixel evidence
+  and limits: `docs/s6a-local-vision-validation.md`. Installed local Gemma 4 E2B/E4B
+  also passed real native one-shot/Media colors and screenshot reading, plus TUI
+  source-deletion follow-ups, explicit model switching and process resume through
+  the existing declared-capability path. No model-name exceptions were added;
+  larger installed Gemma variants have metadata-only evidence. Scope, timings
+  and limits: `docs/s6a-gemma-local-validation.md`. S6a2 also permits ordinary chat
+  `/attach PATH`/inline `@PATH` and one-shot inline images when Vision is enabled
+  and the explicitly selected active Chat model declares image support. S6a3a
+  extends chat to native Anthropic Messages and compatible HTTP endpoints:
+  fresh exact-model `capabilities.image_input.supported` or
+  `architecture.input_modalities` evidence is required. An enabled, configured
+  native Ollama peer at the same root/auth scope can verify an otherwise unknown
+  compatible catalog through `/api/show`; explicit negative evidence is retained.
+  Model inventories label Images as declared, unsupported or unknown; tool support
+  remains independent. Anthropic uses image-before-text native base64 sources,
+  compatible requests use image_url data URIs. Anthropic bounds raw images to
+  7,500,000 bytes; other existing PNG/JPEG dimensions/count bounds remain intact.
+  Metadata verification is bounded, cancellable and cached for 30 seconds.
+  Chat uses its own Runtime budget, with no model/fallback switch. It privately
+  saves immutable Media snapshots associated with the session and stores bounded
+  references in owner-only model_content, never base64 in public history/search/
+  export. PNG/JPEG bounds match Media analysis; at most two distinct images are
+  supplied per request. Restore/follow-ups retain pixels after source deletion;
+  tags/archive preserve bytes, deletion/corruption removes availability. Endpoint/
+  credential changes require reattachment; unsupported providers omit old pixels
+  honestly. Request projection declares actual supplied pixels, counts dimensions
+  for compaction/admission and retains tool pairs; recaps are not visual evidence.
+  Preparation runs in the turn worker; cancellation wakes metadata/generation
+  requests. Failed preparation retains attachments and an empty-composer prompt
+  for retry; clean one-shot preparation failures exit 1. Stored snapshots may
+  remain after later failure/cancellation and are managed independently in Media.
+  Core chat_images/agent/ollama and CLI main own S6a2; evidence:
+  `docs/s6a2-chat-images-validation.md`. Core image_content/chat_image_support and
+  the Anthropic/compatible runtimes own S6a3a; evidence and fixture/live distinctions:
+  `docs/s6a3-http-chat-images-validation.md`. S6a3b extends reviewed Media through
+  the same HTTP adapters and existing owned worker/settings/review flow; actual
+  compatible Ollama and native Anthropic CLI/TUI fixture evidence:
+  `docs/s6a3b-http-media-validation.md`. S6a3c adds OpenRouter chat and reviewed
+  Media pixels. Fresh filtered catalog metadata must identify the exact model and
+  declare image input and text output; declared context/output limits apply.
+  Mandatory-reasoning models require an explicit Thinking chat mode and cannot
+  serve the thinking-disabled Media consumer. OpenRouterRuntime delegates only
+  image requests to the bounded cancellable OpenRouterImages HTTP adapter at the
+  same endpoint/model/credentials; ordinary SDK text requests remain intact.
+  Complete responses precede tool/private-reasoning publication on both paths.
+  Catalog responses use the 1 MB metadata bound, separately from 256 KB stream
+  events. Live free-model one-shot/TUI/Media/resume evidence and limits:
+  `docs/s6a3c-openrouter-vision-validation.md`. S6a3d adds native OpenAI Responses
+  chat/Media for two exact reviewed IDs: gpt-4.1-mini and
+  gpt-4.1-mini-2025-04-14, only at https://api.openai.com/v1. Core image_profiles
+  links official documentation and its review date; a fresh authenticated exact-ID
+  lookup verifies metadata access before delivery. UI labels this evidence documented,
+  distinct from live modality declarations. Unknown IDs/fine-tunes/custom URLs and
+  Codex account auth do not inherit these profiles. These non-reasoning models
+  require Standard mode; the request boundary also rejects unsupported reasoning
+  or output above the documented limit after cached inspection. OpenAIRuntime
+  uses OpenAIImageTransport only for actual image-bearing inputs, retaining its
+  native Responses parser, stateless private continuation, tool pairs, cache keys
+  and compaction. Compaction re-supplies approved older pixels without replaying
+  the old task text; a recap is never pixel evidence. Transport bounds apply to
+  streamed/nonstreamed responses and private state publishes after clean terminal
+  completion. Positive streaming output limits are forwarded, with bounded image
+  defaults. Quota envelopes are bounded/redacted and exhausted credit does not
+  trigger a temporary-failure fallback. Metadata deadlines classify as timeouts,
+  producing clean preparation failures instead of uncaught cancellation tracebacks.
+  TLS CLI/TUI/settings/owned Media/cancel/resume fixtures passed; live OpenAI
+  generation remains unverified because the account returned credit_balance_exhausted.
+  Evidence: `docs/s6a3d-openai-vision-validation.md`. S6a3e adds native Gemini
+  chat/Media images for exact gemini-2.5-flash and gemini-2.5-flash-lite IDs at
+  https://generativelanguage.googleapis.com only. Official profiles and fresh
+  authenticated model identity/generation-method/token-limit checks document
+  support; metadata access does not establish generation access. Newer models,
+  aliases and custom roots do not inherit support. Native inlineData requests
+  retain explicit output, thinkingBudget and store=false with a 20 MB total
+  encoded-request ceiling; no Files API upload or SDK automatic continuation runs.
+  Image requests and their native continuations use core gemini_images; ordinary
+  SDK text requests retain their existing path. Signed text/thought/function
+  parts remain private, exact, model/root/key scoped and bounded to 512 parts/
+  256 KB; compaction counts them and session restore retains them. Complete STOP
+  and clean stream termination precede tool/private-state publication. Thought
+  tokens join native image output usage, and shared HTTP Media usage now feeds
+  the normalizer the complete metadata envelope. Existing Media ownership,
+  thinking-off reviews, cancellation, explicit fallbacks and private results apply.
+  TLS CLI/TUI/settings/Media/cancel/resume fixtures passed. Real generation is
+  unverified: both tested IDs returned HTTP 404; Google explicitly restricts 2.5
+  Flash to previously active users. No automatic newer-model substitution occurs.
+  Evidence: `docs/s6a3e-gemini-vision-validation.md`. S6a3f extends exact reviewed
+  native chat profiles to gemini-3.5-flash-lite and gemini-3.8-flash. Their explicit
+  Thinking controls use thinkingLevel, with minimal/low/medium/high on Flash-Lite
+  and low/medium/high on Flash; minimal is not thinking-off. Current profiles use
+  the bounded native adapter from the first text turn, retaining signatures before
+  a later image attachment. Unknown IDs and ordinary legacy SDK-only text paths
+  retain their previous routing. Capability-derived session modes/efforts also
+  apply to direct selection, restored sessions and TUI commands; minimal is bounded
+  private session state. Standard-only Media, Utility and Research reject these
+  profiles without generation; manual role selection cannot bypass the guard.
+  Native parallel function responses share one user content block. An interrupted
+  parallel round is omitted atomically, preserving the first function signature
+  for complete rounds. Foreign/unscoped earlier tool results become explicitly
+  historical text, without fabricated signatures or native call claims. Missing
+  signatures in scoped current native call history fail explicitly. Real Google
+  one-shot RGB analysis passed for both current IDs; Flash-Lite TUI read_file,
+  signed continuation, source-deletion follow-ups and process resume/minimal passed.
+  Existing request/image bounds and privacy/cancellation remain in force.
+  Gemini catalog discovery retains its SDK client through lazy iteration, closes
+  on every outcome and uses five-second/one-attempt requests. Current
+  supported_actions and the older method field are supported; embedding/TTS/audio
+  entries are filtered. The real catalog check returned 39 compatible models.
+  Native request metadata resets before local validation, so rejected efforts or
+  payloads cannot reuse successful usage from an earlier request.
+  Evidence:
+  `docs/s6a3f-current-gemini-validation.md`. OpenAI/native Anthropic paid generation
+  and legacy Gemini access remain uncertified; S6a3 remains partial for that gate.
+  S6b1 adds a separate OFF-by-default local image-service consumer, described below;
+  S6b2 validates actual native CPU generation. The final S6 pass also validates
+  native CUDA CLI/TUI generation on GTX 1650 using upstream GGML, explicit
+  CUDA diffusion and CPU text/VAE/parameter storage; broader quality remains open.
+  Optional S6c AI tags are implemented below.
+  Session runtime state stores bounded model/mode/effort and
+  captured connection/credential revisions atomically with accepted turns/settings.
+  Resume restores that explicit choice without changing Default Chat or discovering
+  catalogs; stale connections require new selection before sending. Fork retains
+  state, archive keeps it, permanent deletion removes it. Historical sessions may
+  recover Klaude's own model-setting events; dialogue never authorizes a selection.
+- `klaude library image-service [--endpoint URL] [--enable|--disable] [--yes]`,
+  `library generate PROMPT [--width N] [--height N] [--steps N] [--seed N] [--yes]`
+  `library generation-jobs [--offset N]` and
+  `library generation-status JOB_ID [--cancel|--recover|--refresh|--forget]
+  [--abandon] [--yes]`:
+  S6b1 connects an
+  existing unauthenticated stable-diffusion.cpp native HTTP server. Settings →
+  AI Defaults → Image generation owns the separate draft enable/endpoint/Test/
+  observed loaded-model pin/Save/Reload controls. Library → Media → Generate image
+  supplies the prompt, bounded dimensions/steps/seed and Back-focused review.
+  Native capability checks precede acceptance; automatic sampler/scheduler defaults
+  are retained by omitting those fields. One asynchronous job is submitted
+  without retry, then polled for at most five minutes. One PNG up to 8 MiB and
+  256–1024 pixels per side commits atomically with private provenance in the
+  existing artifact store. Metadata/results are bounded to 512 KB/12 MB;
+  connections/reads use 3/6 seconds, with the existing owned worker's outer bound.
+  No model loading, arbitrary workflow, preview/batch, ambient credentials,
+  indexing/tags or new agent tool is added. Model names are reported server
+  identity, not weight attestation. Worker cleanup precedes job-scoped server
+  cancellation; Confirmed/Unconfirmed/Not started remain distinct. Queued
+  cancellation is required; running cancellation follows declared capabilities.
+  Reviews warn when Cancel/deadline cannot stop remote inference. A rejected
+  cancellation still checks the exact job; running_remote and completed_remote
+  remain distinct from cancelled. Graceful exit
+  checks cleanup; abrupt client loss can leave remote work active. Private job
+  receipts retain local status and permit explicit cancellation without resubmission.
+  Post-commit receipt loss recovers the existing artifact by unique job ID.
+  Completion racing with Cancel is recorded as completed_remote, not cancelled.
+  Explicit CLI recovery and the current TUI result's Review output recovery
+  action use Back/No-focused reviews and the same owned worker/pixel/store checks.
+  Recovery rechecks the exact receipt and original settings/capabilities, reads
+  only the acknowledged remote ID and never submits generation. Repeated recovery
+  returns the existing artifact; a receipt cannot restore deleted saved output.
+  TUI recovery is offered only for an acknowledged job ID.
+  S6b3 adds Media → Image jobs and a bounded private metadata inventory, 100 records
+  per page and a 1000-receipt inventory scan bound. Exact IDs remain inspectable
+  beyond that bound. Ordinary list/status send no network requests
+  or prompt text. Explicit refresh checks only the acknowledged native ID without
+  importing output, cancelling or resubmitting. Separate Back-focused cancellation
+  and receipt-removal reviews retain exact endpoints and effects. Receipt removal
+  requires an unchanged reviewed record; images/provenance and server jobs are
+  retained. Unknown/active records require a fresh check or separate explicit
+  abandonment consent (CLI --abandon, TUI unchecked confirmation). This discards
+  local tracking only; remote work can continue and an active client can recreate
+  its receipt. Terminal records need no abandonment override.
+  Removing a receipt clears its stale picker filter and returns to the first page.
+  Artifact archive/tags retain provenance; artifact deletion removes it but not
+  independent job receipts. Native model-work gates and captured roots reject
+  stale results; ordered settings saves drain independently of session SQLite.
+  Core image_generation/library_artifacts and CLI generation_panel/
+  generation_commands own this slice. Actual CLI/TUI fixtures and native CPU
+  generation, queued/running cancellation outcomes and exact export passed. The
+  final pass also validates actual CUDA CLI/TUI generation, while broader
+  model/image-quality claims remain unverified. Evidence/limits:
+  `docs/s6b-local-generation-validation.md`. Additional S6b services/auth remain
+  extensions. Receipt history and S6c evidence: `docs/s6-completion-validation.md`.
+- `klaude library suggest-tags MEDIA_ID [--save] [--select 1,3] [--context N]
+  [--output-tokens N] [--yes]` and `library clear-ai-tags MEDIA_ID [--yes]`:
+  S6c reuses the explicit Vision provider/budget/owned-worker boundary. Nothing
+  tags automatically. Media → image detail → Suggest AI tags supplies a Back-focused
+  pixel review, then initially unselected suggestions and an explicit selected save.
+  CLI proposals stay unsaved unless --save is supplied; --select addresses numbered
+  suggestions. Tags are bounded printable JSON strings, case-insensitively deduped.
+  Manual tags and AI tags remain separate, searchable metadata. Existing manual tags
+  are never overwritten; promoting an AI tag to manual removes its AI duplicate.
+  Up to 20 AI tags retain per-tag model/endpoint/time/budget provenance privately.
+  Clearing removes only AI metadata; archive retains it and artifact deletion removes
+  it atomically. Old stores remain read-only on browse. Apply rechecks actual pixels,
+  checksum, archive state and metadata revision; no model call, tool, chat history or
+  knowledge indexing occurs during save. Interrupted saves require metadata reload;
+  no rollback is claimed. Actual Gemma E2B CLI/TUI suggestions and selected save,
+  three review widths, manual-tag preservation and clearing passed. Implementation:
+  core image_tags/vision/library_artifacts and CLI vision_panel/library_commands.
+  Evidence and remaining provider limits: `docs/s6-completion-validation.md`.
 - `klaude research run QUESTION [--model MODEL] [--provider PROVIDER]
   [--rounds N] [--format FORMAT] [--queue]`, `research list [--offset N]` and
   `research resume JOB_ID`: bounded web research through the same owned worker
@@ -139,6 +373,263 @@ Top-level commands currently include:
 - `klaude code-search`: search programming docs, examples, and debugging refs.
 - `klaude huggingface-search/details/readme`: Hugging Face Hub integration.
 - `klaude models`: list installed Ollama models and Klaude role assignment.
+- `klaude model-manager list/status/pull/delete/hardware/search`: inspect and
+  manage downloaded models on enabled Local native Ollama endpoints. List uses
+  100-record pages (`--offset`); endpoint operations accept `--endpoint ID`.
+  Pull/Delete confirm the exact model and server unless `--yes` is supplied;
+  failures/unknown outcomes exit 1 and Ctrl+C exits 130. The shared fixed worker
+  uses native tags/ps/version/pull/delete APIs without generation, service control
+  or automatic model selection. Definition/credential revisions and installed
+  digests are rechecked; loaded models and configured/session/default roles are
+  protected from deletion, including normalized endpoint aliases. Metadata is
+  bounded to 2 MB/1000 models, with 3-second connect/5-second read deadlines;
+  streamed pull has bounded NDJSON events, a 30-second read stall and a 30-minute
+  worker deadline. Safe progress uses an additive owned-worker protocol, retaining
+  the existing final-result bound. Cancellation closes/reaps the owned worker
+  request; shared/partial downloads remain Ollama-owned. Unknown outcomes require
+  Reload rather than a rollback claim. HF GGUF discovery reuses existing private
+  credentials; private pulls use the Ollama server's own access. Hardware uses
+  existing local probes and makes no model-fit claim. Implementation: core
+  ollama_manager and CLI model_manager/model_manager_commands. S5a is locally
+  validated; S5b is described below and dependencies/SSH remain S5c. Evidence:
+  `docs/s5a-model-manager-validation.md`.
+  S5b adds `model-manager engines/servers/logs/serve/adopt` and Model Manager →
+  Serve models for installed llama.cpp/vLLM engines and local weights. Serve stays
+  foreground until Ctrl+C; TUI servers belong to their launching client and stop
+  on its exit. Structured reviewed fields control name, executable, model path,
+  loopback port, context and supported CPU/GPU settings. Cancellable 15-second
+  preflight jobs bound help/device output to 512 KB, verify executable revisions
+  and model metadata, and execute no installers. GPU offload needs observed engine
+  devices; missing devices fail explicitly. Engines receive offline Hub/Transformers
+  settings, no ambient provider keys, fixed argument arrays and no shell text.
+  Lease-owned helpers supervise engines separately from disposable metadata jobs;
+  a closed client pipe ends the server and cleanup rejects changed endpoint definitions.
+  Terminal acknowledgements precede helper group termination. Cancellable raw log
+  reads prevent inherited worker stdout from blocking cleanup after client death;
+  supervisor exit classification waits for the process status after pipe EOF.
+  A ready health endpoint, exact model ID and owned listener precede connection
+  registration. Stop retains model files/roles/history and disables only unchanged
+  manager-created definitions. Private logs are bounded to 256 KiB with 16 KiB
+  tails, control stripping and credential-label redaction; they never enter model
+  context. Up to two live servers per client and 32 retained records are supported.
+  Explicit adoption requires the same account, matching tested executable and an
+  isolated PID/session; failed adoption leaves the external process running.
+  Adopted servers stop on client exit and retain their original log destination.
+  Ubuntu/Linux ownership, live-engine limits and evidence are documented in
+  `docs/s5b-managed-serving-validation.md`.
+  S5c's first slice adds `model-manager dependencies/builds/build` and the
+  Dependencies panel. It inspects existing CMake/Ninja/Git/C/C++ tools and
+  installed engine flags, without generation or package installation. Reviewed
+  CPU builds use an exact committed local llama.cpp HEAD snapshot in a fresh
+  owner-only `data/model-builds/ID` directory; uncommitted source edits are excluded
+  and existing engines/defaults stay intact. Back is initially selected; build
+  instructions execute source code and require an explicitly trusted source review.
+  Fixed CMake/Ninja arguments produce a Release CPU server with static llama/ggml
+  libraries and supported accelerator/Web UI/fetch options disabled. This is not
+  an OS sandbox for build code. Jobs default to two and permit 1–8; build deadline
+  is 30 minutes, source bounds are 50,000 entries/256 MiB/32 MiB per file and links
+  or special paths are rejected. Review requires 2 GiB free and execution stops
+  below 256 MiB. Tools/commit identities are rechecked at acceptance; engine help
+  must pass before a verified executable is published. Ready builds open a fresh
+  Serve draft with Local model path focused; serving/selection remain explicit.
+  Owned build work gates chat/Knowledge/Research/Utility and survives navigation;
+  cancellation waits for compiler-group cleanup. Client loss is checked during
+  build commands, retaining failed metadata and ending the owned group. Scoped
+  read jobs reject late request/session/draft results. Engine probes inside owned
+  workers inherit that group, so forced cancellation also kills a help/device
+  child that ignores SIGTERM; standalone probes retain their own isolated group.
+  Failed/partial files are retained, with at most eight builds and bounded private
+  log previews. Inventory detects interrupted work and changed/missing executables.
+  Reviewed removal is documented below. Build implementation:
+  core model_dependencies and CLI dependency_panel/model_manager_commands.
+  Actual source build, native model generation and TUI evidence:
+  `docs/s5c-dependencies-validation.md`. Further S5c slices are described below.
+  S5c engine recipes extend `model-manager build` with `--profile cpu|cuda`,
+  `--architectures` and `--host-compiler`; add `model-manager install-vllm
+  WHEELHOUSE [--python PATH] [--yes]`. Dependencies exposes separate CPU/CUDA and
+  NVIDIA vLLM recipe forms, Back-focused paged reviews, shared retained setup
+  inventory/logs and explicit engine-aware Serve handoff. CUDA uses installed NVCC
+  supported-target discovery and a bounded fixed-code compiler probe; target IDs
+  are explicit or come from observed GPU compute capabilities. Unsupported host
+  compilers fail rather than using an override flag. CUDA builds retain the same
+  snapshot, static library, 1–8 job and 30-minute deadline conventions as CPU.
+  vLLM uses one complete trusted local wheel closure, selected installed Linux
+  Python 3.10–3.13 and installed uv. Bounded ZIP/metadata/hash checks and offline
+  dependency/platform resolution precede persistent writes. At most 128 wheels,
+  2 GiB per wheel, 8 GiB compressed and 32 GiB expanded are accepted; disk review
+  requires compressed + twice expanded + 2 GiB free, with the shared runtime disk
+  floor. Fixed commands create a fresh venv and install only copied wheels with
+  no index/config/cache, binary-only and exact-version/hash requirements. No
+  interpreter download, system/app environment mutation or driver installation
+  is performed. CUDA backend/version and required engine help precede publication;
+  setup checks never certify GPU inference or model fit. Source/wheel/tool revisions
+  are checked again at acceptance; partial/failed/cancelled setups are retained.
+  Owned work gates model jobs, rejects stale page/session/editor results and reaps
+  helper groups before queue consumption. Wheel/package/build code requires trust;
+  this is not an OS sandbox. Core model_dependencies/model_recipes and CLI
+  dependency_panel/model_manager_commands own this slice. Native compilation,
+  fixture versus real-runtime limits and regression gates:
+  `docs/s5c-engine-recipes-validation.md`.
+  S5c retained setup removal adds `model-manager remove-build ID [--yes]` and
+  Dependencies → Built/installed engines → Review removal. Read-only reviews show
+  exact UUID/directory/recipe and estimated uniquely linked storage; confirmation
+  defaults to Back/No. An owned 120-second mutation rechecks bounded tree/metadata
+  revisions, current/saved/configured/default/Utility/Research selections and
+  endpoint aliases, active workers/helpers and accessible same-account process
+  executable/argv/cwd/maps/open-file references. Protected Linux processes produce
+  an explicit incomplete-inspection warning, not a universal removal lockout.
+  Local server acceptance and build creation share the inventory lock; removal
+  also locks connection definitions and preferences. Descriptor-relative traversal
+  rejects unsafe ancestry, mounts, special files and foreign-owned entries; venv
+  symlinks are unlinked without following targets. Trees are bounded to 100,000
+  entries, depth 64 and 25 seconds of review. Original source/wheel folders,
+  referenced model weights, roles, server history and other setups are retained.
+  A removing record prevents partially cleaned environments from being served;
+  cancelled/failed cleanup reports partial effects and needs a fresh review.
+  Cleanup reaps its owned worker before new model work; Ctrl+C exits 130, verified
+  removal 0 and failures/unknown outcomes 1. Core model_setup_removal and shared
+  dependency CLI/TUI workers own the behavior. Validation/limits:
+  `docs/s5c-setup-removal-validation.md`. Remote GPU/vLLM/adoption extensions
+  are implemented below; S6a1 native Vision is documented above.
+  S5c's SSH slice adds `model-manager ssh list/add/test/inspect/default/remove`
+  and Model Manager → Servers. Reviewed private fields retain only name/host/user/
+  port, absolute key/known-hosts references, model directory and an opt-in agent
+  flag. Saving never connects or changes model roles/HTTP endpoints. A separate
+  diagnostics default drives Inspect default server; removing its definition
+  restores This machine and retains remote files/processes/local keys. Ordered
+  settings writes drain independently of session SQLite. Nonce/default revisions
+  and captured request/root/session/draft/target state reject stale writes/results.
+  Checks use the existing owned worker, installed OpenSSH and remote Python 3;
+  strict existing host-key trust and public-key authentication disable prompts,
+  ambient SSH configuration/proxies, multiplexing and forwarding. Agent use is
+  explicit. Fixed quoted code receives JSON stdin, uses a 7-second remote alarm,
+  3-second connect/10-second operation/15-second outer deadlines and 64 KiB output.
+  CPU/RAM/disk/model-directory/process metadata is bounded and sanitized, without
+  model loading or remote mutation. GPU stays Not checked; observed processes do
+  not certify ownership. Connection retests preserve original inspection ages;
+  failed checks/edited definitions invalidate old data. Up to 32 definitions,
+  100 model entries and 32 observed processes are supported. Cancel/navigation
+  reaps owned checks; accepted saves drain. Shared explicit table sections align
+  read-only/action rows while controls remain above inventories. Extra installers
+  remain pending; real loopback OpenSSH CLI/
+  TUI evidence and limits: `docs/s5c-ssh-validation.md`.
+  S5c remote CPU serving adds `model-manager serve MODEL --ssh-server ID
+  --executable REMOTE_PATH --port REMOTE_PORT --local-port TUNNEL_PORT` and
+  Servers → saved server → Serve model. Private reviewed fields use installed
+  absolute llama.cpp executables, regular GGUF weights inside the configured
+  remote directory, CPU threads/context and explicit remote/tunnel loopback ports.
+  Reviewed remote adoption and the vLLM extension are described below. Prepared
+  flags are reused; definition,
+  credential, executable/model revisions are checked before execution/publication.
+  The existing ServingJobs/helper owns the SSH channel and a self-contained remote
+  supervisor; no second scheduler or remote installation is added. Heartbeats renew
+  a six-second remote lease. EOF/client/helper/channel loss ends the owned engine
+  group, with bounded TERM/KILL and live-group checks before confirmation. Not
+  started, Confirmed and Unconfirmed cleanup remain distinct; lost channels disable
+  local endpoints without claiming a remote receipt. One daemon health check per
+  side prevents HTTP from blocking heartbeats/cancel. Exact model ID, owned remote
+  listener and owned local tunnel precede endpoint registration. Startup/cleanup
+  use the existing model-work gate; ready servers retain two-server client ownership, endpoint equality
+  cleanup, private redacted logs and explicit model selection. Cancel loading is a
+  visible local/remote startup control; ready Stop uses Back-focused review. Long
+  reviews support PageUp/PageDown with Back still selected. Shared port probes use
+  SO_REUSEADDR for TIME_WAIT while rejecting live listeners, allowing immediate
+  restart. Fixed SSH preflight requests retain config_dir in both CLI/TUI paths.
+  CLI remains foreground; Ctrl+C exits 130. Owned remote CPU serving/real inference
+  evidence: `docs/s5c-remote-serving-validation.md`. GPU profiles are described
+  below, followed by reviewed remote adoption.
+  Remote llama.cpp GPU profiles add the existing `--gpu-layers N --gpu IDS`
+  controls to SSH serving. Layers 0 keeps CPU; 1–999 explicitly requests offload
+  to up to eight distinct indices from the tested remote engine device list.
+  Bounded `--list-devices` checks provide at most 32 validated device names;
+  unavailable/unknown devices never authorize GPU launch. Help/device checks
+  share an eight-second probe budget; device reads use four seconds/64 KiB.
+  Review reuses verified flags and refreshes devices; acceptance refreshes again
+  and rejects lost/reordered inventory or changed selected names before loading.
+  Engines receive exact --device names and --n-gpu-layers arrays with no ambient
+  GPU overrides/provider keys; no CPU fallback or model selection is automatic.
+  Request metadata, progress and bounded specific preflight/launch errors stay
+  separate from actual allocation/inference proof. GPU availability/fit is not
+  inferred from system diagnostics or help flags alone. TUI mapping sits beside
+  GPU fields; forms/reviews page long content, retain short selected values and
+  never move safe Back focus at paging boundaries. Cancellation immediately
+  reaps checks rather than waiting out their deadline. Existing owner lease,
+  tunnel/health/model checks, cleanup, two-server cap and model-work gates apply.
+  Real native CUDA over loopback SSH and fixture/TUI/regression boundaries:
+  `docs/s5c-remote-gpu-validation.md`. Physical LAN hosts and other GPU backends
+  remain uncertified extensions; vLLM/adoption follow below and S6a1 Vision is documented above.
+  S5c remote vLLM adds an explicit Engine choice in the saved SSH serving form.
+  Installed absolute Python-console vLLM launchers and local regular safetensors
+  directories are reviewed; serving executes no installers or Hub downloads.
+  GPU IDs map to fresh remote NVIDIA UUIDs, with CUDA availability/capabilities
+  checked in that launcher's exact environment, preserving venv interpreter paths.
+  Unsupported/missing CUDA and incompatible BF16 fail without CPU fallback.
+  Precision, memory fraction and Eager execution are visible controls; TUI remote
+  vLLM begins eager, while CLI requires --enforce-eager to enable it. Context stays
+  bounded/user-editable and concurrency is one sequence, with one-host mp workers.
+  All visible model-bundle file metadata is revision-checked, with complete local
+  shard references and no bundle symlinks. Torch/vLLM metadata/interpreter identity
+  is rechecked before spawn; this is not full environment or weight attestation.
+  Fixed help/NVIDIA/CUDA preflights share 45 seconds (30/3/10 sublimits), with
+  50-second SSH and 60-second owned read deadlines; llama.cpp retains its budgets.
+  Local vLLM uses the same 30-second help headroom and a 40-second owned read
+  budget. Only used flags are carried forward, keeping launch payloads bounded. Remote
+  readiness accepts a listener only in the created engine group, including vLLM
+  frontend children. Owned leases/cancel/log/endpoint/model-work gates are reused.
+  Provider keys/ambient overrides are omitted; offline settings and telemetry
+  opt-outs apply. These are trusted-engine settings, not an OS network sandbox.
+  Aligned review metadata stacks complete labels/values on narrow terminals; Back
+  focus remains safe during paging. Evidence: `docs/s5c-remote-vllm-validation.md`.
+  Upstream vLLM 0.31.0/Torch 2.13.0 served SmolLM2-135M-Instruct on GTX 1650
+  over loopback SSH through the real CLI/TUI, with confirmed cleanup and preserved
+  model roles/files. Initial cold-help and interrupted-cleanup failures prompted
+  bounded preflight headroom and nested cancellation windows (remote receipt 6 s,
+  helper 8 s, client 12 s); normal successful cleanup returns immediately. Exact model,
+  context/precision/hardware and validation limits are recorded in the evidence.
+  Physical LAN and other accelerators remain uncertified extensions.
+  S5c remote adoption extends `model-manager adopt PID MODEL_ID` with
+  `--ssh-server ID --local-port N` and Servers → saved server → Adopt existing
+  server. Private fields capture the installed executable, exact advertised model
+  ID, isolated PID and remote/tunnel ports; no resource/model settings are changed.
+  Inspect/Review remain nonmutating, with Back/No focused. Same-account Linux PID
+  start/group/session/executable/argv identity and an owned healthy loopback
+  listener precede takeover. The client verifies its tunnel and current definitions/
+  credentials, publishes an endpoint and sends a fixed acknowledgement; Ready
+  requires the remote ownership receipt. A ten-second acknowledgement deadline
+  bounds pending takeover. An abstract Unix socket rejects competing owners without
+  lock files; failed takeover leaves the external process running. Original logs
+  remain unattached. The shared six-second owner lease and shutdown windows apply
+  after takeover; exact witnessed group members anchor TERM/KILL even when the
+  leader exits first. Stale/reused identities reject signals; lost receipts remain
+  Unconfirmed. Remote PIDs are explicitly excluded from local adopted cleanup.
+  Actual upstream vLLM CLI and native CUDA llama.cpp TUI generation, review
+  cancellation, three widths and confirmed Stop passed. S5c's supported Linux
+  recipes/SSH scope is complete locally. S6a1 Vision is documented above. Evidence/limits:
+  `docs/s5c-remote-adoption-validation.md`.
+  S5c reviewed key setup adds `model-manager ssh host-key/trust/enroll` and
+  Servers → saved server → Key setup. Ed25519 scans discover candidates without
+  authentication; an independently verified SHA256 fingerprint and explicit
+  review precede saving a content-addressed owner-only host pin. Definition nonce,
+  host/port and a 120-second discovery receipt reject stale saves. Selected
+  known-hosts revocations are retained; old trust files and identity selection
+  stay intact. Private pins are bounded to 64 files. Enrollment accepts one
+  bounded non-symlink Ed25519 .pub file through existing verified authentication,
+  with a read-only review of the remote account/path, public fingerprint and file
+  revision. Acceptance rechecks definition, authentication/public-file references
+  and remote authorized-key metadata/content. Fixed remote Python anchors account
+  SSH paths to directory descriptors, rejects unsafe permissions/symlinks/hardlinks,
+  takes a bounded advisory lock and uses one O_APPEND write without replacing or
+  chmodding existing key files. Existing restricted keys are never duplicated.
+  Post-write receipt failure and lost transports are Unconfirmed, with no rollback
+  claim; cancellation waits for owned-worker cleanup. CLI Ctrl+C exits 130 and
+  Trust/Enroll confirmations default to No. Remote work has a ten-second alarm,
+  15-second transport/20-second owned-job deadline and 256-KiB authorized-file bound.
+  Setup fields/results stay out of chat/model context; no private-key contents,
+  passwords/passphrases, key generation or automatic identity switch are added.
+  Accepted enrollment/trust writes gate model work, survive navigation and reject
+  late page/session/draft/target callbacks. Implementation: core ssh_setup and
+  ssh_enrollment_program, CLI ssh_setup_panel/ssh_commands. Real CLI/TUI/new-key
+  login and limits: `docs/s5c-ssh-key-setup-validation.md`.
 - `klaude model-connections list/add/test`: register additional native Ollama,
   Chat Completions or Anthropic Messages endpoints and inspect their catalogs. Add requires an ID,
   `--adapter ollama|openai_compatible|deepseek|anthropic` and `--url`; optional `--key-env` stores a
@@ -180,7 +671,16 @@ Top-level commands currently include:
   Evidence: `docs/s3b-agent-tools-validation.md`. S4a's Library session/knowledge
   foundation, Documents/Media storage and explicit Knowledge TUI consumers are
   implemented. S4b research jobs/defaults/reports are also implemented and locally
-  validated; S5-S6 remain unstarted. See
+  validated; S5a's native Ollama lifecycle is also implemented and locally
+  validated. S5b managed serving is implemented; S5c dependency inspection/CPU
+  builds, SSH settings/diagnostics, owned remote CPU serving and reviewed existing
+  public-key/host-trust setup, CUDA build profiles and offline NVIDIA vLLM wheel
+  environments, reviewed retained setup removal and remote llama.cpp GPU profiles
+  and remote NVIDIA vLLM serving and reviewed remote adoption are implemented;
+  S5c's supported Linux scope is complete locally. S6 supplies native/HTTP Vision
+  and chat images, CPU/CUDA generation, image-job management and selected AI tags;
+  paid/legacy-provider generation access remains uncertified. See
+  `docs/s6-completion-validation.md` and
   `docs/s4a-library-validation.md`, `docs/s4a-artifacts-validation.md` and
   `docs/s4a-knowledge-validation.md` and `docs/s4b-deep-research-validation.md`.
   DeepSeek is an explicit Add API Models preset and `/model` Cloud provider.
@@ -274,6 +774,41 @@ Top-level commands currently include:
 - `klaude doctor`: verify services, models, config, and data directories.
 
 Chat slash commands currently include:
+
+- `/model-manager`: open Model Manager outside Settings; Settings → Models
+  provides the same workspace link. Endpoint, Installed models, Download,
+  Discover, Service status and Hardware use typed panels with fixed headers and
+  footers, controls above wrapped tables, stable IDs, shared Back/filter/draft
+  behavior and owned read jobs. Inventory caches retain their true age for
+  30 seconds; explicit Reload bypasses reuse and failed reads mark old snapshots
+  stale. Private model/query inputs do not enter chat. Download/Delete reviews
+  start with Back focused and clear old review filters. Accepted mutations retain
+  endpoint/model identity through navigation; progress is bounded/throttled and
+  cancellation waits for worker cleanup. Active chat, Knowledge, Research and
+  Utility work gate mutations, and accepted mutations gate new model work.
+  Hugging Face credentials reuse Provider credentials and return to Discover.
+  Native CLI and real terminal/Ollama evidence: `docs/s5a-model-manager-validation.md`.
+  Dependencies adds bounded tool/engine diagnostics, trusted committed-source
+  CPU/CUDA build and local vLLM wheel reviews, logs and retained setup inventory.
+  S5c's local build slice
+  shares the model-work gate and opens verified results in a fresh Serve draft;
+  evidence and remaining scope: `docs/s5c-dependencies-validation.md`.
+  Servers adds reviewed SSH definitions and explicit connection/resource/model/
+  process checks with a functioning diagnostics default. Its read-only checks
+  share owned cancellation without gating unrelated model work. Serve model
+  uses reviewed SSH/tunnel ownership, Cancel loading and existing ready-server
+  Stop/log/inventory workflows, without changing defaults. Key setup adds
+  independently verified host pinning and reviewed existing-public-key enrollment;
+  Back is initially focused on reviews, with paged long details and controls
+  above fingerprint tables. Explicit read/cancel state and semantic feedback use
+  the shared panel conventions. Reviewed setup removal and remote llama.cpp GPU
+  and remote NVIDIA vLLM profiles and reviewed remote adoption are implemented.
+  Local recipe evidence:
+  `docs/s5c-engine-recipes-validation.md`; removal evidence:
+  `docs/s5c-setup-removal-validation.md`; SSH evidence:
+  `docs/s5c-ssh-validation.md`, `docs/s5c-remote-serving-validation.md` and
+  `docs/s5c-ssh-key-setup-validation.md`, `docs/s5c-remote-gpu-validation.md` and
+  `docs/s5c-remote-vllm-validation.md` and `docs/s5c-remote-adoption-validation.md`.
 
 - `/library [VIEW]`: open the Library workspace outside Settings, ordered
   Sessions, Knowledge, Documents, Research, Media, Archive. Sessions/Archive have
@@ -494,8 +1029,8 @@ Chat slash commands currently include:
   memory/MCP changes, session/source changes, and exit cancel or invalidate jobs;
   late results cannot replace newer state. Category detail pages and other saved-setting
   writes still have separate synchronous paths pending responsiveness work.
-  Models opens a typed landing page with Added Models, Add Models and Session
-  model. Session model retains `/model`'s source/provider/model/mode/effort flow;
+  Models opens a typed landing page with Added Models, Add Models, Model Manager
+  and Session model. Session model retains `/model`'s source/provider/model/mode/effort flow;
   returning from it opens the Models landing page. Add Models has Local and API
   drafts for implemented adapters only. Name, server type/provider, normalized
   URL, masked key, Test, Add and Cancel use shared panels/private editors.

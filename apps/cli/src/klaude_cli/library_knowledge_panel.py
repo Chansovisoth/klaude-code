@@ -340,8 +340,12 @@ class KnowledgePanel:
             self.host._set_input("")
 
     def start(self, draft: dict[str, Any]) -> None:
+        if getattr(getattr(self.host, "_model_manager", None), "busy", False):
+            raise ValueError("Finish the Model Manager operation before starting a Knowledge task")
         if (
             self.busy
+            or getattr(getattr(self.library, "vision", None), "busy", False)
+            or getattr(getattr(self.library, "generation", None), "busy", False)
             or self.host.running
             or self.host._watching_remote
             or self.host._setup_job is not None

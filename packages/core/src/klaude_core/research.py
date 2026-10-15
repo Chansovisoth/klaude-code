@@ -419,7 +419,12 @@ def run_research(
         ),
         None,
     )
-    if info and info.backend == "anthropic" and info.capabilities.requires_thinking:
+    requires_thinking = bool(info and info.capabilities.requires_thinking)
+    if connection.backend == "gemini_api":
+        from .model_runtime import gemini_capabilities
+
+        requires_thinking = gemini_capabilities(model).requires_thinking
+    if requires_thinking:
         raise ResearchError("Research uses Standard mode; choose a model supporting it")
     deadline = time.monotonic() + settings.timeout
     heartbeat_stop = threading.Event()
