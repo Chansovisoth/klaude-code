@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+- Add the experimental local WebUI and shared application foundation, with an
+  expressive responsive chat shell, eight color palettes, shared-session controls,
+  message links and device sharing, file attachments and image thumbnails,
+  Files/Knowledge/Skills pages, and local admin sign-in. Browser coverage remains
+  partial; see the [WebUI checklist](docs/webui/coverage.md).
+
+- Pair complex local behavior changes with their tests and checks between phases;
+  require fresh edit/check evidence when files recur in later phases.
+- Honor explicit OpenRouter thinking controls, preserve usage from failed replies,
+  and retain Ollama prefill/generation stage durations without extra model calls.
+
+- Keep observed project files available when a proposed plan omits tests/docs;
+  reserve complex local execution for earlier validation and repairs, and skip
+  late optional planning. Report passive Python syntax diagnostics after actual
+  edits without executing code. Preserve a factual workspace summary on terminal
+  provider errors. Resolve unambiguous user-supplied literal echoes without model
+  generation, extra punctuation or tool calls.
+
+- Add bounded, permission-controlled discovery of enabled tools and installed
+  Skills, including deferred MCP schemas. Load definitions for the next response
+  without executing targets or restoring omitted mutation/delegation routes.
+  Bound large registry summaries while retaining complete audit snapshots, and
+  show concise tool/Skill discovery activity in chat.
+- Preserve typed MCP application failures through the CLI tool adapter, count
+  them as failed progress and retain bounded recovery with corrected inputs.
+  Keep valid deferred native calls on native routing recovery and reduce
+  unrelated policy context for read-only file/MCP investigations.
+- Mark exhausted no-progress execution as a failed turn while preserving its
+  final explanation. One-shot chat now exits 1 for that host-detected stop;
+  recovered tools and ordinary budget finalization retain their existing paths.
+- Bind native Ollama lookup-recovery arguments to the chosen action's schema,
+  and sequence interactive recovery reads before dependent questions. Keep model
+  information requests separate from observed research limitations, and require
+  explicitly requested page reads before budget-end completion. Retrospective
+  source answers now include bounded sanitized public fetched URLs without
+  replaying source bodies. Reject all URL userinfo, including empty usernames.
+  [Follow-up evaluation](docs/agent-read-recovery-validation.md).
+- Track explicit lookup outcomes and source examination, retain bounded current
+  goal/referent context, and use bounded native action recovery for omitted work.
+  Reduce retrieval-only prompt overhead and buffer replies until required retrieval runs.
+  Keep literal replies direct and avoid clock tools for historical-date research.
+  Preserve typed transport failures, response phase and actual failure elapsed time
+  without automatic transport retries. [Evaluation](docs/agent-multi-action-validation.md).
 - Rename Models & AI to Models, AI Defaults to Model Defaults, and Agent Tools
   to Tools. Move Search into Agent directly above Tools, and Appearance below
   Advanced. Fill empty model roles from verified available metadata in owned

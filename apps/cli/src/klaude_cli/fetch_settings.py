@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import os
-import time
 import uuid
 from dataclasses import replace
 from typing import Any
 
+from klaude_application.web_diagnostics import run_fetch_test as run_fetch_test
 from klaude_core.fetch_settings import (
     apply_fetch_settings,
     exa_fallback,
@@ -35,76 +34,6 @@ def row(identity: str, label: str, value: str = "", **kwargs: Any) -> PanelRow:
 
 def back(target: str) -> PanelRow:
     return row("back", "Back", target=target, kind=RowKind.NAVIGATION, control=RowControl.BACK)
-
-
-def run_fetch_test(request: dict[str, Any]) -> dict[str, Any]:
-    """Exercise the real uncached route, returning only sanitized outcome metadata."""
-    from klaude_core.config import load_config, provider_secret_value
-    from klaude_web.facade import Web
-    from klaude_web.fetch import FetchPageError, UnsafeURL, canonicalize_public_url
-
-    os.environ["KLAUDE_CONFIG_DIR"] = request["config_dir"]
-    os.environ["KLAUDE_DATA_DIR"] = request["data_dir"]
-    cfg = load_config()
-    for provider, (env, attr) in KEYS.items():
-        reference = (cfg.web_providers["exa"].api_key_env or env) if provider == "exa" else env
-        value = request.get("environment_keys", {}).get(reference)
-        if isinstance(value, str) and len(value) <= 8192:
-            os.environ[reference] = value
-        fallback = getattr(cfg, attr, "") if reference == env else ""
-        setattr(cfg, attr, provider_secret_value(cfg.config_dir, reference, fallback))
-    apply_fetch_settings(cfg, request.get("settings"))
-    if request.get("enabled") is False:
-        return {"status": "disabled", "message": "URL Fetch is disabled"}
-    provider = request.get("provider", "")
-    if provider not in ("", "local", "crawl4ai", "exa"):
-        raise ValueError("Invalid fetch provider")
-    # Detail tests exercise exactly that extraction choice, without cloud fallback.
-    if provider:
-        cfg.web_fetch.settings_provider = "exa" if provider == "exa" else "local"
-        cfg.web_fetch.exa_fallback = False
-    start = time.monotonic()
-    try:
-        url = canonicalize_public_url(str(request.get("url", "")))
-        result = Web(cfg)._fetch_uncached_detailed(
-            url, extraction=provider if provider == "crawl4ai" else ""
-        )
-    except UnsafeURL:
-        return {"status": "unsafe_url", "message": "URL blocked by public-address safety rules"}
-    except FetchPageError as exc:
-        reason = exc.failure_class
-        labels = {
-            "timeout": "Fetch timed out",
-            "authentication": "Authentication failed",
-            "rate_limit": "Rate limited",
-            "disabled": "Provider is disabled",
-            "configuration": "Provider configuration missing",
-            "response_too_large": "Provider response too large",
-        }
-        return {
-            "status": reason,
-            "message": labels.get(reason, "Fetch failed; check URL and provider settings"),
-        }
-    except Exception:
-        return {"status": "failed", "message": "Fetch failed; check URL and provider settings"}
-    used = result.get("provider", "")
-    used = used if used in {"direct", "trafilatura", *NAMES} else "unknown"
-    fallback = bool(result.get("fallback_used"))
-    return {
-        "status": "ok",
-        "provider": used,
-        "attempted": [
-            p
-            for p in result.get("attempted_providers", [])
-            if p in {"direct", "trafilatura", *NAMES}
-        ][:4],
-        "characters": min(len(result.get("content", "")), cfg.web_fetch.max_content_characters),
-        "fallback": fallback,
-        "elapsed_ms": int((time.monotonic() - start) * 1000),
-        "message": f"{NAMES.get(used, used.title())} · "
-        f"{len(result.get('content', '')):,} characters"
-        + (" · cloud fallback used" if fallback else ""),
-    }
 
 
 class FetchSettings(SearchSettings):

@@ -1019,7 +1019,10 @@ def test_cross_tool_no_progress_forces_tool_free_finalization():
     assert len(runtime.requests) == 4
     assert runtime.requests[3][1] == []
     assert events[-1].kind == "done"
-    assert "blocked" in events[-2].payload["content"]
+    assert any(event.kind == "text" and "blocked" in event.payload["content"]
+               for event in events)
+    assert any(event.kind == "error" and "repeated unsuccessful results" in
+               event.payload["message"] for event in events)
 
 
 def test_missing_file_batch_can_discover_correct_paths_and_read_them(tmp_path):
@@ -1090,9 +1093,10 @@ def test_three_nonzero_shell_responses_still_stop_as_no_progress():
     tool = Tool("run_shell", "shell", {"type": "object", "properties": {
         "command": {"type": "string"}}}, lambda command: "exit=127\ncommand not found")
     agent = make_agent(runtime, [tool])
-    list(agent.run("Validate the implementation"))
+    events = list(agent.run("Validate the implementation"))
     assert runtime.requests[-1][1] == []
     assert agent.last_turn_budget["no_progress_streak"] == 3
+    assert any(event.kind == "error" for event in events)
 
 
 def test_request_user_input_is_removed_after_one_answer():

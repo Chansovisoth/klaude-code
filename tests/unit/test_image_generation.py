@@ -6,6 +6,7 @@ import queue
 import struct
 import threading
 import time
+import uuid
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
@@ -14,6 +15,246 @@ import pytest
 from klaude_cli.background_jobs import OwnedBackgroundJobs
 from klaude_core import image_generation as gen
 from klaude_core.library_artifacts import ArtifactStore
+
+
+def test_shared_image_generation_command_is_fixed_and_private(tmp_path):
+    from klaude_application.image_generation import ImageGenerationCommand
+
+    cfg = SimpleNamespace(config_dir=tmp_path / "config", data_dir=tmp_path / "data")
+    command = ImageGenerationCommand.for_client(
+        cfg, "prepare", prompt="private prompt", options={"width": 512}
+    )
+    request = command.worker_request()
+    assert ImageGenerationCommand.from_worker(request).worker_request() == request
+    assert "private prompt" not in repr(command)
+    with pytest.raises(ValueError, match="Invalid image generation"):
+        ImageGenerationCommand.from_worker({**request, "operation": "arbitrary"})
+    with pytest.raises(ValueError, match="Invalid image generation"):
+        ImageGenerationCommand.from_worker({**request, "shell": "unexpected"})
+
+
+def test_journaled_image_settings_recover_after_lost_ack(tmp_path, monkeypatch):
+    from klaude_application.image_settings import (
+        ImageSettingsUnconfirmed,
+        image_settings_resource,
+        recover_image_settings,
+        save_image_settings,
+    )
+    from klaude_application.operation_journal import OperationJournal
+
+    cfg = SimpleNamespace(config_dir=tmp_path / "config", data_dir=tmp_path / "data")
+    cfg.config_dir.mkdir()
+    cfg.data_dir.mkdir()
+    journal = OperationJournal(cfg.data_dir / "operations.db")
+    request_id = uuid.uuid4().hex
+
+    def lose_ack(*_args, **_kwargs):
+        raise OSError("ack lost")
+
+    monkeypatch.setattr(journal, "finish", lose_ack)
+    with pytest.raises(ImageSettingsUnconfirmed, match="recover"):
+        save_image_settings(
+            cfg, {"enabled": False, "endpoint": "", "model": ""}, "",
+            journal, request_id, "cli",
+        )
+    original = gen.read(cfg)
+    assert original["revision"]
+    assert journal.resource_busy(image_settings_resource(cfg.config_dir))
+    recovered = OperationJournal(journal.path)
+    receipt = recover_image_settings(cfg, recovered, request_id, "cli")
+    assert receipt.state == "completed"
+    assert not recovered.resource_busy(image_settings_resource(cfg.config_dir))
+    assert gen.read(cfg) == original
+
+
+def test_journaled_image_settings_lost_start_ack_has_recovery_path(tmp_path, monkeypatch):
+    from klaude_application.image_settings import (
+        ImageSettingsUnconfirmed,
+        recover_image_settings,
+        save_image_settings,
+    )
+    from klaude_application.operation_journal import OperationJournal
+
+    cfg = SimpleNamespace(config_dir=tmp_path / "config", data_dir=tmp_path / "data")
+    cfg.config_dir.mkdir()
+    cfg.data_dir.mkdir()
+    journal = OperationJournal(cfg.data_dir / "operations.db")
+    request_id = uuid.uuid4().hex
+    start = journal.start
+
+    def lose_start_ack(*args):
+        start(*args)
+        raise OSError("start acknowledgement lost")
+
+    monkeypatch.setattr(journal, "start", lose_start_ack)
+    with pytest.raises(ImageSettingsUnconfirmed, match="recover"):
+        save_image_settings(
+            cfg, {"enabled": False, "endpoint": "", "model": ""}, "",
+            journal, request_id, "cli",
+        )
+    assert gen.read(cfg)["revision"] == ""
+    assert journal.status(request_id, "cli").state == "unknown"
+    assert recover_image_settings(
+        cfg, OperationJournal(journal.path), request_id, "cli",
+    ).state == "failed"
+
+
+def test_journaled_image_settings_prior_state_and_changed_state(tmp_path, monkeypatch):
+    from klaude_application.image_settings import (
+        ImageSettingsUnconfirmed,
+        image_settings_resource,
+        recover_image_settings,
+        save_image_settings,
+    )
+    from klaude_application.operation_journal import OperationConflict, OperationJournal
+
+    cfg = SimpleNamespace(config_dir=tmp_path / "config", data_dir=tmp_path / "data")
+    cfg.config_dir.mkdir()
+    cfg.data_dir.mkdir()
+    journal = OperationJournal(cfg.data_dir / "operations.db")
+    request_id = uuid.uuid4().hex
+    original_write = gen.atomic_write_private
+
+    def fail_publish(*_args, **_kwargs):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(gen, "atomic_write_private", fail_publish)
+    with pytest.raises(ImageSettingsUnconfirmed):
+        save_image_settings(
+            cfg, {"enabled": False, "endpoint": "", "model": ""}, "",
+            journal, request_id, "cli",
+        )
+    assert gen.read(cfg)["revision"] == ""
+    assert recover_image_settings(
+        cfg, OperationJournal(journal.path), request_id, "cli",
+    ).state == "failed"
+    monkeypatch.setattr(gen, "atomic_write_private", original_write)
+
+    current = gen.save(cfg, {"enabled": False, "endpoint": "", "model": ""}, "")
+    request_id = uuid.uuid4().hex
+
+    def lose_ack(*_args, **_kwargs):
+        raise OSError("ack lost")
+
+    monkeypatch.setattr(journal, "finish", lose_ack)
+    with pytest.raises(ImageSettingsUnconfirmed):
+        save_image_settings(
+            cfg, {"enabled": False, "endpoint": "", "model": ""},
+            current["revision"], journal, request_id, "cli",
+        )
+    changed = gen.read(cfg)
+    gen.save(cfg, {"enabled": False, "endpoint": "", "model": ""}, changed["revision"])
+    with pytest.raises(OperationConflict, match="differs from both"):
+        recover_image_settings(cfg, OperationJournal(journal.path), request_id, "cli")
+    assert journal.resource_busy(image_settings_resource(cfg.config_dir))
+
+
+def test_image_settings_worker_save_uses_same_journal(tmp_path):
+    from klaude_application.image_generation import ImageGenerationCommand
+    from klaude_application.operation_journal import OperationJournal
+
+    cfg = SimpleNamespace(config_dir=tmp_path / "config", data_dir=tmp_path / "data")
+    cfg.config_dir.mkdir()
+    cfg.data_dir.mkdir()
+    request_id = uuid.uuid4().hex
+    command = ImageGenerationCommand.for_client(
+        cfg, "save", settings={"enabled": False, "endpoint": "", "model": ""},
+        revision="", request_id=request_id, owner_id="cli",
+    )
+    assert ImageGenerationCommand.from_worker(command.worker_request()).execute()[
+        "settings"
+    ]["revision"]
+    receipt = OperationJournal(cfg.data_dir / "operations.db").status(request_id, "cli")
+    assert receipt is not None and receipt.state == "completed"
+
+
+def test_invalid_image_settings_worker_does_not_probe_network(tmp_path, monkeypatch):
+    from klaude_application.image_generation import ImageGenerationCommand
+
+    cfg = SimpleNamespace(config_dir=tmp_path / "config", data_dir=tmp_path / "data")
+    cfg.config_dir.mkdir()
+    cfg.data_dir.mkdir()
+    monkeypatch.setattr(gen, "inspect", lambda *_: pytest.fail("No network probe"))
+    command = ImageGenerationCommand.for_client(
+        cfg, "save", settings={"enabled": "yes", "endpoint": "http://localhost:1234",
+                               "model": "invalid"},
+        revision="", request_id=uuid.uuid4().hex, owner_id="cli",
+    )
+    assert command.execute()["status"] == "error"
+    assert not (cfg.data_dir / "operations.db").exists()
+
+
+def test_cli_image_service_recovery_checks_exact_state(tmp_path, monkeypatch, capsys):
+    from klaude_application.image_settings import ImageSettingsUnconfirmed, save_image_settings
+    from klaude_application.operation_journal import OperationJournal
+    from klaude_cli import library_commands
+
+    cfg = SimpleNamespace(config_dir=tmp_path / "config", data_dir=tmp_path / "data")
+    cfg.config_dir.mkdir()
+    cfg.data_dir.mkdir()
+    journal = OperationJournal(cfg.data_dir / "operations.db")
+    request_id = uuid.uuid4().hex
+
+    def lose_ack(*_args, **_kwargs):
+        raise OSError("ack lost")
+
+    monkeypatch.setattr(journal, "finish", lose_ack)
+    with pytest.raises(ImageSettingsUnconfirmed):
+        save_image_settings(
+            cfg, {"enabled": False, "endpoint": "", "model": ""}, "",
+            journal, request_id, "cli",
+        )
+    monkeypatch.setattr(library_commands, "load_config", lambda: cfg)
+    library_commands.image_service_recover(yes=True)
+    assert "Recovered" in capsys.readouterr().out
+    assert OperationJournal(journal.path).status(request_id, "cli").state == "completed"
+
+
+def test_image_settings_writer_requires_journal(tmp_path):
+    from klaude_cli.session_actions import ImageGenerationUpdate, SessionActionWriter
+
+    cfg = SimpleNamespace(config_dir=tmp_path / "config", data_dir=tmp_path / "data")
+    cfg.config_dir.mkdir()
+    cfg.data_dir.mkdir()
+    events = queue.Queue()
+    writer = SessionActionWriter(
+        object(), lambda kind, value: events.put((kind, value)),
+        require_image_journal=True,
+    )
+    request = ImageGenerationUpdate(
+        "session", uuid.uuid4().hex, cfg,
+        {"enabled": False, "endpoint": "", "model": ""}, "",
+    )
+    assert writer.submit(request)
+    assert not writer.close(wait=True)
+    kind, payload = events.get(timeout=2)
+    assert kind == "image_generation_saved" and "journal unavailable" in payload[2]
+    assert not (cfg.config_dir / "image-generation.json").exists()
+
+
+def test_image_settings_writer_records_completed_receipt(tmp_path):
+    from klaude_application.operation_journal import OperationJournal
+    from klaude_cli.session_actions import ImageGenerationUpdate, SessionActionWriter
+
+    cfg = SimpleNamespace(config_dir=tmp_path / "config", data_dir=tmp_path / "data")
+    cfg.config_dir.mkdir()
+    cfg.data_dir.mkdir()
+    journal = OperationJournal(cfg.data_dir / "operations.db")
+    events = queue.Queue()
+    writer = SessionActionWriter(
+        object(), lambda kind, value: events.put((kind, value)),
+        image_journal=journal, require_image_journal=True,
+    )
+    request_id = uuid.uuid4().hex
+    request = ImageGenerationUpdate(
+        "session", request_id, cfg,
+        {"enabled": False, "endpoint": "", "model": ""}, "",
+    )
+    assert writer.submit(request)
+    assert writer.close(wait=True)
+    kind, payload = events.get(timeout=2)
+    assert kind == "image_generation_saved" and not payload[2]
+    assert journal.status(request_id, "session").state == "completed"
 
 
 def png(width=512, height=512):

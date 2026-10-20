@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import os
 import time
 from typing import Any
 
+from klaude_application.model_manager import ModelManagerCommand
 from klaude_core.ollama_manager import PULL_TIMEOUT, model_name
 
 from .dependency_panel import DependencyPanel
@@ -51,21 +51,7 @@ def size(value: Any) -> str:
 
 
 def worker_request(cfg: Any, operation: str, **values: Any) -> dict:
-    # Inherited credentials cross only the existing private worker request pipe.
-    variable = values.pop("key_env", "")
-    keys = {
-        k: v
-        for k in ("HUGGINGFACE_API_KEY", variable)
-        if k and (v := os.environ.get(k)) is not None and len(v) <= 8192
-    }
-    return {
-        "kind": "model_manager",
-        "operation": operation,
-        "config_dir": str(cfg.config_dir),
-        "data_dir": str(cfg.data_dir),
-        "environment_keys": keys,
-        **values,
-    }
+    return ModelManagerCommand.for_client(cfg, operation, **values).worker_request()
 
 
 class ModelManager:

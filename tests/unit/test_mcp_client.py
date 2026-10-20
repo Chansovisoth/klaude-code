@@ -342,6 +342,7 @@ def test_oauth_discovery_metadata_survives_restart_for_refresh(tmp_path):
 
 def test_mcp_oauth_status_and_logout_never_print_tokens(tmp_path, monkeypatch, capsys):
     import anyio
+    from klaude_application.operation_journal import OperationJournal
 
     registry = MCPRegistry(tmp_path / "mcp-servers.json")
     server = MCPServerConfig(
@@ -369,6 +370,9 @@ def test_mcp_oauth_status_and_logout_never_print_tokens(tmp_path, monkeypatch, c
     assert "nor-me" not in output
     assert not mcp_auth_file(cfg.mcp_auth_dir, "github").exists()
     assert registry.load()["github"].enabled is False
+    receipts = OperationJournal(tmp_path / "operations.db").recent("cli")
+    assert len(receipts) == 1 and receipts[0].kind == "MCPOAuthLogout"
+    assert receipts[0].state == "completed"
 
 
 def test_mcp_enable_checks_oauth_login_before_trust_prompt(tmp_path, monkeypatch):
@@ -392,6 +396,211 @@ def test_mcp_enable_checks_oauth_login_before_trust_prompt(tmp_path, monkeypatch
 
     with pytest.raises(cli_main.typer.Exit):
         cli_main.mcp_enable("github", yes=False)
+
+
+def test_mcp_cli_toggle_and_remove_share_reviewed_application_mutation(tmp_path, monkeypatch):
+    from klaude_application.operation_journal import OperationJournal
+
+    registry = MCPRegistry(tmp_path / "mcp-servers.json")
+    server = MCPServerConfig(
+        name="docs", transport="http", url="https://example.com/mcp", enabled=True,
+        tools=[{"name": "read", "inputSchema": {"type": "object"}}],
+    )
+    registry.save({"docs": server})
+    monkeypatch.setattr(cli_main, "_mcp_registry", lambda: registry)
+
+    cli_main.mcp_disable("docs")
+    assert not MCPRegistry(registry.path).load()["docs"].enabled
+    cli_main.mcp_remove("docs", yes=True)
+    assert MCPRegistry(registry.path).load() == {}
+    receipts = OperationJournal(tmp_path / "operations.db").recent("cli")
+    assert [item.kind for item in receipts] == ["MCPRemove", "MCPToggle"]
+    assert all(item.state == "completed" for item in receipts)
+
+
+def test_mcp_cli_recover_reconciles_exact_saved_definition(tmp_path, monkeypatch):
+    import uuid
+
+    from klaude_application.mcp_mutations import mcp_resource
+    from klaude_application.operation_journal import OperationJournal
+
+    registry = MCPRegistry(tmp_path / "mcp-servers.json")
+    server = MCPServerConfig(
+        name="docs", transport="http", url="https://example.com/mcp", enabled=False,
+        tools=[{"name": "read", "inputSchema": {"type": "object"}}],
+    )
+    registry.save({"docs": server})
+    before = {"docs": server.to_dict()}
+    server.enabled = True
+    after = {"docs": server.to_dict()}
+    journal = OperationJournal(tmp_path / "operations.db")
+    request_id = uuid.uuid4().hex
+    receipt = journal.admit(
+        request_id=request_id, owner_id="terminal", kind="MCPToggle",
+        resource=mcp_resource(registry.path), payload={"name": "docs"},
+    )
+    journal.record_witness(request_id, "terminal", receipt.fence, before=before, after=after)
+    journal.start(request_id, "terminal", receipt.fence)
+    registry.load()
+    registry.save({"docs": server})
+    journal.mark_unknown(request_id, "terminal", receipt.fence)
+    monkeypatch.setattr(
+        cli_main, "load_config",
+        lambda: SimpleNamespace(
+            data_dir=tmp_path, mcp_servers_file=registry.path,
+            mcp_auth_dir=tmp_path / "auth",
+        ),
+    )
+
+    cli_main.mcp_recover(yes=True)
+
+    recovered = OperationJournal(journal.path)
+    assert recovered.status(request_id, "terminal").state == "completed"
+    assert not recovered.resource_busy(mcp_resource(registry.path))
+
+
+def test_mcp_cli_add_disabled_uses_shared_fixed_operation(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    registry = MCPRegistry(tmp_path / "mcp-servers.json")
+    monkeypatch.setattr(cli_main, "_mcp_registry", lambda: registry)
+    args = ["mcp", "add", "docs", "--url", "https://example.com/mcp", "--skip-test", "--yes"]
+    first = CliRunner().invoke(cli_main.app, args)
+    assert first.exit_code == 0, first.output
+    saved = MCPRegistry(registry.path).load()["docs"]
+    assert not saved.enabled and saved.tools == []
+    before = registry.path.read_bytes()
+    duplicate = CliRunner().invoke(cli_main.app, args)
+    assert duplicate.exit_code == 1
+    assert registry.path.read_bytes() == before
+
+
+def test_mcp_cli_add_connected_requires_discovery_and_rejects_duplicate(tmp_path, monkeypatch):
+    import klaude_core.mcp_client as mcp_client
+    from typer.testing import CliRunner
+
+    registry = MCPRegistry(tmp_path / "mcp-servers.json")
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def discover(self, _server):
+            return [{"name": "read", "inputSchema": {"type": "object"}}]
+
+    monkeypatch.setattr(cli_main, "_mcp_registry", lambda: registry)
+    monkeypatch.setattr(cli_main, "load_config", lambda: SimpleNamespace(mcp_auth_dir=tmp_path))
+    monkeypatch.setattr(mcp_client, "MCPClient", FakeClient)
+    args = ["mcp", "add", "docs", "--url", "https://example.com/mcp", "--yes"]
+    first = CliRunner().invoke(cli_main.app, args)
+    assert first.exit_code == 0, first.output
+    saved = MCPRegistry(registry.path).load()["docs"]
+    assert saved.enabled and saved.tools[0]["name"] == "read"
+    before = registry.path.read_bytes()
+    duplicate = CliRunner().invoke(cli_main.app, args)
+    assert duplicate.exit_code == 1
+    assert registry.path.read_bytes() == before
+
+
+def test_mcp_cli_import_saves_exact_preview_when_source_changes_at_confirmation(
+    tmp_path, monkeypatch
+):
+    registry = MCPRegistry(tmp_path / "mcp-servers.json")
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps({
+        "mcpServers": {"docs": {"url": "https://reviewed.example/mcp"}}
+    }))
+
+    def change_file(_prompt):
+        source.write_text(json.dumps({
+            "mcpServers": {"other": {"url": "https://changed.example/mcp"}}
+        }))
+        return True
+
+    monkeypatch.setattr(cli_main, "_mcp_registry", lambda: registry)
+    monkeypatch.setattr(cli_main.typer, "confirm", change_file)
+    cli_main.mcp_import(source, yes=False)
+    saved = MCPRegistry(registry.path).load()
+    assert set(saved) == {"docs"}
+    assert saved["docs"].url == "https://reviewed.example/mcp"
+    assert not saved["docs"].enabled
+
+
+def test_mcp_cli_enable_rejects_definition_changed_during_discovery(tmp_path, monkeypatch):
+    import klaude_core.mcp_client as mcp_client
+
+    registry = MCPRegistry(tmp_path / "mcp-servers.json")
+    server = MCPServerConfig(
+        name="docs", transport="http", url="https://example.com/mcp", enabled=False,
+    )
+    registry.save({"docs": server})
+
+    class ChangingClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def discover(self, _server):
+            changed = MCPRegistry(registry.path)
+            servers = changed.load()
+            servers["docs"].url = "https://changed.example/mcp"
+            changed.save(servers)
+            return [{"name": "read", "inputSchema": {"type": "object"}}]
+
+    monkeypatch.setattr(cli_main, "_mcp_registry", lambda: registry)
+    monkeypatch.setattr(cli_main, "load_config", lambda: SimpleNamespace(mcp_auth_dir=tmp_path))
+    monkeypatch.setattr(mcp_client, "MCPClient", ChangingClient)
+    with pytest.raises(cli_main.typer.Exit) as error:
+        cli_main.mcp_enable("docs", yes=True)
+    assert error.value.exit_code == 1
+    persisted = MCPRegistry(registry.path).load()["docs"]
+    assert persisted.url == "https://changed.example/mcp"
+    assert not persisted.enabled and persisted.tools == []
+
+
+def test_mcp_cli_enable_saves_discovered_tools_through_application(tmp_path, monkeypatch):
+    import klaude_core.mcp_client as mcp_client
+
+    registry = MCPRegistry(tmp_path / "mcp-servers.json")
+    registry.save({"docs": MCPServerConfig(
+        name="docs", transport="http", url="https://example.com/mcp", enabled=False,
+    )})
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def discover(self, _server):
+            return [{"name": "read", "inputSchema": {"type": "object"}}]
+
+    monkeypatch.setattr(cli_main, "_mcp_registry", lambda: registry)
+    monkeypatch.setattr(cli_main, "load_config", lambda: SimpleNamespace(mcp_auth_dir=tmp_path))
+    monkeypatch.setattr(mcp_client, "MCPClient", FakeClient)
+    cli_main.mcp_enable("docs", yes=True)
+    saved = MCPRegistry(registry.path).load()["docs"]
+    assert saved.enabled and saved.tools[0]["name"] == "read"
+
+
+def test_mcp_cli_refresh_saves_each_discovery_through_application(tmp_path, monkeypatch):
+    import klaude_core.mcp_client as mcp_client
+
+    registry = MCPRegistry(tmp_path / "mcp-servers.json")
+    registry.save({"docs": MCPServerConfig(
+        name="docs", transport="http", url="https://example.com/mcp", enabled=True,
+        tools=[{"name": "old", "inputSchema": {"type": "object"}}],
+    )})
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def discover(self, _server):
+            return [{"name": "new", "inputSchema": {"type": "object"}}]
+
+    monkeypatch.setattr(cli_main, "_mcp_registry", lambda: registry)
+    monkeypatch.setattr(cli_main, "load_config", lambda: SimpleNamespace(mcp_auth_dir=tmp_path))
+    monkeypatch.setattr(mcp_client, "MCPClient", FakeClient)
+    cli_main.mcp_refresh("docs")
+    assert MCPRegistry(registry.path).load()["docs"].tools[0]["name"] == "new"
 
 
 def test_manual_mcp_oauth_login_uses_masked_callback_and_enables_server(
@@ -425,6 +634,10 @@ def test_manual_mcp_oauth_login_uses_masked_callback_and_enables_server(
                 )
 
             anyio.run(authorize)
+            anyio.run(
+                MCPTokenStorage(mcp_auth_file(cfg.mcp_auth_dir, "github")).set_tokens,
+                OAuthToken(access_token="test-access-token", expires_in=60),
+            )
             return [
                 {
                     "name": "issues",
@@ -457,6 +670,46 @@ def test_manual_mcp_oauth_login_uses_masked_callback_and_enables_server(
     assert [tool["name"] for tool in configured.tools] == ["issues"]
     assert prompt_options["hide_input"] is True
     assert "short-lived-code" not in capsys.readouterr().out
+
+
+def test_mcp_oauth_login_keeps_new_credentials_when_definition_save_is_unknown(
+    tmp_path, monkeypatch
+):
+    import anyio
+    import klaude_core.mcp_client as mcp_client
+
+    registry = MCPRegistry(tmp_path / "mcp-servers.json")
+    registry.save({"github": MCPServerConfig(
+        name="github", transport="http", url="https://mcp.example.com/mcp",
+        enabled=False,
+    )})
+    cfg = SimpleNamespace(mcp_auth_dir=tmp_path / "auth")
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def discover(self, _server):
+            anyio.run(
+                MCPTokenStorage(mcp_auth_file(cfg.mcp_auth_dir, "github")).set_tokens,
+                OAuthToken(access_token="test-access-token", expires_in=60),
+            )
+            return [{"name": "read", "inputSchema": {"type": "object"}}]
+
+    monkeypatch.setattr(cli_main, "_mcp_registry", lambda: registry)
+    monkeypatch.setattr(cli_main, "load_config", lambda: cfg)
+    monkeypatch.setattr(mcp_client, "MCPClient", FakeClient)
+    monkeypatch.setattr(
+        cli_main, "apply_embedded_mcp_mutation",
+        lambda *_args, **_kwargs: SimpleNamespace(state="unconfirmed"),
+    )
+    with pytest.raises(cli_main.typer.Exit):
+        cli_main.mcp_auth_login(
+            "github", manual=True, open_browser=False, scope="",
+            client_metadata_url="",
+        )
+    assert MCPTokenStorage(mcp_auth_file(cfg.mcp_auth_dir, "github")).status().access_token_present
+    assert not MCPRegistry(registry.path).load()["github"].enabled
 
 
 def test_cached_mcp_tools_are_namespaced_routed_and_permission_gated(tmp_path, monkeypatch):
@@ -495,7 +748,9 @@ def test_cached_mcp_tools_are_namespaced_routed_and_permission_gated(tmp_path, m
 
     assert set(by_name) == {tool_name}
     assert _select_tool_names("use Context7 for current React docs", by_name) == [tool_name]
-    assert json.loads(by_name[tool_name].fn(query="hooks"))["content"] == {"query": "hooks"}
+    response = by_name[tool_name].fn(query="hooks")
+    assert json.loads(response["content"])["content"] == {"query": "hooks"}
+    assert response["metadata"]["status"] == "succeeded"
     cfg._mcp_client_manager.close()
 
 

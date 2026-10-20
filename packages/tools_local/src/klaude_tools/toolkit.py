@@ -10,6 +10,7 @@ Design rules:
 
 from __future__ import annotations
 
+import ast
 import fcntl
 import fnmatch
 import glob
@@ -23,11 +24,14 @@ import tempfile
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from itertools import islice
 from pathlib import Path
 
 from klaude_core import Tool
 
 MAX_READ = 60_000
+MAX_PAGED_READ = 2_000_000
+MAX_DIR_SCAN = 2_000
 SHELL_TIMEOUT = 120
 GIT_TIMEOUT = 60
 GIT_ERROR_OUTPUT_LIMIT = 2_000
@@ -76,7 +80,7 @@ def _edit_result(path: str, before: str, after: str, message: str) -> dict:
         if len(rows) > 120:
             break
     truncated = len(rows) > 120
-    return {
+    result: dict = {
         "content": message,
         "metadata": {
             "edit": {
@@ -89,6 +93,26 @@ def _edit_result(path: str, before: str, after: str, message: str) -> dict:
             }
         },
     }
+    # Cheap passive feedback after a real edit: never import/execute project code
+    # or create bytecode, and never describe an applied write as rolled back.
+    if before != after and Path(path).suffix == '.py' and len(after) <= 65_536:
+        diagnostics = []
+        try:
+            ast.parse(after)
+        except SyntaxError as exc:
+            diagnostics.append({'kind': 'syntax', 'line': exc.lineno or 1,
+                                'message': str(exc.msg)[:300]})
+        except (ValueError, RecursionError):
+            pass  # Resource/encoding limits are not proof of a syntax error.
+        else:
+            result['metadata']['syntax_checked'] = True
+        if diagnostics:
+            result['metadata']['syntax_checked'] = True
+            result['content'] += '\nPython syntax error at line ' + str(
+                diagnostics[0]['line']) + ': ' + str(diagnostics[0]['message'])
+        if result['metadata'].get('syntax_checked'):
+            result['metadata']['diagnostics'] = diagnostics
+    return result
 
 
 READ_ONLY_COMMANDS = {
@@ -522,6 +546,8 @@ class Workspace:
             ".env",
             "searxng.env",
             "credentials.json",
+            "webui-accounts.json",
+            "webui-admin-password.txt",
             "id_rsa",
             "id_ed25519",
         } or name.endswith((".pem", ".key", ".p12", ".pfx"))
@@ -609,12 +635,28 @@ class Workspace:
         target = self._jail(path)
         if self._is_sensitive_path(target):
             raise PermissionError(f"access to secret file denied: {path}")
-        text = target.read_text()
         if offset is not None or limit is not None:
             start = 1 if offset is None else offset
             count = 200 if limit is None else limit
             if not 1 <= start <= 1_000_000 or not 1 <= count <= 500:
                 raise ValueError("offset must be 1–1000000 and limit must be 1–500")
+        previous = target.stat()
+        if not stat.S_ISREG(previous.st_mode):
+            raise ValueError("source is not a regular file")
+        descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            current = os.fstat(stream.fileno())
+            if (current.st_dev, current.st_ino) != (previous.st_dev, previous.st_ino):
+                raise PermissionError("source changed during read; retry")
+            if offset is not None or limit is not None:
+                if current.st_size > MAX_PAGED_READ * 4:
+                    raise ValueError("file exceeds bounded paging limit")
+                text = stream.read(MAX_PAGED_READ + 1)
+                if len(text) > MAX_PAGED_READ:
+                    raise ValueError("file exceeds bounded paging limit")
+            else:
+                text = stream.read(MAX_READ + 1)
+        if offset is not None or limit is not None:
             lines = text.splitlines()
             if start > len(lines):
                 return f"{path}: offset {start} exceeds {len(lines)} lines"
@@ -664,7 +706,10 @@ class Workspace:
 
     def list_dir(self, path: str = ".") -> str:
         p = self._jail(path)
-        entries = sorted(p.iterdir(), key=lambda e: (e.is_file(), e.name))
+        entries = list(islice(p.iterdir(), MAX_DIR_SCAN + 1))
+        if len(entries) > MAX_DIR_SCAN:
+            raise ValueError("directory exceeds bounded listing limit")
+        entries.sort(key=lambda e: (e.is_file(), e.name))
         lines = [
             f"{'d' if e.is_dir() else 'f'} {e.relative_to(self.root)}"
             for e in entries
@@ -684,6 +729,8 @@ class Workspace:
                 "--exclude-dir=.venv",
                 "--exclude=.env",
                 "--exclude=searxng.env",
+                "--exclude=webui-accounts.json",
+                "--exclude=webui-admin-password.txt",
                 "--exclude=*.pem",
                 "--exclude=*.key",
                 pattern,

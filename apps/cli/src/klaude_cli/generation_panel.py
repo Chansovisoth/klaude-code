@@ -6,6 +6,7 @@ import time
 import uuid
 from typing import Any
 
+from klaude_application.image_generation import ImageGenerationCommand
 from klaude_core.image_generation import DEADLINE, DEFAULTS, cancellation_notice, endpoint, text
 
 from .session_actions import ImageGenerationUpdate
@@ -415,25 +416,22 @@ class GenerationPanel:
             raise ValueError("Finish the running model/setup task before generating an image")
         cfg = host.cfg
         self.roots = (str(cfg.config_dir), str(cfg.data_dir))
-        request = {
-            "kind": "image_generation",
-            "operation": operation,
-            "config_dir": str(cfg.config_dir),
-            "data_dir": str(cfg.data_dir),
-            "endpoint": self.draft["endpoint"],
-            "prompt": self.prompt,
-            "options": {
+        request = ImageGenerationCommand.for_client(
+            cfg, operation,
+            endpoint=self.draft["endpoint"],
+            prompt=self.prompt,
+            options={
                 "width": self.width,
                 "height": self.height,
                 "steps": self.steps,
                 "seed": self.seed,
                 "session": host.session_id,
             },
-            "spec": self.spec,
-            "id": self.spec.get("id", ""),
-            "offset": self.offset,
-            "abandon": self.abandon,
-        }
+            spec=self.spec,
+            id=self.spec.get("id", ""),
+            offset=self.offset,
+            abandon=self.abandon,
+        ).worker_request()
         self.library.leave()
         identity = host._background_jobs.submit(
             KEY, request, timeout=DEADLINE + 30 if operation == "run" else 20, notify_cancel=True
@@ -452,13 +450,13 @@ class GenerationPanel:
             self.library.show()
 
     def cleanup(self, previous: tuple[str, str, str, str]) -> None:
-        request = {
+        request = ImageGenerationCommand.from_worker({
             "kind": "image_generation",
             "operation": "cancel",
             "id": self.spec["id"],
             "config_dir": self.roots[0],
             "data_dir": self.roots[1],
-        }
+        }).worker_request()
         identity = self.host._background_jobs.submit(KEY, request, timeout=16, notify_cancel=True)
         self.task = (identity, previous[1], previous[2], "cancel")
         self.stopping = True

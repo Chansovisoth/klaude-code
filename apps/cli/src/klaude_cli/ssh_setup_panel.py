@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from klaude_application.ssh_operations import SSHSetupCommand
 from klaude_core.ssh_setup import TIMEOUT
 
 from .session_actions import SSHServerChange
@@ -270,16 +271,12 @@ class SSHSetupPanel:
             self.host._set_panel_feedback(*self.feedback)
 
     def request(self, operation: str) -> dict:
-        return {
-            "kind": "ssh_setup",
-            "operation": operation,
-            "target": self.target,
-            "revision": self.record().get("revision", ""),
-            "config_dir": str(self.host.cfg.config_dir),
-            "public_file": self.public_path,
-            "review": self.review,
-            "agent_socket": os.environ.get("SSH_AUTH_SOCK", ""),
-        }
+        return SSHSetupCommand.for_client(
+            self.host.cfg, operation, target=self.target,
+            revision=self.record().get("revision", ""),
+            public_file=self.public_path, review=self.review,
+            agent_socket=os.environ.get("SSH_AUTH_SOCK", ""),
+        ).worker_request()
 
     def load(self, operation: str) -> None:
         identity = self.host._background_jobs.submit(READ, self.request(operation), timeout=TIMEOUT)

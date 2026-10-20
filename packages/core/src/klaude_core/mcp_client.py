@@ -11,6 +11,7 @@ import stat
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -279,7 +280,9 @@ class MCPTokenStorage:
         return value if isinstance(value, dict) else {}
 
     def _write(self, updates: dict[str, Any]) -> None:
-        with self._lock:
+        if self.path.parent.is_symlink():
+            raise PermissionError("Refusing symlinked MCP credential directory")
+        with self._lock, settings_lock(self.path.parent / ".mcp-auth", timeout=2):
             value = self._read()
             if self.server_url:
                 if not self._matches_server(value):
@@ -423,14 +426,19 @@ class MCPTokenStorage:
             scope=scope,
         )
 
-    def clear(self) -> bool:
-        try:
-            if self.path.is_symlink():
+    def clear(self, *, before_clear: Callable[[], None] | None = None) -> bool:
+        if self.path.parent.is_symlink():
+            raise PermissionError("Refusing symlinked MCP credential directory")
+        with self._lock, settings_lock(self.path.parent / ".mcp-auth", timeout=2):
+            try:
+                if self.path.is_symlink():
+                    return False
+                if before_clear is not None:
+                    before_clear()
+                self.path.unlink()
+            except FileNotFoundError:
                 return False
-            self.path.unlink()
-        except FileNotFoundError:
-            return False
-        return True
+            return True
 
 
 def mcp_auth_file(auth_dir: Path, server_name: str) -> Path:
@@ -553,7 +561,10 @@ class MCPRegistry:
             if isinstance(value, dict)
         }
 
-    def save(self, servers: dict[str, MCPServerConfig]) -> None:
+    def save(
+        self, servers: dict[str, MCPServerConfig], *,
+        before_publish: Callable[[], None] | None = None,
+    ) -> None:
         proposed = deepcopy({name: item.to_dict() for name, item in servers.items()})
         changed = {
             name for name in self._baseline.keys() | proposed.keys()
@@ -575,6 +586,8 @@ class MCPRegistry:
             encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
             if len(encoded.encode()) > MAX_MCP_CONFIG_FILE_BYTES:
                 raise ValueError("MCP configuration exceeds storage limit")
+            if before_publish is not None:
+                before_publish()
             atomic_write_private(self.path, encoded)
             # Retain the caller's snapshot, not unseen rows merged from another
             # client: a subsequent save must not interpret unseen rows as deletions.

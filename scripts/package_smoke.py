@@ -10,11 +10,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PACKAGES = {
+    "klaude_application",
     "klaude_cli",
     "klaude_core",
     "klaude_knowledge",
     "klaude_tools",
     "klaude_web",
+    "klaude_webhost",
 }
 
 
@@ -47,6 +49,9 @@ def main() -> None:
         run("uv", "venv", "--python", sys.executable, str(environment))
         python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         klaude = environment / ("Scripts/klaude.exe" if os.name == "nt" else "bin/klaude")
+        webui = environment / (
+            "Scripts/klaude-webui.exe" if os.name == "nt" else "bin/klaude-webui"
+        )
         run(
             "uv",
             "pip",
@@ -58,11 +63,23 @@ def main() -> None:
         run(
             str(python),
             "-c",
-            "import klaude_cli, klaude_core, klaude_knowledge, klaude_tools, klaude_web",
+            "import klaude_application, klaude_cli, klaude_core, "
+            "klaude_knowledge, klaude_tools, klaude_web, klaude_webhost; "
+            "from importlib.resources import files; "
+            "assets = files('klaude_webhost').joinpath('static'); "
+            "required = ('index.html', 'app.js', 'library.js', 'attachments.js', "
+            "'markdown.js', 'style.css', "
+            "'vendor/markdown-it.min.js', 'vendor/prism.min.js', 'vendor/manifest.json', "
+            "'vendor/markdown-it-LICENSE.txt', 'vendor/markdown-it-THIRD-PARTY.txt', "
+            "'vendor/prism-LICENSE.txt', 'fonts/Roboto.ttf', "
+            "'fonts/JetBrainsMono.ttf', 'fonts/Roboto-OFL.txt', 'fonts/JetBrainsMono-OFL.txt'); "
+            "assert all(assets.joinpath(name).read_bytes() for name in required), "
+            "'WebUI assets missing from installed wheel'",
         )
         smoke_env = {**os.environ, "NO_COLOR": "1"}
         run(str(klaude), "--help", env=smoke_env)
-        print(f"package smoke passed: {len(wheels)} wheel(s), imports, and klaude --help")
+        run(str(webui), "--help", env=smoke_env)
+        print(f"package smoke passed: {len(wheels)} wheels, imports, and both CLI help commands")
 
 
 if __name__ == "__main__":

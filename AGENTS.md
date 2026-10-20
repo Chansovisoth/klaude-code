@@ -19,9 +19,269 @@ not the full Klaude chat agent.
 
 Workspace layout:
 
+- `packages/application`: in-process chat composition, typed public events,
+  bounded headless turn worker, structured interaction broker, and an additive
+  SQLite admission/fencing/replay journal shared by real CLI, TUI and headless
+  chat turns. An expired turn preserves its public partial, becomes interrupted,
+  and blocks new work until explicit reconciliation (`klaude sessions reconcile
+  SESSION_ID`). The in-process application also owns bounded queue/control,
+  workspace binding, plan-mode revisions and explicit restart recovery. Durable
+  request receipts deduplicate supplied IDs for persistent coordination mutations
+  and the two shared chat-preference fields; embedded callers remain compatible
+  without supplying IDs. Old
+  binaries cannot claim a lease after schema migration. Compatibility test
+  doubles retain the earlier Memory seam; other application domains still need
+  M3 service extraction. Headless and terminal turns use the same fenced lease
+  keeper and storage-outage grace. A typed settings seam offers compare-and-set
+  writes for chat composer mode and activity updates; the TUI chat-preferences
+  writer checks stale fields under the same file lock while merging unrelated
+  fields. Other domain settings and appearance retain their existing writers.
+  Terminal presentation stays in the CLI. The experimental browser host is
+  separate. M3 has begun with a typed, bounded SessionDirectory shared by
+  headless, CLI and TUI session list/search paths. Its transactional
+  rename/fork/archive/restore/delete methods are shared by CLI and TUI; legacy
+  CLI delete/clear also use that embedded service. Session Markdown export
+  formatting and public activity wording now live in the application package;
+  its Memory query reads only dialogue and allowlisted public events, never
+  model_content. Terminal clients still own export path/no-overwrite handling.
+  Legacy CLI delete/clear use reviewed turn/session counts rechecked inside
+  SQLite's write transaction, rejecting cross-client changes before deletion.
+  A KnowledgeReader is used by CLI raw queries/library listing and TUI
+  knowledge tool results. Both reuse existing stores and retrieval without
+  browser routes. The bounded Library inventory and reviewed artifact changes,
+  typed TUI Knowledge action and trusted worker request construction (including
+  effective URL Fetch routing), Knowledge operations,
+  typed Research create/run/control actions shared by CLI and TUI worker,
+  model connection definitions/reviewed writes and catalog/capability reads,
+  write-only provider credential changes, typed private model activation and
+  Utility requests, fixed Model Manager, dependency, serving-read, SSH diagnostic,
+  key-setup and definition commands, private image-generation and Vision
+  analysis/tagging requests, the client-owned serving process lifecycle, and
+  the bounded subprocess owner now live in the application package. The shared
+  fixed-operation worker dispatches existing Library, Knowledge, Research,
+  Media, model, SSH, serving, MCP, Skills, Web diagnostic and Utility requests;
+  CLI compatibility adapters keep terminal call sites working. The worker binds
+  config/data roots before importing the application package. The coalescing
+  atomic settings writer, ordered session/domain action writer, ordered MCP
+  mutation writer, ordered Skills action owner and bounded installed Skill
+  reader also live in the application package. The RFC M3 embedded-service
+  exit gate is met for the currently supported chat/read browser surface;
+  unsupported domain mutations remain unavailable over HTTP until their
+  public authorization and lifecycle contracts are built in later milestones.
+  Terminal review presentation stays in the CLI. CLI MCP enable/disable/remove
+  and reviewed add/install use the writer's
+  fixed effect logic through a synchronous embedded adapter; connected add
+  requires nonempty discovered tool schemas. CLI refresh and OAuth logout use
+  the same reviewed definition checks. CLI import saves an immutable preview
+  snapshot through the shared writer, so a source-file swap at confirmation
+  cannot change the imported definitions. OAuth login also uses the reviewed
+  definition effect after credential storage and requires a saved access token;
+  its interactive authorization remains in the CLI. An ambiguous definition
+  save retains newly stored OAuth credentials for explicit inspection rather
+  than treating the save as rejected. An opt-in private SQLite
+  non-chat operation journal has cross-process
+  admission, resource fencing, hashed intent and explicit unknown-outcome
+  reconciliation. CLI and production TUI MCP definition saves use the journal;
+  a registry reload cannot clear an unresolved fence. The TUI keeps chat usable
+  but rejects MCP saves if the journal cannot open. Accepted non-chat requests
+  cancelled or expired before their effect gate release their resource;
+  started or cancelling requests remain unknown and fenced on expiry. A
+  resource-scoped read identifies the exact fenced request after an owner
+  session changes, without releasing it or exposing private intent.
+  CLI and production TUI SSH add/edit/remove/default definition writes now
+  use the same non-chat journal, with a private exact before/after witness
+  recorded under the SSH file lock before atomic publication. Unknown writes
+  stay fenced until `klaude model-manager ssh recover` checks the current
+  definitions without replay. The TUI rejects SSH definition saves if the
+  journal cannot open. SSH host trust/key enrollment is a separate multi-file
+  path and does not use this definition journal yet.
+  CLI worker and production TUI image-service settings saves now share a
+  journaled, revisioned file effect. A lost acknowledgement retains the
+  image-settings fence until `klaude library image-service-recover` confirms
+  the exact prior or saved state without re-testing or contacting the image
+  server. Existing generation job receipts/cancellation remain separate.
+  Production TUI Model Defaults saves now fence their three owned chat-
+  preference fields under the existing registry/preference/credential locks;
+  unrelated preference edits do not invalidate recovery. An unknown role save
+  requires `klaude model-manager defaults-recover` to compare exact prior/final
+  fields without replay or model work. Other chat-preference writers retain
+  their existing field-level compare-and-set semantics.
+  TUI custom bearer-token and catalog-plan MCP installs submit disabled
+  definitions through the ordered mutation writer; reviewed secret capture
+  remains in the terminal flow.
+  Journaled MCP definition saves persist private before/after HMAC witnesses
+  before the effect gate, which the registry checks inside its file lock.
+  The gate also rejects an unrelated direct/old-binary registry edit that
+  would otherwise produce an unwitnessed merged result. An unconfirmed TUI
+  save directs the user to `klaude mcp recover` before another attempt.
+  `klaude mcp recover` reconciles an unknown definition save only when the
+  current registry matches a witnessed state; changed or unwitnessed files
+  remain fenced. OAuth login/removal additionally witness bounded private
+  credential-file hashes and serialize token writes/cleanup with recovery;
+  partial configuration/credential outcomes remain fenced until
+  `klaude mcp recover-oauth NAME` verifies the exact reviewed final state and
+  finishes the one credential deletion. OAuth login discovery and token exchange
+  occur before definition admission; other credential changes and older binaries
+  do not participate in the resource fence. Browser MCP mutations remain off.
 - `apps/cli`: Typer commands, Rich terminal rendering, deterministic command
   reference/help, chat loop wiring, tool display formatting, docs/session/memory
   CLI commands.
+- `apps/webhost`: experimental `klaude-webui` loopback launcher, persistent local
+  admin account, owner cookie/CSRF/Origin checks, public snapshot/SSE replay and a
+  minimal chat and workspace page. Its shared Agent begins with only
+  read/list/search/status/diff tools. M5 adds browser queue/steer/cancel,
+  structured question replies, per-tab control handles and bounded workspace
+  browsing, same-workspace session list/new/resume with exact saved-runtime
+  checks, a live local Ollama model picker, and idle-boundary Standard/Thinking
+  and Plan mode changes. Browser actions acquire session control automatically;
+  there is no separate Take control step. Watching, polling and focusing a tab
+  never claim control. Every authenticated owner client sees pending reviews and
+  questions; explicit responses still use the fenced decision path. Hosted
+  terminal review/cancel actions also reacquire automatically. Client drafts,
+  action request IDs, session/revision checks and the single worker lease remain
+  independent of control handoff. Submitted queue receipts remain available as
+  history but do not block idle controls or appear as pending work. Model
+  selection requires an exact installed catalog entry and fresh `/api/show`
+  completion/tool declarations; browser Thinking
+  currently uses the existing medium effort. Loopback clients may explicitly
+  activate file edits only after the
+  existing clean-worktree/branch check; `write_file` and `edit_file` then use
+  exact allow-once/deny review with content preview and hash. LAN cannot
+  activate or approve edits, and an edit-enabled host cannot start LAN preview.
+  Shell and Git mutations remain unavailable.
+  The authenticated Library has two destinations: Files and Knowledge. Files
+  combines existing Documents, Media and Research reports, with independent type
+  and Saved/Archived status filters. Archive is a status, not a separate tab.
+  Imports choose Document or Image independently of the current filters and
+  remain behind a compact Add a file disclosure. Old saved tab selections migrate
+  to file filters; section, type and status survive page refresh within the tab.
+  Saving owner-scoped uploads to Library needs an explicit import review;
+  previews/downloads never launch a host desktop opener. Tags, archive/restore
+  and deletion use artifact revisions. Knowledge supports inventories/text
+  search, reviewed URL/text-upload Learn and exact existing-source refresh.
+  Files image previews recognize lossy VP8, lossless VP8L and extended VP8X WebP
+  headers. Existing images missing stored dimensions derive them from at most
+  64 KiB of private headers on read, without decoding pixels, rewriting the
+  artifact or changing its revision. Recognized images imported as Documents
+  retain their type and record dimensions for preview. Browser previews retain
+  their 8 MiB, 4-megapixel and 4096px-side limits. Evidence:
+  `docs/webui/webp-preview-validation.md`.
+  Integrations exposes installed Skills, reviewed local ZIP/Markdown import,
+  activation and deletion. Library inventories, Knowledge matches/sources and
+  installed Skills use browser pages sized to complete grid rows near 20 cards
+  (at most 40), with filters applied before paging. Three-column grids show 21
+  cards; only the final page may have a partial row. The browser composes at most
+  two bounded reads without changing CLI/TUI store batches or requiring a host
+  restart. Pagination follows the actual card capacity, and resizing preserves
+  the page containing the former first item.
+  Pagination keeps the first/last pages visible, with ellipses around the current
+  range and chevron controls. Filtered totals determine the actual last page.
+  Mobile shows up to five page numbers with 36–38px wide, 40px tall controls and
+  wider pagination rows, adapting on resize; card pages reload only when their
+  capacity changes. Pagination gaps use centered dots.
+  CLI/TUI store batch sizes remain unchanged.
+  Library and Integrations tabs show unfiltered totals in small leading pills,
+  refreshed on entry, explicit refresh and completed operations. Bounded inventory
+  counts use a plus sign; unavailable counts are omitted. Files sums the known
+  saved Document/Media/Research totals across all types. Integrations keeps Skills
+  and Connections distinct; Connections shows the configured MCP server count
+  only and remains disabled in the browser. MCP remains the protocol/server term.
+  Persistent Memory management belongs under Settings in the planned IA; browser
+  Memory management is not implemented by this navigation reorganization.
+  Populated Library and Skills lists omit redundant per-page count summaries;
+  delayed skeletons represent pending reads; status text reports empty results,
+  inventory limits and errors.
+  `application.library_management` owns bounded private
+  reviews/snapshots and fixed owned workers with durable operation receipts.
+  Accepted work survives page changes/logout. Worker loss is unknown and fences
+  the resource; browser reconciliation remains deferred. These operations do
+  not accept arbitrary host paths or write workspace files. Current v2 coverage:
+  `docs/webui/coverage.md`.
+  `/settings web` adds an owner-only detached host toggle. Desired state lives
+  in private `config/webui.json`; a private Unix control socket reports status,
+  reports stable sign-in URLs, and stops only the owning host.
+  Enabled hosts restart on the next `klaude` launch and survive TUI exit.
+  `klaude-webui` remains available as a separate foreground launcher. The
+  optional LAN toggle binds a selected private IPv4 address to a separate HTTP
+  listener with exact Host/Origin checks and a sign-in URL shown in the TUI.
+  LAN defaults off; HTTP transmits chats, cookies and approvals without network
+  encryption, so the UI warns users to use only a trusted private network.
+  Both managed
+  listeners use TCP port 50000. Settings can probe each listener locally and
+  records a nonlocal LAN request as recent positive device reachability evidence;
+  absent requests cannot identify firewall blocking. The wider
+  RFC hosting lifecycle and browser mutation surface remain unfinished.
+  The M4 host revokes browser sessions/bootstrap and denies
+  pending/future browser reviews before a managed stop is acknowledged. Accepted
+  chat turns drain before the host releases its runtime. Re-enable reports a
+  still-draining owner promptly, and the settings toggle can retry stop if the
+  preference is off while the host still runs. The Unix control protocol checks a
+  version, same-account peer, process start identity and profile; it exposes bounded
+  shared-session snapshot/replay, turn submission, exact read-tool review and
+  cancellation for terminal clients. A pre-versioned managed host is recognized
+  only for status and graceful stop after verifying its module command, account,
+  process birth identity and held profile lock; settings retain Disable and show
+  that re-enabling updates the host. Other legacy commands remain unavailable.
+  Production browser authorization now uses username/password: a single local
+  `admin` account has a generated 32-character initial password, salted scrypt
+  hashes in owner-only `config/webui-accounts.json`, and a private initial-password
+  file retained until password change. TUI `/settings web` → Account shows admin
+  information and reveals/hides the initial password only on explicit selection,
+  outside chat history. The Account page reads local storage independently of
+  host status, remains available with hosting stopped or control errors, and
+  Back/Escape restores focus to Account in Web UI settings. Login work is bounded to two
+  verifiers and five attempts per peer / thirty globally per minute. Password
+  changes and `klaude-webui --reset-admin-password` rotate the account revision,
+  invalidating all browser cookies and SSE; accepted agent work remains owned.
+  Bootstrap exchanges are disabled on account-enabled hosts. Embedded fixtures
+  retain the older bootstrap seam. The browser header's Account shortcut opens
+  Settings → Your local account directly. Password forms clear on leaving
+  Settings or signing out; authentication epochs reject stale snapshot/error
+  responses after sign-out. Foreground startup prints the credential-file path,
+  never the initial password; local reveal toggles back to hidden. Account
+  password changes revoke sessions, and sign-out returns to the sign-in form.
+  Account files are protected from workspace tools/reads/search/diff. This is one
+  local owner account, not multi-user workspace ACLs; 2FA is deferred.
+  TUI settings display host/session/turn status.
+  HTTP rejects duplicate authority/framing headers and caps concurrent request
+  handlers. Authenticated browser uploads stage bounded private files with a
+  per-profile quota and expiry; owner-scoped downloads verify checksums and force
+  attachments. Logout and shutdown revoke staged files. The terminal chat path
+  still runs embedded. Artifact download
+  adapters, nonlocal provider/model selection, effort-level controls and broader
+  domain mutations remain for M6. Switching sessions clears browser file-edit
+  activation and requires explicit activation again.
+  The chat paperclip offers device uploads and revision-checked Library files.
+  A message accepts four files, including two images, within 32 MiB total.
+  Selected and sent attachments use tonal file cards with filename, type and size;
+  PDFs have a PDF badge and images show a decoded, metadata-free 128px thumbnail.
+  New attachment descriptors and thumbnails persist with their dialogue row,
+  survive reloads and forks, and share session deletion. Preview requests require
+  owner authentication and the exact current chat; unsent previews also check the
+  selecting tab. Public snapshots expose only descriptors, never thumbnail bytes
+  or private model input. Text-only legacy records keep their literal transcript.
+  UTF-8 text/code and bounded PDF/DOCX extraction become private model input;
+  public dialogue contains the prompt and filenames only. PDF/DOCX parsers run
+  in disposable resource-limited processes. Images use the existing enabled
+  Vision and exact active-model capability checks, pixel preparation and private
+  Media snapshots. Owner/tab/session-scoped selections expire after 30 minutes;
+  logout and shutdown revoke them, while accepted turns retain their captured
+  bytes. Text and image input hashes participate in durable request deduplication.
+  Files can be prepared during a reply; sending them waits for an idle turn.
+  Sending does not Learn/index text or enable Vision. If the attachment script
+  or server capability is missing, the paperclip is disabled with an explicit
+  restart/reload explanation. Static assets can update before a running Python
+  host; that host must reload before new attachment routes become available.
+  Validation and format
+  limits: `docs/webui/chat-attachments-validation.md`.
+  Its read-only workspace file and search tools use the shared application
+  WorkspaceReadService, which caps underlying input/output, anchors directory
+  listing and search to opened descriptors, and anchors bounded Git status/diff
+  to the selected workspace descriptor. Protected secret names are hidden from
+  browser directory listings and Git path output; Git redaction reads bounded
+  secret sources and fails closed when they are unsafe or oversized.
+  It stops owned processes at their output limits. Browser principal and
+  workspace-grant authorization remain separate work.
 - `packages/core`: config loading, Ollama HTTP client, system prompt, agent
   loop, permission gate, memory/session store, runtime context, follow-up and
   retrieval planning.
@@ -29,7 +289,10 @@ Workspace layout:
   workspace jail, dirty-tree write lockout, command risk classification, and
   auto-commit support when writes are enabled. `read_file` accepts optional
   one-based `offset` and bounded `limit` for numbered later-line reads; an
-  unpaged read retains its existing output. Shell commands prefer the active
+  unpaged read retains its existing output. Underlying reads are bounded;
+  paging rejects files above its scan cap, and the opened file identity is
+  rechecked before use. Directory listing scans at most 2,000 entries. Shell
+  commands prefer the active
   workspace's `.venv/bin` and `node_modules/.bin`, then use a deterministic
   system `PATH`, without Klaude's launcher virtualenv or Python-path variables.
 - `packages/knowledge`: chunking, LanceDB vector storage, SQLite FTS5, atomic
@@ -47,7 +310,7 @@ Workspace layout:
 
 GitHub Actions runs the locked unit suite on Python 3.11, 3.12, and 3.13, then
 runs Ruff and production-source mypy in a separate least-privilege quality job.
-A packaging job also builds all five workspace wheels, installs them together
+A packaging job also builds all seven workspace wheels, installs them together
 in an isolated temporary virtual environment, imports each public package, and
 runs the installed `klaude --help`. Jobs use bounded timeouts and cancel
 superseded runs. `make check` mirrors the local unit, lint, and production-type
@@ -57,7 +320,7 @@ workspace metadata or dependencies change, and keep CI installation frozen.
 `.github/workflows/release-candidate.yml` is a non-publishing release gate,
 started by manual dispatch or by pushing an alpha release tag (`v*-alpha.*`).
 The tag trigger permits verified release preparation through Git push when API
-authentication cannot dispatch workflows. It builds all five wheels twice with
+authentication cannot dispatch workflows. It builds all seven wheels twice with
 one source timestamp, validates their metadata and archive structure, requires
 byte-identical output, writes
 `SHA256SUMS`, creates GitHub/Sigstore build-provenance attestations with the
@@ -67,7 +330,107 @@ a separate explicitly authorized operation.
 
 ## User-Facing Terms
 
-Settings groups are Models, Agent, Advanced, then Appearance. Search is the first
+The planned product WebUI must use Material Design 3 Expressive, with LineageOS
+and end-4/dots-hyprland as user-requested visual references. Use cohesive tonal
+palettes, expressive shapes, grouped controls and fluid, interruptible motion.
+Preserve stable streaming/code reading, immediate approval/cancel actions and
+reduced-motion support. The v2 planning spec owns the detailed design direction;
+the initial Expressive shell now provides Chat/Workspaces, a tab-local Activity
+view, responsive conversation drawer and activity panel, and browser-only
+Settings → INTERFACE → Themes & Colors. System/Light/Dark and eight palettes
+(Slate, Lavender, Sage, Peach, Ocean, Rose, Teal, Amber) preview before Apply
+and persist under a versioned localStorage key with same-origin tab updates.
+Slate uses neutral white/charcoal surfaces, accents, text and outlines. The
+palette picker keeps four columns in two rows on desktop and phone layouts.
+Validation: `docs/webui/theme-palettes-validation.md`. Roboto and JetBrains Mono
+plus their OFL licenses ship in the webhost wheel and are served locally.
+Assistant chat replies render CommonMark Markdown with tables, task lists and
+strikethrough through a pinned local parser; user messages stay literal text.
+Locally bundled Prism grammars highlight bounded code blocks, with code and raw
+response Copy controls. Code headers keep an icon-only Copy control pinned
+within their block during conversation scrolling, with checkmark feedback and
+an accessible Copy code label. The DOM renderer disables raw HTML, permits only explicit
+HTTP/HTTPS/mail links, and turns Markdown images into links without automatic
+fetches. Completed blocks retain identity during streaming; selected/focused
+blocks defer replacement, and terminal snapshots promote the partial article in
+place. Streaming changes coalesce; oversized replies remain readable plain text.
+The browser-only system instruction requests useful Markdown while respecting
+explicit user formats. Source, stored dialogue, public snapshots and export stay
+text. Vendor licenses/hashes ship in the wheel; refresh them only with the pinned
+maintenance script. Validation: `docs/webui/markdown-chat-validation.md`.
+Each assistant reply has a compact action row beneath it: icon-only Copy,
+Read aloud/Stop, Share message, More options, and a book icon with Sources.
+Read aloud uses browser speech voices in bounded chunks and stops when its
+message is removed or the user signs out. Share opens a dialog with Copy link
+and Share via. Links identify the selected saved message and its conversation
+on the current Klaude server and require sign-in; they contain no bootstrap
+token or copied dialogue. The dialog shows local WhatsApp, Telegram, Discord
+and Email icons with text labels in a two-column app grid. WhatsApp, Telegram
+and Email prefill the exact message link. Discord invokes the native device
+share sheet directly from its click, with guidance to choose Discord there.
+Browsers control which apps appear and cannot preselect the target. If system
+sharing is unavailable or blocked, the dialog explains the restriction and
+points to browser Share/Copy link; Discord never copies automatically. The three
+social logos use pinned Simple Icons 15.13.0 paths with source hashes and CC0
+license in `static/share-icons-LICENSE.txt`. Share via calls the native share
+API directly from the click when available in a secure context. The app grid
+remains usable when unavailable or denied. Native cancellation is silent.
+Plain HTTP LAN origins cannot use the native sheet; localhost may. Opening a
+conversation link waits for sign-in and
+uses normal controlled, idle-boundary session selection. Reload retains the tab's
+selected page after a link is handled. Message links focus, highlight and scroll
+to their exact reply. The arrival border holds for three seconds, then fades
+over 400 ms; reduced motion clears it after the same hold without the fade.
+A session-scoped, bounded public-message read retrieves
+older targets outside the recent window, with an explicit gap before recent
+messages; it never reads provider/model content. Missing targets report an
+unavailable message. Explicit session changes clear the old message target.
+More opens an anchored, keyboard-operable
+menu with the saved message's local timestamp, Branch in new chat and Retry.
+Branch copies the conversation only through the selected saved reply. Retry
+creates a separate continuation before that reply's original prompt and submits
+the prompt once, preserving the original conversation. The app session service
+and transactional Memory fork own the exact row boundary; HTTP requires session,
+CSRF, browser control and an idle queue. These actions clear browser file-edit
+activation. The original model/runtime, workspace and plan settings are retained.
+This is a preserved separate retry conversation, not an in-place variant selector.
+Sources lists deduplicated HTTP/HTTPS references linked in
+the reply, with an explicit empty state; it does not claim verified tool-source
+provenance. Actions wait for streaming to finish; unsupported speech stays
+disabled with a descriptive title. These controls also apply to saved replies.
+Browser reads use shared, request-owned skeletons after a 120 ms delay: initial
+chat/history, session lists, local model inventory, Library/Skills cards, tab
+counts, source lists, workspace reads, item previews and operation inventory.
+Known content remains visible during same-context refreshes; changed contexts
+clear outdated content. Preview dialogs open immediately, and closing one rejects
+late results. Busy state clears on completion/errors/sign-out, and old requests
+cannot remove a newer loader. Workspace/session/model reads reject stale auth
+results. Skeletons use theme tones, decorative bars and accessible loading status;
+reduced motion disables pulsing. Static settings and live work progress retain
+their real controls/status rather than placeholder content. Validation:
+`docs/webui/loading-states-validation.md`.
+The navbar's leading hamburger toggles conversations on desktop and mobile.
+Page refresh restores the tab's selected page and Library section after sign-in,
+using allowlisted identifiers in optional sessionStorage; new tabs default to Chat.
+Account is a circular username initial; Sign out and Send are icon-only with
+accessible names (Send becomes Queue message while a turn is active).
+Chat places model, Thinking and Plan controls to the left of Send. The Chat title
+is screen-reader-only; status and tool policy share the composer footer with the
+session ID. Cancel and Steer occupy a compact top toolbar only during an active
+turn, leaving no heading row while idle. The model picker closes on outside
+clicks or taps and Escape; controls inside the picker remain usable.
+Compact phone layouts use native CSS
+viewport sizing and safe areas; the browser owns focused-input keyboard scrolling.
+They retain 44px primary touch targets, grow the composer within a bound, and
+scroll reviews separately from the composer. Do not resize the shell from
+visualViewport events or add an extra focused-input scroll adjustment.
+Custom seed/image palettes and the remaining domain controls are deferred;
+disabled navigation marks unsupported
+screens. Browser smoke checks cover layout and interactions, not final product
+or complete accessibility acceptance.
+
+Settings groups are Interface, Models, Agent, Advanced, then Appearance. Web UI is
+the first Interface row. Search is the first
 Agent row, directly above Tools. Model Defaults is the public name; existing
 `ai_defaults` storage/controller IDs and `/settings ai defaults` remain compatible.
 `/settings model defaults` is the preferred spelling. Opening Model Defaults checks
@@ -822,6 +1185,9 @@ Top-level commands currently include:
   with an unexpired running worker lease using the same green `[ACTIVE]` badge.
   `--archived` lists retained archived sessions; `sessions archive SESSION_ID`
   and `sessions restore SESSION_ID` use the same transactional lifecycle as Library.
+- `klaude sessions reconcile SESSION_ID [--yes]`: after a crashed or expired
+  chat turn, explicitly acknowledge possible external effects before new turns.
+  The session fence is checked again when the acknowledgement commits.
 - `klaude sessions delete SESSION_ID`: delete one session after confirmation.
 - `klaude sessions clear`: delete all sessions after confirmation.
 - `klaude session-search`: search prior conversation sessions.
@@ -964,7 +1330,7 @@ Chat slash commands currently include:
   counts from its existing owned background inventory, with loading/unavailable states.
   Memory shows the bounded saved-fact count and automatic-memory flag as
   `1 saved, ON`; its overview worker returns counts without exposing fact text.
-  MODELS groups Models and Model Defaults. AGENT groups
+  INTERFACE appears first and contains Web UI. MODELS groups Models and Model Defaults. AGENT groups
   Search, Tools, MCPs, Skills, Memory, Library and Permissions. ADVANCED contains Provider
   credentials (the legacy Providers landing page) and Runtime. Inside MCPs, the MCP Servers
   heading shows `2 installed, 1 enabled` beside the snapshot age, independently
@@ -2719,6 +3085,71 @@ The agent loop in `packages/core/src/klaude_core/agent.py` handles:
 - explicit retrieval requirements are cumulative: a user request to search and
   fetch must perform both model-directed operations, and a requested source URL
   receives one answer-only compliance retry if omitted.
+- ordinary explicit lookups also keep bounded, turn-local outcome evidence in
+  `task_progress`: usable external retrieval, and candidate source examination
+  for image-associated/origin requests and explicitly requested page reads.
+  A direct source read can satisfy lookup;
+  an observed MCP source-provenance result can also satisfy the relevant outcome.
+  Search leads do not establish source examination. Missing actions get at most
+  one model-directed correction per outcome; blocked, failed, empty or repeated
+  omissions produce an honest incomplete/error result. Pending action responses
+  are buffered up to 64,000 characters before publication, retaining live progress
+  and direct ordinary-chat streaming. Detection is a bounded lexical bootstrap,
+  not a general semantic planner; execution evidence cannot prove attribution.
+  Quoted examples/code and individually negated lookup clauses do not create
+  host-enforced obligations; the original request still reaches the model.
+  Current goal and bounded unverified prior-answer context remain explicit;
+  one ephemeral post-result note keeps follow-ups on that objective. Supported
+  local runtimes reuse the existing constrained-action protocol on the bounded
+  corrective attempt, exposing only the missing outcome's routes with no finish
+  action. Permissions and argument validation remain authoritative. Budget-end
+  synthesis cannot bypass an outstanding source-examination obligation.
+  Current CLI/TUI/local-model and fixture boundaries are documented in
+  `docs/agent-multi-action-validation.md`.
+- native Ollama lookup recovery can opt into exact per-action argument schemas;
+  final-answer fields cannot be reused as source-read arguments. The existing
+  workspace discovery grammar and canonical host argument/permission checks stay
+  authoritative. Bound interactive recovery takes one action before reconsidering
+  dependent questions; ordinary read-only batches retain their existing bound.
+  Unsupported runtimes receive no new recovery argument. No extra planner or
+  normal-turn model call is introduced. Model pre-call information requests are
+  retained as bounded audit metadata, rather than restated as unresolved gaps
+  after a result arrives; actual host failures and limits remain visible.
+  Retrospective source answers include at most four sanitized public fetched URLs
+  when recorded, including restored receipts. They retain the distinction between
+  recorded execution and actual evidence: source bodies are not replayed by this
+  feature. Query/fragment values, credentialed URLs and private hosts are excluded.
+  Follow-up evidence: `docs/agent-read-recovery-validation.md`.
+- `discover_tools(query)` performs bounded metadata search across the current
+  enabled, scoped registry and installed Skill summaries. It is a normal
+  permission-controlled tool (default allow), configurable under Orchestration.
+  Up to four matches per call load canonical schemas for the next response;
+  discovery never invokes a target or authorizes a same-response call. Four
+  discovery calls, twelve newly loaded tools and a context-derived schema byte
+  limit bound each turn; oversized schemas are rejected whole. An initially
+  omitted write/shell/commit/persistence/delegation route cannot be restored this
+  way. Settings, scope, user tool-only/no-tools/search/Skill restrictions, live
+  permission changes, definition identity, dirty-workspace and research budgets
+  remain authoritative. Skill matches identify exact names for a separate
+  `read_skill` call; metadata is not instruction authority. Loaded choices and
+  the callback are turn-local, cleared on completion/cancellation and never
+  restored as grants. Large model-facing registry summaries are bounded while
+  full immutable status/audit snapshots are retained. Implementation and ongoing
+  real CLI/MCP/Skill evaluation: `docs/agent-capability-discovery-validation.md`.
+  Native Ollama non-coding recovery with discovery available also binds exact
+  per-action arguments, retaining workspace discovery's existing default grammar.
+  Valid native calls to enabled but deferred tools get one bounded discovery
+  routing correction rather than a protocol switch; the rejected batch executes
+  nothing. Malformed/unknown calls retain protocol recovery. Non-coding file/MCP
+  investigations use the compact policy projection while preserving repository
+  guidance, permissions and source-trust rules.
+- MCP application errors retain the server's `is_error` flag as typed failed
+  tool metadata. A completed remote call is not necessarily successful progress.
+  Returned diagnostics stay visible; changed inputs can recover within existing
+  permissions, duplicate guards and no-progress budgets, without automatic remote
+  retries or claims that side effects were rolled back. Rediscovering the same
+  schema does not repair invalid task identifiers. Evidence:
+  `docs/agent-capability-discovery-validation.md`.
 - a configurable per-turn model/tool step ceiling (`[agent] max_steps`, default
   20 and clamped to 1-64) so malformed or weak-model tool behavior cannot run
   indefinitely. When completed tool work reaches the ceiling, make one final
@@ -2732,6 +3163,10 @@ The agent loop in `packages/core/src/klaude_core/agent.py` handles:
   next model request for a factual tool-free finalization. A successful new
   result resets the non-progress streak. The live snapshot is included in the
   per-request capability block and `/status`; switching sessions clears it.
+  A no-progress stop preserves the final factual explanation and emits a failed
+  turn event, so one-shot `ask` exits 1 rather than presenting execution failure
+  as a successful command. Successful recovery resets the streak; reaching an
+  ordinary call/step budget alone does not introduce this failure event.
 - normalized Codex usage-limit failures that show the account plan and reset
   time when supplied, link to the official usage page, and suggest waiting or
   selecting another configured provider without printing the raw API payload.
@@ -2803,8 +3238,9 @@ their original output. This bounds ordinary generated-file reads without adding
 automatic file reads or raising context allocation; long lines and explicitly
 large pages can still exceed the conservative request estimate.
 After observed implementation/test inspection, one optional model request
-proposes one to four coherent changes, one target file per change. The adapter appends project-check
-execution and final review, rather than asking the model to classify application
+proposes one to three small behavior changes, grouping one to three files needing
+edits with their focused tests. The adapter inserts project-check execution after
+each behavior and appends final review, rather than asking the model to classify application
 requirements as implementation or validation. Up to sixteen exact request spans
 provide stable navigation references; a long tail remains one span, and the
 original objective is retained verbatim. Plan links are advisory. Unlinked spans
@@ -2813,8 +3249,10 @@ semantic coverage. Discovery omits reference excerpts until planning needs them.
 Actual
 file-tool changes and current passing checks gate implementation/validation step
 completion. A failed optional plan does not prevent ordinary tool execution.
-During constrained local implementation, write/edit path choices follow the
-active plan's files. Canonical arguments and the immutable response scope are
+During constrained local implementation, write/edit path choices include the
+active plan's files and already observed project files. A model proposal cannot
+hide omitted existing tests, documentation or repair files. Canonical arguments
+and the immutable response scope are
 validated before permission or execution. Failed checks and review reopen file
 choices for recovery without changing permissions or workspace boundaries.
 Once the active file has an actual edit since planning, the next planned
@@ -2838,14 +3276,66 @@ answer can complete review bookkeeping only when actual edit/check prerequisites
 are met. Missing scoped edits and stale checks still block completion.
 Constrained execution omits the final-answer choice until this existing gate
 permits it, avoiding an inference request for an answer the host would reject.
+Phased plans require fresh edits when reusing files after the preceding phase's
+check. Their bounded state exposes those fresh changed files; an older phase's
+edit/check cannot complete the next phase. Active phase validation offers
+inspection/check tools before further writes, with existing failure-driven repair
+and permission boundaries. Older unphased plan contracts remain compatible.
 The plan remains turn-local; it is not a durable requirements proof. Simple turns
 and other providers keep their existing native path and do not incur this call.
+The optional local planner is skipped when fewer than six steps remain or
+exploration used 35% of the elapsed budget. Validation checkpoints prioritize
+checks after test edits, two source-file edits since the last check, or budget
+pressure (four steps remaining or 55% elapsed). Constrained local checkpoints
+offer inspection/check tools before more edits. Under budget pressure they offer
+only the available shell/check tool, avoiding another inspection loop; failed
+checks reopen inspection and repair paths.
+Failed shell probes also reopen repair even when their commands are not
+recognized as project tests; successful help/smoke output is never a suite pass.
+Validation checkpoints prioritize already-read documentation/configuration in
+the existing version-checked excerpt cache, retaining check instructions within
+the same request budget rather than reading files automatically.
+No command executes automatically or bypasses permissions, and budgets do not grow.
+Built-in Python file writes/edits up to 65,536 characters include passive AST
+syntax feedback without imports, code execution or bytecode files. An applied
+write remains applied; known syntax errors block completion until repaired.
+Unrecoverable workspace transport failures save a factual incomplete-work summary
+with actual edits and validation state before emitting the normal error.
+Validation/recovery follow-up: `docs/agent-validation-recovery-followup.md`.
+Cloud controls and smaller-phase follow-up: `docs/agent-phased-execution-validation.md`.
+Ollama preserves native prompt-evaluation and generation durations alongside
+existing total/load duration and token counts, without extra requests. OpenRouter
+explicit thinking on/off overrides provider defaults; automatic/unspecified
+thinking retains those defaults. Usage observed before failed/truncated buffered
+responses remains available without publishing partial calls/private reasoning;
+new request failures cannot reuse older usage.
 
 `klaude_core.request_context` selects policy modules from the canonical prompt
 using the actual callable schemas. Workspace implementation omits unrelated
 configuration/runtime and standalone-answer detail, retaining host boundaries,
 applicable repository guidance, and enabled Skill metadata. Coding tasks do not
 admit product configuration merely because they mention tools or commands.
+Retrieval-only requests use concise research policies and capability rendering,
+omitting unrelated coding/presentation details while retaining authority,
+repository/Skill guidance, runtime dates/location and source trust boundaries.
+Historical/publication dates and event timings do not automatically select the
+local clock. Explicit clock/weather requests retain their tools, and research
+with those tools can still use the compact retrieval projection.
+Whole-request quoted echo/reply/print operations use direct context and general
+runtime options with no callable tools; their payload is not an instruction to
+search or execute code. Compound actions and explicit file destinations retain
+normal routing. Unconditional whole-request literal echoes are resolved directly
+from bounded printable user text, preserving quoted spaces and punctuation,
+without a model or tool request. Unquoted output requires `exactly` and one token;
+conditions, transformations, destinations, additional actions and new image
+attachments keep their normal model path. Direct echoes record zero model/tool use.
+Local context remains explicitly configured; it is never silently increased.
+Compatible HTTP/OpenRouter image transports retain safe timeout/connection/
+protocol categories, response phase, generation-started state and request elapsed
+time. CLI metadata preserves these diagnostics alongside explicitly labeled prior
+usage. Failed/cancelled turns refresh elapsed budgets at their actual boundary;
+completed request snapshots remain stable. Raw HTTPX messages, URLs and secrets
+are not serialized. No new automatic transport retry or deadline policy applies.
 Initial compaction uses the selected execution contract without
 provider admission; admission happens inside the guarded loop after compaction.
 This keeps an initial context constraint on the same clean failure path as a
@@ -3176,6 +3666,13 @@ stored separately from attachment-enriched model content so search and exports
 do not disclose private attachment text. Durable `memory.md` mutations use an
 advisory process lock plus atomic replacement. Ephemeral event replay is bounded;
 saved turns remain the canonical transcript.
+Application chat admission and terminal finalization additionally use an additive
+versioned journal: lease/fence, user input and runtime binding commit together;
+assistant messages, terminal receipt and public completion commit together. The
+public replay cursor includes a stream epoch and retention watermark. Expired
+turns are interrupted and require reconciliation; old binaries cannot claim
+execution leases after the migration. Explicit cancellation remains a terminal
+receipt and does not automatically replay tools.
 
 Save only high-signal preferences, repeated corrections, project decisions,
 durable goals, and important external references. Do not save one-off trivia,
@@ -3607,7 +4104,13 @@ Use focused checks after relevant changes:
 - `bash -n scripts/install.sh`
 
 Live behavioral model comparisons are deliberately separate from deterministic
-CI. Run `uv run python scripts/evaluate_agent_behavior.py --model MODEL --yes`
+CI. Use an authorized cloud model whenever local inference would make an
+evaluation slow; do not spend hours waiting on CPU-only local generations.
+This preference applies to future evaluations as well. Keep user model defaults
+unchanged and record the exact provider, model, mode and budgets. Cloud results
+do not certify local-provider behavior: use bounded local checks or deterministic
+protocol fixtures for those contracts, and document any remaining live-model gap.
+Run `uv run python scripts/evaluate_agent_behavior.py --model MODEL --yes`
 to evaluate direct response, workspace inspection, contextual diagnostics, and
 synthetic learned-document grounding. Additional `conversation-continuation` and
 network-opt-in `local-search-followup` scenarios exercise seeded conversational

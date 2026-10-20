@@ -148,6 +148,10 @@ class ForgetResult:
         return super().__eq__(other)
 
 
+class SessionLeaseLost(RuntimeError):
+    """A stale terminal worker may no longer start effects or write its turn."""
+
+
 def _parse_memory_line(line: str) -> MemoryEntry | None:
     stripped = line.strip()
     if not stripped:
@@ -178,6 +182,8 @@ class Memory:
             self.sessions_db.absolute().as_uri() + "?mode=rw", uri=True,
             timeout=0.2, check_same_thread=False,
         )
+        clone.db.create_function("klaude_writer_v2", 0, lambda: 1)
+        clone.db.create_function("klaude_writer_v3", 0, lambda: 1)
         clone._db_lock = threading.RLock()
         return clone
 
@@ -201,9 +207,18 @@ class Memory:
         # remains usable. Turns are serialized, but the connection crosses the
         # UI/worker boundary.
         self.db = sqlite3.connect(sessions_db, check_same_thread=False)
+        self.db.create_function("klaude_writer_v2", 0, lambda: 1)
+        self.db.create_function("klaude_writer_v3", 0, lambda: 1)
         self._db_lock = threading.RLock()
-        self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=5000")
+        for attempt in range(100):
+            try:
+                self.db.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 99:
+                    raise
+                time.sleep(0.05)
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS turns (
                 session_id TEXT, ts REAL, role TEXT, content TEXT, model_content TEXT
@@ -212,6 +227,11 @@ class Memory:
         turn_columns = {row[1] for row in self.db.execute("PRAGMA table_info(turns)").fetchall()}
         if "model_content" not in turn_columns:
             self.db.execute("ALTER TABLE turns ADD COLUMN model_content TEXT")
+        # Public file descriptors and small, decoded previews are independent of
+        # private model input. Keeping them on the dialogue row shares its lifecycle.
+        for column in ("attachments", "attachment_previews"):
+            if column not in turn_columns:
+                self.db.execute(f"ALTER TABLE turns ADD COLUMN {column} TEXT")
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -273,6 +293,17 @@ class Memory:
                     row[1] for row in self.db.execute("PRAGMA table_info(session_live)").fetchall()
                 }
                 if "turn_started_at" not in migrated_columns:
+                    raise
+        if "fence_generation" not in live_columns:
+            try:
+                self.db.execute(
+                    "ALTER TABLE session_live ADD COLUMN fence_generation "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                if "fence_generation" not in {
+                    row[1] for row in self.db.execute("PRAGMA table_info(session_live)")
+                }:
                     raise
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS session_clients (
@@ -524,6 +555,50 @@ class Memory:
             )
             self.db.commit()
 
+    def session_lease_fence(self, session_id: str, client_id: str, turn_id: str) -> int:
+        with self._db_lock:
+            row = self.db.execute(
+                "SELECT fence_generation FROM session_live WHERE session_id=? "
+                "AND owner_client_id=? AND turn_id=? AND state='running' "
+                "AND owner_lease_until>?",
+                (session_id, client_id, turn_id, time.time()),
+            ).fetchone()
+        if row is None:
+            raise SessionLeaseLost("session worker lost its lease")
+        return int(row[0])
+
+    def _assert_session_lease(
+        self, session_id: str, client_id: str, turn_id: str, fence: int,
+    ) -> None:
+        row = self.db.execute(
+            "SELECT 1 FROM session_live WHERE session_id=? AND owner_client_id=? "
+            "AND turn_id=? AND fence_generation=? AND state='running' "
+            "AND owner_lease_until>?",
+            (session_id, client_id, turn_id, fence, time.time()),
+        ).fetchone()
+        if row is None:
+            raise SessionLeaseLost("session worker lost its lease")
+
+    def assert_session_lease(
+        self, session_id: str, client_id: str, turn_id: str, fence: int,
+    ) -> None:
+        with self._db_lock:
+            self._assert_session_lease(session_id, client_id, turn_id, fence)
+
+    def log_turn_fenced(
+        self, session_id: str, client_id: str, turn_id: str, fence: int,
+        role: str, content: object, *, model_content: object | None = None,
+    ) -> None:
+        with self._db_lock, self.db:
+            self._assert_session_lease(session_id, client_id, turn_id, fence)
+            self.db.execute(
+                "INSERT INTO turns(session_id,ts,role,content,model_content) "
+                "VALUES (?,?,?,?,?)",
+                (session_id, time.time(), role, json.dumps(content, ensure_ascii=False),
+                 json.dumps(model_content, ensure_ascii=False)
+                 if model_content is not None else None),
+            )
+
     def record_session_update(
         self, session_id: str, client_id: str, detail: str, *, runtime: dict | None = None
     ) -> None:
@@ -556,10 +631,13 @@ class Memory:
         payload: object,
         *,
         turn_id: str = "",
+        fence: int | None = None,
     ) -> int:
         """Append one ordered cross-process session event and return its cursor."""
         encoded = json.dumps(payload, ensure_ascii=False)
         with self._db_lock, self.db:
+            if fence is not None:
+                self._assert_session_lease(session_id, client_id, turn_id, fence)
             cursor = self.db.execute(
                 "INSERT INTO session_events "
                 "(session_id, turn_id, client_id, ts, kind, payload) "
@@ -591,6 +669,7 @@ class Memory:
         *,
         model_content: object | None = None,
         runtime: dict | None = None,
+        fence: int | None = None,
     ) -> int:
         """Save a user turn and announce it as one atomic database change."""
         payload = json.dumps({"text": _as_text(visible_content)}, ensure_ascii=False)
@@ -599,6 +678,8 @@ class Memory:
         if runtime is not None and decode(runtime) is None:
             raise ValueError("Invalid session runtime state")
         with self._db_lock, self.db:
+            if fence is not None:
+                self._assert_session_lease(session_id, client_id, turn_id, fence)
             self.db.execute(
                 "INSERT INTO turns "
                 "(session_id, ts, role, content, model_content) VALUES (?,?,?,?,?)",
@@ -696,6 +777,18 @@ class Memory:
         cutoff = time.time() - max(60.0, float(retention_seconds))
         bounded_max = max(1_000, int(max_events))
         with self._db_lock, self.db:
+            has_application_streams = bool(self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='application_streams'"
+            ).fetchone())
+            pruned_application_id = 0
+            if has_application_streams:
+                row = self.db.execute(
+                    "SELECT COALESCE(MAX(id),0) FROM session_events "
+                    "WHERE session_id=? AND ts<? AND kind='application.public.v1'",
+                    (session_id, cutoff),
+                ).fetchone()
+                pruned_application_id = int(row[0] or 0)
             old = self.db.execute(
                 "DELETE FROM session_events WHERE session_id=? AND ts<?",
                 (session_id, cutoff),
@@ -707,12 +800,26 @@ class Memory:
             excess_count = int(excess[0] or 0) if excess else 0
             capped = 0
             if excess_count:
+                if has_application_streams:
+                    row = self.db.execute(
+                        "SELECT COALESCE(MAX(id),0) FROM ("
+                        "SELECT id,kind FROM session_events WHERE session_id=? "
+                        "ORDER BY id LIMIT ?) WHERE kind='application.public.v1'",
+                        (session_id, excess_count),
+                    ).fetchone()
+                    pruned_application_id = max(pruned_application_id, int(row[0] or 0))
                 capped = self.db.execute(
                     "DELETE FROM session_events WHERE id IN ("
                     "SELECT id FROM session_events WHERE session_id=? ORDER BY id LIMIT ?"
                     ")",
                     (session_id, excess_count),
                 ).rowcount
+            if pruned_application_id:
+                self.db.execute(
+                    "UPDATE application_streams SET minimum_id=MAX(minimum_id, ?) "
+                    "WHERE session_id=?",
+                    (pruned_application_id, session_id),
+                )
             self.db.execute(
                 "DELETE FROM session_clients WHERE session_id=? AND updated_at<?",
                 (session_id, cutoff),
@@ -750,7 +857,22 @@ class Memory:
                 preflight_live.get("state") == "running"
                 and float(preflight_live.get("owner_lease_until") or 0) <= now
             )
-            self.db.execute("BEGIN IMMEDIATE" if unfinished or expired_live else "BEGIN")
+            application_owned = bool(
+                expired_live
+                and self.db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='application_turns'"
+                ).fetchone()
+                and self.db.execute(
+                    "SELECT 1 FROM application_turns WHERE session_id=? AND turn_id=? "
+                    "AND state='running'",
+                    (session_id, preflight_live.get("turn_id")),
+                ).fetchone()
+            )
+            self.db.execute(
+                "BEGIN IMMEDIATE" if unfinished or (expired_live and not application_owned)
+                else "BEGIN"
+            )
             try:
                 turns = self.load_session(session_id, timestamps=True)
                 live = self.session_live_state(session_id)
@@ -786,6 +908,8 @@ class Memory:
                         break
                 recovered_turn_ids: list[str] = []
                 for turn_id, start_event in started.items():
+                    if application_owned and turn_id == preflight_live.get("turn_id"):
+                        continue
                     if turn_id in finished or turn_id == active:
                         continue
                     related = by_turn[turn_id]
@@ -874,7 +998,7 @@ class Memory:
                     )
                     recovered_turn_ids.append(turn_id)
 
-                if live.get("state") == "running" and not active:
+                if live.get("state") == "running" and not active and not application_owned:
                     recovery_now = time.time()
                     self.db.execute(
                         "UPDATE session_live SET revision=revision+1, owner_client_id='', "
@@ -1041,11 +1165,23 @@ class Memory:
                 ).fetchone():
                     self.db.rollback()
                     return False
+                if self.db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='application_deleted_sessions'"
+                ).fetchone() and self.db.execute(
+                    "SELECT 1 FROM application_deleted_sessions WHERE session_id=?",
+                    (session_id,),
+                ).fetchone():
+                    self.db.rollback()
+                    return False
                 row = self.db.execute(
-                    "SELECT owner_client_id, owner_lease_until, turn_id FROM session_live "
+                    "SELECT owner_client_id, owner_lease_until, turn_id, state FROM session_live "
                     "WHERE session_id=?",
                     (session_id,),
                 ).fetchone()
+                if row and row[3] == "interrupted":
+                    self.db.rollback()
+                    return False
                 if (
                     row
                     and row[0]
@@ -1057,14 +1193,15 @@ class Memory:
                 self.db.execute(
                     "INSERT INTO session_live "
                     "(session_id, revision, owner_client_id, owner_lease_until, turn_id, "
-                    "state, turn_started_at, activity, partial, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?) "
+                    "state, turn_started_at, activity, partial, updated_at, fence_generation) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,1) "
                     "ON CONFLICT(session_id) DO UPDATE SET "
                     "revision=session_live.revision+1, owner_client_id=excluded.owner_client_id, "
                     "owner_lease_until=excluded.owner_lease_until, turn_id=excluded.turn_id, "
                     "state='running', turn_started_at=excluded.turn_started_at, "
                     "activity='thinking', partial='', "
-                    "updated_at=excluded.updated_at",
+                    "updated_at=excluded.updated_at, "
+                    "fence_generation=session_live.fence_generation+1",
                     (
                         session_id,
                         1,
@@ -1091,12 +1228,15 @@ class Memory:
         turn_id: str,
         *,
         ttl: float = SESSION_LEASE_TTL_SECONDS,
+        fence: int | None = None,
     ) -> bool:
         with self._db_lock, self.db:
             cursor = self.db.execute(
                 "UPDATE session_live SET owner_lease_until=?, updated_at=? "
                 "WHERE session_id=? AND owner_client_id=? AND turn_id=? AND state='running' "
-                "AND owner_lease_until>?",
+                "AND owner_lease_until>?" + (
+                    " AND fence_generation=?" if fence is not None else ""
+                ),
                 (
                     time.time() + max(5.0, float(ttl)),
                     time.time(),
@@ -1104,7 +1244,7 @@ class Memory:
                     client_id,
                     turn_id,
                     time.time(),
-                ),
+                ) + ((fence,) if fence is not None else ()),
             )
         return cursor.rowcount == 1
 
@@ -1115,14 +1255,18 @@ class Memory:
         turn_id: str,
         *,
         state: str = "idle",
+        fence: int | None = None,
     ) -> bool:
         with self._db_lock, self.db:
             cursor = self.db.execute(
                 "UPDATE session_live SET revision=revision+1, owner_client_id='', "
                 "owner_lease_until=0, turn_id='', state=?, turn_started_at=0, "
                 "activity='ready', partial='', "
-                "updated_at=? WHERE session_id=? AND owner_client_id=? AND turn_id=?",
-                (state, time.time(), session_id, client_id, turn_id),
+                "updated_at=? WHERE session_id=? AND owner_client_id=? AND turn_id=?" + (
+                    " AND fence_generation=?" if fence is not None else ""
+                ),
+                (state, time.time(), session_id, client_id, turn_id)
+                + ((fence,) if fence is not None else ()),
             )
         return cursor.rowcount == 1
 
@@ -1167,6 +1311,22 @@ class Memory:
             if timestamps:
                 out[-1]["ts"] = ts
         return out
+
+    def public_session_records(self, session_id: str) -> list[dict]:
+        """Read exportable columns without loading private model continuation data."""
+        with self._db_lock:
+            rows = self.db.execute(
+                "SELECT role,content,ts FROM turns WHERE session_id=? AND ("
+                "role IN ('user','assistant') OR (role='system' AND "
+                "CASE WHEN json_valid(content) THEN json_extract(content,'$.event') "
+                "IN ('edit_summary','activity_update','input_request','input_answer',"
+                "'subagent_activity') ELSE 0 END)) ORDER BY ts,rowid",
+                (session_id,),
+            ).fetchall()
+        return [
+            {"role": role, "content": _decode_content(content), "ts": ts}
+            for role, content, ts in rows
+        ]
 
     def resumable_sessions(self) -> list[dict]:
         """List every saved session newest first, named by its first user turn."""
@@ -1246,15 +1406,73 @@ class Memory:
             )
             return cursor.rowcount==1
 
-    def fork_session(self, source: str, target: str) -> None:
+    def fork_session(
+        self, source: str, target: str, *, through_row_id: int | None = None,
+        retry: bool = False,
+    ) -> str | None:
+        """Copy an idle session, optionally at one exact saved assistant reply.
+
+        Retry copies only the prefix before that reply's user prompt and returns
+        the prompt for a new admission. Original records are never changed.
+        """
+        if (through_row_id is not None and
+                (type(through_row_id) is not int or not 0 < through_row_id <= 2**63 - 1)):
+            raise ValueError("Invalid message boundary")
+        if type(retry) is not bool or (retry and through_row_id is None):
+            raise ValueError("Retry requires a message boundary")
         with self._db_lock, self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            if self.db.execute(
+                "SELECT 1 FROM session_live WHERE session_id=? "
+                "AND (owner_client_id<>'' OR state='interrupted')", (source,),
+            ).fetchone():
+                raise ValueError("Source session has unresolved work; reconcile it first")
+            prompt: str | None = None
+            cutoff = through_row_id
+            if cutoff is not None:
+                if self.db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='application_queue'"
+                ).fetchone() and self.db.execute(
+                    "SELECT 1 FROM application_queue WHERE session_id=? "
+                    "AND state NOT IN ('removed','submitted')", (source,),
+                ).fetchone():
+                    raise ValueError("Source session has queued work")
+                selected = self.db.execute(
+                    "SELECT role FROM turns WHERE session_id=? AND rowid=?",
+                    (source, cutoff),
+                ).fetchone()
+                if selected != ("assistant",):
+                    raise ValueError("Saved assistant message not found")
+                if retry:
+                    user = self.db.execute(
+                        "SELECT rowid,content FROM turns WHERE session_id=? AND role='user' "
+                        "AND rowid<? ORDER BY rowid DESC LIMIT 1", (source, cutoff),
+                    ).fetchone()
+                    if user is None:
+                        raise ValueError("Original prompt unavailable")
+                    decoded = _decode_content(user[1])
+                    if (not isinstance(decoded, str) or not decoded.strip()
+                            or len(decoded) > 65_536):
+                        raise ValueError("Original prompt unavailable")
+                    prompt = decoded
+                    cutoff = int(user[0]) - 1
             if self.db.execute("SELECT 1 FROM turns WHERE session_id=?", (target,)).fetchone():
                 raise ValueError("Target session already exists.")
+            if self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='application_deleted_sessions'"
+            ).fetchone() and self.db.execute(
+                "SELECT 1 FROM application_deleted_sessions WHERE session_id=?", (target,)
+            ).fetchone():
+                raise ValueError("Target session ID was deleted")
             self.db.execute(
-                "INSERT INTO turns (session_id, ts, role, content, model_content) "
-                "SELECT ?, ts, role, content, model_content FROM turns "
-                "WHERE session_id=? ORDER BY ts, rowid",
-                (target, source),
+                "INSERT INTO turns (session_id, ts, role, content, model_content, "
+                "attachments, attachment_previews) "
+                "SELECT ?, ts, role, content, model_content, attachments, attachment_previews "
+                "FROM turns "
+                "WHERE session_id=? AND (? IS NULL OR rowid<=?) ORDER BY ts, rowid",
+                (target, source, cutoff, cutoff),
             )
             self.db.execute(
                 "INSERT INTO session_names SELECT ?, name || ' (fork)' "
@@ -1264,12 +1482,47 @@ class Memory:
             runtime = self.session_runtime(source)
             if runtime is not None:
                 self._store_session_runtime(target, runtime)
+            if self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='application_workspace'"
+            ).fetchone():
+                self.db.execute(
+                    "INSERT INTO application_workspace(session_id,path,revision,updated_at) "
+                    "SELECT ?,path,1,? FROM application_workspace WHERE session_id=?",
+                    (target, time.time(), source),
+                )
+                self.db.execute(
+                    "INSERT INTO application_session_options "
+                    "(session_id,revision,plan_mode,updated_at) "
+                    "SELECT ?,1,plan_mode,? FROM application_session_options "
+                    "WHERE session_id=?", (target, time.time(), source),
+                )
+            return prompt
 
-    def delete_session(self, session_id: str) -> int:
+    def delete_session(
+        self, session_id: str, *, expected_total_turns: int | None = None
+    ) -> int:
         session_id = session_id.strip()
         if not session_id:
             return 0
+        if expected_total_turns is not None and (
+            type(expected_total_turns) is not int or expected_total_turns < 0
+        ):
+            raise ValueError("Invalid reviewed session count")
         with self._db_lock, self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            if self.db.execute(
+                "SELECT 1 FROM session_live WHERE session_id=? "
+                "AND (owner_client_id<>'' OR state='interrupted')",
+                (session_id,),
+            ).fetchone():
+                raise ValueError("Session has unresolved work; reconcile it before deletion")
+            if expected_total_turns is not None:
+                actual = self.db.execute(
+                    "SELECT COUNT(*) FROM turns WHERE session_id=?", (session_id,)
+                ).fetchone()[0]
+                if actual != expected_total_turns:
+                    raise ValueError("Session changed; review deletion again")
             row = self.db.execute(
                 "SELECT COUNT(*) FROM turns WHERE session_id=? AND role IN ('user','assistant')",
                 (session_id,),
@@ -1282,7 +1535,33 @@ class Memory:
             self.db.execute("DELETE FROM session_clients WHERE session_id=?", (session_id,))
             self.db.execute("DELETE FROM session_archive WHERE session_id=?", (session_id,))
             self.db.execute("DELETE FROM settings WHERE key=?", ("session.runtime." + session_id,))
+            self._delete_application_session(session_id)
         return turns
+
+    def _delete_application_session(self, session_id: str) -> None:
+        """Retain request tombstones while removing live application projections."""
+        tables = {
+            str(row[0]) for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'application_%'"
+            )
+        }
+        if "application_deleted_sessions" not in tables:
+            return
+        self.db.execute(
+            "INSERT OR IGNORE INTO application_deleted_sessions(session_id,deleted_at) "
+            "VALUES (?,?)", (session_id, time.time()),
+        )
+        if "application_turns" in tables:
+            self.db.execute(
+                "UPDATE application_turns SET fingerprint='',state='gone' "
+                "WHERE session_id=?", (session_id,),
+            )
+        for table in (
+            "application_queue", "application_control", "application_workspace",
+            "application_session_options", "application_streams", "application_decisions",
+        ):
+            if table in tables:
+                self.db.execute(f"DELETE FROM {table} WHERE session_id=?", (session_id,))
 
     def session_archived(self, session_id: str) -> bool:
         with self._db_lock:
@@ -1307,12 +1586,15 @@ class Memory:
                 ).fetchone():
                     raise ValueError("Session no longer exists; reload the list")
                 active = self.db.execute(
-                    "SELECT 1 FROM session_live WHERE session_id=? "
-                    "AND owner_client_id<>'' AND owner_lease_until>?",
-                    (session_id, time.time()),
+                    "SELECT owner_client_id, owner_lease_until FROM session_live "
+                    "WHERE session_id=? "
+                    "AND (owner_client_id<>'' OR state='interrupted')",
+                    (session_id,),
                 ).fetchone()
                 if active:
-                    raise ValueError("Session has an active worker; wait for it to finish")
+                    if active[0] and float(active[1]) > time.time():
+                        raise ValueError("Session has an active worker")
+                    raise ValueError("Session has unresolved work; reconcile it first")
                 archived = self.session_archived(session_id)
                 if archived != (operation != "archive"):
                     raise ValueError("Session archive state changed; reload the list")
@@ -1330,6 +1612,7 @@ class Memory:
                     self.db.execute(
                         "DELETE FROM settings WHERE key=?", ("session.runtime." + session_id,)
                     )
+                    self._delete_application_session(session_id)
                 self.db.commit()
             except Exception:
                 self.db.rollback()
@@ -1346,14 +1629,48 @@ class Memory:
             "turns": int(row[1]) if row else 0,
         }
 
-    def clear_sessions(self) -> dict[str, int]:
+    def clear_sessions(
+        self, *, expected_counts: tuple[int, int] | None = None
+    ) -> dict[str, int]:
+        if expected_counts is not None and (
+            not isinstance(expected_counts, tuple)
+            or len(expected_counts) != 2
+            or any(type(value) is not int or value < 0 for value in expected_counts)
+        ):
+            raise ValueError("Invalid reviewed session counts")
         with self._db_lock, self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            if self.db.execute(
+                "SELECT 1 FROM session_live WHERE owner_client_id<>'' "
+                "OR state='interrupted' LIMIT 1",
+            ).fetchone():
+                raise ValueError("A session has unresolved work; reconcile it first")
+            session_ids = [str(row[0]) for row in self.db.execute(
+                "SELECT DISTINCT session_id FROM turns UNION "
+                "SELECT DISTINCT session_id FROM session_live"
+            )]
+            tables = {
+                str(row[0]) for row in self.db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name LIKE 'application_%'"
+                )
+            }
+            for table in (
+                "application_queue", "application_workspace", "application_control",
+                "application_streams", "application_session_options",
+            ):
+                if table in tables:
+                    session_ids.extend(str(row[0]) for row in self.db.execute(
+                        f"SELECT DISTINCT session_id FROM {table}"
+                    ))
             row = self.db.execute(
                 "SELECT COUNT(DISTINCT session_id), COUNT(*) FROM turns "
                 "WHERE role IN ('user','assistant')"
             ).fetchone()
             sessions = int(row[0]) if row else 0
             turns = int(row[1]) if row else 0
+            if expected_counts is not None and (sessions, turns) != expected_counts:
+                raise ValueError("Session history changed; review deletion again")
             self.db.execute("DELETE FROM turns")
             self.db.execute("DELETE FROM session_names")
             self.db.execute("DELETE FROM session_events")
@@ -1361,6 +1678,8 @@ class Memory:
             self.db.execute("DELETE FROM session_clients")
             self.db.execute("DELETE FROM session_archive")
             self.db.execute("DELETE FROM settings WHERE key GLOB 'session.runtime.*'")
+            for session_id in set(session_ids):
+                self._delete_application_session(session_id)
         return {"sessions": sessions, "turns": turns}
 
     def session_tail(self, session_id: str, limit: int = 8) -> list[dict]:

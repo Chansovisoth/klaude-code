@@ -8,6 +8,7 @@ import uuid
 from typing import Any
 
 import typer
+from klaude_application.research import ResearchCreate, ResearchRun, ResearchService
 from klaude_core.ai_defaults import read_defaults
 from klaude_core.config import load_config
 from klaude_core.research import ResearchStore, read_research_defaults
@@ -47,11 +48,9 @@ def execute(identity: str, cfg: Any) -> None:
     jobs.submit(
         "research",
         {
-            "kind": "research_run",
+            **ResearchRun(identity, owner).worker_fields(),
             "config_dir": str(cfg.config_dir),
             "data_dir": str(cfg.data_dir),
-            "target": identity,
-            "owner": owner,
             "environment_keys": keys,
             "native_options": cfg.ollama_options,
         },
@@ -140,15 +139,8 @@ def run_research(
     if rounds:
         settings["rounds"] = rounds
     try:
-        from klaude_core.research import execute_research_request
-
-        result = execute_research_request(
-            {
-                "kind": "research_control",
-                "operation": "create",
-                "draft": {"question": question, "model": reference, "format": format},
-                "settings": settings,
-            }
+        result = ResearchService().create(
+            ResearchCreate(question, reference, format, settings)
         )
         if result.get("error"):
             raise ValueError(result["error"])

@@ -436,6 +436,13 @@ class ResearchPanel:
     def submit_control(self, operation: str, **values: Any) -> None:
         if self.control is not None or self.task is not None and operation == "load":
             raise ValueError("Finish or cancel the current research action")
+        from klaude_application.research import research_control_from_worker
+
+        reviewed = research_control_from_worker(
+            {"kind": "research_control", "operation": operation,
+             "expected": self.saved_defaults, **values}
+        )
+        values = {**values, **reviewed.worker_fields()}
         identity = self.host._background_jobs.submit(
             "research:control",
             {
@@ -549,11 +556,11 @@ class ResearchPanel:
             )
             self.library.show("research-job")
             return
+        from klaude_application.research import ResearchRun
+
         request = {
             **self.request_base(),
-            "kind": "research_run",
-            "target": item["id"],
-            "owner": uuid.uuid4().hex,
+            **ResearchRun(item["id"], uuid.uuid4().hex).worker_fields(),
         }
         self.run_request = request
         identity = self.host._background_jobs.submit(

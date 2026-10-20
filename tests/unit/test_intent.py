@@ -1,6 +1,7 @@
 import re
 
 from klaude_core.intent import (
+    explicit_literal_response_request,
     explicit_local_file_read_request,
     explicit_only_tool_names,
     explicit_workspace_inspection,
@@ -8,6 +9,7 @@ from klaude_core.intent import (
     has_nonnegated_action,
     prohibits_skill_read,
     prohibits_web_search,
+    requests_external_lookup,
 )
 
 
@@ -70,3 +72,39 @@ def test_resource_constraints_do_not_turn_off_tools():
     assert explicit_only_tool_names("Use only read_file to inspect this", names) == ["read_file"]
     assert explicit_only_tool_names("Use only unavailable_tool to inspect this", names) == []
     assert explicit_only_tool_names("Use only the unavailable tool", names) == []
+
+
+def test_lookup_bootstrap_ignores_quoted_examples_and_scopes_each_prohibition():
+    assert not requests_external_lookup('What does “look them up” mean?')
+    assert not requests_external_lookup('Explain ‘look them up’.')
+    assert not requests_external_lookup(
+        'Do not look them up online; look up the key in this dictionary.'
+    )
+    assert requests_external_lookup('Look "Luma Quill" up online.')
+    assert requests_external_lookup("Look up 'Luma Quill'.")
+    assert requests_external_lookup('Explain "look them up", then look the artist up online.')
+
+
+def test_literal_response_is_a_whole_request_and_preserves_compound_actions():
+    assert explicit_literal_response_request('Print exactly "look them up".')
+    assert explicit_literal_response_request("Reply with exactly 'search the web'.")
+    assert explicit_literal_response_request('Please repeat `read challenge.md`.')
+    assert not explicit_literal_response_request('Print "hello" to output.txt.')
+    assert not explicit_literal_response_request('Say "ready", then look the artist up online.')
+    assert not explicit_literal_response_request('Run `git status`.')
+
+
+def test_exact_literal_parser_leaves_conditions_destinations_and_transformations_to_model():
+    from klaude_core.intent import exact_literal_response
+
+    for prompt in (
+        'If the tests pass, reply exactly OK.',
+        'Reply exactly OK if the tests passed.',
+        'Print "hello" to output.txt.',
+        'Say "ready", then look the artist up.',
+        'Translate "hello" to French.',
+        'Reply exactly the current model name.',
+        'Reply exactly "\x1b]52;clipboard".',
+        'Reply exactly "' + 'x' * 4097 + '".',
+    ):
+        assert exact_literal_response(prompt) is None

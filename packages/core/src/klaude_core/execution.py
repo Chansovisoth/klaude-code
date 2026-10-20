@@ -134,6 +134,7 @@ class TurnGovernor:
             metadata is not None
             and (
                 metadata.get("found") is False
+                or metadata.get("is_error") is True
                 or metadata.get("status") in {"failed", "skipped", "no_results"}
                 or (metadata.get("result_count") == 0 and tool in {"web_search", "query_knowledge"})
                 or (isinstance(metadata.get("edit"), dict)

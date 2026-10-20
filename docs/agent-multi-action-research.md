@@ -4,6 +4,21 @@ Research date: **2026-10-16**, Asia/Phnom_Penh. Base repository revision:
 `4a64ce696ba0e0825fa5670609d2449955304648`, including the current dirty worktree.
 **Status: research/proposal only. No production behavior changed in this pass.**
 
+Subsequent implementation and measured M0/M1 results are recorded separately in
+[compound lookup validation](agent-multi-action-validation.md). Capability
+discovery and the later proposed steps are not implicitly marked complete.
+
+The later M2/M3 continuation and optional M4 decision are tracked in
+[capability discovery validation](agent-capability-discovery-validation.md),
+with implementation and runtime outcomes distinguished.
+That engineering pass is finished: M2 discovery is implemented, M3's tested
+workflows have explicit results but its broader completion gate remains partial,
+and optional M4 is deferred. Neither small model completes the unchanged CSV
+benchmark; the report separates model mistakes, host fixes and runtime failures.
+
+Further corrections and new measurements are recorded in the
+[validation and recovery follow-up](agent-validation-recovery-followup.md).
+
 ## Recommendation
 
 Keep Klaude's existing agent and give it a compact representation of the complete

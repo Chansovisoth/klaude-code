@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+from klaude_application.lease import SessionLeaseKeeper as SessionLeaseKeeper
+from klaude_core.memory import Memory
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,7 @@ class SessionIORequest:
     queue: tuple[str, ...] = ()
     was_watching: bool = False
     list_sessions: bool = False
+    fence: int | None = None
 
 
 @dataclass
@@ -38,7 +40,10 @@ class SessionIOResult:
 
 def collect_session_io(memory, request: SessionIORequest) -> SessionIOResult:
     renewed = (
-        memory.renew_session_lease(request.session_id, request.client_id, request.turn_id)
+        memory.renew_session_lease(
+            request.session_id, request.client_id, request.turn_id,
+            **({"fence": request.fence} if request.fence is not None else {}),
+        )
         if request.renew else None
     )
     renewed_at = time.monotonic() if renewed else 0.0
@@ -53,6 +58,23 @@ def collect_session_io(memory, request: SessionIORequest) -> SessionIOResult:
     )
     recovered = False
     if request.was_watching and not remote and live["state"] == "running":
+        if isinstance(memory, Memory):
+            with memory._db_lock:
+                application_owned = bool(
+                    memory.db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='application_turns'"
+                    ).fetchone()
+                    and memory.db.execute(
+                        "SELECT 1 FROM application_turns WHERE session_id=? "
+                        "AND turn_id=? AND state='running'",
+                        (request.session_id, live["turn_id"]),
+                    ).fetchone()
+                )
+            if application_owned:
+                from klaude_application.coordination import DurableTurns
+
+                DurableTurns(memory).recover_session(request.session_id)
         snapshot = memory.session_snapshot(request.session_id)
         live = snapshot["live"]
         recovered = bool(snapshot.get("recovered_turn_ids"))
@@ -164,74 +186,3 @@ class SessionIOCoordinator:
             self._condition.notify()
         if wait and self._thread is not None:
             self._thread.join(2)
-
-
-class SessionLeaseKeeper:
-    """Renew a line-oriented turn lease while its synchronous model loop runs."""
-
-    def __init__(
-        self,
-        memory,
-        session_id: str,
-        client_id: str,
-        turn_id: str,
-        *,
-        interval: float = 5.0,
-        ttl: float = 60.0,
-        on_lost: Callable[[], None] | None = None,
-    ) -> None:
-        self.memory = memory
-        self.session_id = session_id
-        self.client_id = client_id
-        self.turn_id = turn_id
-        self.interval = max(0.1, float(interval))
-        self.ttl = max(self.interval * 2, float(ttl))
-        self.on_lost = on_lost
-        self.lost = threading.Event()
-        self._stop = threading.Event()
-        self._thread = threading.Thread(
-            target=self._run, daemon=True, name="klaude-session-lease"
-        )
-
-    def start(self) -> None:
-        self._thread.start()
-
-    def close(self) -> None:
-        self._stop.set()
-        if self._thread.is_alive():
-            self._thread.join(timeout=1.0)
-
-    def _run(self) -> None:
-        connection = self.memory
-        open_connection = getattr(self.memory, "open_session_io", None)
-        if callable(open_connection):
-            try:
-                connection = open_connection()
-            except sqlite3.Error:
-                connection = self.memory
-        try:
-            while not self._stop.wait(self.interval):
-                try:
-                    renewed = connection.renew_session_lease(
-                        self.session_id,
-                        self.client_id,
-                        self.turn_id,
-                        ttl=self.ttl,
-                    )
-                except sqlite3.Error:
-                    continue
-                if renewed:
-                    continue
-                self.lost.set()
-                if self.on_lost is not None:
-                    try:
-                        self.on_lost()
-                    except Exception:
-                        pass
-                return
-        finally:
-            if connection is not self.memory:
-                try:
-                    connection.db.close()
-                except sqlite3.Error:
-                    pass

@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from dataclasses import asdict, replace
 from types import SimpleNamespace
 
@@ -17,6 +18,308 @@ from klaude_cli.background_jobs import OwnedBackgroundJobs
 from klaude_cli.session_actions import SessionActionWriter, SSHServerChange
 from klaude_cli.ssh_panel import SSHPanel
 from klaude_core.ssh_servers import SSHServer, arguments, change, decoded, execute, load, run
+
+
+def test_shared_ssh_commands_reject_unlisted_operations(tmp_path):
+    from klaude_application.ssh_operations import (
+        SSHDefinitionChange,
+        SSHDiagnostic,
+        SSHSetupCommand,
+    )
+
+    cfg = SimpleNamespace(config_dir=tmp_path / "config")
+    diagnostic = SSHDiagnostic.for_client(cfg, "inspect", target="ssh-example", revision="r")
+    assert SSHDiagnostic.from_worker(diagnostic.worker_request()) == diagnostic
+    setup = SSHSetupCommand.for_client(
+        cfg, "review", target="ssh-example", revision="r",
+        public_file=str(tmp_path / "key.pub"),
+    )
+    assert SSHSetupCommand.from_worker(setup.worker_request()) == setup
+    with pytest.raises(ValueError, match="Invalid SSH diagnostic"):
+        SSHDiagnostic.from_worker({**diagnostic.worker_request(), "operation": "remove"})
+    with pytest.raises(ValueError, match="Invalid SSH setup"):
+        SSHSetupCommand.from_worker({**setup.worker_request(), "operation": "shell"})
+    with pytest.raises(ValueError, match="Invalid SSH definition"):
+        SSHDefinitionChange.reviewed(cfg.config_dir, "shell")
+
+
+def test_shared_ssh_definition_change_rechecks_reviewed_revision(tmp_path):
+    from klaude_application.ssh_operations import SSHDefinitionChange
+
+    root = tmp_path / "config"
+    root.mkdir()
+    server = SSHServer("ssh-example", "Example", "example.com", "tester",
+                       identity_file=str(tmp_path / "key"),
+                       known_hosts=str(tmp_path / "known_hosts"))
+    added = SSHDefinitionChange.reviewed(
+        root, "add", definition=asdict(server)
+    ).apply()
+    old_revision = added["servers"][server.id]["revision"]
+    SSHDefinitionChange.reviewed(
+        root, "edit", definition=asdict(replace(server, name="Updated")),
+        target=server.id, revision=old_revision,
+    ).apply()
+    with pytest.raises(ValueError, match="changed"):
+        SSHDefinitionChange.reviewed(
+            root, "remove", target=server.id, revision=old_revision,
+            default_revision=added["default_revision"],
+        ).apply()
+
+
+def test_journaled_ssh_definition_recovery_never_replays_change(tmp_path, monkeypatch):
+    from klaude_application.operation_journal import OperationJournal
+    from klaude_application.ssh_operations import (
+        SSHChangeUnconfirmed,
+        SSHDefinitionChange,
+        recover_ssh_definition,
+        ssh_resource,
+    )
+
+    root = tmp_path / "config"
+    root.mkdir()
+    server = SSHServer(
+        "ssh-example", "Example", "example.com", "tester",
+        identity_file=str(tmp_path / "key"), known_hosts=str(tmp_path / "known_hosts"),
+    )
+    journal = OperationJournal(tmp_path / "operations.db")
+    request_id = uuid.uuid4().hex
+
+    def lose_ack(*_args, **_kwargs):
+        raise OSError("ack lost")
+
+    monkeypatch.setattr(journal, "finish", lose_ack)
+    with pytest.raises(SSHChangeUnconfirmed, match="recover"):
+        SSHDefinitionChange.reviewed(root, "add", definition=asdict(server)).apply_journaled(
+            journal, request_id, "cli",
+        )
+    original = load(root)
+    assert server.id in original["servers"]
+    assert journal.resource_busy(ssh_resource(root))
+    assert b"example.com" not in journal.path.read_bytes()
+    recovered = OperationJournal(journal.path)
+    receipt = recover_ssh_definition(root, recovered, request_id, "cli")
+    assert receipt.state == "completed"
+    assert not recovered.resource_busy(ssh_resource(root))
+    assert load(root) == original
+
+
+def test_journaled_ssh_recovery_rejects_changed_definition(tmp_path, monkeypatch):
+    from klaude_application.operation_journal import OperationConflict, OperationJournal
+    from klaude_application.ssh_operations import (
+        SSHChangeUnconfirmed,
+        SSHDefinitionChange,
+        recover_ssh_definition,
+        ssh_resource,
+    )
+
+    root = tmp_path / "config"
+    root.mkdir()
+    server = SSHServer(
+        "ssh-example", "Example", "example.com", "tester",
+        identity_file=str(tmp_path / "key"), known_hosts=str(tmp_path / "known_hosts"),
+    )
+    journal = OperationJournal(tmp_path / "operations.db")
+    request_id = uuid.uuid4().hex
+
+    def lose_ack(*_args, **_kwargs):
+        raise OSError("ack lost")
+
+    monkeypatch.setattr(journal, "finish", lose_ack)
+    with pytest.raises(SSHChangeUnconfirmed):
+        SSHDefinitionChange.reviewed(root, "add", definition=asdict(server)).apply_journaled(
+            journal, request_id, "cli",
+        )
+    saved = load(root)
+    change(root, "edit", definition=asdict(replace(server, name="Changed")),
+           target=server.id, revision=saved["servers"][server.id]["revision"])
+    with pytest.raises(OperationConflict, match="differs from both"):
+        recover_ssh_definition(root, OperationJournal(journal.path), request_id, "cli")
+    assert journal.resource_busy(ssh_resource(root))
+
+
+def test_journaled_ssh_no_publish_reconciles_prior_state(tmp_path, monkeypatch):
+    from klaude_application.operation_journal import OperationJournal
+    from klaude_application.ssh_operations import (
+        SSHChangeUnconfirmed,
+        SSHDefinitionChange,
+        recover_ssh_definition,
+        ssh_resource,
+    )
+    from klaude_core import ssh_servers
+
+    root = tmp_path / "config"
+    root.mkdir()
+    server = SSHServer(
+        "ssh-example", "Example", "example.com", "tester",
+        identity_file=str(tmp_path / "key"), known_hosts=str(tmp_path / "known_hosts"),
+    )
+    journal = OperationJournal(tmp_path / "operations.db")
+    request_id = uuid.uuid4().hex
+
+    def fail_publish(*_args, **_kwargs):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(ssh_servers, "atomic_write_private", fail_publish)
+    with pytest.raises(SSHChangeUnconfirmed):
+        SSHDefinitionChange.reviewed(root, "add", definition=asdict(server)).apply_journaled(
+            journal, request_id, "cli",
+        )
+    assert load(root)["servers"] == {}
+    assert journal.resource_busy(ssh_resource(root))
+    receipt = recover_ssh_definition(root, OperationJournal(journal.path), request_id, "cli")
+    assert receipt.state == "failed"
+    assert not journal.resource_busy(ssh_resource(root))
+
+
+def test_journaled_ssh_lost_start_ack_has_recovery_path(tmp_path, monkeypatch):
+    from klaude_application.operation_journal import OperationJournal
+    from klaude_application.ssh_operations import (
+        SSHChangeUnconfirmed,
+        SSHDefinitionChange,
+        recover_ssh_definition,
+    )
+
+    root = tmp_path / "config"
+    root.mkdir()
+    server = SSHServer(
+        "ssh-example", "Example", "example.com", "tester",
+        identity_file=str(tmp_path / "key"), known_hosts=str(tmp_path / "known_hosts"),
+    )
+    journal = OperationJournal(tmp_path / "operations.db")
+    request_id = uuid.uuid4().hex
+    start = journal.start
+
+    def lose_start_ack(*args):
+        start(*args)
+        raise OSError("start acknowledgement lost")
+
+    monkeypatch.setattr(journal, "start", lose_start_ack)
+    with pytest.raises(SSHChangeUnconfirmed, match="recover"):
+        SSHDefinitionChange.reviewed(root, "add", definition=asdict(server)).apply_journaled(
+            journal, request_id, "cli",
+        )
+    assert load(root)["servers"] == {}
+    assert journal.status(request_id, "cli").state == "unknown"
+    assert recover_ssh_definition(
+        root, OperationJournal(journal.path), request_id, "cli",
+    ).state == "failed"
+
+
+def test_ssh_writer_requires_journal_when_configured(tmp_path):
+    root = tmp_path / "config"
+    root.mkdir()
+    server = SSHServer(
+        "ssh-example", "Example", "example.com", "tester",
+        identity_file=str(tmp_path / "key"), known_hosts=str(tmp_path / "known_hosts"),
+    )
+    events = queue.Queue()
+    writer = SessionActionWriter(
+        None, lambda *value: events.put(value), require_ssh_journal=True,
+    )
+    assert writer.submit(SSHServerChange(
+        "session", uuid.uuid4().hex, str(root), "add", asdict(server),
+    ))
+    assert not writer.close(wait=True)
+    kind, payload = events.get(timeout=2)
+    assert kind == "ssh_server_saved" and "journal unavailable" in payload[2]
+    assert load(root)["servers"] == {}
+
+
+def test_ssh_writer_records_completed_journal_receipt(tmp_path):
+    from klaude_application.operation_journal import OperationJournal
+
+    root = tmp_path / "config"
+    root.mkdir()
+    server = SSHServer(
+        "ssh-example", "Example", "example.com", "tester",
+        identity_file=str(tmp_path / "key"), known_hosts=str(tmp_path / "known_hosts"),
+    )
+    journal = OperationJournal(tmp_path / "operations.db")
+    events = queue.Queue()
+    writer = SessionActionWriter(
+        None, lambda *value: events.put(value), ssh_journal=journal,
+        require_ssh_journal=True,
+    )
+    request_id = uuid.uuid4().hex
+    assert writer.submit(SSHServerChange(
+        "session", request_id, str(root), "add", asdict(server),
+    ))
+    assert writer.close(wait=True)
+    kind, payload = events.get(timeout=2)
+    assert kind == "ssh_server_saved" and not payload[2]
+    receipt = journal.status(request_id, "session")
+    assert receipt is not None and receipt.state == "completed"
+    assert server.id in load(root)["servers"]
+
+
+def test_cli_ssh_settings_use_same_journaled_effect(tmp_path, monkeypatch):
+    from klaude_application.operation_journal import OperationJournal
+    from klaude_cli import ssh_commands
+
+    root = tmp_path / "config"
+    root.mkdir()
+    server = SSHServer(
+        "ssh-example", "Example", "example.com", "tester",
+        identity_file=str(tmp_path / "key"), known_hosts=str(tmp_path / "known_hosts"),
+    )
+    monkeypatch.setattr(
+        ssh_commands, "load_config",
+        lambda: SimpleNamespace(config_dir=root, data_dir=tmp_path),
+    )
+    saved = ssh_commands.settings("add", server.id, definition=asdict(server))
+    assert server.id in saved["servers"]
+    receipts = OperationJournal(tmp_path / "operations.db").recent("cli")
+    assert len(receipts) == 1 and receipts[0].state == "completed"
+
+
+def test_cli_ssh_recover_checks_exact_saved_state(tmp_path, monkeypatch, capsys):
+    from klaude_application.operation_journal import OperationJournal
+    from klaude_application.ssh_operations import SSHChangeUnconfirmed, SSHDefinitionChange
+    from klaude_cli import ssh_commands
+
+    root = tmp_path / "config"
+    root.mkdir()
+    server = SSHServer(
+        "ssh-example", "Example", "example.com", "tester",
+        identity_file=str(tmp_path / "key"), known_hosts=str(tmp_path / "known_hosts"),
+    )
+    journal = OperationJournal(tmp_path / "operations.db")
+    request_id = uuid.uuid4().hex
+
+    def lose_ack(*_args, **_kwargs):
+        raise OSError("ack lost")
+
+    monkeypatch.setattr(journal, "finish", lose_ack)
+    with pytest.raises(SSHChangeUnconfirmed):
+        SSHDefinitionChange.reviewed(root, "add", definition=asdict(server)).apply_journaled(
+            journal, request_id, "cli",
+        )
+    monkeypatch.setattr(
+        ssh_commands, "load_config",
+        lambda: SimpleNamespace(config_dir=root, data_dir=tmp_path),
+    )
+    ssh_commands.recover_definitions(yes=True)
+    assert "Recovered" in capsys.readouterr().out
+    assert OperationJournal(journal.path).status(request_id, "cli").state == "completed"
+
+
+def test_cli_host_trust_refuses_unresolved_definition_fence(tmp_path, monkeypatch):
+    import typer
+    from klaude_application.operation_journal import OperationJournal
+    from klaude_cli import ssh_commands
+
+    root = tmp_path / "config"
+    root.mkdir()
+    cfg = SimpleNamespace(config_dir=root, data_dir=tmp_path)
+    monkeypatch.setattr(ssh_commands, "setup_operation", lambda *_args: (
+        cfg, {"host": "example.com", "port": 22, "observed_at": time.time(),
+              "server_revision": "a" * 32,
+              "keys": [{"fingerprint": "SHA256:reviewed", "public_key": "ssh-ed25519 AAAA"}]},
+    ))
+    monkeypatch.setattr(OperationJournal, "resource_busy", lambda *_args: True)
+    with pytest.raises(typer.Exit):
+        ssh_commands.trust_host("ssh-example", "SHA256:reviewed", yes=True)
+    assert load(root)["servers"] == {}
 
 
 @pytest.fixture

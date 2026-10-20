@@ -11,6 +11,27 @@ from typing import Any
 from .execution import TurnBudgetSnapshot
 
 
+def _names(names: Iterable[str]) -> str:
+    values = list(names)
+    shown = []
+    size = 0
+    for value in values[:32]:
+        if size + len(value) > 2400:
+            break
+        shown.append(value)
+        size += len(value) + 2
+    extra = len(values) - len(shown)
+    return (", ".join(shown) or "(none)") + (f" (+{extra} omitted)" if extra else "")
+
+
+def _reasons(reasons: Mapping[str, str]) -> str:
+    shown = dict(list(reasons.items())[:32])
+    return json.dumps(shown, sort_keys=True) + (
+        f"; {len(reasons) - len(shown)} additional restrictions omitted"
+        if len(reasons) > len(shown) else ""
+    )
+
+
 class TurnScope(StrEnum):
     """Host-selected purpose and safety envelope for one agent turn."""
 
@@ -143,10 +164,10 @@ class TurnCapabilities:
             f"Injected repository instructions: {instructions}"
             f"{' (bounded)' if self.instructions_truncated else ''}.\n"
             "Globally enabled registry: "
-            f"{', '.join(self.globally_enabled_tools) or '(none)'}.\n"
-            f"Callable this request: {', '.join(self.callable_tools) or '(none)'}.\n"
-            f"Not callable this request: {', '.join(unavailable) or '(none)'}.\n"
-            f"Reasons: {json.dumps(unavailable, sort_keys=True)}\n"
+            f"{_names(self.globally_enabled_tools)}.\n"
+            f"Callable this request: {_names(self.callable_tools)}.\n"
+            f"Not callable this request: {_names(unavailable)}.\n"
+            f"Reasons: {_reasons(unavailable)}\n"
             "The supplied schemas are authoritative for calls. A tool marked 'turn routing' "
             "is enabled in Klaude but omitted from this request; do not describe it as "
             "unavailable in Klaude or claim to have used it. Other omissions may reflect "
@@ -154,7 +175,7 @@ class TurnCapabilities:
             "Effective permission policy for registered "
             "tools: "
             + "; ".join(
-                f"{policy.upper()}={', '.join(names) or '(none)'}"
+                f"{policy.upper()}={_names(names)}"
                 for policy, names in policy_groups.items()
             )
             + ". ALLOW executes without a prompt; ASK invokes the host permission UI; "
@@ -176,8 +197,8 @@ class TurnCapabilities:
             "<turn_capabilities>"
             f"Turn scope: {self.scope.value}. "
             f"Provider: {self.provider_backend}/{self.provider_model}. "
-            f"Callable this request: {', '.join(self.callable_tools) or '(none)'}. "
-            f"Not callable this request: {', '.join(unavailable) or '(none)'}. "
+            f"Callable this request: {_names(self.callable_tools)}. "
+            f"Not callable this request: {_names(unavailable)}. "
             "Only supplied schemas are callable; turn routing is not global unavailability."
             "</turn_capabilities>"
         )
@@ -193,15 +214,15 @@ class TurnCapabilities:
             "<turn_capabilities>\n"
             f"Turn scope: {self.scope.value}. Provider: {self.provider_backend}/"
             f"{self.provider_model}; context={self.provider_context_window}.\n"
-            f"Globally enabled registry: {', '.join(self.globally_enabled_tools)}.\n"
-            f"Callable this request: {', '.join(self.callable_tools) or '(none)'}.\n"
+            f"Globally enabled registry: {_names(self.globally_enabled_tools)}.\n"
+            f"Callable this request: {_names(self.callable_tools)}.\n"
             "Only supplied schemas are callable. Other enabled tools are omitted by "
             "turn routing, not globally unavailable. "
-            f"Restrictions: {json.dumps(unavailable, sort_keys=True)}.\n"
+            f"Restrictions: {_reasons(unavailable)}.\n"
             + "; ".join(
-                f"{policy.upper()}=" + (", ".join(
+                f"{policy.upper()}=" + _names(
                     n for n in self.callable_tools if policies.get(n) == policy
-                ) or "(none)") for policy in ("allow", "ask", "deny")
+                ) for policy in ("allow", "ask", "deny")
             )
             + ". ASK invokes the host approval UI. Hard constraints: "
             + " ".join(self.hard_constraints)

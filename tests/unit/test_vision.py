@@ -27,6 +27,24 @@ from klaude_core.vision import VisionHTTP, analyze, inspect_model, prepare
 from .test_library_artifacts import png
 
 
+def test_shared_vision_command_preserves_private_scope_and_filters_env(tmp_path):
+    from klaude_application.vision import VisionCommand
+
+    cfg = SimpleNamespace(config_dir=tmp_path / "config", data_dir=tmp_path / "data",
+                          ollama_url="http://localhost:11434", models={"coder": "fixture"})
+    command = VisionCommand.for_client(
+        cfg, "inspect", reference="ollama/fixture", environment_keys={
+            "PRIVATE_TOKEN": "secret", "PATH": "unsafe", "KLAUDE_MODEL_KEY": "ignored",
+        },
+    )
+    request = command.worker_request()
+    assert request["environment_keys"] == {"PRIVATE_TOKEN": "secret"}
+    assert "secret" not in repr(command)
+    assert VisionCommand.from_worker(request).worker_request() == request
+    with pytest.raises(ValueError, match="Invalid Vision"):
+        VisionCommand.from_worker({**request, "operation": "shell"})
+
+
 @pytest.fixture
 def vision_lab(tmp_path):
     calls, mode = [], {"value": "good"}

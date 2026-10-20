@@ -15,6 +15,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -119,10 +120,12 @@ def change(
     target: str = "",
     revision: str = "",
     default_revision: str = "",
+    before_publish: Callable[[dict, dict], None] | None = None,
 ) -> dict:
     path = root / "model-servers.json"
     with settings_lock(path):
         value = load(root)
+        before = deepcopy(value)
         records = value["servers"]
         if operation in {"add", "edit"}:
             server = SSHServer(**(definition or {})).validate()
@@ -161,6 +164,8 @@ def change(
         payload = json.dumps(value)
         if len(payload.encode()) > 262_144:
             raise ValueError("SSH server configuration size limit reached")
+        if before_publish is not None:
+            before_publish(before, value)
         atomic_write_private(path, payload)
         return value
 

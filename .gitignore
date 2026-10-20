@@ -10,6 +10,10 @@ logs/
 .klaude/
 /config/config.toml
 /config/model-connections.json
+/config/webui.json
+/config/webui-accounts.json
+/config/webui-admin-password.txt
+/config/.webui.json.lock
 /config/env
 /config/.env
 /config/.env.*

@@ -1,6 +1,7 @@
 """Managed artifact boundaries, independent stores and real panel consumers."""
 
 import hashlib
+import io
 import json
 import os
 import queue
@@ -14,6 +15,7 @@ from klaude_cli.session_actions import LibraryArtifactChange, SessionActionWrite
 from klaude_cli.settings_panel import PanelAction, PanelState, render_body
 from klaude_core.library_artifacts import ArtifactStore, execute_artifact_change, image_header
 from klaude_core.memory import Memory
+from PIL import Image
 from prompt_toolkit.utils import get_cwidth
 from typer.testing import CliRunner
 
@@ -49,6 +51,55 @@ def png():
     return base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC"
     )
+
+
+@pytest.mark.parametrize("mode,options,chunk", [
+    ("RGB", {"lossless": False}, b"VP8 "),
+    ("RGBA", {"lossless": True}, b"VP8L"),
+    ("RGBA", {"lossless": False}, b"VP8X"),
+])
+def test_real_webp_dimensions_and_truncated_headers(mode, options, chunk):
+    output = io.BytesIO()
+    Image.new(mode, (719, 513), (12, 70, 130, 100) if mode == "RGBA" else "teal").save(
+        output, "WEBP", **options,
+    )
+    data = output.getvalue()
+    assert data[12:16] == chunk
+    assert image_header(data[:65536]) == ("image/webp", 719, 513)
+    for size in range(12, 25 if chunk == b"VP8L" else 30):
+        assert image_header(data[:size]) == ("image/webp", None, None)
+    malformed = bytearray(data)
+    if chunk == b"VP8 ":
+        malformed[23] ^= 1
+    elif chunk == b"VP8L":
+        malformed[24] |= 0x20  # Unsupported lossless bitstream version.
+    else:
+        return
+    assert image_header(bytes(malformed)) == ("image/webp", None, None)
+
+
+@pytest.mark.parametrize("kind", ["media", "document"])
+def test_existing_image_dimensions_are_recovered_read_only(tmp_path, monkeypatch, kind):
+    output = io.BytesIO()
+    Image.new("RGB", (37, 23), "teal").save(output, "WEBP", lossless=True)
+    store = ArtifactStore(tmp_path / "library")
+    imported = store.import_bytes(output.getvalue(), kind, "existing.webp")
+    assert (imported["width"], imported["height"]) == (37, 23)
+    with store.database(write=True) as db:
+        db.execute("UPDATE artifacts SET width=NULL,height=NULL WHERE id=?", (imported["id"],))
+        before = tuple(db.execute("SELECT * FROM artifacts WHERE id=?",
+                                  (imported["id"],)).fetchone())
+    monkeypatch.setattr(Image, "open", lambda *_a, **_kw: pytest.fail("Browse decoded pixels"))
+    for item in (store.get(imported["id"]), store.listing("all")["items"][0]):
+        assert (item["width"], item["height"]) == (37, 23)
+        assert item["revision"] == imported["revision"]
+        assert item["sha256"] == hashlib.sha256(output.getvalue()).hexdigest()
+        assert "_image_header" not in item
+        assert not any(isinstance(value, bytes) for value in item.values())
+    with store.database() as db:
+        after = tuple(db.execute("SELECT * FROM artifacts WHERE id=?",
+                                 (imported["id"],)).fetchone())
+    assert after == before
 
 
 def test_import_keeps_private_exact_copy_and_preview_is_bounded(artifact):

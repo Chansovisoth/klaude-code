@@ -15,7 +15,8 @@ from .working_sources import WorkingSources
 # Recognize ordinary project checks, not arbitrary successful shell commands.
 # This is evidence of command execution, never a semantic completion verdict.
 CHECK_COMMAND = re.compile(
-    r"(?i)(?:^|[;&|])\s*(?:[^\s;&|]*/)?(?:"
+    r"(?i)(?:^|[;&|])\s*(?:(?:uv|poetry|pipenv)\s+run\s+"
+    r"(?:(?:--frozen|--offline|--no-sync)\s+)*)?(?:[^\s;&|]*/)?(?:"
     r"python[\d.]*\s+-m\s+(?:pytest|unittest)\b|"
     r"(?:pytest|ruff|mypy|tsc)\b|"
     r"(?:npm|pnpm|yarn|bun|cargo|go|make|gradle|mvn|dotnet)\s+"
@@ -133,10 +134,48 @@ class WorkspaceExecution:
     plan: list[dict[str, Any]] = field(default_factory=list)
     plan_cursor: int = 0
     plan_revision: int = 0
+    phase_revision: int = 0
     file_revisions: dict[str, int] = field(default_factory=dict)
     completion_feedback: str = ''
     sources: WorkingSources = field(default_factory=WorkingSources)
     stale_sources: list[str] = field(default_factory=list)
+    syntax_errors: dict[str, str] = field(default_factory=dict)
+    validation_pressure: bool = False
+
+    @property
+    def needs_repair(self) -> bool:
+        last_command = next(reversed(self.commands.values()), None)
+        return (bool(self.syntax_errors) or self.validation == 'failed'
+                or bool(last_command and last_command[0] == self.revision
+                        and last_command[1] != 0))
+
+    def reserve_validation(self, budget: dict[str, Any]) -> None:
+        """Spend the existing budget on checks/repair before another large edit."""
+        self.validation_pressure = (
+            budget.get('model_steps_left', 20) <= 4
+            or budget.get('elapsed_seconds', 0) >= .55 * budget.get('max_elapsed_seconds', 1800)
+        )
+
+    @property
+    def checkpoint_reason(self) -> str:
+        if (not self.changed or not self.exploration_ready
+                or self.permission_blocked or self.needs_repair
+                or self.validation.startswith('passed')):
+            return ''
+        if (self.plan_cursor < len(self.plan)
+                and self.plan[self.plan_cursor]['kind'] == 'validate'
+                and 'phase' in self.plan[self.plan_cursor]):
+            return 'Check this behavior and its tests before starting the next planned change.'
+        checked_revision = max((rev for rev, _ in self.checks.values()), default=-1)
+        unchecked = [p for p in self.changed
+                     if self.file_revisions.get(p, 0) > checked_revision]
+        if any(TEST_PATH.search(p) for p in unchecked):
+            return 'Tests changed; run the project checks before further implementation.'
+        source_changes = [p for p in unchecked
+                          if PurePath(p).suffix.lower() not in {'.md', '.rst', '.txt'}]
+        if len(source_changes) >= 2 or self.validation_pressure:
+            return 'Validate the edited workspace now, retaining time for diagnosis and repair.'
+        return ''
 
     @property
     def request_refs(self) -> list[dict[str, Any]]:
@@ -149,10 +188,25 @@ class WorkspaceExecution:
 
     @property
     def active_files(self) -> list[str]:
-        if self.validation == 'failed' or self.plan_cursor >= len(self.plan):
+        if self.needs_repair or self.plan_cursor >= len(self.plan):
             return []  # Repairs/review may need other files; permissions still apply.
         step = self.plan[self.plan_cursor]
         return step['files'] if step['kind'] == 'implement' else []
+
+    @property
+    def validation_files(self) -> list[str]:
+        """Prefer inspected check instructions when validation replaces editing.
+
+        These are source-cache preferences, not commands or coverage claims.
+        The existing version/range checks and excerpt budget remain authoritative.
+        """
+        if not self.checkpoint_reason:
+            return []
+        return [path for path in self.inspected if (
+            PurePath(path).suffix.lower() in {
+                '.md', '.rst', '.txt', '.toml', '.json', '.yaml', '.yml', '.ini', '.cfg',
+            } or PurePath(path).name in {'Makefile', 'Justfile', 'justfile', 'Taskfile'}
+        )][-8:]
 
     @property
     def allowed_edit_files(self) -> list[str]:
@@ -166,7 +220,9 @@ class WorkspaceExecution:
             following = self.plan[self.plan_cursor + 1:self.plan_cursor + 2]
             if following and following[0]['kind'] == 'implement':
                 files = list(dict.fromkeys([*files, *following[0]['files']]))
-        return files
+        # A model proposal is guidance, not an authority boundary. Incomplete
+        # plans must not permanently hide observed tests, docs or repair files.
+        return list(dict.fromkeys([*files, *self.known_files]))
 
     @property
     def finish_allowed(self) -> bool:
@@ -177,6 +233,8 @@ class WorkspaceExecution:
         """
         if self.permission_blocked:
             return True
+        if self.syntax_errors:
+            return False
         if self.plan_cursor < len(self.plan) and self.plan[self.plan_cursor]['kind'] != 'review':
             return False
         return bool(self.changed and self.validation.startswith('passed'))
@@ -216,8 +274,13 @@ class WorkspaceExecution:
                         or (p not in self.fully_inspected
                             and p not in self.implementation_inspected)]
         selected = []
+        checkpoint_tools = ({'run_shell'} if self.validation_pressure else {
+            'run_shell', 'read_file', 'list_dir', 'grep', 'workspace_info',
+        })
         for schema in schemas:
             name = schema['function']['name']
+            if self.checkpoint_reason and 'run_shell' in names and name not in checkpoint_tools:
+                continue
             if discovery and not ready and name not in {
                 'read_file', 'list_dir',
             }:
@@ -267,20 +330,34 @@ class WorkspaceExecution:
         } for step in steps]
         self.plan_cursor = 0
         self.plan_revision = self.revision
+        self.phase_revision = self.revision
 
     def complete_step(self) -> bool:
         if self.plan_cursor >= len(self.plan):
             return True
         step = self.plan[self.plan_cursor]
         if step['kind'] == 'implement':
-            changed = [p for p, rev in self.file_revisions.items() if rev > self.plan_revision]
+            baseline = self.phase_revision if 'phase' in step else self.plan_revision
+            changed = [p for p, rev in self.file_revisions.items() if rev > baseline]
             if not changed or not set(step['files']) <= set(changed):
-                self.completion_feedback = 'Active implementation step has no edits for its files.'
+                self.completion_feedback = (
+                    'Active behavior needs new edits for its files since this phase began.'
+                    if 'phase' in step else
+                    'Active implementation step has no edits for its files.')
+                return False
+            if set(step['files']).intersection(self.syntax_errors):
+                self.completion_feedback = (
+                    'Repair the reported syntax errors before completing this step.')
                 return False
         if step['kind'] == 'validate' and not self.validation.startswith('passed'):
             self.completion_feedback = 'Active validation needs a passing current project check.'
             return False
         self.plan_cursor += 1
+        if ('phase' in step and self.plan_cursor < len(self.plan)
+                and self.plan[self.plan_cursor].get('phase') != step['phase']):
+            # Reusing a file in another behavior needs fresh work. The previous
+            # phase's edit/check cannot establish completion of the next one.
+            self.phase_revision = self.revision
         self.completion_feedback = ''
         return True
 
@@ -341,6 +418,13 @@ class WorkspaceExecution:
             if path not in self.known_files:
                 self.known_files.append(path)
             content, complete = _inspected_content(args, result)
+            if complete and path in self.syntax_errors:
+                try:
+                    ast.parse(content)
+                except (SyntaxError, ValueError, RecursionError):
+                    pass
+                else:
+                    self.syntax_errors.pop(path, None)
             if complete and path not in self.fully_inspected:
                 self.fully_inspected.append(path)
             if _has_implementation(path, content) and path not in self.implementation_inspected:
@@ -370,6 +454,11 @@ class WorkspaceExecution:
                 self.changed.append(path)
             if path and path not in self.known_files:
                 self.known_files.append(path)
+            self.syntax_errors.pop(path, None)
+            if metadata.get('syntax_checked') is True:
+                diagnostics = metadata.get('diagnostics', [])
+                if diagnostics:
+                    self.syntax_errors[path] = str(diagnostics[0])[:500]
         if name == 'run_shell':
             command = str(args.get('command', ''))
             exit_code = metadata.get('exit_code')
@@ -389,6 +478,7 @@ class WorkspaceExecution:
         self.known_files = self.known_files[-48:]
         self.known_directories = self.known_directories[-24:]
         self.listed_directories = self.listed_directories[-24:]
+        self.syntax_errors = dict(list(self.syntax_errors.items())[-8:])
         if metadata.get('status') != 'failed':
             self.align_executed_action(name, path)
 
@@ -404,8 +494,14 @@ class WorkspaceExecution:
 
     @property
     def next_action(self) -> str:
+        if self.syntax_errors:
+            return 'Repair the reported syntax errors, then run project checks.'
         if self.validation == 'failed':
             return 'Repair the failing checks, then rerun them.'
+        if self.needs_repair:
+            return 'Inspect the failed shell command and repair its cause, then rerun the check.'
+        if self.checkpoint_reason:
+            return self.checkpoint_reason
         if not self.changed and self.unlisted_directories:
             return 'List the observed unlisted directories and read actual source/test paths.'
         if not self.changed and not self.exploration_ready:
@@ -442,6 +538,8 @@ class WorkspaceExecution:
             'commands': [{ 'command': cmd[:300], 'exit': code, 'current': rev == self.revision }
                          for cmd, (rev, code) in self.commands.items()],
             'known_failures': self.failures,
+            'syntax_errors': self.syntax_errors,
+            'validation_checkpoint': self.checkpoint_reason,
             'source_excerpts_stale': self.stale_sources,
             'permission_blocked': self.permission_blocked,
             'next_action': self.next_action,
@@ -449,6 +547,10 @@ class WorkspaceExecution:
                                     'active' if i == self.plan_cursor else 'pending')}
                      for i, s in enumerate(self.plan)],
             'completion_feedback': self.completion_feedback,
+            **({'phase_changed_files': [
+                path for path, revision in self.file_revisions.items()
+                if revision > self.phase_revision
+            ]} if active and 'phase' in active else {}),
             **({'request_references': [
                 {**ref, 'excerpt': self.objective[ref['start']:ref['end']][:200],
                  'excerpt_complete': ref['end'] - ref['start'] <= 200}
@@ -466,6 +568,8 @@ class WorkspaceExecution:
     def missing_completion(self) -> str:
         if self.permission_blocked:
             return ''
+        if self.syntax_errors:
+            return 'Syntax errors remain in: ' + ', '.join(self.syntax_errors)
         if self.plan_cursor < len(self.plan):
             return 'Active subtask is unfinished: ' + self.plan[self.plan_cursor]['goal']
         if self.validation.startswith('passed'):
@@ -480,7 +584,8 @@ class WorkspaceExecution:
 
     def incomplete_report(self, reason: str) -> str:
         """Factual failure summary that cannot turn a stalled loop into a success claim."""
-        lines = ['Task incomplete: ' + self.missing_completion(),
+        missing = self.missing_completion() or 'Final response interrupted; review completed work.'
+        lines = ['Task incomplete: ' + missing,
                  'Changed files: ' + (', '.join(self.changed) or 'none'),
                  'Validation: ' + self.validation]
         remaining = self.plan[self.plan_cursor:]

@@ -126,3 +126,16 @@ def test_turn_governor_enforces_exact_tokens_and_marks_unknown_usage():
     assert snapshot.total_tokens_used == 100
     assert snapshot.tokens_left == 0
     assert snapshot.token_usage_unknown_requests == 1
+
+
+def test_remote_error_metadata_never_counts_as_progress():
+    from klaude_core.execution import TurnGovernor
+
+    governor = TurnGovernor(20)
+    for i in range(3):
+        reason = governor.observe_tool_result(
+            "mcp__service__read", f'{{"content":"error for {i}"}}',
+            {"executed": True, "is_error": True},
+        )
+    assert governor.no_progress_streak == 3
+    assert reason

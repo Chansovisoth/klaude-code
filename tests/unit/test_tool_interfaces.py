@@ -88,7 +88,7 @@ def test_legacy_model_arguments_normalize_before_validation_permission_and_execu
         lambda **args: observed.append(args) or "found source",
     )
     approvals = []
-    agent.gate.check = lambda name, detail: approvals.append((name, detail))
+    agent.gate.check = lambda name, detail, **_: approvals.append((name, detail))
     events = list(agent.run("Search the local knowledge for movement."))
     assert observed == [{"query": "movement", "library": "godot"}]
     assert approvals[0][0] == "query_knowledge"

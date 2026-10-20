@@ -5,17 +5,20 @@ description = "klaude-code: a local-first AI coding agent (Ollama + RAG + web se
 requires-python = ">=3.11"
 dependencies = [
     "klaude-cli",
+    "klaude-webhost",
 ]
 
 [project.optional-dependencies]
 cloud = ["klaude-core[cloud]"]
 
 [tool.uv.workspace]
-members = ["apps/cli", "packages/*"]
+members = ["apps/cli", "apps/webhost", "packages/*"]
 
 [tool.uv.sources]
 klaude-cli = { workspace = true }
 klaude-core = { workspace = true }
+klaude-application = { workspace = true }
+klaude-webhost = { workspace = true }
 klaude-knowledge = { workspace = true }
 klaude-web = { workspace = true }
 klaude-tools = { workspace = true }

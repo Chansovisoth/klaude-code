@@ -10,6 +10,7 @@ import re
 import secrets
 import time
 import uuid
+from collections.abc import Callable
 from itertools import islice
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,11 +65,15 @@ def read(cfg: Any) -> dict:
     return {key: data[key] for key in DEFAULTS}
 
 
-def save(cfg: Any, candidate: dict, expected: str) -> dict:
+def save(
+    cfg: Any, candidate: dict, expected: str, *,
+    before_publish: Callable[[dict, dict], None] | None = None,
+) -> dict:
     path = cfg.config_dir / "image-generation.json"
     regular_path(path)
     with settings_lock(path):
-        if read(cfg)["revision"] != expected:
+        before = read(cfg)
+        if before["revision"] != expected:
             raise ValueError("Image generation settings changed; Reload before saving")
         value = {key: candidate[key] for key in DEFAULTS if key != "revision"}
         if type(value["enabled"]) is not bool:
@@ -78,6 +83,8 @@ def save(cfg: Any, candidate: dict, expected: str) -> dict:
         if value["enabled"] and not value["endpoint"]:
             raise ValueError("Choose an image server before enabling generation")
         value["revision"] = uuid.uuid4().hex
+        if before_publish is not None:
+            before_publish(before, value)
         atomic_write_private(path, json.dumps(value) + "\n")
         return value
 

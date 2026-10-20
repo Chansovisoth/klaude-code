@@ -13,6 +13,24 @@ The subsequent Phase 1 task-state work is recorded in
 [Agent task-state evaluation](agent-task-state-evaluation.md), covering request
 references, scoped execution and estimated request admission.
 
+The later compound-lookup work is recorded in
+[M0/M1 lookup evaluation](agent-multi-action-validation.md) and
+[exact read-recovery follow-up](agent-read-recovery-validation.md). Those passes
+exercise real local-model CLI/TUI retrieval and source continuity; they do not
+replace or claim completion of this unchanged CSV benchmark.
+
+The later [capability-discovery and broader validation follow-up](agent-capability-discovery-validation.md)
+records bounded tools/Skills/MCP discovery, routing and remote-error corrections,
+and fresh runs of the original two-model CSV benchmark. Read its outcome and
+hardware qualifications separately from the earlier evaluations.
+That pass is finished: the controlled 4B Skill/MCP and Gemma compound lookups
+complete, but neither small model completes the full CSV benchmark. Its final
+full host gate passes; model and hardware limitations remain explicit.
+
+The subsequent [validation and recovery follow-up](agent-validation-recovery-followup.md)
+addresses omitted-plan paths, late checks, edit diagnostics, terminal error
+summaries and exact literal output. Its fresh results are recorded separately.
+
 Date: 2026-10-04. Evaluated the real CLI and Prompt Toolkit chat against local
 Ollama, then traced observed defects into the implementation. This is a product
 evaluation, not a claim that the tested local models completed the coding task.

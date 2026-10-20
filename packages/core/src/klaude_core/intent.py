@@ -66,6 +66,42 @@ def explicitly_disallows_tools(text: str) -> bool:
     return bool(_NO_TOOLS.search(text))
 
 
+def explicit_literal_response_request(text: str) -> bool:
+    """A complete request to echo quoted text is not an instruction to run it."""
+    return bool(re.fullmatch(
+        r'\s*(?:please\s+)?(?:reply|respond|answer|say|repeat|print|echo|output|return)\s+'
+        r'(?:(?:with|only|exactly|just)\s+)*'
+        r'(?:"[^"\n]*"|\'[^\'\n]*\'|`[^`\n]*`|“[^”\n]*”|‘[^’\n]*’)\s*[.!?]?\s*',
+        text, re.I,
+    ))
+
+
+def exact_literal_response(text: str) -> str | None:
+    """Resolve only a whole, unconditional request for user-supplied literal text.
+
+    Unquoted output must be one token with an explicit 'exactly' modifier.
+    Destinations, conditions, transformations and additional actions do not match.
+    Backslashes remain literal; this never evaluates code or looks up a value.
+    """
+    match = re.fullmatch(
+        r'\s*(?:please\s+)?(?:reply|respond|answer|say|repeat|print|echo|output|return)\s+'
+        r'(?P<modifiers>(?:(?:with|only|exactly|just)\s+)*)'
+        r'(?:"(?P<double>[^"\n]{0,4096})"|\'(?P<single>[^\'\n]{0,4096})\'|'
+        r'`(?P<backtick>[^`\n]{0,4096})`|“(?P<curly>[^”\n]{0,4096})”|'
+        r'‘(?P<curly_single>[^’\n]{0,4096})’|(?P<bare>[\w-]{1,128}))'
+        r'\s*[.!?]?\s*(?:(?:do not|don\x27t) use (?:any )?tools[.!]?\s*)?',
+        text, re.I,
+    )
+    if match is None:
+        return None
+    if match['bare'] is not None and 'exactly' not in match['modifiers'].lower().split():
+        return None
+    payload = next(match[name] for name in (
+        'double', 'single', 'backtick', 'curly', 'curly_single', 'bare'
+    ) if match[name] is not None)
+    return payload if all(c.isprintable() for c in payload) else None
+
+
 def explicit_local_file_read_request(text: str) -> bool:
     """Recognize a request to open a named workspace file without requiring 'file'."""
     without_urls = re.sub(r"https?://\S+", " ", text, flags=re.IGNORECASE)
@@ -102,6 +138,39 @@ def prohibits_web_search(text: str) -> bool:
 def prohibits_skill_read(text: str) -> bool:
     """Respect an explicit request to answer without opening Skill instructions."""
     return bool(_NO_SKILL_READ.search(text))
+
+
+def requests_external_lookup(text: str) -> bool:
+    """Recognize an action request with an arbitrary object, including pronouns.
+
+    This is a bounded bootstrap for observable lookup obligations, not a semantic
+    planner. Local dictionary/file/library operations retain their own routing.
+    The model resolves the object and chooses all queries from the conversation.
+    """
+    if explicitly_disallows_tools(text) or prohibits_web_search(text):
+        return False
+    # Quoted examples/code are not host-enforced action requests. Keep the
+    # actual user message intact for the model; this only scopes the bootstrap.
+    text = re.sub(
+        r'```.*?(?:```|\Z)|`[^`\n]*`|(?<!\w)"[^"\n]*"|(?<!\w)\'[^\'\n]*\'|'
+        r'“[^”\n]*”|‘[^’\n]*’',
+        ' ', text, flags=re.S,
+    )
+    action = r"\blook\s+(?:(?:[\w'’-]+\s+){0,10})up\b"
+    for match in re.finditer(action, text, re.I):
+        prefix = re.split(r"[.;:!?\n]|\bbut\b", text[:match.start()], flags=re.I)[-1]
+        if _NEGATED_ACTION_PREFIX.search(prefix):
+            continue
+        clause = re.split(r"[.;!?\n]|\band\b", text[match.start():], maxsplit=1, flags=re.I)[0]
+        if re.search(r"\b(?:online|web|internet)\b", clause, re.I):
+            return True
+        if not re.search(
+            r"\b(?:dictionary|dict|table|database|variable|key|workspace|repo(?:sitory)?|"
+            r"knowledge|libraries|library|local docs?|indexed|file)\b|"
+            r"\b[\w.-]+\.(?:md|py|js|ts|json|csv|toml|txt)\b", clause, re.I,
+        ):
+            return True
+    return False
 
 
 def without_tool_use_prohibition(text: str) -> str:

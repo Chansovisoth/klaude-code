@@ -1999,7 +1999,31 @@ def test_search_fetch_then_meaningfully_refined_search():
     assert "leadership" in searches[0]
     assert "board chair" in searches[1]
     assert [item.action for item in state.actions] == ["search", "fetch", "search", "finish"]
-    assert "Need a source that names the board chair." in state.unresolved_information
+    assert "Need a source that names the board chair." in state.information_requests
+    assert "Need a source that names the board chair." not in state.unresolved_information
+    assert "Need a source that names the board chair." not in state.model_summary()
+
+
+def test_requested_information_is_bounded_audit_data_and_does_not_clear_host_limits():
+    from klaude_core.agent import AgenticSearchState
+
+    state = AgenticSearchState('Find the title and date', WebResearchBudget())
+    state.add_gap('A prior URL was blocked by host policy.')
+    for i in range(30):
+        state.note_information_request(f'Request {i}: ' + 'x' * 300)
+    latest = state.information_requests[-1]
+    state.note_information_request(latest)
+    state.add_source('src_001', fetched=True)
+
+    assert len(state.information_requests) == 16
+    assert all(len(value) <= 240 for value in state.information_requests)
+    assert state.to_dict()['information_requests'] == state.information_requests
+    assert state.unresolved_information == ['A prior URL was blocked by host policy.']
+    summary = state.model_summary()
+    assert 'sources read: src_001' in summary
+    assert 'blocked by host policy' in summary
+    assert latest not in summary
+    assert state.assessment.sufficient is False
 
 
 def test_equivalent_search_is_prevented_even_with_new_purpose():

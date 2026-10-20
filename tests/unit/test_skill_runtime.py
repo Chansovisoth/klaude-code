@@ -58,6 +58,14 @@ def test_installed_skill_catalog_and_read_are_bounded_to_enabled_package(tmp_pat
         reader.read("coding-standards")
 
 
+def test_installed_skill_catalog_rejects_oversized_directory(tmp_path):
+    root = tmp_path / "skills"
+    _installed(root, "valid", "Valid instructions")
+    for number in range(2_001):
+        (root / f"entry-{number}").touch()
+    assert InstalledSkillReader(root).catalog() == ()
+
+
 def test_legacy_absolute_skill_path_uses_only_local_current_copy(tmp_path):
     root = tmp_path / "skills"
     current = _installed(root, "legacy", "Legacy guidance")

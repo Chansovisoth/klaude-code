@@ -18,6 +18,27 @@ def budget() -> TurnBudgetSnapshot:
     )
 
 
+def test_large_registry_model_projection_is_bounded_while_audit_remains_complete():
+    registry = {f"mcp__service_{i:04}__deployment_status" for i in range(1000)}
+    snapshot = TurnCapabilities.create(
+        globally_enabled_tools=registry | {"discover_tools"},
+        callable_tools={"discover_tools"},
+        unavailable_tools={n: "turn routing" for n in registry},
+        effective_permissions={n: "ask" for n in registry},
+        hard_constraints=["Use only supplied schemas"],
+        provider_backend="ollama", provider_model="small", provider_supports_tools=True,
+        provider_context_window=8192, provider_effort_levels=(), injected_instructions=(),
+        instructions_truncated=False, plan_mode=False, workspace_write_enabled=False,
+        budget=budget(),
+    )
+    assert len(snapshot.to_dict()["globally_enabled_tools"]) == 1001
+    assert len(snapshot.to_dict()["unavailable_tools"]) == 1000
+    assert len(snapshot.render_for_model()) < 16000
+    assert len(snapshot.render_execution_for_model()) < 5000
+    assert len(snapshot.render_compact_for_model()) < 3000
+    assert "omitted" in snapshot.render_for_model()
+
+
 def test_model_capability_text_includes_bounded_exact_token_usage():
     bounded = TurnBudgetSnapshot(
         max_model_steps=6,

@@ -15,11 +15,13 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_DISTRIBUTIONS = {
+    "klaude-application",
     "klaude-cli",
     "klaude-core",
     "klaude-knowledge",
     "klaude-tools",
     "klaude-web",
+    "klaude-webhost",
 }
 
 

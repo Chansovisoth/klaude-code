@@ -1,5 +1,6 @@
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from klaude_tools import GitCommandError, Workspace, build_tools, classify_command
@@ -63,6 +64,27 @@ def test_read_file_can_page_later_lines_without_changing_default_output(tmp_path
     )
     with pytest.raises(ValueError, match="offset must"):
         workspace.read_file("long.py", offset=0)
+
+
+def test_read_file_bounds_underlying_read_and_rejects_oversized_paging(tmp_path):
+    source = tmp_path / "huge.py"
+    with source.open("wb") as stream:
+        stream.write(b"a" * 60_001)
+        stream.truncate(16_000_000)
+    workspace = Workspace(tmp_path)
+    result = workspace.read_file("huge.py")
+    assert len(result) < 61_000 and result.endswith("...[truncated]")
+    with pytest.raises(ValueError, match="bounded paging limit"):
+        workspace.read_file("huge.py", offset=2)
+
+
+def test_list_dir_rejects_unbounded_directory_inventory(tmp_path, monkeypatch):
+    workspace = Workspace(tmp_path)
+    monkeypatch.setattr(Path, "iterdir", lambda self: (
+        self / f"item-{number}" for number in range(2_001)
+    ))
+    with pytest.raises(ValueError, match="bounded listing limit"):
+        workspace.list_dir()
 
 
 def test_missing_leading_slash_on_exact_workspace_path_does_not_nest_files(tmp_path):
@@ -340,6 +362,12 @@ def test_tools_deny_or_redact_workspace_secrets(tmp_path, monkeypatch):
         ws.read_file("config/.env")
     with pytest.raises(PermissionError, match="secret file denied"):
         ws.run_shell("cat config/.env")
+    for name in ("webui-accounts.json", "webui-admin-password.txt"):
+        (config / name).write_text("private account data")
+        with pytest.raises(PermissionError, match="secret file denied"):
+            ws.read_file(f"config/{name}")
+        with pytest.raises(PermissionError, match="secret file denied"):
+            ws.run_shell(f"cat config/{name}")
 
     def fake_run(argv, **kwargs):
         return subprocess.CompletedProcess(argv, 0, "sk-example1234567890", "")
@@ -381,3 +409,20 @@ def test_run_shell_permission_detail_includes_classified_risk(tmp_path):
 
     assert "$ touch generated.txt" in detail
     assert "risk=workspace-writing" in detail
+
+
+def test_python_edit_diagnostics_preserve_write_without_executing_code(tmp_path):
+    from klaude_tools import Workspace
+
+    workspace = Workspace(tmp_path)
+    result = workspace.write_file(
+        'broken.py', 'if True:\n  pass\nelse:\n  pass\nelif False:\n  pass\n')
+    assert result['metadata']['edit']['changed'] is True
+    assert result['metadata']['syntax_checked'] is True
+    assert result['metadata']['diagnostics'][0]['line'] == 5
+    assert 'Python syntax error' in result['content']
+    assert 'elif False:' in (tmp_path / 'broken.py').read_text()
+    fixed = workspace.write_file('broken.py', "raise RuntimeError('must not execute')\n")
+    assert fixed['metadata']['syntax_checked'] is True
+    assert fixed['metadata']['diagnostics'] == []
+    assert not (tmp_path / '__pycache__').exists()

@@ -8,6 +8,7 @@ from hashlib import sha256
 from typing import Any
 
 from .memory import is_sensitive_memory
+from .research_receipts import research_receipt
 
 _ACTUAL_USE = re.compile(
     r"(?i)\b(?:which|what)\s+(?:(?:knowledge|research|external)\s+)?"
@@ -67,6 +68,7 @@ def prior_answer_source_note(turns: list[dict[str, Any]]) -> str:
     if start < 0:
         return "I cannot verify which sources were used for an earlier answer."
     names: list[str] = []
+    urls: list[str] = []
     for turn in turns[start + 1 : answer_index]:
         role = turn.get("role")
         content = turn.get("content")
@@ -76,6 +78,8 @@ def prior_answer_source_note(turns: list[dict[str, Any]]) -> str:
             and (turn["metadata"].get("executed") is True)
         ):
             name = str(turn.get("tool_name", ""))
+            receipt = research_receipt(name, {}, turn["metadata"], content) \
+                if name == "fetch_url" else None
         elif (
             role == "system"
             and isinstance(content, dict)
@@ -86,6 +90,7 @@ def prior_answer_source_note(turns: list[dict[str, Any]]) -> str:
             )
         ):
             name = str(content.get("tool", ""))
+            receipt = None
         elif (
             role == "system"
             and isinstance(content, dict)
@@ -96,10 +101,19 @@ def prior_answer_source_note(turns: list[dict[str, Any]]) -> str:
             # Older line-mode sessions stored this bounded result metadata but
             # did not store tool audits among the replayed turns.
             name = str(content.get("tool", ""))
+            # Revalidate restored metadata before displaying it. This yields
+            # identifiers only; no saved receipt becomes result evidence.
+            receipt = research_receipt(name, {}, {
+                "executed": True, "final_url": content.get("public_url"),
+            }, "") if name == "fetch_url" else None
         else:
             continue
         if re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", name) and name not in names:
             names.append(name)
+        if name == "fetch_url" and receipt and receipt.get("status") == "completed":
+            url = receipt.get("public_url")
+            if isinstance(url, str) and url and url not in urls and len(urls) < 4:
+                urls.append(url)
     if not names:
         return (
             "No retrieval tool was used for that answer. I generated it from the "
@@ -118,6 +132,7 @@ def prior_answer_source_note(turns: list[dict[str, Any]]) -> str:
     return (
         "The recorded tool activity for that answer was: "
         + ", ".join(labels)
+        + (". Recorded public URLs (up to four): " + ", ".join(urls) if urls else "")
         + ". These records confirm tool execution, but do not by themselves "
         "preserve or prove the answer's specific evidence."
     )

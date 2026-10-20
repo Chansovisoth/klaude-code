@@ -55,11 +55,13 @@ jobs:
       - name: Mypy production source
         run: >-
           uv run mypy
+          packages/application/src
           packages/core/src
           packages/knowledge/src
           packages/tools_local/src
           packages/web/src
           apps/cli/src
+          apps/webhost/src
 
   package-smoke:
     name: Build and installed-CLI smoke test

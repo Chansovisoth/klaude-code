@@ -63,6 +63,7 @@ def prepare_image(
     model: str = "",
     frame: int | None = None,
     crop: tuple[int, int, int, int] | None = None,
+    thumbnail: bool = False,
     cancelled: Callable[[], bool] = lambda: False,
 ) -> tuple[dict[str, Any], bytes]:
     if not data or len(data) > MAX_SOURCE_BYTES:
@@ -74,6 +75,7 @@ def prepare_image(
         "model": model,
         "frame": frame,
         "crop": crop,
+        "thumbnail": thumbnail,
     }
     payload = json.dumps(options).encode() + b"\n" + data
     environment = {
@@ -183,6 +185,10 @@ def _decode(data: bytes, options: dict[str, Any]) -> tuple[dict[str, Any], bytes
                 backend=options["backend"],
                 model=options["model"],
             )
+            if options.get("thumbnail"):
+                scale = min(1.0, 128 / max(oriented.size))
+                size = (max(1, int(oriented.width * scale)),
+                        max(1, int(oriented.height * scale)))
             # Always encode pixels, even when dimensions already fit: an apparently
             # metadata-free container can still carry private trailing/unknown chunks.
             oriented = oriented.convert("RGBA")

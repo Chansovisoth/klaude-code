@@ -34,7 +34,7 @@ def test_appearance_writer_migrates_under_lock_and_merges_scoped_fields(tmp_path
 
 
 def test_settings_writer_serializes_and_coalesces_scoped_changes(tmp_path, monkeypatch):
-    import klaude_cli.settings_writer as module
+    import klaude_application.settings_writer as module
 
     path = tmp_path / "preferences.json"
     path.write_text(json.dumps({"model": "unchanged"}))
@@ -69,7 +69,7 @@ def test_settings_writer_serializes_and_coalesces_scoped_changes(tmp_path, monke
 
 
 def test_failed_settings_intent_is_retried_only_with_next_explicit_save(tmp_path, monkeypatch):
-    import klaude_cli.settings_writer as module
+    import klaude_application.settings_writer as module
 
     path = tmp_path / "preferences.json"
     events = queue.Queue()
@@ -94,7 +94,7 @@ def test_failed_settings_intent_is_retried_only_with_next_explicit_save(tmp_path
 
 
 def test_close_drains_accepted_writes_and_rejects_new_submissions(tmp_path, monkeypatch):
-    import klaude_cli.settings_writer as module
+    import klaude_application.settings_writer as module
 
     entered, release = threading.Event(), threading.Event()
     events = queue.Queue()
@@ -141,8 +141,68 @@ def test_two_settings_writers_preserve_independent_client_fields(tmp_path):
         second.close(wait=True)
 
 
+def test_compare_and_set_writer_rejects_stale_field_but_merges_unrelated(tmp_path):
+    from klaude_application.settings import ChatSettings
+    from klaude_core.settings_store import update_settings
+
+    path = tmp_path / "preferences.json"
+    events = queue.Queue()
+    writer = SettingsWriter(path, lambda kind, payload: events.put((kind, payload)),
+                            compare_and_set=True)
+    shared = ChatSettings(path)
+    original = shared.read("composer_mode")
+    shared.patch("composer_mode", "vim", expected_revision=original.revision)
+    writer.submit({("composer_mode",): "standard"})
+    assert events.get(timeout=2) == ("settings_saved", (1, False))
+    assert writer.close(wait=True)
+    assert shared.read("composer_mode").value == "vim"
+
+    fresh = SettingsWriter(path, lambda kind, payload: events.put((kind, payload)),
+                           compare_and_set=True)
+    update_settings(path, {("unrelated",): "kept"})
+    fresh.submit({("composer_mode",): "standard"})
+    assert events.get(timeout=2) == ("settings_saved", (1, True))
+    assert fresh.close(wait=True)
+    assert json.loads(path.read_text()) == {
+        "composer_mode": "standard", "unrelated": "kept",
+    }
+
+
+def test_compare_and_set_writer_orders_rapid_same_field_saves(tmp_path, monkeypatch):
+    import klaude_application.settings_writer as module
+
+    path = tmp_path / "preferences.json"
+    entered, release = threading.Event(), threading.Event()
+    original = module.update_settings
+    calls = 0
+
+    def slow(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            assert release.wait(2)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "update_settings", slow)
+    events = queue.Queue()
+    writer = SettingsWriter(path, lambda kind, payload: events.put((kind, payload)),
+                            compare_and_set=True)
+    try:
+        writer.submit({("composer_mode",): "vim"})
+        assert entered.wait(2)
+        writer.submit({("composer_mode",): "standard"})
+        release.set()
+        assert events.get(timeout=2) == ("settings_saved", (1, True))
+        assert events.get(timeout=2) == ("settings_saved", (2, True))
+        assert json.loads(path.read_text())["composer_mode"] == "standard"
+    finally:
+        release.set()
+        assert writer.close(wait=True)
+
+
 def test_close_reports_unconfirmed_save_instead_of_claiming_rollback(tmp_path, monkeypatch):
-    import klaude_cli.settings_writer as module
+    import klaude_application.settings_writer as module
 
     events = queue.Queue()
     def failed(path, changes):

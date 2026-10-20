@@ -10,6 +10,8 @@ dependencies = [
     "pygments>=2.17",
     "regex>=2024.11.6",
     "klaude-core",
+    "klaude-application",
+    "klaude-webhost",
     "klaude-knowledge",
     "klaude-web",
     "klaude-tools",

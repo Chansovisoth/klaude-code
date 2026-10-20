@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import os
-import time
 import uuid
 from dataclasses import replace
 from typing import Any
 
+from klaude_application.web_diagnostics import run_search_test as run_search_test
 from klaude_core.search_settings import (
     KEYS,
     PROVIDERS,
@@ -51,85 +51,6 @@ def row(identity: str, label: str, value: str = "", **kwargs: Any) -> PanelRow:
 
 def back(target: str) -> PanelRow:
     return row("back", "Back", target=target, kind=RowKind.NAVIGATION, control=RowControl.BACK)
-
-
-def run_search_test(request: dict[str, Any]) -> dict[str, Any]:
-    """Private worker; no snippets, credentials or upstream errors in the result."""
-    from klaude_core.config import load_config, provider_secret_value
-    from klaude_web.providers import quality_search
-
-    os.environ["KLAUDE_CONFIG_DIR"] = request["config_dir"]
-    os.environ["KLAUDE_DATA_DIR"] = request["data_dir"]
-    cfg = load_config()
-    for name, (default_env, attr) in KEYS.items():
-        reference = cfg.web_providers[name].api_key_env or default_env
-        value = request.get("environment_keys", {}).get(reference)
-        if isinstance(value, str) and len(value) <= 8192:
-            os.environ[reference] = value
-        fallback = getattr(cfg, attr, "") if reference == default_env else ""
-        setattr(cfg, attr, provider_secret_value(cfg.config_dir, reference, fallback))
-    apply_search_settings(cfg, request.get("settings"))
-    for name, enabled in request.get("availability", {}).items():
-        if name in cfg.web_providers and isinstance(enabled, bool):
-            cfg.web_providers[name].enabled = enabled
-    cfg.web_search.result_validation_enabled = request.get("validation") is not False
-    if request.get("enabled") is False:
-        return {"status": "disabled", "message": "Web Search is disabled", "attempted": []}
-    query = str(request.get("query", "")).strip()
-    provider = str(request.get("provider", ""))
-    if not query or len(query) > 500 or provider not in {"", *PROVIDERS}:
-        raise ValueError("Invalid search test")
-    if provider:
-        # Detail tests identify this provider, never silently test a fallback.
-        cfg.web_search.allow_explicit_provider_fallback = False
-    start = time.monotonic()
-    try:
-        response = quality_search(
-            cfg,
-            query,
-            cfg.web_search.default_results,
-            provider=provider or None,
-            provider_strict=bool(provider),
-        )
-    except Exception:
-        return {
-            "status": "failed",
-            "message": "Search test failed; check provider settings",
-            "attempted": [],
-            "count": 0,
-        }
-    attempted = [name for name in response.providers_attempted if name in PROVIDERS][:9]
-    used = [name for name in response.providers_succeeded if name in PROVIDERS][:9]
-    count = len(response.results)
-    metadata = response.provider_metadata or {}
-    states = [
-        item.get("status")
-        for item in metadata.get("provider_attempts", [])
-        if isinstance(item, dict)
-    ]
-    status = "ok" if count else "empty" if used else "failed"
-    if not count and "authentication_failed" in states:
-        status = "authentication"
-    elif not count and "quota_exhausted" in states:
-        status = "quota"
-    elif not count and "rate_limited" in states:
-        status = "rate_limit"
-    names = ", ".join(PROVIDERS[name] for name in used or attempted) or "No provider"
-    issue = {
-        "authentication": "Authentication failed",
-        "quota": "Quota exhausted",
-        "rate_limit": "Rate limited",
-        "failed": "Search unavailable",
-        "empty": "No results",
-    }.get(status)
-    return {
-        "status": status,
-        "message": f"{issue} · {names}" if issue else f"{names} · {count} results",
-        "attempted": attempted,
-        "used": used,
-        "count": min(count, 50),
-        "elapsed_ms": int((time.monotonic() - start) * 1000),
-    }
 
 
 class SearchSettings:

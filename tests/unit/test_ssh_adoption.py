@@ -70,7 +70,7 @@ def test_remote_adoption_retains_identity_logs_and_defaults_and_stops_owned_grou
     events = queue.Queue()
     jobs = ServingJobs(lambda *event: events.put(event))
     local_signals = []
-    monkeypatch.setattr("klaude_cli.serving_jobs.stop_adopted", local_signals.append)
+    monkeypatch.setattr("klaude_application.serving_jobs.stop_adopted", local_signals.append)
     try:
         request = start(lab, jobs)
         ready = wait_for(events, "ready")

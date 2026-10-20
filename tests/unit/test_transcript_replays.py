@@ -13,11 +13,18 @@ from klaude_core import Agent, ModelCapabilities, ModelInfo, PermissionGate, Too
 
 
 class ReplayRuntime:
-    def __init__(self) -> None:
+    def __init__(self, actions: list[dict[str, Any]] | None = None) -> None:
         self.requests: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
+        self.actions = list(actions or [])
 
     def chat(self, _model, messages, tools=None, **_kwargs):
         self.requests.append((messages, list(tools or [])))
+        names = {item['function']['name'] for item in tools or []}
+        if self.actions and self.actions[0]['tool'] in names:
+            action = self.actions.pop(0)
+            return {'role': 'assistant', 'content': '', 'tool_calls': [{'function': {
+                'name': action['tool'], 'arguments': action['arguments'],
+            }}]}
         return {"role": "assistant", "content": "Replay completed."}
 
 
@@ -87,8 +94,13 @@ def replay_cases() -> list[dict[str, Any]]:
 @pytest.mark.parametrize("profile", MODEL_PROFILES, ids=lambda profile: profile["name"])
 @pytest.mark.parametrize("case", replay_cases(), ids=lambda case: case["name"])
 def test_transcript_replay_keeps_schemas_prompt_and_completion_in_sync(case, profile):
-    runtime = ReplayRuntime()
-    tools = [Tool(name, name.replace("_", " "), {}, lambda: "ok") for name in TOOL_NAMES]
+    runtime = ReplayRuntime(case.get('actions'))
+    tools = [Tool(name, name.replace("_", " "), {}, lambda **_: "ok") for name in TOOL_NAMES]
+    next(tool for tool in tools if tool.name == 'web_search').fn = lambda **_: {
+        'content': 'A search lead; identity remains unverified.',
+        'metadata': {'search_results': [{'url': 'https://example.org/lead',
+                                         'result_id': 'search_result_001'}]},
+    }
     agent = Agent(
         runtime,
         "replay-model",
@@ -133,7 +145,11 @@ def test_transcript_replay_keeps_schemas_prompt_and_completion_in_sync(case, pro
     assert set(case["forbidden_tools"]).isdisjoint(schemas)
     assert events[-1].payload["turn_capabilities"] == snapshot
     assert events[-1].kind == "done"
-    assert len(runtime.requests) == 1
+    actions = case.get('actions', []) if profile['supports_tools'] else []
+    assert len(runtime.requests) == 1 + len(actions)
+    if actions:
+        assert {action['tool'] for action in actions} <= completed_evidence
+        assert not any(event.kind in {'retry', 'error'} for event in events)
     assert snapshot["provider"] == {
         "backend": profile["backend"],
         "model": profile["model"],

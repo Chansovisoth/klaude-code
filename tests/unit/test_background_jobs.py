@@ -468,6 +468,20 @@ def test_activation_worker_validates_without_returning_credentials(monkeypatch, 
     assert "private-key" not in json.dumps(result)
 
 
+def test_activation_contract_keeps_credential_private_and_rejects_unknown_backend():
+    from klaude_application.model_activation import ModelActivation
+
+    command = ModelActivation.from_worker({
+        "kind": "model_activation", "backend": "openrouter", "key": "private-key",
+    })
+    assert "private-key" not in repr(command)
+    assert command.worker_request()["key"] == "private-key"
+    with pytest.raises(ValueError, match="Invalid model activation"):
+        ModelActivation.from_worker({
+            "kind": "model_activation", "backend": "unknown", "key": "private-key",
+        })
+
+
 def test_activation_worker_rejects_key_removed_during_preparation(monkeypatch, tmp_path):
     from types import SimpleNamespace
 

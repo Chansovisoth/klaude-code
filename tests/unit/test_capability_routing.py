@@ -164,6 +164,45 @@ def test_relevant_mcp_tool_schema_reaches_model_and_call_uses_its_server(tmp_pat
                for event in events)
 
 
+def test_mcp_application_error_is_typed_and_corrected_inputs_can_recover(tmp_path):
+    calls = []
+
+    def invoke(server, name, arguments):
+        calls.append(arguments)
+        failed = arguments["release_id"] != "R472"
+        return {"server": server.name, "tool": name, "is_error": failed,
+                "content": [{"type": "text", "text": "Unknown release" if failed else
+                             "State blocked; revision f47c9; migration review pending"}]}
+
+    cfg = SimpleNamespace(mcp_servers_file=tmp_path / "mcp.json", mcp_auth_dir=tmp_path,
+                          _mcp_client_manager=SimpleNamespace(call=invoke))
+    server = MCPServerConfig("rollout", "stdio", command="fixture", tools=[{
+        "name": "deployment_status", "inputSchema": {"type": "object", "properties": {
+            "release_id": {"type": "string"}}, "required": ["release_id"]},
+    }])
+    tools = _configured_mcp_tools(cfg, servers={"rollout": server})
+    name = tools[0].name
+    runtime = ScriptedRuntime([
+        {"role": "assistant", "content": "", "tool_calls": [{"function": {
+            "name": name, "arguments": {"release_id": release_id}}}]}
+        for release_id in ("wrong", "R472")
+    ] + [{"role": "assistant", "content": "R472 is blocked, revision f47c9."}])
+    agent = Agent(runtime, "test", tools, PermissionGate({name: "allow"}, lambda *_: "n"),
+                  "system")
+    events = list(agent.run("Check release R472"))
+    results = [e.payload for e in events if e.kind == "tool_result"]
+    assert calls == [{"release_id": "wrong"}, {"release_id": "R472"}]
+    assert results[0]["metadata"]["is_error"] is True
+    assert results[0]["metadata"]["status"] == "failed"
+    assert results[0]["metadata"]["executed"] is True
+    assert results[1]["metadata"]["is_error"] is False
+    assert results[1]["metadata"]["status"] == "succeeded"
+    assert agent.last_turn_budget["no_progress_streak"] == 0
+    assert agent.last_turn_budget["tool_calls_used"] == 2
+    assert "original task's identifiers" in str(runtime.requests[1]["messages"])
+    assert not any(e.kind == "error" for e in events)
+
+
 def test_skill_instructions_load_only_after_model_calls_read_skill(tmp_path):
     skill_root = tmp_path / "skills"
     current = skill_root / "design" / "versions" / "one"

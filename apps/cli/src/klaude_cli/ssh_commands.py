@@ -4,12 +4,23 @@ from __future__ import annotations
 
 import os
 import queue
+import sqlite3
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 
 import typer
+from klaude_application.operation_journal import OperationConflict, OperationJournal
+from klaude_application.ssh_operations import (
+    SSHChangeUnconfirmed,
+    SSHDefinitionChange,
+    SSHDiagnostic,
+    SSHSetupCommand,
+    recover_ssh_definition,
+    ssh_resource,
+)
 from klaude_core.config import load_config
-from klaude_core.ssh_servers import TIMEOUT, SSHServer, change, load
+from klaude_core.ssh_servers import TIMEOUT, SSHServer, load
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -37,17 +48,61 @@ def settings(operation: str, target: str, **values):
     try:
         cfg = load_config()
         current = load(cfg.config_dir)
-        return change(
+        return SSHDefinitionChange.reviewed(
             cfg.config_dir,
             operation,
             target=target,
             revision=current["servers"].get(target, {}).get("revision", ""),
             default_revision=current["default_revision"],
             **values,
+        ).apply_journaled(
+            OperationJournal(cfg.data_dir / "operations.db"), uuid.uuid4().hex, "cli"
         )
-    except (OSError, ValueError, KeyError, TypeError):
-        console.print(Text("SSH settings failed or changed; reload and review again", style="red"))
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error,
+            OperationConflict, SSHChangeUnconfirmed) as exc:
+        console.print(Text(
+            "SSH settings failed or changed; reload and review again"
+            if not isinstance(exc, RuntimeError) else str(exc), style="red",
+        ))
         raise typer.Exit(1) from None
+
+
+@app.command("recover")
+def recover_definitions(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Run exact-state recovery check"),
+) -> None:
+    """Reconcile one uncertain SSH definition save without repeating the change."""
+    cfg = load_config()
+    path = cfg.data_dir / "operations.db"
+    if not path.exists():
+        console.print("No journaled SSH definition changes to recover.")
+        return
+    try:
+        journal = OperationJournal(path)
+        fenced = journal.fenced_operation(ssh_resource(cfg.config_dir))
+        if fenced is None:
+            console.print("No unresolved SSH definition change.")
+            return
+        receipt = fenced.receipt
+        if receipt.state != "unknown":
+            raise OperationConflict("SSH definition change is still active")
+        console.print(
+            f"Uncertain SSH definition change: request {receipt.request_id}"
+        )
+        if not yes and not typer.confirm(
+            "Check the saved SSH definitions and reconcile?", default=False
+        ):
+            raise typer.Abort()
+        resolved = recover_ssh_definition(
+            cfg.config_dir, journal, receipt.request_id, fenced.owner_id,
+        )
+    except (OSError, ValueError, OperationConflict) as exc:
+        console.print(f"[yellow]SSH definition change remains fenced:[/] {exc}")
+        raise typer.Exit(1) from None
+    if resolved.state == "completed":
+        console.print("[green]Recovered:[/] definitions match the reviewed saved state.")
+    else:
+        console.print("[yellow]Recovered:[/] definitions match the reviewed prior state.")
 
 
 @app.command("list")
@@ -128,14 +183,10 @@ def check(identity: str, operation: str):
     try:
         worker = jobs.submit(
             "ssh",
-            {
-                "kind": "ssh_servers",
-                "operation": operation,
-                "config_dir": str(cfg.config_dir),
-                "target": identity,
-                "revision": record["revision"],
-                "agent_socket": os.environ.get("SSH_AUTH_SOCK", ""),
-            },
+            SSHDiagnostic.for_client(
+                cfg, operation, target=identity, revision=record["revision"],
+                agent_socket=os.environ.get("SSH_AUTH_SOCK", ""),
+            ).worker_request(),
             timeout=TIMEOUT,
         )
         _, payload = events.get()
@@ -196,15 +247,10 @@ def setup_operation(identity: str, operation: str, **values):
     try:
         job = jobs.submit(
             "ssh-setup",
-            {
-                "kind": "ssh_setup",
-                "operation": operation,
-                "config_dir": str(cfg.config_dir),
-                "target": identity,
-                "revision": record["revision"],
-                "agent_socket": os.environ.get("SSH_AUTH_SOCK", ""),
-                **values,
-            },
+            SSHSetupCommand.for_client(
+                cfg, operation, target=identity, revision=record["revision"],
+                agent_socket=os.environ.get("SSH_AUTH_SOCK", ""), **values,
+            ).worker_request(),
             timeout=setup_timeout,
         )
         _, payload = events.get()
@@ -260,7 +306,13 @@ def trust_host(identity: str, fingerprint: str, yes: bool = False):
     ):
         raise typer.Exit(0)
     try:
-        change(
+        journal = OperationJournal(cfg.data_dir / "operations.db")
+        if journal.resource_busy(ssh_resource(cfg.config_dir)):
+            raise OperationConflict(
+                "SSH definitions have unresolved work; run "
+                "`klaude model-manager ssh recover` first"
+            )
+        SSHDefinitionChange.reviewed(
             cfg.config_dir,
             "trust",
             target=identity,
@@ -272,9 +324,13 @@ def trust_host(identity: str, fingerprint: str, yes: bool = False):
                 "port": result["port"],
                 "observed_at": result["observed_at"],
             },
+        ).apply()
+    except (OSError, ValueError, sqlite3.Error, OperationConflict) as exc:
+        message = (
+            str(exc) if isinstance(exc, OperationConflict) else
+            "Host trust save failed or changed; reload and review"
         )
-    except (OSError, ValueError):
-        console.print(Text("Host trust save failed or changed; reload and review", style="red"))
+        console.print(Text(message, style="red"))
         raise typer.Exit(1) from None
     console.print(
         Text("Verified host pin saved; existing known-hosts file retained", style="green")

@@ -24,7 +24,7 @@ from klaude_core.model_runtime import (
     model_cache_generation,
     save_model_cache,
 )
-from klaude_core.settings_store import atomic_write_private
+from klaude_core.settings_store import SettingsConflictError, atomic_write_private
 
 
 @pytest.fixture
@@ -32,6 +32,23 @@ def cfg(tmp_path, monkeypatch):
     monkeypatch.setattr("klaude_core.config.CONFIG_DIR", tmp_path / "config")
     monkeypatch.setattr("klaude_core.config.DATA_DIR", tmp_path / "data")
     return Config()
+
+
+def test_shared_connection_service_preserves_registry_migration_and_duplicate_guard(cfg):
+    from klaude_application.model_connections import ModelConnectionAdd, ModelConnectionService
+
+    service = ModelConnectionService(cfg)
+    connection = ModelConnection(
+        "lab", "Lab", "openai_compatible", "http://localhost:8080", "Local",
+        "KLAUDE_MODEL_LAB_KEY",
+    )
+    assert "default-ollama" in service.list()
+    action = ModelConnectionAdd(connection, "secret")
+    assert "secret" not in repr(action)
+    service.add(action)
+    assert service.list()["lab"].backend == "openai_compatible"
+    with pytest.raises(SettingsConflictError):
+        service.add(action)
 
 
 @pytest.mark.parametrize(

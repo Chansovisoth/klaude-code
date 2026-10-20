@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import time
 from pathlib import Path
 from typing import Any
 
-from klaude_core.fetch_settings import public_fetch_settings
-
 from .library_inventory import public_text
-from .library_knowledge import library_name
+from .library_knowledge import KnowledgeAction, knowledge_worker_request, library_name
 from .settings_panel import PanelAction, PanelPage, PanelRow, RowControl, RowKind
 
 TASK_KEY = "library:knowledge"
@@ -340,6 +337,7 @@ class KnowledgePanel:
             self.host._set_input("")
 
     def start(self, draft: dict[str, Any]) -> None:
+        action = KnowledgeAction.from_draft(draft)
         if getattr(getattr(self.host, "_model_manager", None), "busy", False):
             raise ValueError("Finish the Model Manager operation before starting a Knowledge task")
         if (
@@ -358,22 +356,10 @@ class KnowledgePanel:
         cfg = self.host.cfg
         if not cfg.models.get("embed"):
             raise ValueError("Configure a local embedding model before starting this task")
-        reference = cfg.web_providers["exa"].api_key_env or "EXA_API_KEY"
-        request = {
-            "kind": "library_knowledge_operation",
-            **draft,
-            "config_dir": str(cfg.config_dir),
-            "data_dir": str(Path(self.library.scope).parent),
-            "ollama_url": cfg.ollama_url,
-            "embedding_model": cfg.models["embed"],
-            "fetch_settings": public_fetch_settings(cfg),
-            "validation": getattr(cfg, "retrieval_validation_enabled", True),
-            "workspace": str(getattr(self.host.agent, "workdir", Path.cwd())),
-            "environment_keys": {
-                "CRAWL4AI_API_KEY": os.environ.get("CRAWL4AI_API_KEY", cfg.crawl4ai_api_key),
-                reference: os.environ.get(reference, cfg.exa_api_key),
-            },
-        }
+        request = knowledge_worker_request(
+            action, cfg, data_dir=Path(self.library.scope).parent,
+            workspace=Path(getattr(self.host.agent, "workdir", Path.cwd())),
+        )
         self.library.leave()
         # An action chosen through page filtering must not conceal its results.
         for view in (self.library.view, "knowledge-hybrid"):

@@ -110,3 +110,36 @@ def test_repeated_lost_native_calls_fail_with_no_execution():
     assert not writes
     assert sum(e.kind == 'retry' for e in events) == 1
     assert any(e.kind == 'error' and 'repeatedly exhausted' in e.payload['message'] for e in events)
+
+
+def test_retrieval_projection_retains_authority_sources_and_runtime_without_unrelated_settings():
+    prompt = (resources.files('klaude_core') / 'prompts/system.md').read_text()
+    prompt = prompt.replace('{CONFIGURATION}', '''<klaude_configuration>
+<configuration_detail>
+- Appearance: red
+- Runtime context settings: 4096
+</configuration_detail>
+- Installed Skills: 1
+  - research: source verification
+<repository_instructions>Do not upload private files.</repository_instructions>
+</klaude_configuration>''').replace('{RUNTIME_CONTEXT}', 'Current date: 2026-10-16')
+    result = select_request_prompt(prompt, {'web_search', 'fetch_url'}, focused_retrieval=True)
+    assert 'Do not upload private files.' in result
+    assert 'research: source verification' in result
+    assert 'Current date: 2026-10-16' in result
+    assert 'Tool approval is handled by the host' in result
+    assert 'Pre-existing dirty changes belong to the user' in result
+    assert 'search/read/reflect' in result
+    assert 'Appearance: red' not in result
+    assert 'complete code, provide one' not in result
+
+
+def test_compact_research_never_replaces_custom_policy_text():
+    prompt = ('Universal rules\n<web_research_policy>\n'
+              'Use only the user-approved documentation domains.\n'
+              '</web_research_policy>\nOther instructions')
+    selected = select_request_prompt(prompt, {'web_search'}, focused_retrieval=True)
+    assert 'Use only the user-approved documentation domains.' in selected
+    assert 'Universal rules' in selected
+    assert 'Other instructions' in selected
+    assert '<web_research_policy>' not in selected

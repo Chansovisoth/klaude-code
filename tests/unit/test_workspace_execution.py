@@ -548,6 +548,41 @@ def test_executed_later_subtasks_update_plan_without_protocol_completion_flags()
     assert not state.missing_completion()
 
 
+def test_behavior_phases_require_fresh_edits_and_checks_when_files_are_reused():
+    state = WorkspaceExecution()
+    state.set_plan([
+        {'goal': 'Handle empty input', 'kind': 'implement', 'phase': 0,
+         'files': ['app.py', 'tests/test_app.py']},
+        {'goal': 'Check empty input', 'kind': 'validate', 'phase': 0, 'files': []},
+        {'goal': 'Preserve results', 'kind': 'implement', 'phase': 1,
+         'files': ['app.py', 'tests/test_app.py']},
+        {'goal': 'Check preservation', 'kind': 'validate', 'phase': 1, 'files': []},
+        {'goal': 'Review', 'kind': 'review', 'files': []},
+    ])
+    state.observe('edit_file', {'path': 'app.py'}, 'changed', executed())
+    state.observe('edit_file', {'path': 'tests/test_app.py'}, 'changed', executed())
+    assert state.complete_step()
+    state.observe('run_shell', {'command': 'python3 -m unittest'}, 'failed',
+                  executed(exit_code=1, status='failed'))
+    assert state.plan_cursor == 1
+    assert not state.complete_step() and state.needs_repair
+    state.observe('edit_file', {'path': 'app.py'}, 'repaired', executed())
+    state.observe('run_shell', {'command': 'python3 -m unittest'}, 'passed', executed(exit_code=0))
+    assert state.plan_cursor == 2
+    state.finish_plan()
+    assert state.plan_cursor == 2  # Prior phase edits/checks cannot consume the next phase.
+    assert not state.finish_allowed
+    state.observe('edit_file', {'path': 'app.py'}, 'second behavior', executed())
+    assert not state.complete_step()  # Its test still has no fresh edit.
+    state.observe('edit_file', {'path': 'tests/test_app.py'}, 'second test', executed())
+    assert state.complete_step() and state.plan_cursor == 3
+    assert not state.complete_step()  # The earlier check is stale after edits.
+    state.observe('run_shell', {'command': 'python3 -m unittest'}, 'passed', executed(exit_code=0))
+    assert state.plan_cursor == 4
+    state.finish_plan()
+    assert not state.missing_completion()
+
+
 @pytest.mark.parametrize('native_first', [False, True])
 def test_local_plan_advances_only_after_real_work_and_repairs_failed_checks(tmp_path, native_first):
     from klaude_cli.main import _select_tool_names
@@ -625,6 +660,79 @@ def test_empty_installed_skills_inventory_omits_reader_but_unknown_inventory_pre
     list(agent.run('Hello'))
     assert 'read_skill' not in agent.last_turn_capabilities['callable_tools']
     assert runtime.requests
+
+
+def test_behavior_phases_execute_real_checks_between_reused_file_edits_and_repair(tmp_path):
+    from klaude_cli.main import _select_tool_names
+    from klaude_core import Agent, PermissionGate
+    from klaude_tools import Workspace, build_tools
+
+    setup, _ = project_agent(tmp_path, [])
+    command = 'python3 -m unittest discover -s tests -v'
+    first_test = (
+        'import unittest\nimport app\nclass ValueTest(unittest.TestCase):\n'
+        ' def test_value(self): self.assertEqual(app.VALUE, 1)\n'
+    )
+    second_test = first_test + ' def test_extra(self): self.assertEqual(app.EXTRA, 2000)\n'
+
+    class Runtime:
+        def __init__(self):
+            self.planned = 0
+            self.requests = []
+            self.actions = iter([
+                native('list_dir', path='.'),
+                {'role': 'assistant', 'content': '', 'tool_calls': [
+                    *native('read_file', path='app.py')['tool_calls'],
+                    *native('read_file', path='tests/test_app.py')['tool_calls'],
+                ]},
+                native('write_file', path='app.py', content='VALUE = 1\n'),
+                native('write_file', path='tests/test_app.py', content=first_test),
+                native('run_shell', command=command),
+                native('write_file', path='app.py', content='VALUE = 1\nEXTRA=10\n'),
+                native('write_file', path='tests/test_app.py', content=second_test),
+                native('run_shell', command=command),
+                native('edit_file', path='app.py', old_str='EXTRA=10', new_str='EXTRA = 2000'),
+                native('run_shell', command=command),
+                {'role': 'assistant', 'content': 'Both behaviors checked; second repaired.'},
+            ])
+
+        def chat(self, *a, **kw):
+            raise AssertionError('Complex local execution should stay on its structured path')
+
+        def supports_structured_tool_recovery(self, *a):
+            return True
+
+        def chat_structured_action(self, model, messages, **kw):
+            self.requests.append(deepcopy(messages))
+            return next(self.actions)
+
+        def chat_workspace_plan(self, *a, **kw):
+            self.planned += 1
+            return {'workspace_plan': [
+                {'goal': 'Preserve VALUE', 'kind': 'implement', 'phase': 0,
+                 'files': ['app.py', 'tests/test_app.py']},
+                {'goal': 'Check VALUE', 'kind': 'validate', 'phase': 0, 'files': []},
+                {'goal': 'Add EXTRA', 'kind': 'implement', 'phase': 1,
+                 'files': ['app.py', 'tests/test_app.py']},
+                {'goal': 'Check EXTRA', 'kind': 'validate', 'phase': 1, 'files': []},
+                {'goal': 'Review', 'kind': 'review', 'files': []},
+            ]}
+
+    runtime = Runtime()
+    tools = build_tools(Workspace(tmp_path))
+    agent = Agent(runtime, 'fake', tools, PermissionGate(
+        {t.name: 'allow' for t in tools}, lambda *_: 'n'), 'system',
+        tool_selector=_select_tool_names)
+    agent.workspace = setup.workspace
+    events = list(agent.run(COMPLEX_TASK))
+    checks = [e.payload for e in events if e.kind == 'tool_result'
+              and e.payload['tool'] == 'run_shell']
+    assert [c['metadata']['exit_code'] for c in checks] == [0, 1, 0]
+    assert runtime.planned == 1
+    assert not any(e.kind == 'error' for e in events)
+    assert (tmp_path/'app.py').read_text() == 'VALUE = 1\nEXTRA = 2000\n'
+    assert '"phase_changed_files": []' in runtime.requests[5][0]['content']
+    assert agent.last_turn_capabilities['budget']['model_steps_used'] <= 14
 
 
 def test_unavailable_host_input_does_not_offer_a_nonfunctional_control_tool(tmp_path):
@@ -813,10 +921,53 @@ def test_incomplete_response_retry_is_bounded_and_cancellation_takes_precedence(
     agent.cancellation_check = lambda: cancelled
     events = list(agent.run(COMPLEX_TASK))
     assert len(calls) == expected_calls
-    assert events[-1].kind == 'error'
+    assert any(e.kind == 'error' for e in events)
     assert not any(e.kind == 'tool_start' for e in events)
     assert (tmp_path / 'app.py').read_text() == 'VALUE=2\n'
     assert agent.last_turn_budget['model_steps_used'] == expected_calls
+
+
+def test_terminal_transport_failure_saves_edit_summary_without_another_inference(tmp_path):
+    from klaude_core.ollama import OllamaIncompleteResponse
+
+    agent, _ = project_agent(tmp_path, [])
+
+    class Runtime:
+        def __init__(self):
+            self.requests = 0
+            self.actions = iter([
+                native('list_dir', path='.'),
+                native('read_file', path='app.py'),
+                native('list_dir', path='tests'),
+                native('read_file', path='tests/test_app.py'),
+                native('write_file', path='app.py', content='VALUE=1\n'),
+                OllamaIncompleteResponse('controlled stream ended'),
+                OllamaIncompleteResponse('controlled stream ended again'),
+            ])
+
+        def supports_structured_tool_recovery(self, *args):
+            return True
+
+        def chat_structured_action(self, *args, **kwargs):
+            self.requests += 1
+            response = next(self.actions)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+    agent.ollama = runtime = Runtime()
+    events = list(agent.run(COMPLEX_TASK))
+    assert runtime.requests == 7
+    assert (tmp_path / 'app.py').read_text() == 'VALUE=1\n'
+    assert len([e for e in events if e.kind == 'tool_result'
+                and e.payload['tool'] == 'write_file']) == 1
+    reports = [e.payload['content'] for e in events if e.kind == 'text']
+    assert len(reports) == 1
+    assert 'Changed files: app.py' in reports[0]
+    assert 'Validation: not run' in reports[0]
+    assert 'controlled stream ended again' in reports[0]
+    assert agent.messages[-1] == {'role': 'assistant', 'content': reports[0]}
+    assert [e.kind for e in events[-3:]] == ['text', 'error', 'done']
 
 
 @pytest.mark.parametrize('outcome', ['answer', 'failure', 'cancel'])
@@ -897,7 +1048,7 @@ def test_active_scope_is_copied_and_repair_reopens_file_choices(tmp_path):
     projected = {s['function']['name']: s for s in state.recovery_schemas(schemas)}
     for name in ['write_file', 'edit_file']:
         path = projected[name]['function']['parameters']['properties']['path']
-        assert path['enum'] == ['README.md']
+        assert path['enum'] == ['README.md', 'app.py']
     assert schemas == original
     state.observe('run_shell', {'command': 'python3 -m unittest'}, 'exit=1',
                   executed(exit_code=1, status='failed'))
@@ -945,7 +1096,7 @@ def test_scoped_edit_and_completion_flag_follow_actual_action_then_repair(tmp_pa
                     *native('read_file', path='app.py')['tool_calls'],
                     *native('read_file', path='tests/test_app.py')['tool_calls'],
                 ]},
-                {**native('write_file', path='README.md', content='Updated docs\n'),
+                {**native('write_file', path='unobserved.py', content='VALUE=3\n'),
                  'completed_step': True},
                 native('write_file', path='app.py', content='VALUE=0\n'),
                 {**native('read_file', path='app.py', offset=1, limit=10),
@@ -983,7 +1134,8 @@ def test_scoped_edit_and_completion_flag_follow_actual_action_then_repair(tmp_pa
     assert writes[0]['metadata']['executed'] is False
     assert writes[0]['metadata']['error_type'] == 'ToolScopeError'
     assert writes[1]['metadata']['executed'] is True
-    assert writes[2]['metadata']['executed'] is True  # Identical arguments, new scope.
+    assert writes[2]['metadata']['executed'] is True
+    assert not (tmp_path / 'unobserved.py').exists()
     assert (tmp_path / 'README.md').read_text() == 'Updated docs\n'
     assert (tmp_path / 'app.py').read_text() == 'VALUE = 1\n'
     # The passing check completes validation, not the following review.
@@ -1069,3 +1221,260 @@ def test_project_tool_and_command_words_do_not_admit_unrelated_product_policy(tm
     assert all('Retain workspace safety.' in r[0]['content'] for r in runtime.requests)
     assert (tmp_path / 'app.py').read_text() == 'VALUE = 1\n'
     assert not any(e.kind == 'error' for e in events)
+
+
+def test_syntax_feedback_blocks_completion_and_clears_after_actual_repair(tmp_path):
+    from klaude_tools import Workspace
+
+    workspace = Workspace(tmp_path)
+    state = WorkspaceExecution()
+    state.set_plan([{'kind': 'implement', 'files': ['app.py'], 'goal': 'Implement'}])
+    bad = workspace.write_file('app.py', 'def broken(:\n pass\n')
+    state.observe('write_file', {'path': 'app.py'}, bad['content'],
+                  executed(**bad['metadata']))
+    assert not state.complete_step() and not state.finish_allowed
+    assert 'Syntax errors remain' in state.missing_completion()
+    assert not state.checkpoint_reason  # Repair first; a check cannot fix syntax.
+    fixed = workspace.write_file('app.py', 'VALUE=1\n')
+    state.observe('write_file', {'path': 'app.py'}, fixed['content'],
+                  executed(**fixed['metadata']))
+    assert not state.syntax_errors and state.complete_step()
+    assert 'Validation is not run' in state.missing_completion()
+
+
+def test_checkpoint_reserves_checks_and_reopens_edits_after_failed_validation(tmp_path):
+    from klaude_tools import Workspace, build_tools
+
+    state = WorkspaceExecution()
+    for path in ('app.py', 'tests/test_app.py', 'README.md'):
+        state.observe('read_file', {'path': path}, 'VALUE=1\n', executed())
+    state.observe('list_dir', {'path': '.'}, 'f app.py', executed())
+    state.set_plan([{'kind': 'implement', 'files': ['app.py'], 'goal': 'Code'}])
+    assert 'tests/test_app.py' in state.allowed_edit_files  # Omitted by a weak plan.
+    state.observe('write_file', {'path': 'tests/test_app.py'}, 'wrote', executed())
+    schemas = [t.schema() for t in build_tools(Workspace(tmp_path))]
+    assert state.checkpoint_reason
+    assert 'write_file' not in {s['function']['name'] for s in state.recovery_schemas(schemas)}
+    state.observe('run_shell', {'command': 'uv run --frozen pytest'}, 'exit=1\nfailed',
+                  executed(status='failed', exit_code=1))
+    assert state.validation == 'failed'
+    assert 'edit_file' in {s['function']['name'] for s in state.recovery_schemas(schemas)}
+    state.observe('edit_file', {'path': 'app.py'}, 'edited', executed())
+    state.observe('run_shell', {'command': 'uv run --frozen pytest'}, 'exit=0\npassed',
+                  executed(exit_code=0))
+    state.observe('write_file', {'path': 'README.md'}, 'wrote', executed())
+    assert not state.checkpoint_reason  # Old test edits do not trigger another early check.
+    state.reserve_validation({'model_steps_left': 3})
+    assert state.checkpoint_reason
+    assert state.validation_files == ['README.md']
+    assert {s['function']['name'] for s in state.recovery_schemas(schemas)} == {'run_shell'}
+    # A failed check reopens inspection/repair even under pressure; no deadlock
+    # or permission override is introduced by the narrower checkpoint.
+    state.observe('run_shell', {'command': 'uv run --frozen pytest'}, 'exit=1\nfailed',
+                  executed(status='failed', exit_code=1))
+    reopened = {s['function']['name'] for s in state.recovery_schemas(schemas)}
+    assert {'read_file', 'edit_file', 'run_shell'} <= reopened
+    assert not state.validation_files
+
+
+def test_phase_validation_checkpoint_precedes_more_work_even_without_budget_pressure(tmp_path):
+    from klaude_tools import Workspace, build_tools
+
+    state = WorkspaceExecution()
+    for path in ('app.py', 'tests/test_app.py'):
+        state.observe('read_file', {'path': path}, 'VALUE=1\n', executed())
+    state.observe('list_dir', {'path': '.'}, 'f app.py', executed())
+    state.set_plan([
+        {'goal': 'Small behavior', 'kind': 'implement', 'phase': 0, 'files': ['app.py']},
+        {'goal': 'Check behavior', 'kind': 'validate', 'phase': 0, 'files': []},
+        {'goal': 'Review', 'kind': 'review', 'files': []},
+    ])
+    state.observe('edit_file', {'path': 'app.py'}, 'edited', executed())
+    assert state.complete_step() and not state.validation_pressure
+    assert 'before starting the next' in state.checkpoint_reason
+    schemas = [tool.schema() for tool in build_tools(Workspace(tmp_path))]
+    assert 'write_file' not in {s['function']['name'] for s in state.recovery_schemas(schemas)}
+    state.observe('run_shell', {'command': 'python3 -m unittest'}, 'failed',
+                  executed(status='failed', exit_code=1))
+    assert 'edit_file' in {s['function']['name'] for s in state.recovery_schemas(schemas)}
+
+
+def test_failed_unrecognized_shell_probe_reopens_checkpoint_for_repair(tmp_path):
+    from klaude_tools import Workspace, build_tools
+
+    state = WorkspaceExecution()
+    state.observe('write_file', {'path': 'app.py'}, 'wrote', executed())
+    state.reserve_validation({'model_steps_left': 3})
+    schemas = [t.schema() for t in build_tools(Workspace(tmp_path))]
+    # A native edit before inspection must retain a route to inspect, rather
+    # than intersecting discovery/checkpoint gates into an empty tool set.
+    assert {'read_file', 'list_dir'} <= {
+        s['function']['name'] for s in state.recovery_schemas(schemas)}
+    state.observe('read_file', {'path': 'app.py'}, 'VALUE=1\n', executed())
+    state.observe('read_file', {'path': 'tests/test_app.py'}, 'assert True\n', executed())
+    assert {s['function']['name'] for s in state.recovery_schemas(schemas)} == {'run_shell'}
+    state.observe('run_shell', {'command': 'python3 -m app --help'}, 'exit=2\nunknown command',
+                  executed(status='failed', exit_code=2))
+    assert state.validation == 'not run'  # A smoke probe is not a test-suite pass.
+    assert state.needs_repair
+    assert 'failed shell command' in state.next_action
+    assert {'read_file', 'edit_file'} <= {
+        s['function']['name'] for s in state.recovery_schemas(schemas)}
+    state.observe('edit_file', {'path': 'app.py'}, 'edited', executed())
+    assert not state.needs_repair
+    assert {s['function']['name'] for s in state.recovery_schemas(schemas)} == {'run_shell'}
+
+
+def test_weak_plan_can_add_omitted_tests_and_repair_after_checkpoint(tmp_path):
+    agent, _ = project_agent(tmp_path, [])
+    command = 'python3 -m unittest discover -s tests -v'
+
+    class Runtime:
+        def __init__(self):
+            self.schemas = []
+            self.actions = iter([
+                native('list_dir', path='.'),
+                {'role': 'assistant', 'content': '', 'tool_calls': [
+                    *native('read_file', path='app.py')['tool_calls'],
+                    *native('read_file', path='tests/test_app.py')['tool_calls'],
+                ]},
+                native('write_file', path='app.py', content='VALUE=0\n'),
+                native('edit_file', path='tests/test_app.py',
+                       old_str='class ValueTest', new_str='# Added coverage\nclass ValueTest'),
+                native('run_shell', command=command),
+                # Change size as well as value: CPython's timestamp/size pyc
+                # cache otherwise makes two checks in one second nondeterministic.
+                native('edit_file', path='app.py', old_str='VALUE=0', new_str='VALUE = 1'),
+                native('run_shell', command=command),
+                {'role': 'assistant', 'content': 'Implemented, repaired and tested.'},
+            ])
+
+        def supports_structured_tool_recovery(self, *args):
+            return True
+
+        def chat_structured_action(self, *args, **kwargs):
+            self.schemas.append(deepcopy(kwargs['tools']))
+            return next(self.actions)
+
+        def chat_workspace_plan(self, *args, **kwargs):
+            return {'workspace_plan': [
+                {'kind': 'implement', 'files': ['app.py'], 'goal': 'Implement'},
+                {'kind': 'validate', 'files': [], 'goal': 'Validate'},
+                {'kind': 'review', 'files': [], 'goal': 'Review'},
+            ]}
+
+    agent.ollama = runtime = Runtime()
+    events = list(agent.run(COMPLEX_TASK))
+    assert not any(e.kind == 'error' for e in events), [(e.kind, e.payload) for e in events]
+    assert (tmp_path / 'app.py').read_text() == 'VALUE = 1\n'
+    assert '# Added coverage' in (tmp_path / 'tests/test_app.py').read_text()
+    assert 'write_file' not in {s['function']['name'] for s in runtime.schemas[4]}
+    assert 'edit_file' in {s['function']['name'] for s in runtime.schemas[5]}
+    assert [e.payload['metadata']['exit_code'] for e in events if e.kind == 'tool_result'
+            and e.payload['tool'] == 'run_shell'] == [1, 0]
+
+
+def test_late_exploration_skips_optional_planner_without_expanding_budget(tmp_path, monkeypatch):
+    import importlib
+
+    from klaude_core.execution import TurnGovernor
+
+    now = [0.0]
+
+    class ClockGovernor(TurnGovernor):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, clock=lambda: now[0], **kwargs)
+
+    monkeypatch.setattr(importlib.import_module('klaude_core.agent'), 'TurnGovernor', ClockGovernor)
+    agent, _ = project_agent(tmp_path, [])
+
+    class Runtime:
+        def __init__(self):
+            self.actions = iter([
+                native('list_dir', path='.'),
+                {'role': 'assistant', 'content': '', 'tool_calls': [
+                    *native('read_file', path='app.py')['tool_calls'],
+                    *native('read_file', path='tests/test_app.py')['tool_calls'],
+                ]},
+                native('edit_file', path='app.py', old_str='VALUE=2', new_str='VALUE=1'),
+                native('run_shell', command='python3 -m unittest discover -s tests -v'),
+                {'role': 'assistant', 'content': 'Implemented and checked.'},
+            ])
+
+        def supports_structured_tool_recovery(self, *args):
+            return True
+
+        def chat_structured_action(self, *args, **kwargs):
+            now[0] = 700.0
+            return next(self.actions)
+
+        def chat_workspace_plan(self, *args, **kwargs):
+            pytest.fail('A late optional plan must not consume the repair reserve')
+
+    agent.ollama = Runtime()
+    events = list(agent.run(COMPLEX_TASK))
+    assert not any(e.kind == 'error' for e in events)
+    assert agent.last_turn_budget['max_model_steps'] == 20
+    assert agent.last_turn_budget['model_steps_used'] == 5
+
+
+def test_validation_checkpoint_retains_read_check_instructions_after_large_edit(
+    tmp_path, monkeypatch,
+):
+    import importlib
+
+    from klaude_core.execution import TurnGovernor
+
+    now = [0.0]
+
+    class ClockGovernor(TurnGovernor):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, clock=lambda: now[0], **kwargs)
+
+    monkeypatch.setattr(importlib.import_module('klaude_core.agent'), 'TurnGovernor', ClockGovernor)
+    agent, _ = project_agent(tmp_path, [], context=8192)
+    command = 'python3 -m unittest discover -s tests -v'
+    (tmp_path / 'README.md').write_text(f'Run project checks with `{command}`.\n')
+    test = tmp_path / 'tests/test_app.py'
+    test.write_text(test.read_text() + ('# test detail ' + 'x' * 65 + '\n') * 60)
+    content = 'VALUE = 1\n' + ('# implementation ' + 'x' * 65 + '\n') * 160
+
+    class Runtime:
+        def __init__(self):
+            self.requests = []
+            self.schemas = []
+            self.actions = iter([
+                native('list_dir', path='.'),
+                native('list_dir', path='tests'),
+                {'role': 'assistant', 'content': '', 'tool_calls': [
+                    *native('read_file', path='README.md')['tool_calls'],
+                    *native('read_file', path='app.py')['tool_calls'],
+                    *native('read_file', path='tests/test_app.py')['tool_calls'],
+                ]},
+                native('write_file', path='app.py', content=content),
+                native('run_shell', command=command),
+                {'role': 'assistant', 'content': 'Implemented and checked.'},
+            ])
+
+        def supports_structured_tool_recovery(self, *args):
+            return True
+
+        def chat_structured_action(self, model, messages, **kwargs):
+            self.requests.append(deepcopy(messages))
+            self.schemas.append(deepcopy(kwargs['tools']))
+            if len(self.requests) == 4:
+                now[0] = 1000.0
+            return next(self.actions)
+
+    agent.ollama = runtime = Runtime()
+    events = list(agent.run(COMPLEX_TASK))
+    assert not any(e.kind == 'error' for e in events), [
+        e.payload for e in events if e.kind in {'error', 'retry'}]
+    check_request = runtime.requests[4]
+    assert any(command in m.get('content', '') and '<working_sources>' in m['content']
+               for m in check_request)
+    assert not any(c['function']['arguments'].get('content') == content
+                   for m in check_request for c in m.get('tool_calls', []))
+    assert {s['function']['name'] for s in runtime.schemas[4]} == {'run_shell'}
+    assert [e.payload['metadata'].get('exit_code') for e in events if e.kind == 'tool_result'
+            and e.payload['tool'] == 'run_shell'] == [0]

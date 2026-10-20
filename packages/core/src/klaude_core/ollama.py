@@ -69,6 +69,8 @@ def _native_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 class Ollama(CancellableHTTPTransport):
+    supports_bound_action_arguments = True
+
     def __init__(self, base_url: str = "http://localhost:11434", timeout: float = 600.0, *,
                  api_key: str = "", trust_env: bool = True):
         self.api_key = api_key
@@ -145,6 +147,8 @@ class Ollama(CancellableHTTPTransport):
                                 "done_reason",
                                 "total_duration",
                                 "load_duration",
+                                "prompt_eval_duration",
+                                "eval_duration",
                                 "prompt_eval_count",
                                 "eval_count",
                             )
@@ -176,7 +180,7 @@ class Ollama(CancellableHTTPTransport):
     def chat_structured_action(
         self, model: str, messages: list[dict[str, Any]], *, tools: list[dict],
         options: dict[str, Any] | None = None, think: bool | str | None = None,
-        allow_finish: bool = True,
+        allow_finish: bool = True, bind_arguments: bool = False,
     ) -> dict[str, Any]:
         """Recover failed native syntax using a declared, constrained action protocol.
 
@@ -239,13 +243,20 @@ class Ollama(CancellableHTTPTransport):
         # Discovery reads can share a response. Once workspace execution is
         # available, enforce the existing one-edit/check instruction in the
         # grammar: an appended test rewrite must not truncate a prior edit.
-        max_actions = 1 if names.intersection({
+        mutation_actions = bool(names.intersection({
             'write_file', 'edit_file', 'run_shell', 'git_commit',
-        }) else 4
-        if max_actions == 1:
+        }))
+        # A question must be reconsidered after a read, not pre-composed in
+        # the same response before its result exists. Ordinary read batches
+        # and the established workspace discovery grammar remain unchanged.
+        max_actions = 1 if mutation_actions or (
+            bind_arguments and 'request_user_input' in names
+        ) else 4
+        if max_actions == 1 or bind_arguments:
             # Shared fields let weak models combine an edit with shell
-            # arguments. Bind the discriminator to its exact canonical schema.
-            # Keep the already-tested discovery grammar unchanged.
+            # arguments, or a source read with final-answer fields. Bind each
+            # discriminator to its canonical schema when the caller opts in;
+            # workspace discovery retains its existing default grammar.
             variants = []
             for tool in tools:
                 function = tool['function']
@@ -273,7 +284,7 @@ class Ollama(CancellableHTTPTransport):
             "actions": {"type": "array", "items": action_schema,
                         "minItems": 1, "maxItems": max_actions},
             "completed_step": {"type": "boolean"},
-        }, "required": ["actions", *(['completed_step'] if max_actions == 1 else [])],
+        }, "required": ["actions", *(['completed_step'] if mutation_actions else [])],
                   "additionalProperties": False}
         dialogue = []
         read_calls: dict[str, dict[str, Any]] = {}
@@ -327,7 +338,9 @@ class Ollama(CancellableHTTPTransport):
             "Set completed_step true when this response's action finishes the active "
             "subtask; false when more work remains there. The next response handles "
             "the following subtask.\n"
-        ) + json.dumps({'response': schema, **({'tools': tools} if max_actions > 1 else {})}) + '\n'
+        ) + json.dumps({'response': schema, **(
+            {'tools': tools} if max_actions > 1 and not bind_arguments else {}
+        )}) + '\n'
         base = str(dialogue[0]['content'])
         stable, separator, changing = base.partition('<turn_capabilities>')
         dialogue[0] = {**dialogue[0], 'content': stable + protocol + separator + changing}
@@ -378,10 +391,10 @@ class Ollama(CancellableHTTPTransport):
         """Create a small public execution plan for complex observed workspace work."""
         refs = list(dict.fromkeys(request_refs or []))[:16]
         schema = {'type': 'object', 'properties': {'changes': {
-            'type': 'array', 'minItems': 1, 'maxItems': 4, 'items': {
+            'type': 'array', 'minItems': 1, 'maxItems': 3, 'items': {
                 'type': 'object', 'properties': {
                     'goal': {'type': 'string', 'minLength': 1, 'maxLength': 160},
-                    'files': {'type': 'array', 'minItems': 1, 'maxItems': 1,
+                    'files': {'type': 'array', 'minItems': 1, 'maxItems': 3,
                               'items': {'type': 'string'}},
                     **({'request_refs': {'type': 'array', 'maxItems': 16,
                                          'items': {'type': 'string', 'enum': refs}}}
@@ -392,12 +405,14 @@ class Ollama(CancellableHTTPTransport):
         }}, 'required': ['changes'], 'additionalProperties': False}
         dialogue = [dict(m) for m in messages]
         dialogue[0] = {**dialogue[0], 'content': str(dialogue[0]['content']) + (
-            '\nFor this response propose 1-4 coherent changes, one target file per change, '
-            'for the remaining user goal. '
+            '\nFor this response propose 1-3 small behavior changes for the remaining user goal. '
+            'Group only files needing edits for each behavior, including focused tests '
+            '(1-3 target files per change), '
+            'rather than assigning an entire module to one change. '
             'Initial inspection is done. Use observed project paths and preserve all constraints. '
             'Include requested code, test and documentation changes. Link each change to '
             'the exact request references it addresses; these links do not prove completion. '
-            'Klaude appends project-check execution and final coverage review after the changes. '
+            'Klaude runs project checks after each change, then a final coverage review. '
             'Return only change proposals; perform no tools in this response.\n'
         ) + json.dumps(schema)}
         reply = self.chat(model, dialogue, options=options, think=think, response_format=schema)
@@ -406,11 +421,11 @@ class Ollama(CancellableHTTPTransport):
             changes = result['changes']
             valid = (isinstance(result, dict) and set(result) == {'changes'}
                      and isinstance(changes, list))
-            valid = valid and 1 <= len(changes) <= 4 and all(
+            valid = valid and 1 <= len(changes) <= 3 and all(
                 isinstance(s, dict) and set(s) == {
                     'goal', 'files', *(['request_refs'] if refs else [])}
                 and isinstance(s['goal'], str) and 1 <= len(s['goal']) <= 160
-                and isinstance(s['files'], list) and len(s['files']) == 1
+                and isinstance(s['files'], list) and 1 <= len(s['files']) <= 3
                 and all(isinstance(p, str) and 0 < len(p) <= 500 for p in s['files'])
                 and (not refs or (isinstance(s['request_refs'], list)
                                  and len(s['request_refs']) <= 16
@@ -421,12 +436,17 @@ class Ollama(CancellableHTTPTransport):
             valid = False
         if not valid:
             raise OllamaError('model returned an invalid workspace plan')
-        steps = [{**change, 'kind': 'implement'} for change in changes]
-        steps += [
-            {'goal': 'Run project checks and repair failures', 'kind': 'validate', 'files': []},
-            {'goal': 'Review every original request reference and report coverage honestly',
-             'kind': 'review', 'files': []},
-        ]
+        steps = []
+        for phase, change in enumerate(changes):
+            steps.extend([
+                {**change, 'kind': 'implement', 'phase': phase},
+                {'goal': 'Check this behavior and repair failures before the next change',
+                 'kind': 'validate', 'files': [], 'phase': phase},
+            ])
+        steps.append({
+            'goal': 'Review every original request reference and report coverage honestly',
+            'kind': 'review', 'files': [],
+        })
         return {'role': 'assistant', 'content': '', 'workspace_plan': steps}
 
     def embed(self, model: str, texts: list[str]) -> list[list[float]]:
@@ -482,6 +502,8 @@ class Ollama(CancellableHTTPTransport):
                                 "done_reason",
                                 "total_duration",
                                 "load_duration",
+                                "prompt_eval_duration",
+                                "eval_duration",
                                 "prompt_eval_count",
                                 "eval_count",
                             )

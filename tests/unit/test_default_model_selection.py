@@ -28,7 +28,7 @@ def packet(cfg):
 def native(setup, monkeypatch, declarations):
     cfg, registry, _ = setup
     connection = registry.load()["default-ollama"]
-    module = "klaude_cli.default_model_selection."
+    module = "klaude_application.default_model_selection."
     monkeypatch.setattr(
         module + "discover_connection",
         lambda c, _key: (
@@ -118,7 +118,7 @@ def test_disabled_model_and_failing_verification_are_not_selected(setup, monkeyp
     def reject(*_args, **_kwargs):
         raise ValueError("metadata unavailable")
 
-    monkeypatch.setattr("klaude_cli.default_model_selection.inspect_model", reject)
+    monkeypatch.setattr("klaude_application.default_model_selection.inspect_model", reject)
     proposals = read_default_candidates(packet(cfg))["proposals"]
     assert all(not p["reference"].endswith("/disabled") for p in proposals)
     assert not any(p["role"] == "vision" for p in proposals)
@@ -164,7 +164,7 @@ def test_standard_only_roles_skip_thinking_required_models(setup, monkeypatch):
         connection_id=connection.id,
     )
     monkeypatch.setattr(
-        "klaude_cli.default_model_selection.discover_connection",
+        "klaude_application.default_model_selection.discover_connection",
         lambda c, _key: [thinking] if c.id == connection.id else [],
     )
     assert read_default_candidates(packet(cfg))["proposals"] == []

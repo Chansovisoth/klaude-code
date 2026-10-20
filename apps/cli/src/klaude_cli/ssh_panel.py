@@ -9,6 +9,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
+from klaude_application.ssh_operations import SSHDiagnostic
 from klaude_core.ssh_servers import TIMEOUT, SSHServer
 
 from .session_actions import SSHServerChange
@@ -405,14 +406,11 @@ class SSHPanel:
         self.read = None
 
     def load(self, operation: str) -> None:
-        request = {
-            "kind": "ssh_servers",
-            "config_dir": str(self.host.cfg.config_dir),
-            "operation": operation,
-            "target": self.target,
-            "revision": self.record().get("revision", ""),
-            "agent_socket": os.environ.get("SSH_AUTH_SOCK", ""),
-        }
+        request = SSHDiagnostic.for_client(
+            self.host.cfg, operation, target=self.target,
+            revision=self.record().get("revision", ""),
+            agent_socket=os.environ.get("SSH_AUTH_SOCK", ""),
+        ).worker_request()
         identity = self.host._background_jobs.submit(READ, request, timeout=TIMEOUT)
         self.read = (
             identity,

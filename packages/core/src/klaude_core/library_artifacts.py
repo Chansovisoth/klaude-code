@@ -1,7 +1,8 @@
 """Private managed copies, independent of sessions and knowledge indexing.
 
-Content and metadata share one SQLite transaction. Browsing selects metadata
-only; importing, tagging and archiving never invoke a model or an indexer.
+Content and metadata share one SQLite transaction. Browsing reads metadata and
+bounded headers for images missing dimensions; importing, tagging and archiving
+never invoke a model or an indexer.
 """
 
 from __future__ import annotations
@@ -29,6 +30,11 @@ MAX_BYTES = 32 * 1024 * 1024
 PAGE_SIZE = 100
 KINDS = ("document", "media", "research")
 ID = re.compile(r"^(document|media|research):[0-9a-f]{32}$")
+_IMAGE_HEADER_COLUMN = (
+    "CASE WHEN mime IN ('image/png','image/jpeg','image/webp','image/gif') "
+    "AND (width IS NULL OR height IS NULL) THEN substr(content,1,65536) "
+    "END AS _image_header"
+)
 
 
 def plain(value: str, limit: int = 500) -> str:
@@ -83,6 +89,18 @@ def image_header(data: bytes) -> tuple[str, int | None, int | None]:
                 1 + int.from_bytes(data[24:27], "little"),
                 1 + int.from_bytes(data[27:30], "little"),
             )
+        chunk_size = int.from_bytes(data[16:20], "little")
+        if (data[12:16] == b"VP8 " and len(data) >= 30 and chunk_size >= 10
+                and not data[20] & 1 and data[23:26] == b"\x9d\x01\x2a"):
+            return (
+                "image/webp",
+                int.from_bytes(data[26:28], "little") & 0x3FFF,
+                int.from_bytes(data[28:30], "little") & 0x3FFF,
+            )
+        if (data[12:16] == b"VP8L" and len(data) >= 25 and chunk_size >= 5
+                and data[20] == 0x2F and data[24] >> 5 == 0):
+            dimensions = int.from_bytes(data[21:25], "little")
+            return "image/webp", (dimensions & 0x3FFF) + 1, ((dimensions >> 14) & 0x3FFF) + 1
         return "image/webp", None, None
     raise ValueError("Media accepts PNG, JPEG, GIF or WebP image headers")
 
@@ -154,6 +172,14 @@ class ArtifactStore:
         result = dict(row)
         result.pop("content", None)
         result.pop("rowid", None)
+        header = result.pop("_image_header", None)
+        # Older imports may lack dimensions. Derive only missing metadata from
+        # a bounded header, without decoding pixels or writing during browse.
+        if isinstance(header, bytes):
+            with contextlib.suppress(ValueError):
+                mime, width, height = image_header(header)
+                if mime == result["mime"]:
+                    result["width"], result["height"] = width, height
         result["tags"] = json.loads(result["tags"])
         # Imported names and provenance are untrusted terminal text.
         for key in ("name", "filename", "origin", "session", "job", "model"):
@@ -183,12 +209,13 @@ class ArtifactStore:
         offset: int = 0,
         sort: str = "newest",
         format: str = "",
+        include_total: bool = False,
     ) -> dict[str, Any]:
         if kind not in (*KINDS, "all") or sort not in {"newest", "oldest", "name"}:
             raise ValueError("Unknown artifact filter or order")
         regular_path(self.path)
         if not self.path.exists():
-            return {"items": [], "more": False}
+            return {"items": [], "more": False, **({"total": 0} if include_total else {})}
         where = "archived=?"
         values: list[Any] = [int(archived)]
         if kind != "all":
@@ -201,6 +228,8 @@ class ArtifactStore:
             sort
         ]
         with self.database() as db:
+            if include_total:
+                db.execute("BEGIN")
             ai, join = self.tag_columns(db)
             if query:
                 columns = ["name", "tags", "origin", "mime"] + (["generated_tags"] if join else [])
@@ -208,9 +237,13 @@ class ArtifactStore:
                     f"instr(lower({column}),lower(?))>0" for column in columns
                 ) + ")"
                 values += [query[:200]] * len(columns)
+            total = db.execute(
+                "SELECT count(*) FROM artifacts" + join + " WHERE " + where, values
+            ).fetchone()[0] if include_total else None
             rows = db.execute(
                 "SELECT artifacts.rowid,id,kind,name,filename,mime,size,sha256,created,origin,"
                 "session,job,model,width,height,tags,archived,revision," + ai
+                + "," + _IMAGE_HEADER_COLUMN
                 + " FROM artifacts" + join + " "
                 "WHERE " + where + " ORDER BY " + order + ",id LIMIT ? OFFSET ?",
                 (*values, PAGE_SIZE + 1, max(0, min(offset, 1_000_000))),
@@ -218,6 +251,7 @@ class ArtifactStore:
         return {
             "items": [self.metadata(row) for row in rows[:PAGE_SIZE]],
             "more": len(rows) > PAGE_SIZE,
+            **({"total": total} if include_total else {}),
         }
 
     def get(self, identity: str) -> dict[str, Any]:
@@ -227,7 +261,8 @@ class ArtifactStore:
             ai, join = self.tag_columns(db)
             row = db.execute(
                 "SELECT artifacts.rowid,id,kind,name,filename,mime,size,sha256,created,origin,"
-                "session,job,model,width,height,tags,archived,revision," + ai + " "
+                "session,job,model,width,height,tags,archived,revision," + ai
+                + "," + _IMAGE_HEADER_COLUMN + " "
                 "FROM artifacts" + join + " WHERE id=?",
                 (identity,),
             ).fetchone()
@@ -303,6 +338,11 @@ class ArtifactStore:
                 None,
                 None,
             )
+            if mime.startswith("image/"):
+                with contextlib.suppress(ValueError):
+                    detected = image_header(data[:65536])
+                    if detected[0] == mime:
+                        _, width, height = detected
         if db is None:
             with self.database(write=True) as owned:
                 return self._insert(data, kind, filename, origin, session, job, model, db=owned)
@@ -332,6 +372,14 @@ class ArtifactStore:
         )
         row = db.execute("SELECT * FROM artifacts WHERE id=?", (identity,)).fetchone()
         return self.metadata(row)
+
+    def import_bytes(self, data: bytes, kind: str, filename: str) -> dict[str, Any]:
+        """Import an already captured upload, without trusting a caller's host path."""
+        if kind not in {"document", "media"} or not isinstance(data, bytes):
+            raise ValueError("Choose document or media")
+        if not filename or len(filename) > 160 or any(c in filename for c in "/\\\x00"):
+            raise ValueError("Invalid upload filename")
+        return self._insert(data, kind, filename, "Browser upload")
 
     def import_file(self, source: Path, kind: str, *, session: str = "") -> dict[str, Any]:
         if kind not in {"document", "media"}:

@@ -333,7 +333,9 @@ class ChatImages:
                     try:
                         _, refs = unpack_input(private)
                         self.remember(refs)
-                        candidate = private
+                        # The private input envelope also carries text files.
+                        # Their retry must not require Vision to be enabled.
+                        candidate = private if refs else None
                     except ValueError:
                         pass
             elif turn.get("role") == "assistant":

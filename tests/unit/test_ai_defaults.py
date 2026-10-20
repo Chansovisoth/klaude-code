@@ -1,4 +1,5 @@
 import json
+import uuid
 from dataclasses import asdict, replace
 from types import SimpleNamespace
 
@@ -19,6 +20,17 @@ from klaude_core.model_connections import ModelConnection, connection_registry
 from klaude_core.model_management import ModelChange, apply_model_change, startup_snapshot
 from klaude_core.settings_store import SettingsConflictError, update_settings
 from klaude_core.utility import public_dialogue, run_utility
+
+
+def test_shared_utility_command_keeps_private_request_out_of_repr(setup):
+    from klaude_application.utility import UtilityCommand
+
+    cfg, _, _ = setup
+    packet = {**request(cfg), "kind": "utility", "environment_keys": {"API_KEY": "secret"}}
+    command = UtilityCommand.from_worker(packet)
+    assert command.task == "recap" and "secret" not in repr(command)
+    with pytest.raises(ValueError, match="Invalid Utility"):
+        UtilityCommand.from_worker({**packet, "task": "shell"})
 
 
 @pytest.fixture
@@ -80,6 +92,96 @@ def test_role_updates_merge_fields_and_reject_stale_same_field(setup):
     )
     with pytest.raises(SettingsConflictError):
         save_defaults(cfg, chat)
+
+
+def test_journaled_model_defaults_recover_ignores_unrelated_preferences(
+    setup, monkeypatch,
+):
+    from klaude_application.model_default_settings import (
+        ModelDefaultsUnconfirmed,
+        model_defaults_resource,
+        recover_model_defaults,
+        save_model_defaults,
+    )
+    from klaude_application.operation_journal import OperationJournal
+
+    cfg, _, lab = setup
+    journal = OperationJournal(cfg.data_dir / "operations.db")
+    request_id = uuid.uuid4().hex
+
+    def lose_ack(*_args, **_kwargs):
+        raise OSError("ack lost")
+
+    monkeypatch.setattr(journal, "finish", lose_ack)
+    with pytest.raises(ModelDefaultsUnconfirmed, match="recover"):
+        save_model_defaults(
+            cfg, change(setup, "utility", lab.model_ref("small")),
+            journal, request_id, "session",
+        )
+    assert journal.resource_busy(model_defaults_resource(cfg.data_dir))
+    update_settings(cfg.data_dir / "chat-preferences.json", {("custom",): 42})
+    recovered = OperationJournal(journal.path)
+    assert recover_model_defaults(cfg, recovered, request_id, "session").state == (
+        "completed"
+    )
+    assert not recovered.resource_busy(model_defaults_resource(cfg.data_dir))
+    assert read_defaults(cfg).utility == lab.model_ref("small")
+
+
+def test_journaled_model_defaults_lost_start_ack_has_recovery_path(setup, monkeypatch):
+    from klaude_application.model_default_settings import (
+        ModelDefaultsUnconfirmed,
+        recover_model_defaults,
+        save_model_defaults,
+    )
+    from klaude_application.operation_journal import OperationJournal
+
+    cfg, _, lab = setup
+    journal = OperationJournal(cfg.data_dir / "operations.db")
+    request_id = uuid.uuid4().hex
+    start = journal.start
+
+    def lose_start_ack(*args):
+        start(*args)
+        raise OSError("start acknowledgement lost")
+
+    monkeypatch.setattr(journal, "start", lose_start_ack)
+    with pytest.raises(ModelDefaultsUnconfirmed, match="recover"):
+        save_model_defaults(
+            cfg, change(setup, "utility", lab.model_ref("small")),
+            journal, request_id, "session",
+        )
+    assert read_defaults(cfg).utility != lab.model_ref("small")
+    assert journal.status(request_id, "session").state == "unknown"
+    assert recover_model_defaults(
+        cfg, OperationJournal(journal.path), request_id, "session",
+    ).state == "failed"
+
+
+def test_journaled_model_defaults_rejects_changed_role_on_recovery(setup, monkeypatch):
+    from klaude_application.model_default_settings import (
+        ModelDefaultsUnconfirmed,
+        recover_model_defaults,
+        save_model_defaults,
+    )
+    from klaude_application.operation_journal import OperationConflict, OperationJournal
+
+    cfg, _, lab = setup
+    journal = OperationJournal(cfg.data_dir / "operations.db")
+    request_id = uuid.uuid4().hex
+
+    def lose_ack(*_args, **_kwargs):
+        raise OSError("ack lost")
+
+    monkeypatch.setattr(journal, "finish", lose_ack)
+    with pytest.raises(ModelDefaultsUnconfirmed):
+        save_model_defaults(
+            cfg, change(setup, "utility", lab.model_ref("small")),
+            journal, request_id, "session",
+        )
+    save_defaults(cfg, change(setup, "utility", lab.model_ref("other")))
+    with pytest.raises(OperationConflict, match="differs from both"):
+        recover_model_defaults(cfg, OperationJournal(journal.path), request_id, "session")
 
 
 @pytest.mark.parametrize(
@@ -292,6 +394,73 @@ def test_defaults_action_lane_works_without_session_database_and_drains(setup):
     assert events[0][0] == "ai_defaults_saved"
     assert events[0][1][2]["utility"] == lab.model_ref("small")
     assert read_defaults(cfg).utility == lab.model_ref("small")
+
+
+def test_defaults_action_lane_requires_journal_when_configured(setup):
+    cfg, _, lab = setup
+    events = []
+    writer = SessionActionWriter(
+        object(), lambda kind, value: events.append((kind, value)),
+        require_defaults_journal=True,
+    )
+    update = AIDefaultUpdate(
+        "session", uuid.uuid4().hex, cfg,
+        change(setup, "utility", lab.model_ref("small")),
+    )
+    assert writer.submit(update)
+    assert not writer.close(wait=True)
+    assert "journal unavailable" in events[0][1][3]
+    assert read_defaults(cfg).utility is None
+
+
+def test_defaults_action_lane_records_completed_receipt(setup):
+    from klaude_application.operation_journal import OperationJournal
+
+    cfg, _, lab = setup
+    journal = OperationJournal(cfg.data_dir / "operations.db")
+    events = []
+    writer = SessionActionWriter(
+        object(), lambda kind, value: events.append((kind, value)),
+        defaults_journal=journal, require_defaults_journal=True,
+    )
+    request_id = uuid.uuid4().hex
+    update = AIDefaultUpdate(
+        "session", request_id, cfg,
+        change(setup, "utility", lab.model_ref("small")),
+    )
+    assert writer.submit(update)
+    assert writer.close(wait=True)
+    assert events[0][0] == "ai_defaults_saved" and not events[0][1][3]
+    assert journal.status(request_id, "session").state == "completed"
+
+
+def test_cli_defaults_recovery_checks_exact_roles(setup, monkeypatch, capsys):
+    from klaude_application.model_default_settings import (
+        ModelDefaultsUnconfirmed,
+        save_model_defaults,
+    )
+    from klaude_application.operation_journal import OperationJournal
+    from klaude_cli import model_manager_commands
+
+    cfg, _, lab = setup
+    journal = OperationJournal(cfg.data_dir / "operations.db")
+    request_id = uuid.uuid4().hex
+
+    def lose_ack(*_args, **_kwargs):
+        raise OSError("ack lost")
+
+    monkeypatch.setattr(journal, "finish", lose_ack)
+    with pytest.raises(ModelDefaultsUnconfirmed):
+        save_model_defaults(
+            cfg, change(setup, "utility", lab.model_ref("small")),
+            journal, request_id, "session",
+        )
+    monkeypatch.setattr(model_manager_commands, "load_config", lambda: cfg)
+    model_manager_commands.defaults_recover(yes=True)
+    assert "Recovered" in capsys.readouterr().out
+    assert OperationJournal(journal.path).status(request_id, "session").state == (
+        "completed"
+    )
 
 
 def test_title_action_acknowledges_actual_save_even_if_history_fails(setup, monkeypatch):

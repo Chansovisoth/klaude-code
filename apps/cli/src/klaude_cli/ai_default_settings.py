@@ -7,11 +7,12 @@ import uuid
 from dataclasses import replace
 from typing import Any
 
+from klaude_application.utility import utility_request
+from klaude_application.vision import VisionCommand
 from klaude_core.ai_defaults import (
     AIDefaults,
     DefaultsChange,
     defaults_from_preferences,
-    read_defaults,
 )
 from klaude_core.image_content import IMAGE_BACKENDS
 from klaude_core.model_connections import ModelConnection, validate_model_id
@@ -32,46 +33,6 @@ def row(identity: str, label: str, value: str = "", **kwargs: Any) -> PanelRow:
 
 def back(target: str) -> PanelRow:
     return row("back", "Back", target=target, kind=RowKind.NAVIGATION, control=RowControl.BACK)
-
-
-def utility_request(
-    cfg: Any,
-    session_id: str,
-    chat_ref: str,
-    connections: Any = None,
-    defaults: AIDefaults | None = None,
-    native_options: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    from klaude_core.model_connections import connection_registry, legacy_connections
-
-    if connections is None:
-        registry = connection_registry(cfg)
-        connections = (
-            registry.load().values() if registry.path.exists() else legacy_connections(cfg)
-        )
-    if defaults is None:
-        defaults = read_defaults(cfg)
-    references = (defaults.utility or chat_ref, *defaults.fallbacks)
-    identities = {reference_parts(ref)[1] for ref in references}
-    names = {item.key_env for item in connections if item.id in identities and item.key_env}
-    return {
-        "kind": "utility",
-        "config_dir": str(cfg.config_dir),
-        "data_dir": str(cfg.data_dir),
-        "roles": dict(cfg.models),
-        "ollama_url": cfg.ollama_url,
-        "session_id": session_id,
-        "chat_ref": chat_ref,
-        "defaults": defaults.public(),
-        "native_options": {
-            name: value
-            for name, value in (native_options or {}).items()
-            if name in {"num_gpu", "num_thread"} and type(value) is int
-        },
-        "environment_keys": {
-            name: value for name in names if (value := os.environ.get(name)) and len(value) <= 8192
-        },
-    }
 
 
 class AIDefaultSettings:
@@ -569,20 +530,14 @@ class AIDefaultSettings:
             connection = self.connections[self.target]
             identity = self.host._background_jobs.submit(
                 "ai-defaults:vision",
-                {
-                    "kind": "vision",
-                    "operation": "inspect",
-                    "reference": reference,
-                    "config_dir": str(self.host.cfg.config_dir),
-                    "data_dir": str(self.host.cfg.data_dir),
-                    "roles": dict(self.host.cfg.models),
-                    "ollama_url": self.host.cfg.ollama_url,
-                    "expected": {
+                VisionCommand.for_client(
+                    self.host.cfg, "inspect", reference=reference,
+                    expected={
                         "connection_revision": connection.revision,
                         "credential_revision": self.credential_revisions.get(connection.id, ""),
                     },
-                    "environment_keys": self.host._model_settings.environment_keys(),
-                },
+                    environment_keys=self.host._model_settings.environment_keys(),
+                ).worker_request(),
                 timeout=INSPECT_TIMEOUT,
             )
             self.vision_check = (identity, self.host.session_id, self.role, reference)

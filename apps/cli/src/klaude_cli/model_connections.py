@@ -7,12 +7,12 @@ from dataclasses import asdict
 from typing import Any
 
 import typer
+from klaude_application.model_connections import ModelConnectionAdd, ModelConnectionService
 from klaude_core.config import load_config, provider_secret_revision
 from klaude_core.model_connections import (
     ModelConnection,
     connection_key,
     connection_registry,
-    legacy_connections,
 )
 from klaude_core.model_runtime import model_cache_generation, models_from_records
 from rich.console import Console
@@ -29,13 +29,8 @@ console = Console()
 def list_connections() -> None:
     """List endpoint identities without connecting or displaying credentials."""
     cfg = load_config()
-    registry = connection_registry(cfg)
     try:
-        connections = (
-            registry.load()
-            if registry.path.exists()
-            else {item.id: item for item in legacy_connections(cfg)}
-        )
+        connections = ModelConnectionService(cfg).list()
     except (ValueError, OSError) as exc:
         console.print(Text(str(exc), style="red"))
         raise typer.Exit(1) from exc
@@ -79,9 +74,7 @@ def add_connection(
                 {"deepseek": "DEEPSEEK_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(adapter, "")
             ),
         )
-        registry = connection_registry(cfg)
-        registry.migrate(cfg, cfg.data_dir / "chat-preferences.json")
-        registry.add(connection)
+        ModelConnectionService(cfg).add(ModelConnectionAdd(connection))
     except (ValueError, OSError) as exc:
         console.print(Text(str(exc), style="red"))
         raise typer.Exit(1) from exc

@@ -79,6 +79,35 @@ def test_chat_assembles_streamed_transport_for_tool_compatible_response():
     assert ollama.last_chat_metadata["eval_count"] == 2
 
 
+@pytest.mark.parametrize('streaming', [False, True])
+def test_native_stage_durations_survive_both_chat_paths_without_extra_requests(streaming):
+    requests = []
+    metrics = {'prompt_eval_duration': 1200000000, 'eval_duration': 400000000,
+               'total_duration': 1700000000, 'load_duration': 100000000,
+               'prompt_eval_count': 100, 'eval_count': 20}
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, text=json.dumps({
+            'message': {'content': 'done'}, 'done': True, **metrics,
+            'unrecognized_private_field': 'not retained',
+        }) + '\n')
+
+    runtime = Ollama('http://ollama.test')
+    runtime._chat_client_factory = lambda: httpx.Client(
+        base_url=runtime.base_url, transport=httpx.MockTransport(handler))
+    try:
+        if streaming:
+            list(runtime.chat_stream('model', []))
+        else:
+            runtime.chat('model', [])
+        assert len(requests) == 1
+        assert all(runtime.last_chat_metadata[key] == value for key, value in metrics.items())
+        assert 'unrecognized_private_field' not in runtime.last_chat_metadata
+    finally:
+        runtime.close()
+
+
 def test_tool_chat_reports_reasoning_only_output_limit():
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -472,11 +501,11 @@ def test_workspace_plan_request_is_constrained_public_data_without_callable_tool
         base_url=client.base_url, transport=httpx.MockTransport(handler))
     result = client.chat_workspace_plan('small', [{'role': 'system', 'content': 'system'}],
                                         request_refs=['r1', 'r2'])
-    assert result['workspace_plan'][0] == {**changes[0], 'kind': 'implement'}
+    assert result['workspace_plan'][0] == {**changes[0], 'kind': 'implement', 'phase': 0}
     assert [step['kind'] for step in result['workspace_plan']] == [
         'implement', 'validate', 'review']
     assert 'tools' not in requests[0]
-    assert requests[0]['format']['properties']['changes']['maxItems'] == 4
+    assert requests[0]['format']['properties']['changes']['maxItems'] == 3
     assert 'kind' not in requests[0]['format']['properties']['changes']['items']['properties']
 
 
@@ -560,9 +589,10 @@ def test_local_read_default_is_paged_and_explicit_ranges_stay_unchanged(
 
 
 @pytest.mark.parametrize(('files', 'reference'), [
-    (['app.py'], 'made_up'), (['app.py'], 1), (['app.py', 'tests/test_app.py'], 'r1'),
+    (['app.py'], 'made_up'), (['app.py'], 1),
+    (['a.py', 'b.py', 'c.py', 'd.py'], 'r1'),
 ])
-def test_workspace_plan_rejects_invalid_links_or_collapsed_file_changes(files, reference):
+def test_workspace_plan_rejects_invalid_links_or_oversized_behavior_changes(files, reference):
     from klaude_core.ollama import OllamaError
 
     client = Ollama()
@@ -572,6 +602,29 @@ def test_workspace_plan_rejects_invalid_links_or_collapsed_file_changes(files, r
     with pytest.raises(OllamaError, match='invalid workspace plan'):
         client.chat_workspace_plan('small', [{'role': 'system', 'content': 'system'}],
                                    request_refs=['r1'])
+
+
+def test_workspace_plan_pairs_behaviors_with_tests_and_checks_between_phases():
+    changes = [
+        {'goal': 'Handle empty input', 'files': ['app.py', 'tests/test_app.py']},
+        {'goal': 'Preserve prior results', 'files': ['app.py', 'tests/test_app.py', 'README.md']},
+    ]
+    runtime = Ollama()
+    captured = []
+
+    def chat(model, messages, **kwargs):
+        captured.append(kwargs)
+        return {'content': json.dumps({'changes': changes})}
+
+    runtime.chat = chat
+    result = runtime.chat_workspace_plan('model', [{'role': 'system', 'content': 'context'}])
+    steps = result['workspace_plan']
+    assert [step['kind'] for step in steps] == [
+        'implement', 'validate', 'implement', 'validate', 'review']
+    assert [step.get('phase') for step in steps] == [0, 0, 1, 1, None]
+    assert steps[0]['files'] == changes[0]['files']
+    assert steps[2]['files'] == changes[1]['files']
+    assert len(captured) == 1 and 'tools' not in captured[0]
 
 
 def test_constrained_batch_rejects_unknown_action_before_returning_any_calls():
@@ -682,6 +735,164 @@ def test_execution_discriminator_binds_arguments_and_preserves_completion(comple
         assert set(by_name['__finish__']['properties']['arguments']['properties']) == {'answer'}
         assert '"tools":' not in requests[0]['messages'][0]['content']
         assert json.dumps(tools) == original
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize('allow_finish', [False, True])
+def test_opted_in_read_actions_bind_exact_arguments_without_changing_batch_limit(allow_finish):
+    requests = []
+    tools = [
+        {'function': {'name': 'web_search', 'parameters': {
+            'type': 'object', 'properties': {'query': {'type': 'string'}},
+            'required': ['query'],
+        }}},
+        {'function': {'name': 'fetch_url', 'parameters': {
+            'type': 'object', 'properties': {'url': {'type': 'string'}},
+            'required': ['url'],
+        }}},
+    ]
+    original = json.dumps(tools)
+    client = Ollama('http://ollama.test')
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, text=json.dumps({
+            'message': {'content': json.dumps({'actions': [
+                {'tool': 'fetch_url', 'arguments': {'url': 'https://artist.example/work'}},
+            ]})}, 'done': True,
+        }) + '\n')
+
+    client._chat_client_factory = lambda: httpx.Client(
+        base_url=client.base_url, transport=httpx.MockTransport(handler))
+    try:
+        result = client.chat_structured_action(
+            'small', [{'role': 'system', 'content': ''}], tools=tools,
+            bind_arguments=True, allow_finish=allow_finish,
+        )
+        payload = requests[0]
+        actions = payload['format']['properties']['actions']
+        by_name = {v['properties']['tool']['enum'][0]: v
+                   for v in actions['items']['oneOf']}
+        assert actions['maxItems'] == 4
+        assert set(by_name) == {'web_search', 'fetch_url'} | (
+            {'__finish__'} if allow_finish else set()
+        )
+        for tool in tools:
+            fn = tool['function']
+            bound = by_name[fn['name']]['properties']['arguments']
+            assert bound['properties'] == fn['parameters']['properties']
+            assert bound['required'] == fn['parameters']['required']
+            assert bound['additionalProperties'] is False
+        if allow_finish:
+            assert set(by_name['__finish__']['properties']['arguments']['properties']) == {'answer'}
+        assert '"tools":' not in payload['messages'][0]['content']
+        assert result['tool_calls'][0]['function']['arguments'] == {
+            'url': 'https://artist.example/work',
+        }
+        assert json.dumps(tools) == original
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize('bound', [False, True])
+def test_bound_interactive_recovery_cannot_mix_a_read_with_a_dependent_question(bound):
+    from klaude_core.ollama import OllamaError
+
+    requests = []
+    tools = [{'function': {'name': name, 'parameters': {
+        'type': 'object', 'properties': {key: {'type': 'string'}}, 'required': [key],
+    }}} for name, key in [('fetch_url', 'url'), ('request_user_input', 'question')]]
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, text=json.dumps({
+            'message': {'content': json.dumps({'actions': [
+                {'tool': 'fetch_url', 'arguments': {'url': 'https://artist.example/work'}},
+                {'tool': 'request_user_input', 'arguments': {'question': 'Is the title there?'}},
+            ]})}, 'done': True,
+        }) + '\n')
+
+    client = Ollama('http://ollama.test')
+    client._chat_client_factory = lambda: httpx.Client(
+        base_url=client.base_url, transport=httpx.MockTransport(handler))
+    try:
+        args = ('small', [{'role': 'system', 'content': ''}])
+        if bound:
+            with pytest.raises(OllamaError, match='invalid constrained action'):
+                client.chat_structured_action(*args, tools=tools, bind_arguments=True)
+        else:
+            assert len(client.chat_structured_action(*args, tools=tools)['tool_calls']) == 2
+        schema = requests[0]['format']
+        assert schema['properties']['actions']['maxItems'] == (1 if bound else 4)
+        assert schema['required'] == ['actions']
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize('permission', ['allow', 'ask', 'deny'])
+def test_bound_lookup_recovery_through_runtime_preserves_permission_and_outcome_checks(permission):
+    from klaude_core import Agent, PermissionGate, Tool
+    from klaude_core.model_runtime import OllamaRuntime
+
+    requests = []
+    executed = []
+
+    def handler(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if len(requests) == 1:
+            content = '{"name":"web_search","arguments":{"query":"artist"}}'
+        else:
+            assert 'oneOf' in payload['format']['properties']['actions']['items']
+            action = (
+                {'tool': 'web_search', 'arguments': {'query': 'artist portfolio'}}
+                if len(requests) == 2 else
+                {'tool': 'fetch_url', 'arguments': {'url': 'https://artist.example/work'}}
+                if len(requests) == 3 else
+                {'tool': '__finish__', 'arguments': {
+                    'answer': 'The work is titled Party, from 2024.',
+                }}
+            )
+            content = json.dumps({'actions': [action]})
+        return httpx.Response(200, text=json.dumps({
+            'message': {'content': content}, 'done': True,
+        }) + '\n')
+
+    client = Ollama('http://ollama.test')
+    client._chat_client_factory = lambda: httpx.Client(
+        base_url=client.base_url, transport=httpx.MockTransport(handler))
+
+    def search(**_):
+        executed.append('search')
+        return {'content': 'Portfolio lead', 'metadata': {
+            'search_results': [{'url': 'https://artist.example/work'}],
+        }}
+
+    def fetch(**_):
+        executed.append('fetch')
+        return {'content': 'Portfolio: the work is titled Party, from 2024. ' * 8,
+                'metadata': {'source_id': 'src_001'}}
+
+    tools = [Tool(name, name, {'type': 'object', 'properties': {key: {'type': 'string'}},
+                              'required': [key]}, fn)
+             for name, key, fn in [('web_search', 'query', search), ('fetch_url', 'url', fetch)]]
+    try:
+        runtime = OllamaRuntime(client)
+        assert runtime.supports_bound_action_arguments is True
+        agent = Agent(runtime, 'small', tools,
+                      PermissionGate({'web_search': 'allow', 'fetch_url': permission},
+                                     lambda *_: 'n'), 'system')
+        events = list(agent.run('Look up this work and read the portfolio page.'))
+        # Denied routes are absent from the response scope: even a provider
+        # returning that action is rejected before another model request.
+        assert len(requests) == (3 if permission == 'deny' else 4)
+        assert executed == (['search', 'fetch'] if permission == 'allow' else ['search'])
+        assert agent.last_task_progress['status'] == ('complete' if permission == 'allow'
+                                                    else 'partial')
+        assert any(e.kind == 'error' for e in events) is (permission != 'allow')
+        if permission != 'allow':
+            assert not any('Party' in e.payload.get('content', '') for e in events)
     finally:
         client.close()
 

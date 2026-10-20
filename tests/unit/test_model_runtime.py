@@ -152,6 +152,61 @@ def test_openrouter_credit_rejection_does_not_expose_provider_account_body(monke
     assert "provider response body" not in str(raised.value)
 
 
+@pytest.mark.parametrize('think,reasoning', [
+    (False, {'enabled': False}), ('off', {'enabled': False}),
+    (True, {'enabled': True}), ('low', {'effort': 'low'}),
+    (None, None), ('auto', None),
+])
+def test_openrouter_explicit_thinking_controls_override_provider_defaults(
+    monkeypatch, think, reasoning,
+):
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return iter([{'choices': [{'finish_reason': 'stop', 'delta': {'content': 'done'}}]}])
+
+    runtime = OpenRouterRuntime('test')
+    monkeypatch.setattr(runtime, '_client', lambda: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
+    runtime.chat('model', [], think=think)
+    assert captured.get('extra_body', {}).get('reasoning') == reasoning
+
+
+@pytest.mark.parametrize('streaming', [False, True])
+def test_openrouter_output_limit_retains_usage_without_publishing_partial_calls(
+    monkeypatch, streaming,
+):
+    runtime = OpenRouterRuntime('test')
+    runtime.last_chat_metadata = {'usage': {'prompt_tokens': 999}}
+    fragments = [{'id': 'limited', 'choices': [{'finish_reason': 'length', 'delta': {
+        'reasoning_details': [{'type': 'reasoning.encrypted', 'data': 'private'}],
+        'tool_calls': [{'index': 0, 'id': 'partial', 'function': {
+            'name': 'write_file', 'arguments': '{"path":"unfinished.py","content":',
+        }}],
+    }}], 'usage': {'prompt_tokens': 123, 'completion_tokens': 4096}}]
+    monkeypatch.setattr(runtime, '_stream', lambda *a, **kw: iter(fragments))
+    seen = []
+    with pytest.raises(RuntimeError, match='output limit reached'):
+        if streaming:
+            for fragment in runtime.chat_stream('model', []):
+                seen.append(fragment)
+        else:
+            seen.append(runtime.chat('model', []))
+    assert seen == []
+    assert normalize_token_usage(runtime.last_chat_metadata) == (123, 4096)
+    assert runtime.last_chat_metadata['finish_reason'] == 'length'
+    assert 'private' not in str(runtime.last_chat_metadata)
+
+    def failure(*a, **kw):
+        raise RuntimeError('request rejected before stream')
+
+    monkeypatch.setattr(runtime, '_stream', failure)
+    with pytest.raises(RuntimeError, match='before stream'):
+        list(runtime.chat_stream('model', [])) if streaming else runtime.chat('model', [])
+    assert runtime.last_chat_metadata == {}
+
+
 def test_model_info_has_stable_canonical_ref_and_derived_metadata():
     local = ModelInfo("ollama", "qwen3.5:9b", "qwen3.5:9b")
     cloud = ModelInfo("openai_api", "gpt-test", "gpt-test")

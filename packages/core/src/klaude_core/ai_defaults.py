@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -118,7 +120,10 @@ class DefaultsChange:
     automatic: bool = False
 
 
-def save_defaults(cfg: Any, change: DefaultsChange) -> dict[str, Any]:
+def save_defaults(
+    cfg: Any, change: DefaultsChange, *,
+    before_publish: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     from .config import provider_secret_revision
 
     if change.field not in {
@@ -137,6 +142,8 @@ def save_defaults(cfg: Any, change: DefaultsChange) -> dict[str, Any]:
     path = cfg.data_dir / "chat-preferences.json"
     with settings_lock(registry.path), settings_lock(path), settings_lock(cfg.config_dir / ".env"):
         saved = read_settings(path)
+        keys = ("ai_defaults", "model_default_selections", "require_model_selection")
+        before = {key: deepcopy(saved.get(key)) for key in keys}
         defaults = defaults_from_preferences(cfg, saved)
         selections = saved.get("model_default_selections", {})
         selections = selections if isinstance(selections, dict) else {}
@@ -190,5 +197,8 @@ def save_defaults(cfg: Any, change: DefaultsChange) -> dict[str, Any]:
         # Keep the old unset marker meaningful for older clients without changing
         # last_model, which is session history rather than a default now.
         saved["require_model_selection"] = updated.chat is None
+        after = {key: deepcopy(saved.get(key)) for key in keys}
+        if before_publish is not None and before != after:
+            before_publish(before, after)
         atomic_write_private(path, json.dumps(saved, indent=2) + "\n")
         return updated.public()

@@ -5,6 +5,12 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from klaude_application.research import (
+    ResearchCreate,
+    ResearchRun,
+    ResearchService,
+    research_control_from_worker,
+)
 from klaude_cli.library_inventory import execute_library
 from klaude_cli.settings_panel import PanelAction, PanelState, render_body
 from klaude_core.ai_defaults import DefaultsChange, migrate_defaults, read_defaults, save_defaults
@@ -267,12 +273,44 @@ def test_queue_has_no_generation_and_respects_tool_availability(cfg, services):
         "draft": {"question": "Atomic writes", "model": "ollama/fixture", "format": "report"},
         "settings": ResearchDefaults().public(),
     }
-    result = execute_research_request(request)
+    reviewed = ResearchCreate.from_worker({
+        **request,
+        "draft": {**request["draft"], "queued": True},
+    })
+    assert "queued" not in reviewed.worker_fields()["draft"]
+    result = ResearchService().create(reviewed)
     assert result["item"]["status"] == "queued" and services == ([], [])
+    with pytest.raises(ValueError, match="Invalid Research create action"):
+        ResearchCreate.from_worker({**request, "draft": {**request["draft"], "extra": "bad"}})
     update_settings(
         cfg.data_dir / "chat-preferences.json", {("tool_availability", "web_search"): False}
     )
     assert execute_research_request(request).get("error") and services == ([], [])
+
+
+def test_research_run_contract_requires_exact_job_and_owner_ids():
+    request = ResearchRun("a" * 32, "b" * 32).worker_fields()
+    assert ResearchRun.from_worker(request).worker_fields() == request
+    with pytest.raises(ValueError, match="Invalid Research run action"):
+        ResearchRun.from_worker({**request, "owner": "another-client"})
+
+
+def test_shared_research_controls_route_existing_job_guards(cfg):
+    item = job(cfg)
+    service = ResearchService()
+    load = research_control_from_worker({
+        "kind": "research_control", "operation": "load", "target": item["id"],
+    })
+    assert service.control(load)["item"]["id"] == item["id"]
+    stop = research_control_from_worker({
+        "kind": "research_control", "operation": "stop", "target": item["id"],
+        "queued_only": True,
+    })
+    assert service.control(stop)["item"]["status"] == "cancelled"
+    with pytest.raises(ValueError, match="Invalid Research defaults action"):
+        research_control_from_worker({
+            "kind": "research_control", "operation": "defaults", "values": {},
+        })
 
 
 def test_form_review_widths_and_report_views(memory, monkeypatch):

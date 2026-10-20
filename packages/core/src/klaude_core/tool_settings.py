@@ -62,7 +62,8 @@ BUILTIN_TOOL_GROUPS = (
     ),
     (
         "ORCHESTRATION",
-        (("delegate_task", "Delegate read-only task"),),
+        (("discover_tools", "Find tools and Skills"),
+         ("delegate_task", "Delegate read-only task")),
     ),
 )
 

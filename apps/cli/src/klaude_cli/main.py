@@ -45,7 +45,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractContextManager, nullcontext
 from copy import copy
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime
 from difflib import get_close_matches
@@ -68,6 +68,28 @@ if TYPE_CHECKING:
 
 import httpx
 import typer
+from klaude_application.activity_text import activity_elapsed as _activity_elapsed
+from klaude_application.activity_text import activity_value as _activity_value
+from klaude_application.activity_text import completed_activity_text as _completed_activity_text
+from klaude_application.activity_text import subagent_activity_text as _subagent_activity_text
+from klaude_application.composition import compose_agent
+from klaude_application.knowledge import KnowledgeReader
+from klaude_application.lifecycle import SessionTurn
+from klaude_application.mcp_mutations import apply_embedded_mcp_mutation
+from klaude_application.model_activation import ModelActivation
+from klaude_application.operation_journal import OperationJournal
+from klaude_application.provider_secrets import ProviderSecretUpdate
+from klaude_application.runner import iter_agent_events
+from klaude_application.sessions import (
+    SessionArchiveChange,
+    SessionDeleteChange,
+    SessionDirectory,
+    SessionForkChange,
+    SessionRenameChange,
+    SessionsClearChange,
+)
+from klaude_application.skill_actions import SkillAction, SkillActionWriter
+from klaude_application.skill_runtime import InstalledSkillReader
 from klaude_core import (
     Agent,
     CodexAuthError,
@@ -91,7 +113,6 @@ from klaude_core import (
     TurnScope,
     WebResearchBudget,
     load_config,
-    save_provider_secret,
     supervise_agent_tasks,
 )
 from klaude_core.agent_settings import (
@@ -110,6 +131,7 @@ from klaude_core.config import (
 )
 from klaude_core.dates import find_establishment_date, operating_duration_since
 from klaude_core.intent import (
+    explicit_literal_response_request,
     explicit_local_file_read_request,
     explicit_only_tool_names,
     explicit_public_page_read_request,
@@ -122,7 +144,7 @@ from klaude_core.knowledge_tool_contract import (
     KNOWLEDGE_TOOL_DESCRIPTION,
     knowledge_tool_parameters,
 )
-from klaude_core.memory import explicit_memory_candidate, is_sensitive_memory
+from klaude_core.memory import SessionLeaseLost, explicit_memory_candidate, is_sensitive_memory
 from klaude_core.model_connections import (
     DEFAULT_IDS,
     connection_key,
@@ -168,6 +190,8 @@ from klaude_core.tool_settings import (
     availability_values,
     builtin_names,
 )
+from klaude_webhost.hosting import WEBUI_PORT, WebHostController
+from klaude_webhost.lan import lan_ipv4_addresses
 from prompt_toolkit import Application, PromptSession
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.application.current import get_app
@@ -257,11 +281,15 @@ from .mcp_management import (
 from .mcp_management import settings_page as mcp_settings_page
 from .mcp_mutations import (
     MCPAddDisabled,
+    MCPAddVerified,
     MCPEnable,
     MCPImport,
+    MCPImportSnapshot,
     MCPMutation,
     MCPMutationResult,
     MCPMutationWriter,
+    MCPOAuthEnable,
+    MCPOAuthLogout,
     MCPReload,
     MCPRemove,
     MCPToggle,
@@ -312,9 +340,7 @@ from .settings_panel import (
     render_header,
 )
 from .settings_writer import SettingsWriter
-from .skill_actions import SkillAction, SkillActionWriter
 from .skill_discovery import DETAIL_KIND, INSTALL_KIND, SEARCH_KIND, SkillDiscovery
-from .skill_runtime import InstalledSkillReader
 from .skills_panel import (
     skill_delete_confirmation_page,
     skill_delete_page,
@@ -445,17 +471,6 @@ CANCEL_CHOICE = "cancel"
 CHOICE_SECTION_PREFIX = "\0section:"
 CHOICE_INFO_PREFIX = "\0info:"
 TOGGLE_CHOICE_RE = re.compile(r"^(?P<label>.+): (?P<state>on|off) \(toggle\)$")
-ACTIVITY_SECRET_VALUE_RE = re.compile(
-    r"(?i)(?P<prefix>\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|password|passwd|"
-    r"secret|credential)s?\s*(?:=|:)\s*)(?P<value>[^\s,;]+)"
-)
-ACTIVITY_BEARER_RE = re.compile(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]+")
-ACTIVITY_SECRET_FLAG_RE = re.compile(
-    r"(?i)(\B--?(?:api[_-]?key|token|password|passwd|secret|credential)\s+)([^\s]+)"
-)
-ACTIVITY_URL_CREDENTIAL_RE = re.compile(r"(?i)(https?://)[^/@\s:]+(?::[^/@\s]*)?@")
-
-
 def _choice_section(title: str) -> str:
     return f"{CHOICE_SECTION_PREFIX}{title}"
 
@@ -580,6 +595,8 @@ PROVIDER_API_KEY_DESCRIPTIONS = {
 }
 
 SETTINGS_CATEGORY_FOR_KIND = {
+    "webui settings": "web ui",
+    "webui account": "web ui",
     "theme settings": "theme",
     "input field settings": "input field",
     "divider settings": "divider",
@@ -641,6 +658,7 @@ CAUTIOUS_ALLOWED_TOOLS = {
     "search_sessions",
     "list_recent_sessions",
     "list_commands",
+    "discover_tools",
     "request_user_input",
 }
 STATE_CHANGING_TOOLS = {
@@ -2571,6 +2589,9 @@ def _public_model_metadata(metadata: object) -> dict[str, Any]:
             "response_id",
             "routed_model",
             "error_type",
+            "request_phase",
+            "request_elapsed_seconds",
+            "output_started",
             "status",
             "prompt_eval_count",
             "eval_count",
@@ -2614,7 +2635,8 @@ def _agent_model_metadata(agent) -> dict[str, Any]:
         return _public_model_metadata(metadata)
     previous = getattr(agent, "last_request_usage", None)
     if isinstance(previous, tuple) and len(previous) == 2:
-        return {"usage": {"input_tokens": previous[0], "output_tokens": previous[1]},
+        return {**_public_model_metadata(metadata),
+                "usage": {"input_tokens": previous[0], "output_tokens": previous[1]},
                 "usage_from_previous_request": True}
     return _public_model_metadata(metadata)
 
@@ -2811,6 +2833,9 @@ CLI_COMMANDS = (
                 "Review permanent removal of one unused retained engine build/installation."),
     CommandSpec("model-manager ssh", CommandSurface.CLI, "model-manager ssh",
                 "SSH settings and diagnostics; remote serving uses model-manager serve."),
+    CommandSpec("model-manager defaults-recover", CommandSurface.CLI,
+                "model-manager defaults-recover [--yes]",
+                "Reconcile an uncertain Model Defaults save without replay."),
     CommandSpec("model-manager ssh list", CommandSurface.CLI, "model-manager ssh list",
                 "List SSH definitions without connecting."),
     CommandSpec("model-manager ssh add", CommandSurface.CLI,
@@ -2824,6 +2849,9 @@ CLI_COMMANDS = (
                 "Choose the diagnostics default; local means This machine."),
     CommandSpec("model-manager ssh remove", CommandSurface.CLI,
                 "model-manager ssh remove ID [--yes]", "Remove only the SSH definition."),
+    CommandSpec("model-manager ssh recover", CommandSurface.CLI,
+                "model-manager ssh recover [--yes]",
+                "Reconcile an uncertain SSH definition save without replay."),
     CommandSpec("model-manager ssh host-key", CommandSurface.CLI,
                 "model-manager ssh host-key ID", "Discover unverified host fingerprints."),
     CommandSpec("model-manager ssh trust", CommandSurface.CLI,
@@ -2881,6 +2909,9 @@ CLI_COMMANDS = (
     CommandSpec("library image-service", CommandSurface.CLI,
                 "library image-service [--endpoint URL] [--enable|--disable] [--yes]",
                 "Review a local native image service; no generation."),
+    CommandSpec("library image-service-recover", CommandSurface.CLI,
+                "library image-service-recover [--yes]",
+                "Reconcile an uncertain image-service setting save without replay."),
     CommandSpec("library generate", CommandSurface.CLI,
                 "library generate PROMPT [--width N] [--height N] [--steps N] [--seed N] [--yes]",
                 "Review one generated PNG and private Media save."),
@@ -3027,6 +3058,9 @@ CLI_COMMANDS = (
                 "Archive an idle session without deleting its content."),
     CommandSpec("sessions-restore", CommandSurface.CLI, "sessions restore SESSION_ID",
                 "Restore an archived conversation to normal session lists."),
+    CommandSpec("sessions-reconcile", CommandSurface.CLI,
+                "sessions reconcile SESSION_ID",
+                "Review an interrupted turn before allowing new work in its session."),
     CommandSpec(
         "sessions-delete",
         CommandSurface.CLI,
@@ -3194,7 +3228,7 @@ CHAT_COMMANDS = (
         "settings",
         CommandSurface.CHAT,
         "/settings [CATEGORY]",
-        "Configure Appearance, Models, Tools, MCPs, Skills, Memory, Library, "
+        "Configure Web UI, Appearance, Models, Tools, MCPs, Skills, Memory, Library, "
         "Permissions, provider credentials, and Runtime.",
         examples=(
             "/settings",
@@ -3209,6 +3243,7 @@ CHAT_COMMANDS = (
             "/settings mcps",
             "/settings library",
             "/settings runtime",
+            "/settings web",
         ),
     ),
     CommandSpec(
@@ -4397,6 +4432,14 @@ def _format_session_hits(hits: list[dict]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+def _recent_session_records(memory: Memory, limit: int = 10) -> list[dict]:
+    return [asdict(item) for item in SessionDirectory(memory).recent(limit)]
+
+
+def _session_search_records(memory: Memory, query: str, limit: int = 8) -> list[dict]:
+    return [asdict(item) for item in SessionDirectory(memory).search(query, limit)]
+
+
 def _format_recent_sessions(sessions: list[dict]) -> str:
     if not sessions:
         return "(no previous sessions)"
@@ -5022,28 +5065,6 @@ def _http_probe_display_lines(metadata: dict, result: str) -> list[str]:
     return lines
 
 
-def _activity_value(value: object, *, limit: int = 180) -> str:
-    """Produce one safe, stable transcript line from model-supplied tool arguments."""
-    text = " ".join(str(value or "").replace("\x00", "").split())
-    text = ACTIVITY_SECRET_VALUE_RE.sub(r"\g<prefix>[redacted]", text)
-    text = ACTIVITY_SECRET_FLAG_RE.sub(r"\1[redacted]", text)
-    text = ACTIVITY_BEARER_RE.sub(r"\1[redacted]", text)
-    text = ACTIVITY_URL_CREDENTIAL_RE.sub(r"\1[redacted]@", text)
-    return text if len(text) <= limit else text[: max(1, limit - 1)].rstrip() + "…"
-
-
-def _activity_elapsed(seconds: int) -> str:
-    """Format whole-turn elapsed time compactly for live and completed activity."""
-    seconds = max(0, int(seconds))
-    hours, remainder = divmod(seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if hours:
-        return f"{hours}h {minutes:02d}m {seconds:02d}s"
-    if minutes:
-        return f"{minutes}m {seconds:02d}s"
-    return f"{seconds}s"
-
-
 def _live_activity_label(activity: str) -> str:
     """Map public live activity text to one progressive lifecycle label."""
     normalized = str(activity).strip().casefold()
@@ -5080,18 +5101,6 @@ def _live_activity_label(activity: str) -> str:
     return "WORKING"
 
 
-def _completed_activity_text(label: object, detail: object, elapsed_seconds: object = None) -> str:
-    """Render a persisted milestone, accepting legacy events without elapsed time."""
-    safe_label = _activity_value(label, limit=32).casefold()
-    safe_detail = _activity_value(detail, limit=240)
-    if not safe_label or not safe_detail:
-        return ""
-    elapsed = ""
-    if type(elapsed_seconds) is int:
-        elapsed = f" ({_activity_elapsed(elapsed_seconds)})"
-    return f"[{safe_label}]{elapsed} {safe_detail}"
-
-
 def _tool_activity(tool: str, args: dict, *, completed: bool) -> tuple[str, str]:
     """Map real tool execution to a concise public activity state."""
     path = _activity_value(args.get("path") or ".")
@@ -5102,6 +5111,12 @@ def _tool_activity(tool: str, args: dict, *, completed: bool) -> tuple[str, str]
 
     if tool == "read_file":
         return ("explored" if completed else "exploring", f"Read {path}")
+    if tool == "read_skill":
+        return ("explored" if completed else "exploring",
+                f"Read Skill {_activity_value(args.get('name'))}")
+    if tool == "discover_tools":
+        return ("explored" if completed else "exploring",
+                f"Searched enabled tools and Skills for {query}")
     if tool == "list_dir":
         return ("explored" if completed else "exploring", f"Listed {path}")
     if tool == "grep":
@@ -5244,43 +5259,6 @@ def _active_tool_status(tool: str, args: dict) -> str:
     }:
         detail = remainder
     return f"{label} {detail}".strip()
-
-
-def _subagent_activity_text(payload: dict[str, Any]) -> str:
-    kind = payload.get("kind")
-    if kind not in {"subagent_finished", "subagent_rejected"}:
-        return ""
-    status = str(payload.get("status", "failed")).casefold()
-    label = {
-        "completed": "explored",
-        "cancelled": "cancelled",
-    }.get(status, "failed")
-    role = _activity_value(payload.get("role") or "read_research", limit=40).replace(
-        "_", "/"
-    )
-    steps = max(0, int(payload.get("model_steps") or 0))
-    calls = max(0, int(payload.get("tool_calls") or 0))
-    tokens = max(0, int(payload.get("input_tokens") or 0)) + max(
-        0, int(payload.get("output_tokens") or 0)
-    )
-    unknown_token_requests = max(0, int(payload.get("unknown_token_requests") or 0))
-    metrics = []
-    if steps:
-        metrics.append(f"{steps} model {'step' if steps == 1 else 'steps'}")
-    if calls:
-        metrics.append(f"{calls} tool {'call' if calls == 1 else 'calls'}")
-    if tokens:
-        metrics.append(f"{tokens:,} tokens")
-    if unknown_token_requests:
-        metrics.append(
-            f"token usage unavailable for {unknown_token_requests} "
-            f"{'request' if unknown_token_requests == 1 else 'requests'}"
-        )
-    suffix = f" ({' · '.join(metrics)})" if metrics else ""
-    outcome = "rejected" if kind == "subagent_rejected" else status
-    rendered = f"[{label}] {role} subagent {outcome}{suffix}"
-    summary = _activity_value(payload.get("summary"), limit=500)
-    return rendered + (f"\n  └ {summary}" if summary else "")
 
 
 def _delegate_task_preflight(args: dict) -> None:
@@ -5447,11 +5425,9 @@ def _query_knowledge_tool_result(
     k: int = 6,
 ) -> dict:
     target_library = library or collection
-    if callable(getattr(kn, "query_with_evidence", None)):
-        content, evidence = kn.query_with_evidence(query, target_library, k)
-    else:
-        content = kn.query_as_context(query, target_library, k)
-        evidence = []
+    result = KnowledgeReader(kn).context(query, target_library, k)
+    content = result.content
+    evidence = [asdict(item) for item in result.evidence]
     found = not content.startswith("No relevant local knowledge found.")
     return {
         "content": content,
@@ -5937,6 +5913,8 @@ def _is_standalone_code_generation_request(user_message: str) -> bool:
 
 def _tool_use_route(user_message: str) -> ToolUseRoute:
     text = _normalized_request_text(user_message)
+    if explicit_literal_response_request(user_message):
+        return ToolUseRoute.DIRECT_RESPONSE
     if (
         _is_command_reference_request(user_message)
         or resolve_command_help_request(user_message) is not None
@@ -6048,7 +6026,7 @@ def _select_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str]:
             )
             if name in tools
         ]
-    if explicitly_disallows_tools(user_message):
+    if explicitly_disallows_tools(user_message) or explicit_literal_response_request(user_message):
         return []
     explicit_only = explicit_only_tool_names(user_message, set(tools))
     if explicit_only is not None:
@@ -6336,7 +6314,20 @@ def _heuristic_tool_names(user_message: str, tools: dict[str, Tool]) -> list[str
     if not selected and _looks_like_public_lookup_term(user_message):
         add("search_sessions", "query_knowledge", "web_search", "fetch_url")
 
-    if _contains_request_phrase(text, ("today", "date", "time", "day is", "what day")):
+    # Historical/publication dates and task timings do not need the local clock.
+    # Broad bare-word matching also bloats otherwise focused research requests.
+    if re.search(
+        r"\b(?:today|tonight|right now|current_time)\b|"
+        r"\b(?:current|local|present)\s+(?:date|time)\b|"
+        r"\b(?:date|time)\s+(?:right\s+)?now\b|"
+        r"\bwhat\s+(?:date|time|day)\s+(?:is\s+it|it\s+is)\b",
+        text,
+    ) or re.fullmatch(
+        r"\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?"
+        r"(?:(?:what(?:'s| is)|tell me|show me|get)\s+(?:the\s+)?)?"
+        r"(?:date|time)(?:\s+(?:in|at)\s+[\w /+-]+)?[?!. ]*",
+        text,
+    ):
         add("current_time")
 
     weather_words = (
@@ -7100,10 +7091,12 @@ def _configured_mcp_tools(
 
     def make_invoke(server, remote_name: str):
         def invoke(**arguments):
-            return json.dumps(
-                client.call(server, remote_name, arguments),
-                ensure_ascii=False,
-            )
+            response = client.call(server, remote_name, arguments)
+            failed = response.get("is_error") is True
+            return {"content": json.dumps(response, ensure_ascii=False), "metadata": {
+                "is_error": failed, "status": "failed" if failed else "succeeded",
+                "mcp_server": server.name, "mcp_tool": remote_name,
+            }}
 
         return invoke
 
@@ -7189,7 +7182,16 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
         and cfg.permissions.get("web_search", "allow") != "deny",
     )
     S = {"type": "string"}
+    from klaude_core import tool_discovery
+
     tools += [
+        Tool(
+            "discover_tools",
+            tool_discovery.DESCRIPTION,
+            tool_discovery.PARAMETERS,
+            lambda query: agent_ref["agent"].discover_tools(query),
+            detail=lambda args: str(args.get("query", ""))[:240],
+        ),
         Tool(
             "read_skill",
             "Read a bounded part of an enabled installed Skill's SKILL.md or supporting file. "
@@ -7474,14 +7476,14 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
             "Use when the user asks what they said before.",
             {"type": "object", "properties": {"query": S, "question": S}, "required": []},
             lambda query="", question="": _format_session_hits(
-                memory.search_sessions(query or question)
+                _session_search_records(memory, query or question)
             ),
         ),
         Tool(
             "list_recent_sessions",
             "List recent Klaude conversation sessions with short previews.",
             {"type": "object", "properties": {}, "required": []},
-            lambda: _format_recent_sessions(memory.recent_sessions()),
+            lambda: _format_recent_sessions(_recent_session_records(memory)),
         ),
         Tool(
             "remember_fact",
@@ -7598,7 +7600,7 @@ def _build_agent(workdir: Path, model: str | None = None) -> tuple[Agent, Memory
 
     gate = PermissionGate(cfg.permissions, _ask_permission)
     initial_model = model or cfg.models["coder"]
-    agent = Agent(
+    agent = compose_agent(
         OllamaRuntime(ollama),
         initial_model,
         tools,
@@ -7978,22 +7980,32 @@ def _render(
             return
         try:
             memory.publish_session_event(
-                session_id, client_id, kind, payload, turn_id=turn_id
+                session_id, client_id, kind, payload, turn_id=turn_id,
+                **({"fence": session_turn.fence}
+                   if isinstance(memory, Memory) and session_turn is not None else {}),
             )
-        except sqlite3.Error:
+        except (sqlite3.Error, SessionLeaseLost):
             # Session mirroring is auxiliary to the local answer. Lease
             # cleanup below must still run if event persistence is degraded.
             return
 
     lease_keeper: SessionLeaseKeeper | None = None
+    session_turn = (
+        SessionTurn(memory, agent, session_id, client_id, turn_id, journal=True)
+        if live_lifecycle else None
+    )
 
-    if live_lifecycle and not memory.acquire_session_lease(
-        session_id, client_id, turn_id
-    ):
+    if session_turn is not None and not session_turn.claim():
         archived = getattr(memory, "session_archived", None)
+        interrupted = (
+            isinstance(memory, Memory)
+            and memory.session_live_state(session_id)["state"] == "interrupted"
+        )
         message = (
             "This session is archived; use klaude sessions restore SESSION_ID first."
             if callable(archived) and archived(session_id) else
+            f"Previous turn outcome is unknown; review effects, then run "
+            f"klaude sessions reconcile {session_id}." if interrupted else
             "This session already has an active worker; use /resume to follow it."
         )
         console.print(Text(message))
@@ -8002,15 +8014,10 @@ def _render(
         return ""
     if live_lifecycle:
         try:
-            from klaude_core.session_runtime import capture
-
-            memory.start_session_turn(
-                session_id,
-                client_id,
-                turn_id,
+            assert session_turn is not None
+            session_turn.start(
                 user_msg,
                 model_content=(effective_message if effective_message != user_msg else None),
-                **({"runtime": capture(agent)} if isinstance(memory, Memory) else {}),
             )
             cancel_transports = getattr(agent, "cancel_active_transports", None)
             lease_keeper = SessionLeaseKeeper(
@@ -8019,13 +8026,13 @@ def _render(
                 client_id,
                 turn_id,
                 on_lost=cancel_transports if callable(cancel_transports) else None,
+                fence=session_turn.fence,
             )
             lease_keeper.start()
             publish("activity", {"text": "working"})
         except Exception:
-            memory.release_session_lease(
-                session_id, client_id, turn_id, state="failed"
-            )
+            assert session_turn is not None
+            session_turn.release("failed")
             raise
     else:
         memory.log_turn(
@@ -8034,10 +8041,21 @@ def _render(
             user_msg,
             model_content=(effective_message if effective_message != user_msg else None),
         )
+
+    def save_assistant(content: str, model_content: object | None = None) -> None:
+        if session_turn is None:
+            if model_content is None:
+                memory.log_turn(session_id, "assistant", content)
+            else:
+                memory.log_turn(session_id, "assistant", content, model_content=model_content)
+        else:
+            session_turn.save_assistant(content, model_content=model_content)
+
     _print_trace(f"-> model [{getattr(agent, 'model', 'local')}] thinking...")
     prior_capability_observer = getattr(agent, "capability_observer", None)
     prior_subagent_observer = getattr(agent, "subagent_event_observer", None)
     prior_cancellation_check = getattr(agent, "cancellation_check", None)
+    prior_execution_guard = getattr(agent, "execution_guard", None)
     agent.capability_observer = lambda snapshot: publish(
         "capabilities", {"snapshot": snapshot}
     )
@@ -8051,6 +8069,8 @@ def _render(
 
     agent.subagent_event_observer = publish_subagent
     agent.cancellation_check = lambda: False
+    if session_turn is not None:
+        agent.execution_guard = session_turn.guard
     assistant_text: list[str] = []
     streamed_fragments: list[str] = []
     streamed_logged = False
@@ -8062,7 +8082,7 @@ def _render(
         TurnScope.REVIEW if read_only else None
     )
     try:
-        events = agent.run(effective_message, scope=effective_scope)
+        events = iter_agent_events(agent, effective_message, scope=effective_scope)
         for event in events:
             if event.kind == "text_delta" and event.payload.get("content"):
                 piece = event.payload["content"]
@@ -8081,15 +8101,7 @@ def _render(
                     _print_assistant_text(event.payload["content"], metadata, plain=plain)
                     publish("assistant_delta", {"text": event.payload["content"]})
                 model_message = event.payload.get("model_message")
-                if model_message is None:
-                    memory.log_turn(session_id, "assistant", event.payload["content"])
-                else:
-                    memory.log_turn(
-                        session_id,
-                        "assistant",
-                        event.payload["content"],
-                        model_content=model_message,
-                    )
+                save_assistant(event.payload["content"], model_message)
                 assistant_text.append(event.payload["content"])
             elif event.kind == "tool_start":
                 tool_name = event.payload["tool"]
@@ -8127,7 +8139,7 @@ def _render(
                 memory.log_turn(session_id, "system", {"event": "tool_audit", **audit})
                 if metadata.get("suppress_user_output"):
                     continue
-                tool_name = event.payload.get("tool")
+                tool_name = str(event.payload.get("tool") or "")
                 merged = {**pending_tool_start_metadata.pop(tool_name, {}), **metadata}
                 if tool_name == "web_search":
                     lines = _web_search_display_lines(merged, event.payload["result"])
@@ -8150,7 +8162,7 @@ def _render(
                     if not partial.endswith("\n"):
                         console.file.write("\n")
                         console.file.flush()
-                    memory.log_turn(session_id, "assistant", partial)
+                    save_assistant(partial)
                     assistant_text.append(partial)
                     streamed_logged = True
                 console.print(f"[red]error: {event.payload['message']}[/]")
@@ -8184,9 +8196,10 @@ def _render(
         agent.subagent_event_observer = prior_subagent_observer
         if prior_cancellation_check is not None:
             agent.cancellation_check = prior_cancellation_check
+        agent.execution_guard = prior_execution_guard
         if streamed_fragments and not streamed_logged:
             partial = "".join(streamed_fragments)
-            memory.log_turn(session_id, "assistant", partial)
+            save_assistant(partial)
             if partial not in assistant_text:
                 assistant_text.append(partial)
             streamed_logged = True
@@ -8214,23 +8227,21 @@ def _render(
             )
         if live_lifecycle:
             state = "interrupted" if interrupted else "failed" if turn_failed else "idle"
-            publish(
-                "turn_done",
-                {
-                    "cancelled": interrupted,
-                    "failed": turn_failed,
-                    "model_metadata": _public_model_metadata(
-                        getattr(getattr(agent, "ollama", None), "last_chat_metadata", {})
-                    ),
-                    "turn_capabilities": getattr(agent, "last_turn_capabilities", {}),
-                },
-            )
+            completion_payload = {
+                "cancelled": interrupted,
+                "failed": turn_failed,
+                "model_metadata": _public_model_metadata(
+                    getattr(getattr(agent, "ollama", None), "last_chat_metadata", {})
+                ),
+                "turn_capabilities": getattr(agent, "last_turn_capabilities", {}),
+            }
+            if session_turn is None or session_turn.journal is None:
+                publish("turn_done", completion_payload)
             if lease_keeper is not None:
                 lease_keeper.close()
             try:
-                memory.release_session_lease(
-                    session_id, client_id, turn_id, state=state
-                )
+                assert session_turn is not None
+                session_turn.release(state, completion_payload=completion_payload)
             except sqlite3.Error:
                 pass
     if ui_state is not None:
@@ -9021,40 +9032,8 @@ def _export_session(memory, session_id: str, agent, cfg, requested: str) -> Path
         directory = cfg.data_dir / "exports"
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{session_id}-{uuid.uuid4().hex[:8]}.md"
-    title = next(
-        (s["title"] for s in memory.resumable_sessions() if s["session_id"] == session_id),
-        "Klaude conversation",
-    )
-    blocks = [f"# {title}\n\nSession: {session_id}\n"]
-    for turn in memory.load_session(session_id, timestamps=True):
-        content = turn.get("content", "")
-        if turn.get("role") == "system" and isinstance(content, dict):
-            if content.get("event") == "edit_summary":
-                blocks.append("\n```text\n" + str(content.get("text", "")) + "\n```\n")
-            if content.get("event") == "activity_update":
-                activity = _completed_activity_text(
-                    content.get("label"),
-                    content.get("detail"),
-                    content.get("elapsed_seconds"),
-                )
-                if activity:
-                    timestamp = datetime.fromtimestamp(turn["ts"]).astimezone().isoformat()
-                    blocks.append(f"\n> {activity} · {timestamp}\n")
-            if content.get("event") == "input_request":
-                blocks.append(f"\n> [INPUT · KLAUDE] {content.get('question', '')}\n")
-            if content.get("event") == "input_answer" and content.get("answer") is not None:
-                blocks.append(f"\n> [INPUT · YOU] {content.get('answer', '')}\n")
-            if content.get("event") == "subagent_activity":
-                activity = _subagent_activity_text(content)
-                if activity:
-                    blocks.append(f"\n> {activity}\n")
-            continue
-        if not isinstance(content, str):
-            content = json.dumps(content, ensure_ascii=False)
-        timestamp = datetime.fromtimestamp(turn["ts"]).astimezone().isoformat()
-        blocks.append(f"\n## {turn['role']} · {timestamp}\n\n{content}\n")
     with path.open("x", encoding="utf-8") as exported:
-        exported.write("".join(blocks))
+        exported.writelines(SessionDirectory(memory).markdown_chunks(session_id))
     return path
 
 
@@ -9185,6 +9164,8 @@ class PersistentChatTUI:
         chat_preferences_path: Path | None = None,
         character_stream: bool = True,
         model_selection_required: bool = False,
+        mcp_journal: OperationJournal | None = None,
+        mcp_journal_required: bool = False,
     ) -> None:
         self.agent = agent
         self.memory = memory
@@ -9214,6 +9195,7 @@ class PersistentChatTUI:
         )
         self.pending: deque[str] = deque()
         self.running = False
+        self._accepted_turn: SessionTurn | None = None
         self.cancel_requested = threading.Event()
         self.shutting_down = False
         self.activity = "ready"
@@ -9266,7 +9248,12 @@ class PersistentChatTUI:
         self._local_models_error = ""
         self._background_jobs = OwnedBackgroundJobs(self._emit)
         self._session_io = SessionIOCoordinator(memory, self._emit)
-        self._session_actions = SessionActionWriter(memory, self._emit)
+        self._session_actions = SessionActionWriter(
+            memory, self._emit, ssh_journal=mcp_journal,
+            require_ssh_journal=mcp_journal_required,
+            image_journal=mcp_journal, require_image_journal=mcp_journal_required,
+            defaults_journal=mcp_journal, require_defaults_journal=mcp_journal_required,
+        )
         self._model_settings = ModelSettings(self)
         self._model_manager = ModelManager(self)
         self._ai_defaults = AIDefaultSettings(self)
@@ -9302,7 +9289,8 @@ class PersistentChatTUI:
         self._skill_inbox_preparation_attempted = False
         self._mcp_mutations = MCPMutationWriter(
             cfg.mcp_servers_file, self._emit, self._prepare_mcp_catalog,
-            auth_dir=cfg.mcp_auth_dir,
+            auth_dir=cfg.mcp_auth_dir, journal=mcp_journal,
+            require_journal=mcp_journal_required,
         )
         self._mcp_mutation_pending: tuple[MCPMutation, float] | None = None
         self._mcp_manage_save_state = ""
@@ -9408,7 +9396,8 @@ class PersistentChatTUI:
             cfg.data_dir / "chat-preferences.json"
         )
         self._settings_writer = SettingsWriter(
-            self.chat_preferences_path, self._emit, publish_tools=True
+            self.chat_preferences_path, self._emit, publish_tools=True,
+            compare_and_set=True,
         )
         self._appearance_writer = SettingsWriter(
             self.appearance_path,
@@ -10974,6 +10963,7 @@ class PersistentChatTUI:
             self.session_id, self.client_id, self._turn_id, self._session_event_cursor,
             bool(self.running and self._turn_id and now - self._last_lease_renewal >= 5),
             draft, queue_value, self._watching_remote, self._choice_kind == "session",
+            self._accepted_turn.fence if self._accepted_turn is not None else None,
         )
 
     def _request_session_sync(self) -> None:
@@ -12135,7 +12125,7 @@ class PersistentChatTUI:
         if kind == "settings":
             self._refresh_settings_overview()
             page = self._settings_home_page()
-            default_id = next((row.id for row in page.rows if (
+            default_id = next((row.id for row in page.rows if row.selectable and (
                 row.id == f"category:{default.casefold()}"
                 or row.legacy_label == default or row.label.casefold() == default.casefold()
             )), "")
@@ -12638,11 +12628,13 @@ class PersistentChatTUI:
                     provider_secret_revision(self.cfg.config_dir, env_name) if env_name else ""
                 )
                 self._model_activation_id = self._background_jobs.submit(
-                    "model-activation", {
+                    "model-activation",
+                    ModelActivation.from_worker({
                         "kind": "model_activation", "backend": info.backend, "key": key,
                         "config_dir": str(self.cfg.config_dir), "env_name": env_name,
                         "revision": revision,
-                    }, timeout=20,
+                    }).worker_request(),
+                    timeout=20,
                 )
                 if not await future or cancel.is_set():
                     raise RuntimeError(
@@ -12907,6 +12899,9 @@ class PersistentChatTUI:
             "effort",
         }
         choice_kind = self._choice_kind or ""
+        if choice_kind == "webui account":
+            self._open_webui_settings("account")
+            return
         if (choice_kind == "providers settings"
                 and getattr(getattr(self, "_model_manager", None), "owner_return", False)):
             self._model_manager.owner_return = False
@@ -12962,6 +12957,7 @@ class PersistentChatTUI:
             "permission preset": "permissions",
             "mcp permission tools": "mcp servers",
             "runtime settings": "settings",
+            "webui settings": "settings",
             "runtime device": "runtime",
             "CPU threads": "runtime",
             "context size": "runtime",
@@ -13559,6 +13555,142 @@ class PersistentChatTUI:
         self._settings_overview_request = None
         self._settings_overview_checked_at = 0.0
 
+    def _webui_controller(self) -> WebHostController:
+        return WebHostController(self.cfg.config_dir, self.cfg.data_dir)
+
+    def _webui_status_label(self) -> str:
+        try:
+            state = self._webui_controller().status()
+        except (OSError, ValueError, RuntimeError) as exc:
+            return f"Unavailable: {exc}"
+        if state.stopping:
+            return "Stopping · accepted work draining"
+        if state.restart_required:
+            return "ON · disable and enable to update host"
+        if state.running:
+            if not state.origin.endswith(f":{WEBUI_PORT}"):
+                return "ON · restart for port 50000"
+            if state.lan_origin.startswith("https://"):
+                return "ON · restart for LAN HTTP"
+            if state.lan_enabled and not state.lan_origin:
+                return "ON · LAN unavailable"
+            return "ON · running" if state.enabled else "Running · preference OFF"
+        return "ON · host stopped" if state.enabled else "OFF"
+
+    def _open_webui_settings(
+        self, focus: str = "enabled", *, reveal_password: bool = False,
+    ) -> None:
+        if reveal_password:
+            self._open_webui_account(reveal_password=True)
+            return
+        try:
+            controller = self._webui_controller()
+            state = controller.status()
+            rows: tuple[PanelRow, ...] = (
+                PanelRow("enabled", RowKind.TOGGLE, "Enable Web UI", checked=state.enabled,
+                         action=PanelAction("webui-toggle"),
+                         description="Starts a local browser host for this workspace"),
+                PanelRow("account", RowKind.NAVIGATION, "Account", "admin · local owner",
+                         action=PanelAction("webui-account"),
+                         description="Username, initial password and recovery"),
+                PanelRow("status", RowKind.INFO, "Status",
+                         "Older host · disable and enable Web UI to update" if
+                         state.restart_required else
+                         "Running at " + state.origin if state.running else
+                         "Stopping · accepted work draining" if state.stopping else "Stopped"),
+                PanelRow("port", RowKind.INFO, "Local and LAN port", str(WEBUI_PORT)),
+                PanelRow("runtime-owner", RowKind.INFO, "Runtime owner",
+                         state.runtime_instance or "Not hosted"),
+                PanelRow("hosted-session", RowKind.INFO, "Hosted session",
+                         state.session_id or "Not hosted"),
+                PanelRow("active-turns", RowKind.INFO, "Active hosted turns",
+                         str(state.active_turns)),
+                PanelRow("workspace", RowKind.INFO, "Workspace",
+                         state.workspace if state.running else str(Path.cwd().resolve())),
+                PanelRow("open", RowKind.ACTION, "Open Web UI",
+                         action=PanelAction("webui-open"),
+                         enabled=(state.running
+                                  and not state.restart_required
+                                  and state.workspace == str(Path.cwd().resolve()))),
+                PanelRow("lan-enabled", RowKind.TOGGLE, "LAN access",
+                         checked=state.lan_enabled, action=PanelAction("webui-lan-toggle"),
+                         description=("HTTP on your private network; chat and login "
+                                      "travel unencrypted")),
+                PanelRow("lan-address", RowKind.INFO, "LAN address",
+                         state.lan_origin or state.lan_ip or "Not selected"),
+                *(PanelRow(f"lan-ip:{ip}", RowKind.CHOICE, f"Use {ip}",
+                           "Selected" if ip == state.lan_ip and state.lan_enabled else "",
+                           action=PanelAction("webui-lan-select", ip))
+                  for ip in lan_ipv4_addresses()[:8]),
+                PanelRow("lan-link", RowKind.ACTION, "Show LAN link",
+                         action=PanelAction("webui-lan-link"),
+                         enabled=bool(state.lan_origin)
+                         and state.workspace == str(Path.cwd().resolve())),
+                PanelRow("lan-device", RowKind.INFO, "Other-device reachability",
+                         f"Recently reached from {state.lan_remote_peer}"
+                         if state.recent_lan_peer()
+                         else "Previously reached; recheck from device"
+                         if state.lan_remote_peer else "Not verified from another device"),
+                PanelRow("network-check", RowKind.ACTION, "Check port exposure",
+                         action=PanelAction("webui-network-check")),
+                PanelRow("back", RowKind.NAVIGATION, "Back", action=PanelAction("back"),
+                         footer=True),
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            rows = (
+                PanelRow("error", RowKind.STATUS, "Web UI settings unavailable", str(exc),
+                         status_tone="error"),
+                PanelRow("account", RowKind.NAVIGATION, "Account", "admin · local owner",
+                         action=PanelAction("webui-account"),
+                         description="Available locally even when the host is stopped"),
+                PanelRow("back", RowKind.NAVIGATION, "Back", action=PanelAction("back"),
+                         footer=True),
+            )
+            focus = "back"
+        self._open_panel(PanelPage("webui-settings", ("Settings", "Web UI"), rows,
+                                   subtitle="Local/LAN browser access · read-only tools"),
+                         "webui settings", focus)
+
+    def _open_webui_account(self, *, reveal_password: bool = False) -> None:
+        """Local owner credential view; never append password text to the transcript."""
+        configured = False
+        try:
+            controller = self._webui_controller()
+            configured = controller.account_configured()
+            initial = (controller.initial_admin_password()
+                       if reveal_password and configured else None)
+            rows: tuple[PanelRow, ...] = (
+                PanelRow("username", RowKind.INFO, "Username", "admin"),
+                PanelRow("account-type", RowKind.INFO, "Account type", "Local owner"),
+                PanelRow("account-status", RowKind.INFO, "Status",
+                         "Configured" if configured else "Created when Web UI is first enabled"),
+                PanelRow("initial-password", RowKind.ACTION,
+                         "Hide initial password" if initial is not None else
+                         "Show initial admin password",
+                         initial if initial is not None else
+                         "Already changed; use your saved password" if reveal_password else
+                         "Hidden · reveal only in this terminal",
+                         action=PanelAction("webui-initial-password"), enabled=configured),
+                PanelRow("change-password", RowKind.INFO, "Change password",
+                         "Web UI → Account → Change password"),
+                PanelRow("recovery", RowKind.INFO, "Forgot password?",
+                         "Run locally: klaude-webui --reset-admin-password",
+                         description="Generates a new password and signs out every browser"),
+                PanelRow("back", RowKind.NAVIGATION, "Back", action=PanelAction("back"),
+                         footer=True),
+            )
+        except (OSError, ValueError, RuntimeError):
+            configured = False
+            rows = (
+                PanelRow("error", RowKind.STATUS, "Account unavailable",
+                         "Local account storage could not be read", status_tone="error"),
+                PanelRow("back", RowKind.NAVIGATION, "Back", action=PanelAction("back"),
+                         footer=True),
+            )
+        self._open_panel(PanelPage("webui-account", ("Settings", "Web UI", "Account"), rows,
+                                   subtitle="Local admin information · credentials stay private"),
+                         "webui account", "initial-password" if configured else "back")
+
     def _settings_categories(self) -> list[str]:
         return [row.legacy_label for row in self._settings_home_page().rows]
 
@@ -13657,6 +13789,11 @@ class PersistentChatTUI:
         context_summary = f"{self.agent.ollama_options.get('num_ctx', 8192):,} context"
         runtime = f"{device} · {context_summary}"
         rows = [
+            PanelRow("section:interface", RowKind.SECTION, "INTERFACE",
+                     legacy_label=_choice_section("INTERFACE")),
+            PanelRow("category:web ui", RowKind.NAVIGATION, "Web UI",
+                     self._webui_status_label(), action=PanelAction("category", "web ui"),
+                     section_id="section:interface", legacy_label="Web UI"),
             PanelRow("section:assistant", RowKind.SECTION, "MODELS",
                      legacy_label=_choice_section("MODELS")),
             PanelRow("category:models", RowKind.NAVIGATION, "Models", model_detail,
@@ -13730,6 +13867,9 @@ class PersistentChatTUI:
         self, category: str, default: str | None = None, *, restore: bool = False
     ) -> None:
         begin_choice = partial(self._begin_choice, restore=restore, refresh=True)
+        if category == "web ui":
+            self._open_webui_settings()
+            return
         if category == "reset all":
             self._open_panel(PanelPage(
                 "settings-reset-confirmation", ("Settings", "Reset appearance settings"),
@@ -14846,6 +14986,77 @@ class PersistentChatTUI:
                 self._model_settings.open()
             else:
                 self._open_settings_category(action.target)
+        elif action.kind == "webui-toggle":
+            try:
+                controller = self._webui_controller()
+                state = controller.status()
+                if state.enabled or state.running or state.stopping:
+                    controller.disable()
+                    message = "Web UI disabled; the local host is stopping"
+                else:
+                    controller.enable(Path.cwd())
+                    message = "Web UI enabled; select Open Web UI to launch the browser"
+                self._open_webui_settings()
+                self._set_panel_feedback(message, "success")
+            except (OSError, ValueError, RuntimeError) as exc:
+                self._open_webui_settings()
+                self._set_panel_feedback(f"Web UI change failed: {exc}", "error")
+        elif action.kind == "webui-open":
+            try:
+                url = self._webui_controller().bootstrap_url()
+                opened = webbrowser.open(url)
+                self._set_panel_feedback(
+                    "Browser opened" if opened else f"Open Web UI: {url}",
+                    "success" if opened else "warning",
+                )
+            except (OSError, ValueError, RuntimeError) as exc:
+                self._set_panel_feedback(f"Could not open Web UI: {exc}", "error")
+        elif action.kind == "webui-account":
+            self._open_webui_account()
+        elif action.kind == "webui-initial-password":
+            password_row = self._panel.row("initial-password") if self._panel is not None else None
+            reveal = password_row is None or password_row.label != "Hide initial password"
+            self._open_webui_account(reveal_password=reveal)
+        elif action.kind == "webui-lan-toggle":
+            try:
+                controller = self._webui_controller()
+                controller.set_lan(not controller.lan_preference()[0], workspace=Path.cwd())
+                self._open_webui_settings("lan-enabled")
+                self._set_panel_feedback(
+                    "LAN access enabled" if controller.lan_preference()[0]
+                    else "LAN access disabled", "success",
+                )
+            except (OSError, ValueError, RuntimeError) as exc:
+                self._open_webui_settings("lan-enabled")
+                self._set_panel_feedback(f"LAN change failed: {exc}", "error")
+        elif action.kind == "webui-lan-select":
+            try:
+                self._webui_controller().set_lan(
+                    True, ip=action.target, workspace=Path.cwd(),
+                )
+                self._open_webui_settings(f"lan-ip:{action.target}")
+                self._set_panel_feedback(f"LAN address set to {action.target}", "success")
+            except (OSError, ValueError, RuntimeError) as exc:
+                self._open_webui_settings("lan-enabled")
+                self._set_panel_feedback(f"LAN address change failed: {exc}", "error")
+        elif action.kind == "webui-lan-link":
+            try:
+                url = self._webui_controller().bootstrap_url(lan=True)
+                self._append(f"\n[web ui] LAN link: {url}\n")
+                self._set_panel_feedback("LAN link shown in chat for copying", "success")
+            except (OSError, ValueError, RuntimeError) as exc:
+                self._set_panel_feedback(f"Could not create LAN link: {exc}", "error")
+        elif action.kind == "webui-network-check":
+            try:
+                report = self._webui_controller().diagnose()
+                detail = (f"Port 50000: local {report.local}; LAN {report.lan}; "
+                          f"device {report.device}.")
+                self._append(f"\n[web ui] {detail}\n")
+                self._open_webui_settings("network-check")
+                self._set_panel_feedback(detail, "success" if report.device.startswith(
+                    "confirmed") else "warning")
+            except (OSError, ValueError, RuntimeError) as exc:
+                self._set_panel_feedback(f"Exposure check failed: {exc}", "error")
         elif action.kind == "reset-all":
             self._open_settings_category("reset all")
         elif action.kind == "confirm-reset-all":
@@ -16465,10 +16676,8 @@ class PersistentChatTUI:
             if name in servers:
                 raise ValueError(f"MCP server {name!r} already exists")
             if bearer_token:
-                save_provider_secret(self.cfg.config_dir, env_name, bearer_token)
+                ProviderSecretUpdate(self.cfg.config_dir, env_name, bearer_token).apply()
                 os.environ[env_name] = bearer_token
-            servers[name] = server
-            registry.save(servers)
         except (OSError, ValueError) as exc:
             message = f"MCP server was not saved: {exc}"
             self._begin_settings_input(
@@ -16482,13 +16691,9 @@ class PersistentChatTUI:
             )
             self.status_error = message
             return
+        if not self._submit_disabled_mcp_server(server):
+            return
         self._mcp_setup = None
-        self._append(
-            f"\n[success] Added {name} as disabled. Review it before enabling.\n"
-        )
-        self._invalidate_mcp_inventory()
-        self._invalidate_settings_overview()
-        self._open_mcp_install_result(name)
 
     def _submit_disabled_mcp_server(self, server: MCPServerConfig) -> bool:
         if self.running or self._setup_job is not None or self._mcp_mutation_pending:
@@ -16770,21 +16975,15 @@ class PersistentChatTUI:
             if name in servers:
                 raise ValueError(f"MCP server {name!r} already exists")
             for env_name, secret in secrets.items():
-                save_provider_secret(self.cfg.config_dir, env_name, secret)
+                ProviderSecretUpdate(self.cfg.config_dir, env_name, secret).apply()
                 os.environ[env_name] = secret
-            servers[name] = server
-            registry.save(servers)
         except (MCPCatalogError, OSError, ValueError) as exc:
             self.status_error = f"MCP server was not installed: {exc}"
             self.application.invalidate()
             return
+        if not self._submit_disabled_mcp_server(server):
+            return
         self._mcp_setup = None
-        self._append(
-            f"\n[success] Installed {name} as disabled. Review it before enabling.\n"
-        )
-        self._invalidate_mcp_inventory()
-        self._invalidate_settings_overview()
-        self._open_mcp_install_result(name)
 
     def _search_mcp_catalog(self, query: str) -> None:
         self._background_jobs.cancel("mcp-suggestions")
@@ -17840,7 +18039,9 @@ class PersistentChatTUI:
                     if argument.strip()=="--ai":
                         self._ai_defaults.start_utility("name")
                         return
-                    self.memory.rename_session(self.session_id, argument)
+                    SessionDirectory(self.memory).rename(
+                        SessionRenameChange(self.session_id, argument)
+                    )
                     self._session_title_hint = " ".join(argument.split())
                     self._append(f"\n[session] Renamed to {argument.strip()}\n")
                 elif command == "/export":
@@ -17877,7 +18078,9 @@ class PersistentChatTUI:
                 else:
                     target = uuid.uuid4().hex
                     if command == "/fork":
-                        self.memory.fork_session(self.session_id, target)
+                        SessionDirectory(self.memory).fork(
+                            SessionForkChange(self.session_id, target)
+                        )
                     else:
                         self.agent.restore_session([])
                         self._history = []
@@ -18111,6 +18314,9 @@ class PersistentChatTUI:
                 "permission": "permissions",
                 "permissions": "permissions",
                 "runtime": "runtime",
+                "web": "web ui",
+                "web ui": "web ui",
+                "webui": "web ui",
                 "reset": "reset all",
                 "reset all": "reset all",
             }
@@ -18118,7 +18324,8 @@ class PersistentChatTUI:
                 self._append(
                     "\n[error] Settings category must be theme, input, divider, spinner, "
                     "models, model defaults, providers, search, "
-                    "memory, library, skills, MCP, tools, permissions, runtime, or reset.\n"
+                    "memory, library, skills, MCP, tools, permissions, runtime, "
+                    "web, or reset.\n"
                 )
                 return
             category = category_aliases[requested]
@@ -18342,11 +18549,11 @@ class PersistentChatTUI:
             return
         self._debug_label_started_at = None
         turn_id = uuid.uuid4().hex
-        if not self.memory.acquire_session_lease(
-            self.session_id,
-            self.client_id,
-            turn_id,
-        ):
+        accepted_turn = SessionTurn(
+            self.memory, self.agent, self.session_id, self.client_id, turn_id,
+            journal=True,
+        )
+        if not accepted_turn.claim():
             archived = getattr(self.memory, "session_archived", None)
             if callable(archived) and archived(self.session_id):
                 self._append("\n[session] This session was archived from another client. "
@@ -18355,10 +18562,22 @@ class PersistentChatTUI:
                     self._set_input(str(turn))
                 self.activity = "session archived"
                 return
+            if (isinstance(self.memory, Memory)
+                    and self.memory.session_live_state(self.session_id)["state"]
+                    == "interrupted"):
+                if self.activity != "session needs reconciliation":
+                    self._append(
+                        "\n[session] Previous turn outcome is unknown. Review effects, "
+                        f"then run klaude sessions reconcile {self.session_id}.\n"
+                    )
+                self.pending.appendleft(turn)
+                self.activity = "session needs reconciliation"
+                return
             self.pending.appendleft(turn)
             self._watching_remote = True
             self.activity = "watching session worker"
             return
+        self._accepted_turn = accepted_turn
         user_msg = str(turn)
         if self._session_title_hint == "Untitled session":
             self._session_title_hint = " ".join(user_msg.split())[:160] or "Untitled session"
@@ -18416,14 +18635,18 @@ class PersistentChatTUI:
     def _publish_shared_event(self, kind: str, payload: object, *, turn_id: str) -> bool:
         """Keep optional cross-process mirroring from breaking the model turn."""
         try:
+            active = self._accepted_turn
             self.memory.publish_session_event(
                 self.session_id,
                 self.client_id,
                 kind,
                 payload,
                 turn_id=turn_id,
+                **({"fence": active.fence}
+                   if isinstance(self.memory, Memory) and active is not None
+                   and active.turn_id == turn_id else {}),
             )
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, SessionLeaseLost) as exc:
             self._emit("error", f"session sync unavailable: {exc}")
             return False
         return True
@@ -18485,6 +18708,18 @@ class PersistentChatTUI:
         scope: TurnScope | str | None = None,
         turn_id: str = "",
     ) -> None:
+        accepted_turn = self._accepted_turn
+        if accepted_turn is None or accepted_turn.turn_id != turn_id:
+            # Direct in-process compatibility calls need their own lease;
+            # normal TUI turns use the object from _start_next.
+            accepted_turn = SessionTurn(
+                self.memory, self.agent, self.session_id, self.client_id, turn_id,
+                claimed=not isinstance(self.memory, Memory),
+                journal=True,
+            )
+            if isinstance(self.memory, Memory) and not accepted_turn.claim():
+                self._emit("error", "This session already has an active worker")
+                return
         assistant_parts: list[str] = []
         streamed = False
         assistant_started = False
@@ -18498,6 +18733,7 @@ class PersistentChatTUI:
         prior_capability_observer = getattr(self.agent, "capability_observer", None)
         prior_subagent_observer = getattr(self.agent, "subagent_event_observer", None)
         prior_cancellation_check = getattr(self.agent, "cancellation_check", None)
+        prior_execution_guard = getattr(self.agent, "execution_guard", None)
 
         def flush_edits() -> None:
             if not pending_edits:
@@ -18559,15 +18795,11 @@ class PersistentChatTUI:
                 effective_message = context.resolve_retry(effective_message)
             if attachment_paths and cancel_event.is_set():
                 raise RuntimeError("Attachment preparation cancelled")
-            self.memory.start_session_turn(
-                self.session_id,
-                self.client_id,
-                turn_id,
+            accepted_turn.start(
                 user_msg,
                 model_content=(effective_message if effective_message != user_msg else None),
-                **({"runtime": capture_session_runtime(self.agent)}
-                   if isinstance(self.memory, Memory) else {}),
             )
+            self.agent.execution_guard = accepted_turn.guard
             input_started = True
             if isinstance(effective_message, dict) and effective_message.get("image_inputs"):
                 self._emit("chat_images_saved")
@@ -18580,7 +18812,7 @@ class PersistentChatTUI:
             effective_scope = scope if scope is not None else (
                 TurnScope.REVIEW if read_only else None
             )
-            events = self.agent.run(effective_message, scope=effective_scope)
+            events = iter_agent_events(self.agent, effective_message, scope=effective_scope)
             for event in events:
                 payload = event.payload
                 if event.kind not in {"tool_start", "tool_result"} or (
@@ -18633,15 +18865,7 @@ class PersistentChatTUI:
                         )
                         assistant_started = True
                     model_message = payload.get("model_message")
-                    if model_message is None:
-                        self.memory.log_turn(self.session_id, "assistant", content)
-                    else:
-                        self.memory.log_turn(
-                            self.session_id,
-                            "assistant",
-                            content,
-                            model_content=model_message,
-                        )
+                    accepted_turn.save_assistant(content, model_content=model_message)
                     assistant_saved = True
                 elif event.kind == "tool_start":
                     tool = payload["tool"]
@@ -18664,7 +18888,9 @@ class PersistentChatTUI:
                         },
                         turn_id=turn_id,
                     )
-                    args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+                    args: dict[str, Any] = (
+                        payload["args"] if isinstance(payload.get("args"), dict) else {}
+                    )
                     if tool in {"web_search", "fetch_url", "http_probe"}:
                         pending_metadata[tool] = payload.get("metadata") or {}
                     activity = _active_tool_status(tool, args)
@@ -18689,8 +18915,8 @@ class PersistentChatTUI:
                         self.memory.log_turn(self.session_id, "system", receipt)
                     if (payload.get("metadata") or {}).get("suppress_user_output"):
                         continue
-                    tool = payload.get("tool")
-                    args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+                    tool = str(payload.get("tool") or "")
+                    args = payload["args"] if isinstance(payload.get("args"), dict) else {}
                     metadata = {
                         **pending_metadata.pop(tool, {}),
                         **(payload.get("metadata") or {}),
@@ -18787,7 +19013,7 @@ class PersistentChatTUI:
                 flush_edits()
                 partial = "".join(assistant_parts).strip()
                 if streamed and partial:
-                    self.memory.log_turn(self.session_id, "assistant", partial)
+                    accepted_turn.save_assistant(partial)
                     assistant_saved = True
                 self._emit("append", "\n[interrupted at a safe boundary]\n")
             elif not assistant_saved and not turn_failed:
@@ -18825,9 +19051,10 @@ class PersistentChatTUI:
             self.agent.subagent_event_observer = prior_subagent_observer
             if prior_cancellation_check is not None:
                 self.agent.cancellation_check = prior_cancellation_check
+            self.agent.execution_guard = prior_execution_guard
             partial = "".join(assistant_parts).strip()
             if partial and not assistant_saved:
-                self.memory.log_turn(self.session_id, "assistant", partial)
+                accepted_turn.save_assistant(partial)
             if cancelled:
                 marker = getattr(self.agent, "mark_interrupted_turn", None)
                 if callable(marker):
@@ -18864,28 +19091,26 @@ class PersistentChatTUI:
             )
             metadata = _agent_model_metadata(self.agent)
             suffix = f"worked for {elapsed_label}"
-            self._publish_shared_event(
-                "turn_done",
-                {
-                    "suffix": suffix,
-                    "cancelled": cancelled,
-                    "failed": turn_failed,
-                    "model_metadata": metadata,
-                    "turn_capabilities": getattr(
-                        self.agent, "last_turn_capabilities", {}
-                    ),
-                },
-                turn_id=turn_id,
-            )
+            completion_payload = {
+                "suffix": suffix,
+                "cancelled": cancelled,
+                "failed": turn_failed,
+                "model_metadata": metadata,
+                "turn_capabilities": getattr(self.agent, "last_turn_capabilities", {}),
+            }
+            if accepted_turn.journal is None:
+                self._publish_shared_event(
+                    "turn_done", completion_payload, turn_id=turn_id,
+                )
             try:
-                self.memory.release_session_lease(
-                    self.session_id,
-                    self.client_id,
-                    turn_id,
+                accepted_turn.release(
                     state="interrupted" if cancelled else "failed" if turn_failed else "idle",
+                    completion_payload=completion_payload,
                 )
             except sqlite3.Error as exc:
                 self._emit("error", f"session lease cleanup failed: {exc}")
+            if self._accepted_turn is accepted_turn:
+                self._accepted_turn = None
             self._emit(
                 "turn_done",
                 {
@@ -19136,7 +19361,7 @@ class PersistentChatTUI:
         return_model_backend: str = "",
     ) -> None:
         try:
-            save_provider_secret(self.cfg.config_dir, env_name, value)
+            ProviderSecretUpdate(self.cfg.config_dir, env_name, value).apply()
         except (OSError, ValueError) as exc:
             self._append(f"\n[error] {label} key was not saved: {exc}\n")
         else:
@@ -19484,7 +19709,7 @@ class PersistentChatTUI:
                         "MCP definition changed or operation rejected; review and retry"
                         if mcp_result.state == "rejected" else
                         "MCP save unconfirmed; queued work paused — "
-                        "inspect configuration before retrying"
+                        "run `klaude mcp recover` before retrying"
                     )
                     tone = "warning" if mcp_result.state == "unconfirmed" else "error"
                     self._append(f"\n[{tone}] {self.status_error}.\n")
@@ -20089,7 +20314,10 @@ class PersistentChatTUI:
                     "\r\n[warning] Skill changes unconfirmed; inspect next launch.\r\n"
                 )
             if not self._mcp_mutations.close(wait=True):
-                output.write_raw("\r\n[warning] MCP saves unconfirmed; inspect next launch.\r\n")
+                output.write_raw(
+                    "\r\n[warning] MCP saves unconfirmed; run `klaude mcp recover` "
+                    "before retrying.\r\n"
+                )
             output.write_raw(XTERM_MODIFY_OTHER_KEYS_OFF)
             output.write_raw(KITTY_KEYBOARD_PROTOCOL_OFF)
             output.flush()
@@ -20113,6 +20341,11 @@ def chat(
         _clear_plain_session_view(force=True)
     cfg = load_config()
     chat_preferences_path = cfg.data_dir / "chat-preferences.json"
+    webui_start_error = ""
+    try:
+        WebHostController(cfg.config_dir, cfg.data_dir).ensure_started(Path.cwd())
+    except (OSError, ValueError, RuntimeError) as exc:
+        webui_start_error = str(exc)
     try:
         defaults = migrate_defaults(cfg)
     except (OSError, ValueError) as exc:
@@ -20199,6 +20432,12 @@ def chat(
     )
     if interactive_tui:
         try:
+            mcp_journal = None
+            mcp_journal_error = ""
+            try:
+                mcp_journal = OperationJournal(cfg.data_dir / "operations.db")
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                mcp_journal_error = str(exc)
             tui = PersistentChatTUI(
                 agent,
                 memory,
@@ -20207,7 +20446,18 @@ def chat(
                 chat_preferences_path=chat_preferences_path,
                 character_stream=False,
                 model_selection_required=selection_required,
+                mcp_journal=mcp_journal,
+                mcp_journal_required=True,
             )
+            if mcp_journal_error:
+                tui._append(
+                    "\n[warning] MCP, SSH definition, Model Defaults and image-service "
+                    "saves disabled: "
+                    "operation journal "
+                    f"unavailable ({mcp_journal_error}).\n"
+                )
+            if webui_start_error:
+                tui._append(f"\n[warning] Web UI could not start: {webui_start_error}.\n")
             if selection_required:
                 tui._model_settings.open()
                 tui._model_settings.notify(
@@ -20222,6 +20472,8 @@ def chat(
         _close_agent_mcp(agent)
         console.print(Text("Startup model is unset; use chat --model REFERENCE", style="red"))
         raise typer.Exit(1)
+    if webui_start_error:
+        console.print(f"[yellow]Web UI could not start:[/] {webui_start_error}")
     user_input_broker = getattr(agent, "user_input_broker", None)
     if user_input_broker is not None and sys.stdin.isatty():
         user_input_broker.handler = _ask_line_user_input
@@ -20391,7 +20643,7 @@ def chat(
         if command in {"/new", "/rename", "/fork", "/export", "/diff", "/init", "/review"}:
             try:
                 if command == "/rename":
-                    memory.rename_session(session_id, argument)
+                    SessionDirectory(memory).rename(SessionRenameChange(session_id, argument))
                     console.print(Text(f"Session renamed to {argument.strip()}"))
                 elif command == "/export":
                     path = _export_session(memory, session_id, agent, cfg, argument.strip())
@@ -20424,7 +20676,7 @@ def chat(
                 else:
                     target = uuid.uuid4().hex
                     if command == "/fork":
-                        memory.fork_session(session_id, target)
+                        SessionDirectory(memory).fork(SessionForkChange(session_id, target))
                     else:
                         agent.restore_session([])
                         _clear_plain_session_view()
@@ -20935,16 +21187,15 @@ def query(
     """Hybrid-search the knowledge base (no LLM, raw chunks)."""
     from klaude_knowledge import Knowledge
 
-    kn = Knowledge(load_config())
-    for hit in kn.query(question, library, k):
-        src = hit.get("source") or hit.get("collection", "?")
-        console.print(Panel(hit["text"][:600], title=src, border_style="dim"))
+    reader = KnowledgeReader(Knowledge(load_config()))
+    for hit in reader.query(question, library, k):
+        console.print(Panel(hit.text[:600], title=hit.source or "?", border_style="dim"))
 
 
 def _print_libraries() -> None:
     from klaude_knowledge import Knowledge
 
-    names = Knowledge(load_config()).store.collections()
+    names = KnowledgeReader(Knowledge(load_config())).libraries()
     if not names:
         console.print("[dim](none yet)[/]")
         return
@@ -21158,7 +21409,7 @@ def memory_forget(query: str):
 @memory_app.command("search")
 def memory_search(query: str, n: int = typer.Option(8, "-n")):
     """Search previous conversation sessions."""
-    console.print(_format_session_hits(_memory_store().search_sessions(query, n)))
+    console.print(_format_session_hits(_session_search_records(_memory_store(), query, n)))
 
 
 @sessions_app.callback(invoke_without_command=True)
@@ -21177,13 +21428,15 @@ def sessions_root(ctx: typer.Context, n: int = typer.Option(10, "-n"),
             if data["more"] or len(data["items"]) > n:
                 console.print("Use /library archive to search and page through more sessions.")
             return
-        console.print(_styled_recent_sessions(_memory_store().recent_sessions(n)))
+        console.print(_styled_recent_sessions(_recent_session_records(_memory_store(), n)))
 
 
 def _change_session_archive_cli(session_id: str, operation: str) -> None:
     memory = _memory_store()
     try:
-        memory.change_session_archive(session_id, operation)
+        SessionDirectory(memory).change_archive(
+            SessionArchiveChange.from_values(session_id, operation)
+        )
     except (ValueError, sqlite3.Error) as exc:
         console.print(Text(f"Session action failed: {exc}"))
         raise typer.Exit(1) from None
@@ -21203,6 +21456,45 @@ def sessions_archive(session_id: str):
 def sessions_restore(session_id: str):
     """Restore an archived conversation to normal session lists."""
     _change_session_archive_cli(session_id, "restore")
+
+
+@sessions_app.command("reconcile")
+def sessions_reconcile(
+    session_id: str,
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Acknowledge possible external effects without prompting.",
+    ),
+):
+    """Review an interrupted turn before allowing new work in that session."""
+    from klaude_application.coordination import DurableTurns
+
+    memory = _memory_store()
+    try:
+        journal = DurableTurns(memory)
+        journal.recover_session(session_id)
+        snapshot = journal.snapshot(session_id)
+        if snapshot["state"] != "interrupted":
+            console.print(Text("Session has no interrupted turn to reconcile."))
+            return
+        console.print(Text(
+            "The last turn stopped before its effects could be confirmed. "
+            "Inspect the workspace and any external jobs before continuing."
+        ))
+        if not yes and not typer.confirm(
+            f"Acknowledge unknown effects for session {session_id}?", default=False,
+        ):
+            console.print("[dim]aborted[/]")
+            return
+        if not journal.reconcile_interrupted(
+            session_id, int(snapshot["fence_generation"])
+        ):
+            raise RuntimeError("session state changed; reload and review again")
+        console.print(Text("Session reconciled; new turns may start.", style="green"))
+    except (RuntimeError, ValueError, sqlite3.Error) as exc:
+        console.print(Text(f"Session reconciliation failed: {exc}", style="red"))
+        raise typer.Exit(1) from None
+    finally:
+        memory.db.close()
 
 
 @sessions_app.command("delete")
@@ -21227,7 +21519,13 @@ def sessions_delete(
     ):
         console.print("[dim]aborted[/]")
         return
-    removed_turns = memory.delete_session(session_id)
+    try:
+        removed_turns = SessionDirectory(memory).delete(
+            SessionDeleteChange(session_id, expected_total_turns=turns)
+        ).removed_turns
+    except (ValueError, sqlite3.Error) as exc:
+        console.print(Text(f"Session deletion failed: {exc}", style="red"))
+        raise typer.Exit(1) from None
     console.print(f"[green]removed session {session_id} ({removed_turns} turns)[/]")
 
 
@@ -21253,14 +21551,23 @@ def sessions_clear(
         ):
             console.print("[dim]aborted[/]")
             return
-    counts = memory.clear_sessions()
-    console.print(f"[green]removed {counts['sessions']} sessions ({counts['turns']} turns)[/]")
+    try:
+        receipt = SessionDirectory(memory).clear(
+            SessionsClearChange(counts["sessions"], counts["turns"])
+        )
+    except (ValueError, sqlite3.Error) as exc:
+        console.print(Text(f"Session deletion failed: {exc}", style="red"))
+        raise typer.Exit(1) from None
+    console.print(
+        f"[green]removed {receipt.removed_sessions} sessions "
+        f"({receipt.removed_turns} turns)[/]"
+    )
 
 
 @app.command("session-search")
 def session_search(query: str, n: int = typer.Option(8, "-n")):
     """Search previous conversation sessions."""
-    console.print(_format_session_hits(_memory_store().search_sessions(query, n)))
+    console.print(_format_session_hits(_session_search_records(_memory_store(), query, n)))
 
 
 def _runtime_status_summary(cfg, workdir: Path) -> tuple[str, str, str, object | None]:
@@ -21434,6 +21741,33 @@ def _save_mcp_cli(registry, servers) -> None:
         raise typer.Exit(1) from None
 
 
+def _apply_mcp_cli_reviewed(registry, request, *, auth_dir=None) -> None:
+    """Apply one CLI review through the same fixed mutation path as TUI settings."""
+    from klaude_application.operation_journal import OperationJournal
+
+    try:
+        journal = OperationJournal(registry.path.parent / "operations.db")
+        result = apply_embedded_mcp_mutation(
+            registry.path, request, auth_dir=auth_dir, journal=journal,
+        )
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        console.print(f"[red]MCP operation journal unavailable:[/] {exc}")
+        raise typer.Exit(1) from None
+    if result.state != "saved":
+        message = (
+            "MCP change outcome is unknown; run `klaude mcp recover` "
+            "before retrying."
+            if result.state == "unconfirmed" else
+            "MCP change was rejected; reload the server definition before retrying."
+        )
+        console.print(f"[red]{message}[/]")
+        raise typer.Exit(1)
+    if result.cleanup_failed:
+        console.print(
+            "[yellow]MCP definition removed, but OAuth credential cleanup was unconfirmed.[/]"
+        )
+
+
 def _mcp_catalog():
     from klaude_core.mcp_catalog import MCPCatalogClient
 
@@ -21527,6 +21861,8 @@ def mcp_auth_login(
     ),
 ) -> None:
     """Sign in to a protected remote MCP server using OAuth + PKCE."""
+    from klaude_application.mcp_inventory import definition_digest
+    from klaude_application.operation_journal import OperationJournal
     from klaude_core.mcp_client import (
         MCP_OAUTH_REDIRECT_URI,
         MCPClient,
@@ -21534,7 +21870,8 @@ def mcp_auth_login(
         mcp_auth_file,
     )
 
-    registry, servers, server = _mcp_auth_server(name)
+    registry, _servers, server = _mcp_auth_server(name)
+    reviewed_fingerprint = definition_digest(server)
     server.oauth = True
     if scope:
         server.oauth_scope = scope
@@ -21547,6 +21884,7 @@ def mcp_auth_login(
     cfg = load_config()
     storage = MCPTokenStorage(mcp_auth_file(cfg.mcp_auth_dir, name))
     had_credentials = storage.status().configured
+    preserve_credentials = False
     httpd: HTTPServer | None = None
     callback_url = MCP_OAUTH_REDIRECT_URI
     if not manual:
@@ -21593,14 +21931,30 @@ def mcp_auth_login(
         )
         server.tools = client.discover(server)
         server.enabled = True
-        registry.save(servers)
+        result = apply_embedded_mcp_mutation(
+            registry.path,
+            MCPOAuthEnable(
+                uuid.uuid4().hex, "cli", name, reviewed_fingerprint,
+                server.oauth_scope, server.oauth_client_metadata_url,
+                json.dumps(server.tools, ensure_ascii=False),
+            ),
+            auth_dir=cfg.mcp_auth_dir,
+            journal=OperationJournal(registry.path.parent / "operations.db"),
+        )
+        if result.state != "saved":
+            preserve_credentials = result.state == "unconfirmed"
+            raise RuntimeError(
+                "definition save outcome unknown; inspect before retrying"
+                if preserve_credentials else
+                "definition changed or could not be saved; reload before retrying"
+            )
     except KeyboardInterrupt:
-        if not had_credentials:
+        if not had_credentials and not preserve_credentials:
             storage.clear()
         console.print("\n[yellow]MCP OAuth login cancelled.[/]")
         raise typer.Exit(130) from None
     except Exception as exc:
-        if not had_credentials:
+        if not had_credentials and not preserve_credentials:
             storage.clear()
         console.print(f"[red]MCP OAuth login failed:[/] {exc}")
         raise typer.Exit(1) from None
@@ -21640,17 +21994,17 @@ def mcp_auth_logout(
     yes: bool = typer.Option(False, "--yes", "-y", help="Remove local OAuth credentials"),
 ) -> None:
     """Remove local OAuth credentials and disable the server."""
-    from klaude_core.mcp_client import MCPTokenStorage, mcp_auth_file
-
-    registry, servers, server = _mcp_auth_server(name)
+    from klaude_application.mcp_inventory import definition_digest
+    registry, _servers, server = _mcp_auth_server(name)
     if not yes and not typer.confirm(f"Remove local MCP OAuth credentials for {name}?"):
         raise typer.Abort()
     cfg = load_config()
-    server.enabled = False
-    _save_mcp_cli(registry, servers)
-    removed = MCPTokenStorage(mcp_auth_file(cfg.mcp_auth_dir, name)).clear()
-    state = "removed" if removed else "not present"
-    console.print(f"[green]MCP OAuth credentials {state}; {name} is disabled.[/]")
+    _apply_mcp_cli_reviewed(
+        registry,
+        MCPOAuthLogout(uuid.uuid4().hex, "cli", name, definition_digest(server)),
+        auth_dir=cfg.mcp_auth_dir,
+    )
+    console.print(f"[green]MCP OAuth credentials cleared; {name} is disabled.[/]")
 
 
 @mcp_app.command("list")
@@ -21827,10 +22181,15 @@ def mcp_install(
     try:
         server, secrets = plan.materialize(local_name, answers)
         for variable, value in secrets.items():
-            save_provider_secret(load_config().config_dir, variable, value)
+            ProviderSecretUpdate(load_config().config_dir, variable, value).apply()
             os.environ[variable] = value
-        servers[local_name] = server
-        registry.save(servers)
+        _apply_mcp_cli_reviewed(
+            registry,
+            MCPAddDisabled(
+                uuid.uuid4().hex, "cli", local_name,
+                json.dumps(server.to_dict(), ensure_ascii=False),
+            ),
+        )
     except (MCPCatalogError, OSError, ValueError) as exc:
         console.print(f"[red]MCP server was not installed:[/] {exc}")
         raise typer.Exit(1) from None
@@ -21919,9 +22278,14 @@ def mcp_add(
             console.print(f"[red]Could not initialize MCP server:[/] {exc}")
             raise typer.Exit(1) from None
     registry = _mcp_registry()
-    servers = registry.load()
-    servers[name] = server
-    _save_mcp_cli(registry, servers)
+    addition = MCPAddDisabled if skip_test or oauth else MCPAddVerified
+    _apply_mcp_cli_reviewed(
+        registry,
+        addition(
+            uuid.uuid4().hex, "cli", name,
+            json.dumps(server.to_dict(), ensure_ascii=False),
+        ),
+    )
     if oauth:
         state = f"disabled; run `klaude mcp auth login {name}`"
     elif skip_test:
@@ -21947,12 +22311,16 @@ def mcp_import(path: Path, yes: bool = typer.Option(False, "--yes", "-y")) -> No
         f"Import {len(imported)} server definitions as disabled? Review and enable each afterward."
     ):
         raise typer.Abort()
-    servers = registry.load()
-    for name, server in imported.items():
-        server.enabled = False
-        server.tools = []
-        servers[name] = server
-    _save_mcp_cli(registry, servers)
+    _apply_mcp_cli_reviewed(
+        registry,
+        MCPImportSnapshot(
+            uuid.uuid4().hex, "cli",
+            json.dumps(
+                {name: server.to_dict() for name, server in imported.items()},
+                ensure_ascii=False,
+            ),
+        ),
+    )
     console.print(f"[green]Imported {len(imported)} MCP servers as disabled.[/]")
     console.print("Run `klaude mcp enable NAME` to verify and enable one.")
 
@@ -21963,6 +22331,7 @@ def mcp_enable(
     yes: bool = typer.Option(False, "--yes", "-y", help="Trust and launch/connect"),
 ) -> None:
     """Connect, discover tools, and enable one configured server."""
+    from klaude_application.mcp_inventory import definition_digest
     from klaude_core.mcp_client import MCPClient
 
     registry = _mcp_registry()
@@ -21970,6 +22339,7 @@ def mcp_enable(
     if name not in servers:
         raise typer.BadParameter(f"unknown MCP server: {name}")
     server = servers[name]
+    reviewed_fingerprint = definition_digest(server)
     if server.oauth:
         from klaude_core.mcp_client import MCPTokenStorage, mcp_auth_file
 
@@ -22001,26 +22371,34 @@ def mcp_enable(
     except Exception as exc:
         console.print(f"[red]Could not initialize MCP server:[/] {exc}")
         raise typer.Exit(1) from None
-    server.enabled = True
-    _save_mcp_cli(registry, servers)
+    _apply_mcp_cli_reviewed(
+        registry,
+        MCPEnable(uuid.uuid4().hex, "cli", name, reviewed_fingerprint,
+                  json.dumps(server.tools, ensure_ascii=False)),
+    )
     console.print(f"[green]Enabled {name}[/] · {len(server.tools)} tools")
 
 
 @mcp_app.command("disable")
 def mcp_disable(name: str) -> None:
     """Disable a server without deleting its configuration."""
+    from klaude_application.mcp_inventory import definition_digest
+
     registry = _mcp_registry()
     servers = registry.load()
     if name not in servers:
         raise typer.BadParameter(f"unknown MCP server: {name}")
-    servers[name].enabled = False
-    _save_mcp_cli(registry, servers)
+    _apply_mcp_cli_reviewed(
+        registry,
+        MCPToggle(uuid.uuid4().hex, "cli", name, definition_digest(servers[name]), False),
+    )
     console.print(f"[green]Disabled {name}[/]")
 
 
 @mcp_app.command("refresh")
 def mcp_refresh(name: str = typer.Argument("")) -> None:
     """Refresh cached tool schemas for one or all enabled servers."""
+    from klaude_application.mcp_inventory import definition_digest
     from klaude_core.mcp_client import MCPClient
 
     registry = _mcp_registry()
@@ -22031,14 +22409,120 @@ def mcp_refresh(name: str = typer.Argument("")) -> None:
     failures = 0
     for server in targets:
         try:
-            server.tools = MCPClient(auth_dir=load_config().mcp_auth_dir).discover(server)
-            console.print(f"[green]{server.name}[/] · {len(server.tools)} tools")
+            reviewed_fingerprint = definition_digest(server)
+            tools = MCPClient(auth_dir=load_config().mcp_auth_dir).discover(server)
+            result = apply_embedded_mcp_mutation(
+                registry.path,
+                MCPEnable(uuid.uuid4().hex, "cli", server.name, reviewed_fingerprint,
+                          json.dumps(tools, ensure_ascii=False)),
+            )
         except Exception as exc:
             failures += 1
             console.print(f"[red]{server.name}:[/] {exc}")
-    _save_mcp_cli(registry, servers)
+            continue
+        if result.state != "saved":
+            failures += 1
+            console.print(
+                f"[red]{server.name}:[/] schema save {result.state}; "
+                "inspect the configuration before retrying"
+            )
+            continue
+        console.print(f"[green]{server.name}[/] · {len(tools)} tools")
     if failures:
         raise typer.Exit(1)
+
+
+@mcp_app.command("recover")
+def mcp_recover(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Run exact-state recovery check"),
+) -> None:
+    """Inspect an uncertain journaled MCP save without replaying its mutation."""
+    from klaude_application.mcp_mutations import mcp_resource, recover_mcp_mutation
+    from klaude_application.operation_journal import OperationConflict, OperationJournal
+
+    cfg = load_config()
+    path = cfg.data_dir / "operations.db"
+    if not path.exists():
+        console.print("No journaled MCP changes to recover.")
+        return
+    kind = ""
+    try:
+        journal = OperationJournal(path)
+        fenced = journal.fenced_operation(mcp_resource(cfg.mcp_servers_file))
+        if fenced is None:
+            console.print("No unresolved MCP change.")
+            return
+        receipt = fenced.receipt
+        kind = receipt.kind
+        if receipt.state != "unknown":
+            console.print("[yellow]MCP change is still active; wait for its owner.[/]")
+            raise typer.Exit(1)
+        console.print(
+            f"Uncertain MCP change: {receipt.kind} · request {receipt.request_id}"
+        )
+        if not yes and not typer.confirm(
+            "Check the saved configuration and reconcile?", default=False
+        ):
+            raise typer.Abort()
+        resolved = recover_mcp_mutation(
+            cfg.mcp_servers_file, journal, receipt.request_id, fenced.owner_id,
+            auth_dir=cfg.mcp_auth_dir,
+        )
+    except (OSError, ValueError, OperationConflict) as exc:
+        console.print(f"[yellow]MCP change remains fenced:[/] {exc}")
+        if kind in {"MCPRemove", "MCPOAuthLogout"}:
+            console.print(
+                "If only its OAuth credential remains, use "
+                "`klaude mcp recover-oauth NAME`."
+            )
+        raise typer.Exit(1) from None
+    if resolved.state == "completed":
+        console.print("[green]Recovered:[/] current definitions match the reviewed saved state.")
+    else:
+        console.print(
+            "[yellow]Recovered:[/] current definitions match the reviewed prior state; "
+            "the historical attempt remains uncertain."
+        )
+
+
+@mcp_app.command("recover-oauth")
+def mcp_recover_oauth(
+    name: str,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Confirm exact credential cleanup"),
+) -> None:
+    """Finish one verified credential cleanup from an uncertain MCP removal."""
+    from klaude_application.mcp_mutations import (
+        finish_mcp_oauth_cleanup,
+        mcp_resource,
+    )
+    from klaude_application.operation_journal import OperationConflict, OperationJournal
+
+    cfg = load_config()
+    path = cfg.data_dir / "operations.db"
+    if not path.exists():
+        console.print("No journaled MCP change to recover.")
+        raise typer.Exit(1)
+    try:
+        journal = OperationJournal(path)
+        fenced = journal.fenced_operation(mcp_resource(cfg.mcp_servers_file))
+        if fenced is None or fenced.receipt.state != "unknown":
+            raise OperationConflict("No uncertain MCP removal is available")
+        if not yes and not typer.confirm(
+            f"Remove the saved OAuth credential for {name!r} if it matches the "
+            "reviewed final state?", default=False,
+        ):
+            raise typer.Abort()
+        result = finish_mcp_oauth_cleanup(
+            cfg.mcp_servers_file, cfg.mcp_auth_dir, journal,
+            fenced.receipt.request_id, fenced.owner_id, name,
+        )
+    except (OSError, ValueError, OperationConflict) as exc:
+        console.print(f"[yellow]OAuth cleanup remains fenced:[/] {exc}")
+        raise typer.Exit(1) from None
+    console.print(
+        f"[green]Recovered {name}:[/] exact credential cleanup complete "
+        f"({result.request_id})."
+    )
 
 
 @mcp_app.command("remove")
@@ -22047,19 +22531,20 @@ def mcp_remove(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
 ) -> None:
     """Remove one MCP server and its dedicated OAuth file; shared env secrets remain."""
+    from klaude_application.mcp_inventory import definition_digest
+
     registry = _mcp_registry()
     servers = registry.load()
     if name not in servers:
         raise typer.BadParameter(f"unknown MCP server: {name}")
     if not yes and not typer.confirm(f"Remove MCP server '{name}'?"):
         raise typer.Abort()
-    server = servers.pop(name)
-    _save_mcp_cli(registry, servers)
-    if server.oauth:
-        from klaude_core.mcp_client import MCPTokenStorage, mcp_auth_file
-
-        cfg = load_config()
-        MCPTokenStorage(mcp_auth_file(cfg.mcp_auth_dir, name)).clear()
+    auth_dir = load_config().mcp_auth_dir if servers[name].oauth else None
+    _apply_mcp_cli_reviewed(
+        registry,
+        MCPRemove(uuid.uuid4().hex, "cli", name, definition_digest(servers[name])),
+        auth_dir=auth_dir,
+    )
     console.print(f"[green]Removed {name}[/]")
 
 
@@ -22076,7 +22561,7 @@ def mcp_secret(
     if remove:
         if not yes and not typer.confirm(f"Remove saved MCP secret {variable}?"):
             raise typer.Abort()
-        save_provider_secret(cfg.config_dir, variable, "")
+        ProviderSecretUpdate(cfg.config_dir, variable, "").apply()
         os.environ.pop(variable, None)
         console.print(f"[green]Removed MCP secret {variable}[/]")
         return
@@ -22090,7 +22575,7 @@ def mcp_secret(
         raise typer.Abort() from None
     if not value:
         raise typer.BadParameter("secret value cannot be empty")
-    save_provider_secret(cfg.config_dir, variable, value)
+    ProviderSecretUpdate(cfg.config_dir, variable, value).apply()
     os.environ[variable] = value
     console.print(f"[green]Saved MCP secret {variable} securely[/]")
 

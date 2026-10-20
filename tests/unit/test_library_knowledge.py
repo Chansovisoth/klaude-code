@@ -3,10 +3,17 @@
 import json
 import queue
 import time
+from types import SimpleNamespace
 
 import pytest
 from klaude_cli.background_jobs import OwnedBackgroundJobs
-from klaude_cli.library_knowledge import library_name, run_operation, source_inventory
+from klaude_cli.library_knowledge import (
+    KnowledgeAction,
+    knowledge_worker_request,
+    library_name,
+    run_operation,
+    source_inventory,
+)
 from klaude_cli.settings_panel import PanelAction, PanelState, render_body
 from klaude_core.config import Config
 from klaude_core.memory import Memory
@@ -20,6 +27,61 @@ from klaude_knowledge import (
 from prompt_toolkit.utils import get_cwidth
 
 from .test_library_workspace import library_host as base_library_host
+
+
+def test_knowledge_action_projects_only_reviewed_fields():
+    action = KnowledgeAction.from_draft({
+        "operation": "learn-report", "library": "research", "artifact": "research:123",
+        "revision": "abc", "source": "Stored research report",
+    })
+    assert action.worker_fields() == {
+        "operation": "learn-report", "library": "research",
+        "artifact": "research:123", "revision": "abc",
+    }
+    with pytest.raises(ValueError):
+        KnowledgeAction.from_draft({
+            "operation": "query", "library": "research", "query": "hello",
+            "config_dir": "/tmp/attacker",
+        })
+    with pytest.raises(ValueError):
+        KnowledgeAction.from_draft({"operation": [], "library": "research"})
+
+
+def test_knowledge_worker_request_binds_trusted_roots_and_private_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXA_API_KEY", "private-exa-value")
+    cfg = SimpleNamespace(
+        config_dir=tmp_path / "config", models={"embed": "nomic-embed"},
+        web_providers={"exa": SimpleNamespace(api_key_env="EXA_API_KEY")},
+        ollama_url="http://127.0.0.1:11434", crawl4ai_api_key="",
+        exa_api_key="", retrieval_validation_enabled=True, crawl4ai_url="",
+        web_fetch=SimpleNamespace(
+            settings_provider="local", exa_fallback=False,
+            crawl4ai_enabled=True, exa_enabled=False,
+        ),
+    )
+    action = KnowledgeAction.from_draft({
+        "operation": "query", "library": "docs", "query": "How does it work?",
+    })
+    request = knowledge_worker_request(
+        action, cfg, data_dir=tmp_path / "data", workspace=tmp_path
+    )
+    assert request["kind"] == "library_knowledge_operation"
+    assert request["config_dir"] == str(tmp_path / "config")
+    assert request["query"] == "How does it work?"
+    assert request["fetch_settings"] == {
+        "provider": "local", "exa_fallback": False,
+        "crawl4ai_enabled": True, "exa_enabled": False, "crawl4ai_url": "",
+    }
+    assert request["environment_keys"]["EXA_API_KEY"] == "private-exa-value"
+    assert "private-exa-value" not in repr(action)
+    with pytest.raises(ValueError):
+        knowledge_worker_request(action, cfg, data_dir=tmp_path / "data", workspace="relative")
+    with pytest.raises(ValueError):
+        knowledge_worker_request(
+            KnowledgeAction("query", "docs", query=""), cfg,
+            data_dir=tmp_path / "data", workspace=tmp_path,
+        )
+
 
 
 def library_host(memory):

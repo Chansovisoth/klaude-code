@@ -692,6 +692,7 @@ DEFAULT_PERMISSIONS = {
     "search_sessions": "allow",
     "list_recent_sessions": "allow",
     "list_commands": "allow",
+    "discover_tools": "allow",
     "request_user_input": "allow",
     "remember_fact": "ask",
     "delegate_task": "ask",

@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import os
 import queue
+import sqlite3
 import uuid
 from dataclasses import asdict, replace
 from typing import Any
 
 import typer
+from klaude_application.model_dependencies import ModelDependencyCommand
+from klaude_application.serving_jobs import ServingJobs
+from klaude_application.serving_read import ServingRead
 from klaude_core.config import load_config
 from klaude_core.managed_serving import LaunchSpec, prepare
 from klaude_core.model_dependencies import BUILD_TIMEOUT
@@ -23,7 +27,6 @@ from rich.text import Text
 
 from .background_jobs import OwnedBackgroundJobs
 from .model_manager import size, worker_request
-from .serving_jobs import ServingJobs
 from .ssh_commands import app as ssh_app
 
 app = typer.Typer(
@@ -33,20 +36,57 @@ app.add_typer(ssh_app, name="ssh")
 console = Console()
 
 
+@app.command("defaults-recover")
+def defaults_recover(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Run exact-state recovery check"),
+) -> None:
+    """Reconcile an uncertain Model Defaults save without replaying it."""
+    from klaude_application.model_default_settings import (
+        model_defaults_resource,
+        recover_model_defaults,
+    )
+    from klaude_application.operation_journal import OperationConflict, OperationJournal
+
+    cfg = load_config()
+    path = cfg.data_dir / "operations.db"
+    if not path.exists():
+        console.print("No journaled Model Defaults changes to recover.")
+        return
+    try:
+        journal = OperationJournal(path)
+        fenced = journal.fenced_operation(model_defaults_resource(cfg.data_dir))
+        if fenced is None:
+            console.print("No unresolved Model Defaults change.")
+            return
+        receipt = fenced.receipt
+        if receipt.state != "unknown":
+            raise OperationConflict("Model Defaults save is still active")
+        console.print(f"Uncertain Model Defaults change: request {receipt.request_id}")
+        if not yes and not typer.confirm(
+            "Check the saved Model Defaults and reconcile?", default=False
+        ):
+            raise typer.Abort()
+        resolved = recover_model_defaults(
+            cfg, journal, receipt.request_id, fenced.owner_id,
+        )
+    except (OSError, ValueError, sqlite3.Error, OperationConflict) as exc:
+        console.print(f"[yellow]Model Defaults change remains fenced:[/] {exc}")
+        raise typer.Exit(1) from None
+    if resolved.state == "completed":
+        console.print("[green]Recovered:[/] Model Defaults match the reviewed saved state.")
+    else:
+        console.print("[yellow]Recovered:[/] Model Defaults match the reviewed prior state.")
+
+
 def dependency_execute(cfg: Any, operation: str, **values) -> dict:
     events: queue.Queue = queue.Queue()
     jobs = OwnedBackgroundJobs(lambda kind, value: events.put((kind, value)))
     try:
         identity = jobs.submit(
             "dependencies",
-            {
-                "kind": "model_dependencies",
-                "operation": operation,
-                "data_dir": str(cfg.data_dir),
-                "config_dir": str(cfg.config_dir),
-                "owner": os.getpid(),
-                **values,
-            },
+            ModelDependencyCommand.for_client(
+                cfg, operation, owner=os.getpid(), **values
+            ).worker_request(),
             timeout=BUILD_TIMEOUT
             if operation == "build"
             else REMOVE_TIMEOUT
@@ -457,13 +497,7 @@ def serving_read(cfg: Any, operation: str, **values) -> dict:
     try:
         jobs.submit(
             "serving",
-            {
-                "kind": "serving_read",
-                "operation": operation,
-                "data_dir": str(cfg.data_dir),
-                "config_dir": str(cfg.config_dir),
-                **values,
-            },
+            ServingRead.for_client(cfg, operation, **values).worker_request(),
             timeout=preflight_timeout(LaunchSpec(**values["spec"]))
             if values.get("spec")
             else preflight_timeout(

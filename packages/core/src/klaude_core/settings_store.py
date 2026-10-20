@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 DELETE = object()
+MISSING = object()
 
 
 class SettingsConflictError(OSError):
@@ -99,11 +100,44 @@ def read_settings(path: Path) -> dict[str, Any]:
     return value
 
 
+def setting_value(document: Mapping[str, Any], keys: tuple[str, ...]) -> object:
+    """Read one raw field, distinguishing an absent field from JSON null."""
+    if not keys:
+        raise ValueError("A settings field requires a path")
+    current: object = document
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return MISSING
+        current = current[key]
+    return current
+
+
+def apply_settings_changes(
+    value: dict[str, Any], changes: Mapping[tuple[str, ...], object]
+) -> None:
+    """Apply scoped intent to an in-memory document."""
+    for keys, replacement in changes.items():
+        if not keys:
+            raise ValueError("A settings update requires a field path")
+        current = value
+        for key in keys[:-1]:
+            child = current.get(key)
+            if not isinstance(child, dict):
+                child = {}
+                current[key] = child
+            current = child
+        if replacement is DELETE:
+            current.pop(keys[-1], None)
+        else:
+            current[keys[-1]] = replacement
+
+
 def update_settings(
     path: Path,
     changes: Mapping[tuple[str, ...], object],
     *,
     prepare: Callable[[dict[str, Any]], None] | None = None,
+    expected: Mapping[tuple[str, ...], object] | None = None,
 ) -> dict[str, Any]:
     """Apply explicit field assignments/deletions to the latest locked document.
 
@@ -114,19 +148,13 @@ def update_settings(
         value = read_settings(path)
         if prepare is not None:
             prepare(value)
-        for keys, replacement in changes.items():
-            if not keys:
-                raise ValueError("A settings update requires a field path")
-            current = value
-            for key in keys[:-1]:
-                child = current.get(key)
-                if not isinstance(child, dict):
-                    child = {}
-                    current[key] = child
-                current = child
-            if replacement is DELETE:
-                current.pop(keys[-1], None)
-            else:
-                current[keys[-1]] = replacement
+        if expected is not None:
+            for keys, previous in expected.items():
+                latest = setting_value(value, keys)
+                if (latest is MISSING) != (previous is MISSING) or (
+                    latest is not MISSING and latest != previous
+                ):
+                    raise SettingsConflictError("Setting changed; reload and retry")
+        apply_settings_changes(value, changes)
         atomic_write_private(path, json.dumps(value, indent=2, ensure_ascii=False) + "\n")
         return value

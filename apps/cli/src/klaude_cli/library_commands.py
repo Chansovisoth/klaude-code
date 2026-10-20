@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from klaude_application.library_artifacts import ArtifactChange, ArtifactService
 from klaude_core.config import load_config
-from klaude_core.library_artifacts import ArtifactStore, execute_artifact_change
+from klaude_core.library_artifacts import ArtifactStore
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -53,6 +54,7 @@ def vision_work(cfg: Any, operation: str, **values: Any) -> dict:
     import os
     import queue
 
+    from klaude_application.vision import VisionCommand
     from klaude_core.model_connections import connection_registry, legacy_connections
     from klaude_core.vision import ANALYSIS_TIMEOUT, PREPARE_TIMEOUT
 
@@ -70,16 +72,9 @@ def vision_work(cfg: Any, operation: str, **values: Any) -> dict:
     try:
         identity = jobs.submit(
             "vision",
-            {
-                "kind": "vision",
-                "operation": operation,
-                "config_dir": str(cfg.config_dir),
-                "data_dir": str(cfg.data_dir),
-                "ollama_url": cfg.ollama_url,
-                "roles": dict(cfg.models),
-                "environment_keys": keys,
-                **values,
-            },
+            VisionCommand.for_client(
+                cfg, operation, environment_keys=keys, **values,
+            ).worker_request(),
             timeout=PREPARE_TIMEOUT if operation in {"prepare", "tags_prepare"}
             else 20 if operation == "tags_apply"
             else ANALYSIS_TIMEOUT * len(values["spec"]["models"]),
@@ -203,7 +198,9 @@ def clear_image_tags(identity: ArtifactID, yes: bool = False) -> None:
     console.print(Text(item["name"] + "\nAI tags: " + ", ".join(item["ai_tags"])))
     if not yes and not typer.confirm("Clear AI tags and retain manual tags?", default=False):
         return
-    run(lambda: store().change(identity, item["revision"], "clear_ai_tags"))
+    run(lambda: ArtifactService(store().root).change(
+        ArtifactChange.reviewed(store().root, "clear_ai_tags", target=identity,
+                                revision=item["revision"])))
     console.print(Text("AI tags cleared; manual tags retained", style="green"))
 
 
@@ -239,7 +236,9 @@ def import_artifact(
     kind: str = typer.Option("document", "--type", help="document or media"),
 ) -> None:
     """Store a private copy up to 32 MiB; imported does not mean learned."""
-    item = run(lambda: store().import_file(path, kind))
+    item = run(lambda: ArtifactService(store().root).change(
+        ArtifactChange.reviewed(store().root, "import", value=str(path), kind=kind,
+                                workspace=Path.cwd())))
     console.print(Text(f"Imported {item['id']} · original retained · not indexed", style="green"))
 
 
@@ -272,14 +271,14 @@ def export_artifact(
 ) -> None:
     """Export exact bytes; existing files are never overwritten."""
     result = run(
-        lambda: execute_artifact_change(
+        lambda: ArtifactService(store().root).change(ArtifactChange.reviewed(
             store().root,
             "export",
             target=identity,
             revision=store().get(identity)["revision"],
             value=str(destination),
             workspace=Path.cwd(),
-        )
+        ))
     )
     console.print(Text("Exported copy · " + result["path"], style="green"))
 
@@ -291,7 +290,9 @@ def tag_artifact(
 ) -> None:
     """Replace manual tags without generating tags or altering content."""
     item = run(lambda: store().get(identity))
-    run(lambda: store().change(identity, item["revision"], "tags", value))
+    run(lambda: ArtifactService(store().root).change(
+        ArtifactChange.reviewed(store().root, "tags", target=identity,
+                                revision=item["revision"], value=value)))
     console.print(Text("Tags saved", style="green"))
 
 
@@ -307,7 +308,9 @@ def lifecycle(identity: str, operation: str) -> None:
             default=False,
         ):
             raise typer.Exit(0)
-    run(lambda: instance.change(identity, item["revision"], operation))
+    run(lambda: ArtifactService(instance.root).change(
+        ArtifactChange.reviewed(instance.root, operation, target=identity,
+                                revision=item["revision"])))
     console.print(
         Text(
             {
@@ -371,6 +374,48 @@ def image_service(
         return
     checked(cfg, "save", settings=candidate, revision=saved["revision"])
     console.print(Text("Image service saved", style="green"))
+
+
+@app.command("image-service-recover")
+def image_service_recover(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Run exact-state recovery check"),
+) -> None:
+    """Reconcile an uncertain image-service setting save without replaying it."""
+    from klaude_application.image_settings import (
+        image_settings_resource,
+        recover_image_settings,
+    )
+    from klaude_application.operation_journal import OperationConflict, OperationJournal
+
+    cfg = load_config()
+    path = cfg.data_dir / "operations.db"
+    if not path.exists():
+        console.print("No journaled image-service settings to recover.")
+        return
+    try:
+        journal = OperationJournal(path)
+        fenced = journal.fenced_operation(image_settings_resource(cfg.config_dir))
+        if fenced is None:
+            console.print("No unresolved image-service setting.")
+            return
+        receipt = fenced.receipt
+        if receipt.state != "unknown":
+            raise OperationConflict("Image-service setting save is still active")
+        console.print(f"Uncertain image-service setting: request {receipt.request_id}")
+        if not yes and not typer.confirm(
+            "Check the saved image-service settings and reconcile?", default=False
+        ):
+            raise typer.Abort()
+        resolved = recover_image_settings(
+            cfg, journal, receipt.request_id, fenced.owner_id,
+        )
+    except (OSError, ValueError, sqlite3.Error, OperationConflict) as exc:
+        console.print(f"[yellow]Image-service setting remains fenced:[/] {exc}")
+        raise typer.Exit(1) from None
+    if resolved.state == "completed":
+        console.print("[green]Recovered:[/] settings match the reviewed saved state.")
+    else:
+        console.print("[yellow]Recovered:[/] settings match the reviewed prior state.")
 
 
 @app.command("generate")

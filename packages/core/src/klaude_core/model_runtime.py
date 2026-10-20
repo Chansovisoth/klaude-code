@@ -472,6 +472,10 @@ class OllamaRuntime:
         supports = getattr(self.ollama, "supports_structured_tool_recovery", None)
         return bool(callable(supports) and supports(model, tools))
 
+    @property
+    def supports_bound_action_arguments(self) -> bool:
+        return bool(getattr(self.ollama, "supports_bound_action_arguments", False))
+
     def chat_structured_action(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         return self.ollama.chat_structured_action(*args, **kwargs)
 
@@ -1299,7 +1303,11 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         )
         if tools:
             kwargs["tools"] = tools
-        if think not in {None, False, "off", "auto"}:
+        if think is False or think == "off":
+            kwargs["extra_body"] = {"reasoning": {"enabled": False}}
+        elif think is True:
+            kwargs["extra_body"] = {"reasoning": {"enabled": True}}
+        elif think not in {None, "auto"}:
             kwargs["extra_body"] = {"reasoning": {"effort": str(think)}}
         try:
             client=self._client()
@@ -1330,6 +1338,7 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         options: dict[str, Any] | None = None,
         think: bool | str | None = None,
     ) -> dict[str, Any]:
+        self.last_chat_metadata = {}
         image_client = self._image_client(model, messages)
         if image_client is not None:
             try:
@@ -1379,6 +1388,15 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
                             current["function"]["arguments"] += str(arguments)
         finally:
             self._clear_active_response(response_stream)
+            # Usage is evidence of consumed inference even when the terminal
+            # status or assembled calls are invalid. Never publish partial
+            # calls/private reasoning to make that accounting available.
+            self.last_chat_metadata = {
+                "provider": self.backend,
+                **({"finish_reason": finish_reason} if finish_reason else {}),
+                **({"response_id": response_id} if response_id else {}),
+                "usage": _metadata_mapping(usage),
+            }
         if not completed:
             raise RuntimeError("OpenRouter stream ended without a completion reason.")
         if finish_reason == "length":
@@ -1386,12 +1404,6 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         if finish_reason not in {"stop", "tool_calls"}:
             raise RuntimeError("OpenRouter response did not complete successfully")
         assembled_calls = self._validated_calls(calls)
-        self.last_chat_metadata = {
-            "provider": self.backend,
-            "finish_reason":finish_reason,
-            **({"response_id": response_id} if response_id else {}),
-            "usage": _metadata_mapping(usage),
-        }
         return {
             "role": "assistant",
             "content": "".join(content),
@@ -1411,6 +1423,7 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
         options: dict[str, Any] | None = None,
         think: bool | str | None = None,
     ):
+        self.last_chat_metadata = {}
         image_client = self._image_client(model, messages)
         if image_client is not None:
             try:
@@ -1478,6 +1491,7 @@ class OpenRouterRuntime(_CancelableResponseRuntime):
             self._clear_active_response(response_stream)
             self.last_chat_metadata = {
                 "provider": self.backend,
+                **({"finish_reason": finish_reason} if finish_reason else {}),
                 **({"response_id": response_id} if response_id else {}),
                 "usage": _metadata_mapping(usage),
             }

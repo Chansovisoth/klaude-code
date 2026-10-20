@@ -37,6 +37,57 @@ uv run klaude       # or: uv tool install --editable apps/cli && klaude
 
 `make setup` asks how you want to run Ollama — use an existing install (auto-detected, just press Enter), install system-wide, run it in Docker, point at a remote URL, or skip. Non-interactive installs (`curl | bash`, CI) skip the menu with sane defaults, or force a choice with `--ollama=existing|system|docker|url:URL|skip` and `--no-models`. Model pulls auto-detect your hardware: 32GB+ RAM pulls `qwen3-coder:30b` (30B MoE, the best local coding model that runs on CPU+RAM), 16GB pulls `gpt-oss:20b`, 8GB pulls `qwen3:4b` — and anything you already have is skipped, never re-downloaded.
 
+### Experimental local WebUI
+
+In the TUI, open `/settings web`, turn on **Enable Web UI**, then select
+**Open Web UI**. Klaude starts a local host for the current workspace and opens
+a local sign-in page. The enabled preference survives TUI exit, and the host
+restarts on the next `klaude` launch if needed. Turn the switch off to stop it.
+The default username is **admin**. Klaude generates a random initial password;
+open `/settings web` → **Account** → **Show initial admin password** to reveal
+it in the terminal. Select the row again to hide it. Reopen a CLI that was
+already running before an update to load the new menu.
+The account persists across restarts. The header's **Account** button opens
+**Settings → Your local account**. Changing the password there signs out all
+browsers and removes the initial password file.
+If you forget it, run `klaude-webui --reset-admin-password` locally to generate
+a new password. This also signs out all browsers. No public registration is exposed.
+The managed local and LAN listeners both use TCP port **50000**.
+One managed host serves one workspace per Klaude profile; disable it before
+enabling it from a different workspace.
+For another device on the same private network, turn on **LAN access** in
+`/settings web`, choose the intended private IP if more than one is listed, and
+select **Show LAN link**. Open that address on the device and sign in with the
+same local account. LAN access is off by default, and network firewall rules may still
+block the connection. HTTP on LAN does not encrypt passwords, chat, session cookies or
+approvals, so use it only on a trusted private network. Do not port-forward
+this preview.
+Select **Check port exposure** in `/settings web` to test both listeners from
+this computer. A successful LAN test proves the listener answers locally; it
+cannot establish that another device can reach it through the firewall or
+router. Settings marks device reachability confirmed only for five minutes after
+a request actually arrives from another LAN device; older visits are labeled
+historical. A failed device connection alone cannot distinguish a host firewall
+from router, Wi-Fi isolation or routing problems.
+The host serves one chat session with streaming and public history.
+This preview uses the configured local Ollama coding model.
+Workspace tools start with read/list/search/status/diff, with exact allow-once/
+deny reviews when policy asks. Loopback browsers can explicitly activate file
+edits after the clean-worktree check; LAN browsers retain read-only workspace
+tools. Shell commands, full model management and most settings remain unavailable.
+The browser's **Library** includes **Knowledge, Documents, Research, Media and
+Archive**. Import files/images, preview/download saved copies, edit manual tags,
+archive/restore and review permanent deletion. Knowledge supports indexed-text
+search, explicit URL/text-file learning and refresh of existing docs sources.
+**Integrations → Skills** supports installed packages, reviewed local imports,
+enable/disable and deletion. Accepted operations appear in **Activity**.
+These surfaces share the CLI's stores and workers; importing a document does not
+automatically index it. WebUI v2 is still partial; see the
+[current coverage checklist](docs/webui/coverage.md) for remaining features.
+For foreground use, `klaude-webui --workspace /path/to/project` still works;
+press Ctrl+C to stop that instance. To resume a saved session with the same
+configured model and workspace, pass `--session-id ID` to this command.
+
 ## Commands
 
 | Command | What it does |

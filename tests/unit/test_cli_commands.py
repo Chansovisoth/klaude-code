@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import typer
 from klaude_cli.main import (
     AGENTS_INSTRUCTION_MAX_CHARS,
     COMMAND_REFERENCE,
@@ -456,10 +457,12 @@ def test_sessions_subcommands_are_in_canonical_registry():
         "sessions clear",
         "sessions archive SESSION_ID",
         "sessions restore SESSION_ID",
+        "sessions reconcile SESSION_ID",
         "sessions --archived",
     }
     assert typer_usages == {
-        "sessions delete", "sessions clear", "sessions archive", "sessions restore"
+        "sessions delete", "sessions clear", "sessions archive", "sessions restore",
+        "sessions reconcile",
     }
 
 
@@ -487,6 +490,48 @@ def test_session_delete_and_clear_commands_require_confirmation(tmp_path, monkey
 
     sessions_clear(yes=True)
     assert memory.session_counts() == {"sessions": 0, "turns": 0}
+
+
+def test_session_delete_cli_rejects_turn_added_during_confirmation(tmp_path, monkeypatch):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    other = memory.open_session_io()
+    try:
+        memory.log_turn("s1", "user", "Original")
+        monkeypatch.setattr("klaude_cli.main._memory_store", lambda: memory)
+
+        def confirm(_prompt, default=False):
+            other.log_turn("s1", "assistant", "New work")
+            return True
+
+        monkeypatch.setattr("klaude_cli.main.typer.confirm", confirm)
+        with pytest.raises(typer.Exit) as error:
+            sessions_delete("s1", yes=False)
+        assert error.value.exit_code == 1
+        assert len(memory.load_session("s1")) == 2
+    finally:
+        other.db.close()
+        memory.db.close()
+
+
+def test_session_clear_cli_rejects_history_added_during_confirmation(tmp_path, monkeypatch):
+    memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+    other = memory.open_session_io()
+    try:
+        memory.log_turn("s1", "user", "Original")
+        monkeypatch.setattr("klaude_cli.main._memory_store", lambda: memory)
+
+        def confirm(_prompt, default=False):
+            other.log_turn("s2", "user", "New session")
+            return True
+
+        monkeypatch.setattr("klaude_cli.main.typer.confirm", confirm)
+        with pytest.raises(typer.Exit) as error:
+            sessions_clear(yes=False)
+        assert error.value.exit_code == 1
+        assert memory.session_counts() == {"sessions": 2, "turns": 2}
+    finally:
+        other.db.close()
+        memory.db.close()
 
 
 def test_command_reference_excludes_invented_commands():
@@ -3668,8 +3713,10 @@ def test_settings_choice_sections_are_visible_and_not_selectable():
     tui = _fake_persistent_tui()
     tui._begin_choice("settings", tui._settings_categories(), "tools")
     headings = [row.label for row in tui._panel.page.rows if row.kind == RowKind.SECTION]
-    assert headings == ["MODELS", "AGENT", "ADVANCED", "APPEARANCE"]
+    assert headings == ["INTERFACE", "MODELS", "AGENT", "ADVANCED", "APPEARANCE"]
     rows = list(tui._panel.page.rows)
+    assert rows[0].id == "section:interface"
+    assert rows[1].id == "category:web ui"
     search = next(row for row in rows if row.id == "category:search")
     tools = next(row for row in rows if row.id == "category:tools")
     assert search.section_id == tools.section_id == "section:agent"
@@ -3680,6 +3727,231 @@ def test_settings_choice_sections_are_visible_and_not_selectable():
     for row in tui._panel.page.rows:
         if row.kind == RowKind.SECTION:
             assert not row.selectable
+
+
+def test_webui_settings_toggle_and_open_use_host_controller(monkeypatch):
+    from klaude_webhost.hosting import ExposureReport, HostingStatus
+
+    class FakeController:
+        enabled = False
+        lan_enabled = False
+        lan_ip = ""
+
+        def status(self):
+            return HostingStatus(self.enabled, self.enabled,
+                                 "http://127.0.0.1:12345" if self.enabled else "",
+                                 str(Path.cwd()) if self.enabled else "",
+                                 self.lan_enabled, self.lan_ip,
+                                 f"http://{self.lan_ip}:12346"
+                                 if self.enabled and self.lan_enabled else "",
+                                 "")
+
+        def desired(self):
+            return self.enabled
+
+        def enable(self, _workspace):
+            self.enabled = True
+            return self.bootstrap_url()
+
+        def disable(self):
+            self.enabled = False
+
+        def lan_preference(self):
+            return self.lan_enabled, self.lan_ip
+
+        def set_lan(self, enabled, *, ip="", workspace=None):
+            self.lan_enabled = enabled
+            if enabled:
+                self.lan_ip = ip or "192.168.1.5"
+
+        def bootstrap_url(self, *, lan=False):
+            return (f"http://{self.lan_ip}:12346/#one-use" if lan
+                    else "http://127.0.0.1:12345/#one-use")
+
+        def diagnose(self):
+            return ExposureReport("reachable", "reachable", "unverified from another device")
+
+    controller = FakeController()
+    opened = []
+    monkeypatch.setattr(PersistentChatTUI, "_webui_controller", lambda _self: controller)
+    monkeypatch.setattr("klaude_cli.main.lan_ipv4_addresses", lambda: ("192.168.1.5",))
+    monkeypatch.setattr("klaude_cli.main.webbrowser.open", lambda url: opened.append(url) or True)
+    tui = _fake_persistent_tui()
+    tui._open_settings_category("web ui")
+    assert tui._panel.page.id == "webui-settings"
+    assert tui._panel.row("enabled").checked is False
+    tui._panel.picker.focus("enabled")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert controller.enabled
+    assert tui._panel.row("enabled").checked is True
+    tui._panel.picker.focus("open")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert opened == ["http://127.0.0.1:12345/#one-use"]
+    tui._panel.picker.focus("lan-enabled")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert controller.lan_enabled
+    assert tui._panel.row("lan-link").enabled
+    tui._panel.picker.focus("lan-link")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert "LAN link shown" in tui._panel_feedback[1]
+    tui._panel.picker.focus("network-check")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert "local reachable; LAN reachable" in tui._panel_feedback[1]
+    assert "unverified from another device" in tui._panel_feedback[1]
+    tui._panel.picker.focus("enabled")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert not controller.enabled
+    tui._panel.picker.focus("back")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._choice_kind == "settings"
+    assert tui._panel.picker.selected_id == "category:web ui"
+
+
+def test_webui_initial_password_reveals_only_in_settings_panel(monkeypatch):
+    from klaude_webhost.hosting import HostingStatus
+
+    state = HostingStatus(True, True, "http://127.0.0.1:50000", str(Path.cwd()),
+                          auth_mode="password")
+    monkeypatch.setattr(
+        PersistentChatTUI, "_webui_controller", lambda _self: SimpleNamespace(
+            status=lambda: state, account_configured=lambda: True,
+            initial_admin_password=lambda: "fixture-initial-password",
+        ),
+    )
+    tui = _fake_persistent_tui()
+    tui._open_webui_settings()
+    assert "fixture-initial-password" not in str(tui._panel.page.rows)
+    tui._panel.picker.focus("account")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._panel.page.id == "webui-account"
+    assert tui._panel.row("username").value == "admin"
+    tui._panel.picker.focus("initial-password")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._panel.row("initial-password").value == "fixture-initial-password"
+    tui._panel.picker.focus("initial-password")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._panel.row("initial-password").value == "Hidden · reveal only in this terminal"
+    tui._cancel_choice()
+    assert tui._panel.page.id == "webui-settings"
+    assert tui._panel.picker.selected_id == "account"
+    tui._open_webui_settings()
+    assert "fixture-initial-password" not in str(tui._panel.page.rows)
+
+
+def test_webui_account_available_when_host_status_fails(monkeypatch):
+    def broken_status():
+        raise RuntimeError("control protocol version mismatch")
+
+    monkeypatch.setattr(
+        PersistentChatTUI, "_webui_controller", lambda _self: SimpleNamespace(
+            status=broken_status, account_configured=lambda: True,
+            initial_admin_password=lambda: None,
+        ),
+    )
+    tui = _fake_persistent_tui()
+    tui._open_webui_settings()
+    assert tui._panel.row("account").enabled
+    tui._panel.picker.focus("account")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert tui._panel.page.id == "webui-account"
+    assert tui._panel.row("username").value == "admin"
+    tui._panel.picker.focus("initial-password")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert "Already changed" in tui._panel.row("initial-password").value
+
+
+def test_webui_account_uninitialized_and_unreadable_states(monkeypatch):
+    controller = SimpleNamespace(account_configured=lambda: False)
+    monkeypatch.setattr(PersistentChatTUI, "_webui_controller", lambda _self: controller)
+    tui = _fake_persistent_tui()
+    tui._open_webui_account()
+    assert tui._panel.row("username").value == "admin"
+    assert not tui._panel.row("initial-password").enabled
+    assert tui._panel.picker.selected_id == "back"
+
+    def unreadable():
+        raise OSError("private storage error")
+
+    controller.account_configured = unreadable
+    tui._open_webui_account()
+    assert tui._panel.row("error").label == "Account unavailable"
+    assert "private storage error" not in tui._panel.row("error").value
+    assert tui._panel.picker.selected_id == "back"
+
+
+def test_webui_settings_keep_disable_available_for_legacy_host(monkeypatch):
+    from klaude_webhost.hosting import HostingStatus
+
+    state = HostingStatus(True, True, "http://127.0.0.1:50000", str(Path.cwd()),
+                          restart_required=True)
+    monkeypatch.setattr(
+        PersistentChatTUI, "_webui_controller",
+        lambda _self: SimpleNamespace(status=lambda: state),
+    )
+    tui = _fake_persistent_tui()
+    tui._open_settings_category("web ui")
+    assert tui._panel.row("enabled").enabled
+    assert tui._panel.row("enabled").checked
+    assert not tui._panel.row("open").enabled
+    assert "disable and enable" in tui._webui_status_label()
+    assert "Older host" in tui._panel.row("status").value
+
+
+def test_webui_settings_show_draining_host_as_stopping(monkeypatch):
+    from klaude_webhost.hosting import HostingStatus
+
+    state = HostingStatus(
+        False, False, "http://127.0.0.1:50000", str(Path.cwd()),
+        stopping=True,
+    )
+    monkeypatch.setattr(
+        PersistentChatTUI, "_webui_controller",
+        lambda _self: SimpleNamespace(status=lambda: state),
+    )
+    tui = _fake_persistent_tui()
+    assert tui._webui_status_label() == "Stopping · accepted work draining"
+    tui._open_webui_settings()
+    assert tui._panel.row("status").value == "Stopping · accepted work draining"
+    assert not tui._panel.row("open").enabled
+
+
+def test_webui_toggle_retries_stop_when_preference_is_off_but_host_runs(monkeypatch):
+    from klaude_webhost.hosting import HostingStatus
+
+    class Controller:
+        stopped = False
+
+        def status(self):
+            return HostingStatus(False, not self.stopped,
+                                 "http://127.0.0.1:50000" if not self.stopped else "",
+                                 str(Path.cwd()) if not self.stopped else "")
+
+        def disable(self):
+            self.stopped = True
+
+        def lan_preference(self):
+            return False, ""
+
+    controller = Controller()
+    monkeypatch.setattr(PersistentChatTUI, "_webui_controller", lambda _self: controller)
+    tui = _fake_persistent_tui()
+    tui._open_webui_settings()
+    tui._panel.picker.focus("enabled")
+    tui._apply_picker_state()
+    tui._accept_choice()
+    assert controller.stopped
 
 
 def test_first_picker_option_reveals_its_section_heading():
@@ -4788,6 +5060,21 @@ def test_vim_command_toggles_and_persists_composer_mode(tmp_path):
     assert tui.application.editing_mode == EditingMode.EMACS
 
 
+def test_tui_rejects_stale_composer_save_after_external_client_change(tmp_path):
+    from klaude_cli.settings_writer import SettingsWriter
+    from klaude_core.settings_store import update_settings
+
+    path = tmp_path / "chat-preferences.json"
+    tui = _fake_persistent_tui(chat_preferences_path=path)
+    tui._settings_writer = SettingsWriter(path, tui._emit, compare_and_set=True)
+    update_settings(path, {("composer_mode",): "vim"})
+    tui._set_composer_mode("vim")
+    assert tui._settings_writer.close(wait=True)
+    tui._before_render(None)
+    assert tui._runtime_save_state == "failed"
+    assert json.loads(path.read_text())["composer_mode"] == "vim"
+
+
 def test_vim_composer_applies_modal_editing_keybindings(tmp_path):
     async def exercise():
         tui = _fake_persistent_tui(chat_preferences_path=tmp_path / "chat-preferences.json")
@@ -5103,7 +5390,7 @@ def test_live_picker_is_responsive_while_settings_writer_is_blocked(
 ):
     import threading
 
-    import klaude_cli.settings_writer as module
+    import klaude_application.settings_writer as module
 
     async def exercise():
         tui = _fake_persistent_tui(
@@ -6768,7 +7055,7 @@ def test_provider_settings_collect_and_save_api_key_through_masked_composer(monk
     tui = _fake_persistent_tui()
     saved = []
     monkeypatch.setattr(
-        "klaude_cli.main.save_provider_secret",
+        "klaude_core.config.save_provider_secret",
         lambda config_dir, name, value: saved.append((config_dir, name, value)),
     )
 
@@ -7663,7 +7950,7 @@ def test_tui_registry_install_collects_required_secret_in_settings(monkeypatch, 
     saved = []
     monkeypatch.setattr("klaude_cli.main._mcp_registry", lambda: registry)
     monkeypatch.setattr(
-        "klaude_cli.main.save_provider_secret",
+        "klaude_core.config.save_provider_secret",
         lambda config_dir, name, value: saved.append((config_dir, name, value)),
     )
     plan = MCPInstallPlan(
@@ -7683,6 +7970,7 @@ def test_tui_registry_install_collects_required_secret_in_settings(monkeypatch, 
         ),
     )
     tui = _fake_persistent_tui()
+    _configure_test_mcp_lane(tui, registry, monkeypatch)
 
     tui._begin_mcp_catalog_plan(plan)
     assert tui._secret_request is not None
@@ -7696,11 +7984,42 @@ def test_tui_registry_install_collects_required_secret_in_settings(monkeypatch, 
     )
     tui._apply_panel_action(PanelAction("mcp-setup-confirm"))
 
+    assert tui._mcp_mutations.close(wait=True)
+    tui._before_render(None)
+
     server = registry.load()["secure"]
     assert server.enabled is False
     assert server.headers == {"Authorization": "Bearer ${env:MCP_SECURE_TOKEN}"}
     assert saved[-1][1:] == ("MCP_SECURE_TOKEN", "top-secret-token")
     assert "top-secret-token" not in tui.output.text
+
+
+def test_tui_custom_bearer_mcp_uses_shared_ordered_save(monkeypatch, tmp_path):
+    from klaude_core.mcp_client import MCPRegistry
+
+    registry = MCPRegistry(tmp_path / "mcp-servers.json")
+    monkeypatch.setattr("klaude_cli.main._mcp_registry", lambda: registry)
+    saved = []
+    monkeypatch.setattr(
+        "klaude_core.config.save_provider_secret",
+        lambda config_dir, name, value: saved.append((name, value)),
+    )
+    tui = _fake_persistent_tui()
+    _configure_test_mcp_lane(tui, registry, monkeypatch)
+    tui._mcp_setup = {
+        "name": "secure", "transport": "http", "endpoint": "https://mcp.example.com/mcp"
+    }
+
+    tui._save_custom_mcp(bearer_token="private-token")
+    assert tui._mcp_mutation_pending is not None
+    assert tui._mcp_mutations.close(wait=True)
+    tui._before_render(None)
+
+    server = registry.load()["secure"]
+    assert not server.enabled
+    assert server.headers == {"Authorization": "Bearer ${env:MCP_SECURE_TOKEN}"}
+    assert saved == [("MCP_SECURE_TOKEN", "private-token")]
+    assert "private-token" not in tui.output.text
 
 
 def test_custom_mcp_setup_back_restores_previous_nonsecret_answer(monkeypatch, tmp_path):
@@ -9514,6 +9833,46 @@ def test_tool_selector_exposes_time_and_weather_tools():
     assert selected == ["current_time", "weather_lookup", "web_search"]
 
 
+@pytest.mark.parametrize("prompt", [
+    "Look up Luma Quill, read the portfolio, and tell me the creation date.",
+    "Find the publication date of this book online.",
+    "Look up the event's start time and venue.",
+    "Research the artist's date of birth.",
+    "Explain time complexity.",
+])
+def test_research_dates_and_timings_do_not_expose_the_local_clock(prompt):
+    tools = {name: Tool(name, name, {"type": "object"}, lambda: "")
+             for name in ("web_search", "fetch_url", "current_time")}
+    assert "current_time" not in _select_tool_names(prompt, tools)
+
+
+@pytest.mark.parametrize("prompt", [
+    "What time is it in Cambodia?", "What date is it?", "What day is it?",
+    "What's the time?", "Tell me the date.", "Time in Phnom Penh?",
+    "Could you tell me the time?", "Tell me what time it is in Cambodia.",
+    "Get the current time and look up today's news.",
+    "Research this event and compare its start time with the local time.",
+    "Use current_time.",
+])
+def test_explicit_clock_requests_keep_the_clock_available(prompt):
+    tools = {name: Tool(name, name, {"type": "object"}, lambda: "")
+             for name in ("web_search", "fetch_url", "current_time")}
+    assert "current_time" in _select_tool_names(prompt, tools)
+
+
+@pytest.mark.parametrize("prompt", [
+    'Print exactly "look them up".',
+    "Reply with exactly 'search the web'.",
+    'Repeat `read challenge.md`.',
+    'Say “current time”.',
+])
+def test_literal_responses_do_not_expose_tools_named_inside_the_payload(prompt):
+    tools = {name: Tool(name, name, {"type": "object"}, lambda: "")
+             for name in ("web_search", "fetch_url", "query_knowledge", "search_sessions",
+                          "current_time", "read_file", "run_shell")}
+    assert _select_tool_names(prompt, tools) == []
+
+
 def test_feature_questions_use_knowledge_not_command_help():
     tools = {
         name: Tool(
@@ -10392,6 +10751,55 @@ def _configure_test_mcp_lane(tui, registry, monkeypatch):
         tui.agent.gate.policies = {}
     tui._mcp_mutations.close()
     tui._mcp_mutations = MCPMutationWriter(registry.path, tui._emit, tui._prepare_mcp_catalog)
+
+
+def test_tui_mcp_save_requires_journal_and_records_completed_receipt(tmp_path, monkeypatch):
+    from klaude_application.operation_journal import OperationJournal
+    from klaude_cli.mcp_mutations import MCPMutationWriter
+    from klaude_core.mcp_client import MCPRegistry, MCPServerConfig
+
+    registry = MCPRegistry(tmp_path / "mcp-servers.json")
+    tui = _fake_persistent_tui()
+    _configure_test_mcp_lane(tui, registry, monkeypatch)
+    tui._mcp_mutations.close()
+    tui._mcp_mutations = MCPMutationWriter(
+        registry.path, tui._emit, tui._prepare_mcp_catalog,
+        require_journal=True,
+    )
+    server = MCPServerConfig(
+        name="docs", transport="http", url="https://example.com/mcp",
+    )
+    assert not tui._submit_disabled_mcp_server(server)
+    assert registry.load() == {}
+
+    journal = OperationJournal(tmp_path / "operations.db")
+    tui._mcp_mutations.close()
+    tui._mcp_mutations = MCPMutationWriter(
+        registry.path, tui._emit, tui._prepare_mcp_catalog,
+        journal=journal, require_journal=True,
+    )
+    assert tui._submit_disabled_mcp_server(server)
+    assert tui._mcp_mutations.close(wait=True)
+    tui._before_render(None)
+    assert not registry.load()["docs"].enabled
+    receipts = journal.recent(tui.session_id)
+    assert len(receipts) == 1 and receipts[0].state == "completed"
+
+
+def test_tui_unconfirmed_mcp_save_shows_recovery_command():
+    import uuid
+
+    from klaude_cli.mcp_mutations import MCPMutationResult, MCPToggle
+
+    tui = _fake_persistent_tui()
+    request = MCPToggle(uuid.uuid4().hex, tui.session_id, "docs", "a" * 64, True)
+    tui._mcp_mutation_pending = (request, time.monotonic())
+    tui._events.put(("mcp_mutation_saved", MCPMutationResult(
+        request, str(tui.cfg.mcp_servers_file), "unconfirmed",
+    )))
+    tui._before_render(tui.application)
+    assert "klaude mcp recover" in tui.status_error
+    assert tui._mcp_mutation_pending is None
 
 
 @pytest.mark.parametrize("outcome", ["success", "failure", "cancel", "changed"])
@@ -15036,3 +15444,149 @@ def test_ai_defaults_rows_render_neatly_at_supported_widths(tmp_path, width):
     rendered="\n".join("".join(text for _style,text in line) for line in body.lines)
     assert all(get_cwidth(line) <= width for line in rendered.splitlines())
     assert "Default Chat" in rendered and "Utility" in rendered
+
+
+def test_failed_request_diagnostics_survive_previous_usage_fallback():
+    from klaude_cli.main import _agent_model_metadata
+    agent = SimpleNamespace(
+        ollama=SimpleNamespace(last_chat_metadata={
+            'error_type': 'read_timeout', 'request_phase': 'streaming',
+            'request_elapsed_seconds': 269.0, 'output_started': True,
+            'routed_model': 'actual/model', 'headers': {'authorization': 'private-test-secret'},
+        }), last_request_usage=(6510, 120),
+    )
+    metadata = _agent_model_metadata(agent)
+    assert metadata['error_type'] == 'read_timeout'
+    assert metadata['request_elapsed_seconds'] == 269.0
+    assert metadata['output_started'] is True
+    assert metadata['routed_model'] == 'actual/model'
+    assert metadata['usage_from_previous_request'] is True
+    assert metadata['usage']['input_tokens'] == 6510
+    assert 'private-test-secret' not in str(metadata)
+
+
+@pytest.mark.parametrize("allow_write", (True, False))
+def test_m1_read_approval_edit_parity_across_headless_line_and_tui(
+    tmp_path, monkeypatch, allow_write,
+):
+    """The same scripted Agent/Workspace workflow uses all three client paths."""
+    from klaude_application import HeadlessApplication, compose_agent
+    from klaude_tools import Workspace, build_tools
+    from rich.console import Console
+
+    class Runtime:
+        def __init__(self):
+            self.last_chat_metadata = {}
+            self.replies = [
+                {"role": "assistant", "content": "", "tool_calls": [{"function": {
+                    "name": "read_file", "arguments": {"path": "task.txt"},
+                }}]},
+                {"role": "assistant", "content": "", "tool_calls": [{"function": {
+                    "name": "write_file", "arguments": {
+                        "path": "output.txt", "content": "copied",
+                    },
+                }}]},
+                {"role": "assistant", "content": "Done."},
+            ]
+
+        def chat(self, _model, _messages, tools=None, options=None, think=None):
+            return self.replies.pop(0)
+
+        def close(self):
+            pass
+
+    def make_client(name):
+        root = tmp_path / name / "work"
+        root.mkdir(parents=True, exist_ok=True)
+        if not (root / "task.txt").exists():
+            (root / "task.txt").write_text("copied")
+        workspace = Workspace(root)
+        assert "not a git repo" in workspace.ensure_work_branch()
+        memory = Memory(tmp_path / name / "memory.md", tmp_path / name / "sessions.db")
+        gate = PermissionGate(
+            {"read_file": "allow", "write_file": "ask"},
+            lambda _tool, _detail: "y" if allow_write else "n",
+        )
+        agent = compose_agent(
+            Runtime(), "fixture", build_tools(workspace), gate, "Fixture instructions.",
+            tool_selector=lambda _message, available: list(available),
+            model_info=ModelInfo("ollama", "fixture", "fixture"),
+        )
+        agent.workspace = workspace
+        agent.workdir = root
+        agent.tool_config = Config()
+        started = []
+        agent.execution_observer = lambda tool, _identity: started.append(tool)
+        return root, memory, agent, started
+
+    prompt = "Read task.txt then write output.txt with its content"
+    headless_root, headless_memory, headless_agent, _ = make_client("headless")
+    headless = HeadlessApplication(headless_agent, headless_memory)
+    headless.activate_workspace()
+
+    async def run_headless():
+        handle = headless.submit(prompt)
+        consumer = asyncio.create_task(_collect_bridge_events(handle))
+        for _ in range(200):
+            pending = headless.pending_interactions()
+            if pending:
+                assert pending[0].tool == "write_file"
+                assert headless.decide(
+                    pending[0].id, "allow_once" if allow_write else "deny"
+                )
+                break
+            await asyncio.sleep(0.01)
+        events = await consumer
+        assert (await handle.result()).state == "completed"
+        await headless.close()
+        return events
+
+    async def _collect_bridge_events(handle):
+        return [event async for event in handle.events()]
+
+    headless_events = asyncio.run(run_headless())
+    kinds = [event.kind for event in headless_events]
+    assert "tool.started" in kinds, headless_events
+    assert kinds.index("tool.requested") < kinds.index("tool.started"), headless_events
+    write_result = next(
+        event for event in headless_events
+        if event.kind == "tool.finished" and event.tool == "write_file"
+    )
+    assert write_result.executed is allow_write
+    assert (headless_root / "output.txt").exists() is allow_write
+    _, resumed_memory, resumed_agent, resumed_started = make_client("headless")
+    resumed = HeadlessApplication(resumed_agent, resumed_memory)
+    resumed.resume(headless.session_id)
+    assert resumed.public_history()[-1] == {"role": "assistant", "content": "Done."}
+    assert resumed_started == []
+    asyncio.run(resumed.close())
+
+    line_root, line_memory, line_agent, line_started = make_client("line")
+    monkeypatch.setattr(
+        "klaude_cli.main.console",
+        Console(file=StringIO(), force_terminal=False, width=80),
+    )
+    assert _render(line_agent, line_memory, "line-session", prompt) == "Done."
+    line_memory.db.close()
+
+    tui_root, tui_memory, tui_agent, tui_started = make_client("tui")
+    tui = _fake_persistent_tui()
+    tui.agent = tui_agent
+    tui.memory = tui_memory
+    turn_id = "tui-fixture-turn"
+    from klaude_application.coordination import DurableTurns
+    DurableTurns(tui_memory)  # Migration happens before a terminal writer claims its lease.
+    assert tui_memory.acquire_session_lease(tui.session_id, tui.client_id, turn_id)
+    tui._run_turn(prompt, threading.Event(), turn_id=turn_id)
+    assert tui_memory.load_session(tui.session_id)[-1] == {
+        "role": "assistant", "content": "Done.",
+    }
+    tui_memory.db.close()
+
+    for root, started in (
+        (line_root, line_started),
+        (tui_root, tui_started),
+    ):
+        assert "read_file" in started
+        assert ("write_file" in started) is allow_write
+        assert (root / "output.txt").exists() is allow_write

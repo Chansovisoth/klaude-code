@@ -26,7 +26,8 @@ def _public_url(value: object) -> str:
         url = urlsplit(str(value or ""))
     except ValueError:
         return ""
-    if url.scheme not in {"http", "https"} or not url.hostname or url.username:
+    if (url.scheme not in {"http", "https"} or not url.hostname
+            or url.username is not None or url.password is not None):
         return ""
     host = url.hostname.casefold().rstrip(".")
     try:

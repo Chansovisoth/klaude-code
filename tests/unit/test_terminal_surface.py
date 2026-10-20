@@ -100,7 +100,12 @@ def test_chat_themes_agent_setup_only_for_interactive_tui(monkeypatch, tmp_path,
     monkeypatch.setattr(cli_main.sys, "stdout", SimpleNamespace(isatty=lambda: True))
     monkeypatch.setattr(cli_main, "_clear_plain_session_view", lambda **kwargs: None)
     monkeypatch.setattr(cli_main, "load_config", lambda: SimpleNamespace(
-        data_dir=tmp_path, models={"coder":"test-model"}))
+        config_dir=tmp_path / "config", data_dir=tmp_path,
+        models={"coder":"test-model"}))
+    monkeypatch.setattr(
+        cli_main, "WebHostController",
+        lambda *_: SimpleNamespace(ensure_started=lambda *_: None),
+    )
     monkeypatch.setattr(cli_main, "_load_last_chat_model", lambda path: "")
     monkeypatch.setattr(
         "prompt_toolkit.output.defaults.create_output", lambda **kwargs: DummyOutput()

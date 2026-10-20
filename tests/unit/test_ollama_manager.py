@@ -105,6 +105,23 @@ def review(cfg, operation="delete", model="unused:latest", digest="a" * 64):
     }
 
 
+def test_shared_manager_command_preserves_review_and_private_credentials(cfg, monkeypatch):
+    from klaude_application.model_manager import ModelManagerCommand
+
+    monkeypatch.setenv("HUGGINGFACE_API_KEY", "private-token")
+    command = ModelManagerCommand.for_client(cfg, "delete", **{
+        k: v for k, v in review(cfg).items() if k != "operation"
+    })
+    request = command.worker_request()
+    assert request["environment_keys"] == {"HUGGINGFACE_API_KEY": "private-token"}
+    assert "private-token" not in repr(command)
+    assert ModelManagerCommand.from_worker(request).worker_request() == request
+    with pytest.raises(ValueError, match="Invalid Model Manager"):
+        ModelManagerCommand.from_worker({**request, "operation": "arbitrary"})
+    with pytest.raises(ValueError, match="Invalid Model Manager"):
+        ModelManagerCommand.from_worker({**request, "environment_keys": {"PATH": "unsafe"}})
+
+
 def test_inventory_reads_only_and_keeps_native_roles_and_registry(cfg, service):
     result = execute_manager(cfg, {"operation": "inventory"})
     assert [r.url.path for r in service.requests] == ["/api/tags", "/api/ps", "/api/version"]

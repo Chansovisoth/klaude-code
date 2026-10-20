@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from klaude_application.model_dependencies import ModelDependencyCommand
 from klaude_core.model_dependencies import BUILD_TIMEOUT
 from klaude_core.model_setup_removal import REMOVE_TIMEOUT
 
@@ -409,11 +410,7 @@ class DependencyPanel:
         self.read = None
 
     def request(self, operation: str, **values) -> dict:
-        return {
-            "kind": "model_dependencies",
-            "operation": operation,
-            "data_dir": str(self.host.cfg.data_dir),
-            "config_dir": str(self.host.cfg.config_dir),
+        return ModelDependencyCommand.for_client(self.host.cfg, operation, **{
             "current": self.manager.current(),
             "engine": self.engine,
             "executable": self.executable,
@@ -426,7 +423,7 @@ class DependencyPanel:
             "owner": os.getpid(),
             "id": (self.task or self.result).get("id", ""),
             **values,
-        }
+        }).worker_request()
 
     def load(self, operation: str) -> None:
         identity = self.host._background_jobs.submit(READ, self.request(operation), timeout=40)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -27,12 +28,41 @@ class CompatibleModelError(RuntimeError):
         error_type: str = "unknown",
         output_started: bool = False,
         retry_after: float | None = None,
+        phase: str = "provider",
     ):
         super().__init__(message)
         self.status_code = status_code
         self.error_type = error_type
         self.output_started = output_started
         self.retry_after = retry_after
+        self.phase = phase
+
+
+def transport_error(error: httpx.HTTPError, *, partial: bool, phase: str) -> CompatibleModelError:
+    """Retain HTTPX categories without serializing URLs, credentials or bodies."""
+    categories = (
+        (httpx.ConnectTimeout, "connect_timeout", "Model connection timed out"),
+        (httpx.ReadTimeout, "read_timeout", "Model response stalled (read timeout)"),
+        (httpx.WriteTimeout, "write_timeout", "Model request upload timed out"),
+        (httpx.PoolTimeout, "pool_timeout", "Model connection pool timed out"),
+        (httpx.ConnectError, "connect_error", "Model connection could not be established"),
+        (httpx.ReadError, "read_error", "Model connection interrupted while reading"),
+        (httpx.WriteError, "write_error", "Model connection interrupted while uploading"),
+        (httpx.RemoteProtocolError, "remote_protocol_error", "Model server protocol interrupted"),
+        (httpx.LocalProtocolError, "local_protocol_error", "Invalid model request protocol"),
+        (httpx.ProxyError, "proxy_error", "Model proxy connection failed"),
+    )
+    code, message = next(((code, label) for kind, code, label in categories
+                          if isinstance(error, kind)),
+                         ("transport_error", "Model transport failed"))
+    suffix = "; generation already started; retry explicitly" if partial else (
+        "; remote outcome is unconfirmed; retry explicitly"
+        if code in {"read_timeout", "read_error", "write_timeout", "write_error",
+                    "remote_protocol_error", "transport_error"}
+        else "; explicit retry is available"
+    )
+    return CompatibleModelError(message + suffix, error_type=code,
+                                output_started=partial, phase=phase)
 
 
 def provider_error(
@@ -119,7 +149,7 @@ class CompatibleRuntime(CancellableHTTPTransport):
         super().__init__(base_url, timeout, headers=headers, trust_env=False)
 
     def _cancel_error(self) -> RuntimeError:
-        return CompatibleModelError("Model request cancelled")
+        return CompatibleModelError("Model request cancelled", error_type="cancelled")
 
     def fork_for_child(self) -> CompatibleRuntime:
         child = CompatibleRuntime(self.base_url, self.api_key, self.timeout)
@@ -218,6 +248,8 @@ class CompatibleRuntime(CancellableHTTPTransport):
         calls: dict[int, dict[str, Any]] = {}
         finish: str | None = None
         started = False
+        request_started_at = time.monotonic()
+        phase = "awaiting_headers"
         self.last_chat_metadata = {}
         client = self._chat_client_factory()
         self._track_request(client)
@@ -229,6 +261,7 @@ class CompatibleRuntime(CancellableHTTPTransport):
                 extensions={"trace": self._request_trace(client)},
             ) as response:
                 self._attach_response(client, response)
+                phase = "streaming"
                 if response.status_code != 200:
                     body = bytearray()
                     for chunk in response.iter_bytes(chunk_size=4096):
@@ -356,8 +389,21 @@ class CompatibleRuntime(CancellableHTTPTransport):
             elif continuation:
                 yield {"role": "assistant", "content": "", **continuation}
         except httpx.HTTPError as exc:
-            raise CompatibleModelError("Model connection interrupted; retry") from exc
+            # Closing a cancelled owned transport can surface as an HTTPX error.
+            # Cancellation remains a terminal user action, never a retry signal.
+            with self._active_response_lock:
+                cancelled = self._active_client is not client
+            if cancelled:
+                self.last_chat_metadata["error_type"] = "cancelled"
+                raise self._cancel_error() from exc
+            failure = transport_error(exc, partial=started, phase=phase)
+            self.last_chat_metadata.update(error_type=failure.error_type,
+                                           request_phase=phase, output_started=started)
+            raise failure from exc
         finally:
+            self.last_chat_metadata["request_elapsed_seconds"] = round(
+                time.monotonic() - request_started_at, 3
+            )
             self._finish_request(client)
             client.close()
 

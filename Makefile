@@ -19,7 +19,7 @@ lint:
 	uv run ruff check .
 
 typecheck:
-	uv run mypy packages/core/src packages/knowledge/src packages/tools_local/src packages/web/src apps/cli/src
+	uv run mypy packages/application/src packages/core/src packages/knowledge/src packages/tools_local/src packages/web/src apps/cli/src apps/webhost/src
 
 package-smoke:
 	uv run python scripts/package_smoke.py

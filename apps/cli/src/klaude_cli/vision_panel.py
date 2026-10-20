@@ -6,6 +6,7 @@ import os
 import time
 from typing import Any
 
+from klaude_application.vision import VisionCommand
 from klaude_core.vision import ANALYSIS_TIMEOUT, PREPARE_TIMEOUT
 
 from .settings_panel import PanelAction, PanelPage, PanelRow, RowControl, RowKind
@@ -309,23 +310,13 @@ class VisionPanel:
                 and len(value) <= 8192
             ):
                 environment[connection.key_env] = value
-        request = {
-            "kind": "vision",
-            "operation": operation,
-            "config_dir": str(cfg.config_dir),
-            "data_dir": str(cfg.data_dir),
-            "ollama_url": cfg.ollama_url,
-            "roles": dict(cfg.models),
-            "artifact": self.item["id"],
-            "revision": self.item["revision"],
-            "question": self.question,
-            "context": self.context,
-            "output_tokens": self.output_tokens,
-            "spec": self.spec,
-            "proposal": self.result if self.tagging else {},
-            "selected": [tag for tag in self.result.get("tags", []) if tag in self.selected],
-            "environment_keys": environment,
-        }
+        request = VisionCommand.for_client(
+            cfg, operation, artifact=self.item["id"], revision=self.item["revision"],
+            question=self.question, context=self.context, output_tokens=self.output_tokens,
+            spec=self.spec, proposal=self.result if self.tagging else {},
+            selected=[tag for tag in self.result.get("tags", []) if tag in self.selected],
+            environment_keys=environment,
+        ).worker_request()
         self.library.leave()
         identity = host._background_jobs.submit(
             KEY,

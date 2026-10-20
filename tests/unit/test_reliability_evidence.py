@@ -354,3 +354,55 @@ def test_product_question_keeps_product_context_despite_tool_prohibition():
 def test_provenance_audit_success_never_claims_result_replayability():
     note = prior_answer_source_note(answered("Godot", "query_knowledge"))
     assert "do not by themselves preserve" in note
+
+
+@pytest.mark.parametrize('restored', [False, True])
+def test_source_recap_retains_sanitized_url_without_replaying_result_evidence(restored):
+    url = 'https://artist.example/portfolio?token=private-test-secret#private-fragment'
+    record = ({'role': 'system', 'content': {
+        'event': 'research_receipt', 'tool': 'fetch_url', 'status': 'completed',
+        'public_url': url, 'result_replayable': False,
+    }} if restored else {'role': 'tool', 'tool_name': 'fetch_url',
+                        'content': 'private result body that must not be repeated',
+                        'metadata': {'executed': True, 'final_url': url}})
+    turns = [{'role': 'user', 'content': 'Find the illustration.'}, record,
+             {'role': 'assistant', 'content': 'The work is titled Party.'}]
+    agent = Agent(object(), 'small', [], PermissionGate({}, lambda *_: 'n'), 'system')
+    agent.restore_session(turns)
+    agent.messages = agent.messages[:1]  # provenance survives conversational eviction
+    events = list(agent.run('Which source did you use for the illustration answer?'))
+    note = events[0].payload['content']
+    assert 'https://artist.example/portfolio' in note
+    assert 'private-test-secret' not in note and 'private-fragment' not in note
+    assert 'private result body' not in note
+    assert 'do not by themselves preserve or prove' in note
+
+
+@pytest.mark.parametrize('url', [
+    'https://user:private-test-secret@artist.example/work',
+    'https://:private-test-secret@artist.example/work',
+    'http://127.0.0.1/private', 'http://server.internal/private',
+    'file:///private/document.txt',
+])
+def test_source_recap_never_displays_private_or_credentialed_urls(url):
+    turns = [{'role': 'user', 'content': 'Read a source.'},
+             {'role': 'system', 'content': {
+                 'event': 'research_receipt', 'tool': 'fetch_url', 'status': 'completed',
+                 'public_url': url,
+             }}, {'role': 'assistant', 'content': 'A lead was found.'}]
+    note = prior_answer_source_note(turns)
+    assert 'Recorded public URLs' not in note
+    assert 'private-test-secret' not in note
+
+
+def test_source_recap_url_inventory_is_bounded_and_excludes_failed_fetches():
+    turns = [{'role': 'user', 'content': 'Read sources.'}]
+    turns.extend({'role': 'tool', 'tool_name': 'fetch_url', 'content': 'page', 'metadata': {
+        'executed': True, 'final_url': f'https://artist.example/work/{i}',
+    }} for i in range(8))
+    turns.append({'role': 'tool', 'tool_name': 'fetch_url', 'content': 'tool error: failed',
+                  'metadata': {'executed': True, 'final_url': 'https://failed.example/work'}})
+    turns.append({'role': 'assistant', 'content': 'Four leads remain.'})
+    note = prior_answer_source_note(turns)
+    assert note.count('https://artist.example/') == 4
+    assert 'failed.example' not in note

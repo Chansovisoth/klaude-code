@@ -27,6 +27,9 @@
     "prior_messages": [],
     "user": "Look up Chanreach Try online",
     "expected_tools": ["web_search"],
-    "forbidden_tools": ["write_file", "edit_file", "git_commit", "run_shell"]
+    "forbidden_tools": ["write_file", "edit_file", "git_commit", "run_shell"],
+    "actions": [
+      {"tool": "web_search", "arguments": {"query": "Chanreach Try"}}
+    ]
   }
 ]

@@ -31,6 +31,43 @@ from klaude_core.managed_serving import (
 from klaude_core.model_connections import connection_registry
 
 
+def test_shared_serving_read_request_roundtrip_and_fixed_operations(tmp_path):
+    from klaude_application.serving_read import ServingRead
+
+    cfg = SimpleNamespace(config_dir=tmp_path / "config", data_dir=tmp_path / "data")
+    request = ServingRead.for_client(cfg, "inventory").worker_request()
+    assert ServingRead.from_worker(request).worker_request() == request
+    with pytest.raises(ValueError, match="Invalid serving read"):
+        ServingRead.from_worker({**request, "operation": "start"})
+    with pytest.raises(ValueError, match="Invalid serving read"):
+        ServingRead.from_worker({**request, "command": "arbitrary"})
+
+
+def test_shared_serving_owner_reaps_failed_launch_without_terminal_ui(tmp_path, monkeypatch):
+    from klaude_application import serving_jobs
+
+    monkeypatch.setattr(serving_jobs.subprocess, "Popen", lambda *a, **kw: (
+        _ for _ in ()
+    ).throw(OSError("fixture launch failure")))
+    events = queue.Queue()
+    jobs = serving_jobs.ServingJobs(lambda kind, value: events.put((kind, value)))
+    request = {"id": uuid.uuid4().hex, "config_dir": str(tmp_path / "config"),
+               "data_dir": str(tmp_path / "data"), "spec": {}, "evidence": {}}
+    jobs.start(request)
+    try:
+        seen = []
+        while True:
+            event = events.get(timeout=2)
+            seen.append(event)
+            if event[0] == "serving_stopped":
+                break
+        assert seen[0][0] == "serving_event" and seen[0][1][1]["state"] == "failed"
+        assert seen[-1][1] == (request["id"], True)
+    finally:
+        jobs.close(wait=True)
+    assert not jobs.owns(request["id"])
+
+
 @pytest.fixture
 def lab(tmp_path):
     cfg = SimpleNamespace(config_dir=tmp_path / "config", data_dir=tmp_path / "data")
@@ -299,8 +336,16 @@ def test_explicit_adoption_matches_pid_engine_session_and_stops_only_that_server
         jobs.close(wait=True)
         process.wait(timeout=3)
         assert not connection_registry(cfg).load()[ready["endpoint"]["id"]].enabled
-        with pytest.raises(ValueError):
-            adoption_identity(os.getpid(), Path(sys.executable))
+        shared_session = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(10)"],
+            stdout=subprocess.DEVNULL,
+        )
+        try:
+            with pytest.raises(ValueError):
+                adoption_identity(shared_session.pid, Path(sys.executable))
+        finally:
+            shared_session.terminate()
+            shared_session.wait(timeout=3)
     finally:
         jobs.close(wait=True)
         if process.poll() is None:
@@ -369,7 +414,7 @@ def test_invalid_resource_fields_fail_without_execution(lab, fields):
 
 
 def test_client_close_waits_for_slow_helper_cleanup_acknowledgement(lab, tmp_path, monkeypatch):
-    from klaude_cli import serving_jobs
+    from klaude_application import serving_jobs
 
     cfg, spec = lab
     helper = tmp_path / "slow-cleanup-helper.py"

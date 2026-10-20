@@ -7,10 +7,11 @@ import uuid
 from dataclasses import asdict, replace
 from typing import Any
 
+from klaude_application.serving_jobs import ServingJobs
+from klaude_application.serving_read import ServingRead
 from klaude_core.managed_serving import ENGINES, LaunchSpec
 from klaude_core.ssh_serving import preflight_timeout
 
-from .serving_jobs import ServingJobs
 from .settings_panel import PanelAction, PanelPage, PanelRow, RowControl, RowKind
 
 READ = "serving:read"
@@ -499,19 +500,16 @@ class ServingPanel:
             self.evidence = {}
         identity = self.host._background_jobs.submit(
             READ,
-            {
-                "kind": "serving_read",
-                "operation": operation,
-                "data_dir": str(self.host.cfg.data_dir),
-                "engine": self.spec.engine,
-                "executable": self.spec.executable,
-                "spec": asdict(self.spec),
-                "evidence": self.evidence,
-                "id": self.target,
-                "config_dir": str(self.host.cfg.config_dir),
-                "server_revision": self.ssh_revision,
-                "agent_socket": os.environ.get("SSH_AUTH_SOCK", ""),
-            },
+            ServingRead.for_client(
+                self.host.cfg, operation,
+                engine=self.spec.engine,
+                executable=self.spec.executable,
+                spec=asdict(self.spec),
+                evidence=self.evidence,
+                id=self.target,
+                server_revision=self.ssh_revision,
+                agent_socket=os.environ.get("SSH_AUTH_SOCK", ""),
+            ).worker_request(),
             timeout=preflight_timeout(self.spec),
         )
         self.read = (

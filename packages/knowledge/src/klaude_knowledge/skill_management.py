@@ -129,7 +129,8 @@ def import_remote_skill(cfg: Config, record: SkillRecord, *, transport=None, kno
         )
 
 
-def delete_installed_skill(cfg: Config, name: str, identity: str) -> None:
+def delete_installed_skill(cfg: Config, name: str, identity: str, *,
+                           expected_enabled: bool | None = None) -> None:
     """Delete only the reviewed package and its owner, including old libraries."""
     from .store import KnowledgeStore
 
@@ -155,6 +156,12 @@ def delete_installed_skill(cfg: Config, name: str, identity: str) -> None:
             # One transaction disables only this owner across every library.
             owner = f"skill:{name}"
             with store.fts:
+                store.fts.execute("BEGIN IMMEDIATE")
+                current = store.fts.execute(
+                    "SELECT 1 FROM disabled_skills WHERE name=?", (name,)
+                ).fetchone() is None
+                if expected_enabled is not None and current != expected_enabled:
+                    raise ValueError("Skill activation changed; review it again")
                 store.fts.execute(
                     "UPDATE source_versions SET status='obsolete' WHERE owner=?", (owner,)
                 )
@@ -167,7 +174,8 @@ def delete_installed_skill(cfg: Config, name: str, identity: str) -> None:
 
 
 def set_installed_skill_enabled(
-    cfg: Config, name: str, identity: str, enabled: bool
+    cfg: Config, name: str, identity: str, enabled: bool, *,
+    expected_enabled: bool | None = None,
 ) -> None:
     """Persist activation for one reviewed package without changing its indexed files."""
     from .store import KnowledgeStore
@@ -192,6 +200,12 @@ def set_installed_skill_enabled(
         store = KnowledgeStore(cfg.knowledge_dir)
         try:
             with store.fts:
+                store.fts.execute("BEGIN IMMEDIATE")
+                current = store.fts.execute(
+                    "SELECT 1 FROM disabled_skills WHERE name=?", (name,)
+                ).fetchone() is None
+                if expected_enabled is not None and current != expected_enabled:
+                    raise ValueError("Skill activation changed; review it again")
                 if enabled:
                     store.fts.execute("DELETE FROM disabled_skills WHERE name=?", (name,))
                 else:

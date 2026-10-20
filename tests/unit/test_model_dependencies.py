@@ -17,6 +17,21 @@ from klaude_core.managed_serving import process_identity
 from klaude_core.model_dependencies import TOOLS, build, builds, inspection, prepare, tool_paths
 
 
+def test_shared_dependency_command_roundtrip_and_fixed_operations(tmp_path):
+    from klaude_application.model_dependencies import ModelDependencyCommand
+
+    cfg = type("Config", (), {"config_dir": tmp_path / "config",
+                               "data_dir": tmp_path / "data"})()
+    command = ModelDependencyCommand.for_client(cfg, "prepare_remove", id="record")
+    request = command.worker_request()
+    assert ModelDependencyCommand.from_worker(request).worker_request() == request
+    assert "record" not in repr(command)
+    with pytest.raises(ValueError, match="Invalid model dependency"):
+        ModelDependencyCommand.from_worker({**request, "operation": "shell"})
+    with pytest.raises(ValueError, match="Invalid model dependency"):
+        ModelDependencyCommand.from_worker({**request, "payload": "unexpected"})
+
+
 @pytest.fixture
 def source(tmp_path):
     if set(tool_paths()) != set(TOOLS):

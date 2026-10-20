@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import queue
+import uuid
 from typing import Any
 
 import typer
+from klaude_application.image_generation import ImageGenerationCommand
 from klaude_core.image_generation import DEADLINE
 from rich.console import Console
 from rich.text import Text
@@ -19,13 +21,9 @@ def work(cfg: Any, operation: str, **values: Any) -> dict:
     events: queue.Queue = queue.Queue()
     jobs = OwnedBackgroundJobs(lambda kind, value: events.put((kind, value)))
     interrupted = False
-    request = {
-        "kind": "image_generation",
-        "operation": operation,
-        "config_dir": str(cfg.config_dir),
-        "data_dir": str(cfg.data_dir),
-        **values,
-    }
+    if operation == "save":
+        values = {**values, "request_id": uuid.uuid4().hex, "owner_id": "cli"}
+    request = ImageGenerationCommand.for_client(cfg, operation, **values).worker_request()
     try:
         identity = jobs.submit(
             "image-generation:cli", request, timeout=DEADLINE + 30 if operation == "run" else 20
