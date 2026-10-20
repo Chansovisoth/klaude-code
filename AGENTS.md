@@ -149,28 +149,102 @@ Workspace layout:
   exact allow-once/deny review with content preview and hash. LAN cannot
   activate or approve edits, and an edit-enabled host cannot start LAN preview.
   Shell and Git mutations remain unavailable.
-  The authenticated Library has two destinations: Files and Knowledge. Files
-  combines existing Documents, Media and Research reports, with independent type
-  and Saved/Archived status filters. Archive is a status, not a separate tab.
-  Imports choose Document or Image independently of the current filters and
-  remain behind a compact Add a file disclosure. Old saved tab selections migrate
-  to file filters; section, type and status survive page refresh within the tab.
+  The authenticated Library has two destinations: Uploads and Generated.
+  Uploads contains imported Documents and Media. Generated contains
+  saved Research reports and generated images. Both tabs use All types, Documents
+  and Media filters; Generated Documents includes existing Research records,
+  while Media retains generated images. The browser maps this category to the
+  existing `research` read filter without changing stored kinds or record IDs.
+  Legacy Research filter preferences/URLs migrate to Generated Documents.
+  The shared bounded inventory filters inputs/outputs before counts, search,
+  sorting and pagination: Research records and records in generated_images are
+  outputs; names, model labels and AI tags never determine authorship. Both tabs
+  reuse the existing List/Grid/Gallery, previews and reviewed artifact actions.
+  Only Uploads offers uploads. Each tab restores its own active filters/search/page
+  when switching; Library URLs remain authoritative for reload/back/forward.
+  Generated empty states render in the content area below its toolbar, with an
+  accessible status message and no empty list column header.
+  Legacy Research tabs and Uploads report filters migrate to Generated. Existing
+  kind=all API and CLI/TUI reads remain compatible. Missing source-filter support
+  on a running old host shows restart guidance instead of mixing inventories.
+  Saved/Archived is an independent status filter, not a separate tab.
+  Imports detect supported images from bounded headers of the immutable upload;
+  other files use Document storage, independently of the current filters. One
+  unrestricted picker opens from the toolbar's labeled plus button in the shared
+  native dialog style, with no type selector. The existing import review remains
+  required; closing an in-flight import discards its late review. Compact Uploads
+  toolbars use 48px search/action/view controls, with type/status/all sort directions
+  in the expandable Filters and sort panel. Below the existing 650px content
+  breakpoint, list column headers disappear and two-line file rows are 70px tall;
+  desktop keeps sortable columns. List loading uses matching row placeholders.
+  Explicit document/media API drafts remain compatible. Old saved tab
+  selections migrate to file filters or Generated; section, type and status
+  survive page refresh within the tab.
   Saving owner-scoped uploads to Library needs an explicit import review;
   previews/downloads never launch a host desktop opener. Tags, archive/restore
   and deletion use artifact revisions. Knowledge supports inventories/text
   search, reviewed URL/text-upload Learn and exact existing-source refresh.
-  Files image previews recognize lossy VP8, lossless VP8L and extended VP8X WebP
+  Uploads image previews recognize lossy VP8, lossless VP8L and extended VP8X WebP
   headers. Existing images missing stored dimensions derive them from at most
   64 KiB of private headers on read, without decoding pixels, rewriting the
   artifact or changing its revision. Recognized images imported as Documents
-  retain their type and record dimensions for preview. Browser previews retain
-  their 8 MiB, 4-megapixel and 4096px-side limits. Evidence:
+  retain their type and record dimensions for preview. Original inline-content
+  responses retain their 8 MiB, 4-megapixel and 4096px-side limits. Evidence:
   `docs/webui/webp-preview-validation.md`.
+  Uploads now offers List, Grid and Gallery with compact shared type icons and
+  image thumbnails. Gallery filters supported PNG/JPEG/WebP/GIF before paging;
+  date sorts group by month added. The store has no directory tree, modification
+  times or capture dates: breadcrumbs show Library → Uploads or Library → Generated,
+  with type/status controlled separately, and dates are labeled Added.
+  These are application sections, independent of the selected workspace's folders.
+  View choice uses the existing sessionStorage
+  navigation seam; allowlisted Library URL state owns filters/search/sort/page
+  when present and supports back/forward. Leaving Library clears its URL state
+  so refresh restores the explicitly selected application page.
+  Native item details use a shared image-first viewer: a spacious desktop stage
+  and collapsible details sidebar, or a fullscreen phone/tablet stage with a
+  closed/partial/full details sheet. Existing tonal roles, Roboto, local SVG icons,
+  expressive radii and motion remain authoritative. Compact controls offer
+  download, fit and 1–8x zoom relative to fit; the derivative remains bounded to
+  2048px. Pointer pinch/pan, double-tap and fit-only swipe navigation complement
+  keyboard zoom/pan/previous/next. Details gestures never navigate the image.
+  Escape dismisses a menu/sheet before the viewer; closing restores Uploads focus
+  and scroll. Metadata reports only filename, MIME, size, dimensions and Added.
+  Manual/AI tags use wrapping chips and Show more; manual edits retain their
+  existing 20-tag/40-character bounds and explicit review. Source-link editing
+  appears at the bottom of File details. Optional links use an additive private
+  artifact_links table, HTTP(S)-only validation and the existing fixed reviewed,
+  revision-checked worker. Old stores stay read-only on browse; links are never
+  fetched and private origin paths remain excluded. Archive/Restore and Delete
+  live in the top-right native popover using the chat menu's styling/keyboard
+  convention. Delete retains archive-first gating and a Cancel-focused permanent
+  deletion review. Preview metadata has a 24-item/30-second cache, invalidated on
+  refresh, operations and sign-out. Source editing is disabled on older hosts.
+  Gallery preview navigation crosses page boundaries without moving the grid.
+  Library image derivatives use only authenticated typed IDs and exact revisions,
+  bounded checksummed SQLite blob reads and the existing disposable decoder.
+  Thumbnails fit 320px; expanded previews fit 2048px and existing delivery bounds.
+  Animated sources show frame zero. Originals remain unchanged. The private
+  15-minute LRU cache caps 128 entries/32 MiB with two decoders; owner/revision
+  checks remain active for cached results. HTTP responses stay no-store.
+  Implementation and evidence: `docs/webui/library-browser-validation.md`.
+  Viewer implementation and evidence: `docs/webui/image-preview-validation.md`.
+  Integrations contains Skills and Knowledge, plus the deferred Connections tab.
+  Knowledge retains inventories, text search, reviewed learning and source
+  refresh, with its own status, responsive pagination and cancellable reads.
+  `integrations=knowledge` URLs preserve selection/search/pages and browser history;
+  old `library=knowledge` links and saved Library Knowledge selections migrate
+  there. Switching between Knowledge and Skills preserves Knowledge state, and
+  leaving the panel rejects obsolete reads while accepted work continues.
+  Existing Library Knowledge HTTP services and CLI/TUI navigation remain compatible.
   Integrations exposes installed Skills, reviewed local ZIP/Markdown import,
-  activation and deletion. Library inventories, Knowledge matches/sources and
-  installed Skills use browser pages sized to complete grid rows near 20 cards
-  (at most 40), with filters applied before paging. Three-column grids show 21
-  cards; only the final page may have a partial row. The browser composes at most
+  activation and deletion. Uploads uses stable 24-item pages across its three modes;
+  grids use two/three/four/six columns and Gallery uses three/four/six. Month groups
+  can end in partial rows. An eight-page, 30-second metadata cache avoids repeated
+  reads when presentation changes and clears on refresh, operations and sign-out.
+  Knowledge matches/sources and installed Skills retain pages sized to complete
+  grid rows near 20 cards (at most 40), with filters applied before paging.
+  Three-column grids show 21 cards. The browser composes at most
   two bounded reads without changing CLI/TUI store batches or requiring a host
   restart. Pagination follows the actual card capacity, and resizing preserves
   the page containing the former first item.
@@ -182,8 +256,9 @@ Workspace layout:
   CLI/TUI store batch sizes remain unchanged.
   Library and Integrations tabs show unfiltered totals in small leading pills,
   refreshed on entry, explicit refresh and completed operations. Bounded inventory
-  counts use a plus sign; unavailable counts are omitted. Files sums the known
-  saved Document/Media/Research totals across all types. Integrations keeps Skills
+  counts use a plus sign; unavailable counts are omitted. Uploads and Generated
+  count their own saved artifacts across all types using stored provenance.
+  Integrations keeps Skills
   and Connections distinct; Connections shows the configured MCP server count
   only and remains disabled in the browser. MCP remains the protocol/server term.
   Persistent Memory management belongs under Settings in the planned IA; browser
@@ -267,7 +342,7 @@ Workspace layout:
   Media snapshots. Owner/tab/session-scoped selections expire after 30 minutes;
   logout and shutdown revoke them, while accepted turns retain their captured
   bytes. Text and image input hashes participate in durable request deduplication.
-  Files can be prepared during a reply; sending them waits for an idle turn.
+  Attachments can be prepared during a reply; sending them waits for an idle turn.
   Sending does not Learn/index text or enable Vision. If the attachment script
   or server capability is missing, the paperclip is disabled with an explicit
   restart/reload explanation. Static assets can update before a running Python
@@ -410,7 +485,7 @@ reduced motion disables pulsing. Static settings and live work progress retain
 their real controls/status rather than placeholder content. Validation:
 `docs/webui/loading-states-validation.md`.
 The navbar's leading hamburger toggles conversations on desktop and mobile.
-Page refresh restores the tab's selected page and Library section after sign-in,
+Page refresh restores the selected page and Library/Integrations section after sign-in,
 using allowlisted identifiers in optional sessionStorage; new tabs default to Chat.
 Account is a circular username initial; Sign out and Send are icon-only with
 accessible names (Send becomes Queue message while a turn is active).

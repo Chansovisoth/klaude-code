@@ -413,15 +413,15 @@ async def verify(host, profile, fixture):
                 'document.querySelector(".message-dialog").close();history.replaceState(null,"",location.pathname)'
             )
             await click('[aria-label="More options"]')
-            await wait('document.querySelector(".message-menu:popover-open")!==null')
+            await wait('document.querySelector("#message-options-menu:popover-open")!==null')
             assert await js(
-                'document.querySelector(".message-menu time").dateTime.length>0&&'
-                '[...document.querySelectorAll(".message-menu [role=menuitem]")]'
+                'document.querySelector("#message-options-menu time").dateTime.length>0&&'
+                '[...document.querySelectorAll("#message-options-menu [role=menuitem]")]'
                 '.map(b=>b.textContent).join("|")==="Branch in new chat|Retry"'
             )
             await cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Escape"})
             await cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Escape"})
-            await wait('!document.querySelector(".message-menu").matches(":popover-open")')
+            await wait('!document.querySelector("#message-options-menu").matches(":popover-open")')
             # Speech payloads/lifecycle use browser API doubles, without audible output.
             await js(
                 "window.spoken=[];window.cancelCount=0;"
@@ -487,13 +487,14 @@ async def verify(host, profile, fixture):
                 await js('messages.querySelector(".message-actions").scrollIntoView({block:"end"})')
                 await screenshot("markdown-actions-" + str(width) + ".png")
                 await click('[aria-label="More options"]')
-                await wait('document.querySelector(".message-menu:popover-open")!==null')
+                await wait('document.querySelector("#message-options-menu:popover-open")!==null')
                 assert await js(
-                    '(()=>{const r=document.querySelector(".message-menu").getBoundingClientRect();'
+                    '(()=>{const r=document.querySelector("#message-options-menu")'
+                    '.getBoundingClientRect();'
                     "return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight})()"
                 )
                 await screenshot("message-menu-" + str(width) + ".png")
-                await js('document.querySelector(".message-menu").hidePopover()')
+                await js('document.querySelector("#message-options-menu").hidePopover()')
                 if width == 320:
                     await click('[aria-label="Share message"]')
                     await click('[aria-label="Share via"]')
@@ -589,7 +590,7 @@ async def verify(host, profile, fixture):
             source_id = await js("latest.session_id")
             original_history = host.application.memory.load_session(source_id)
             await click('[aria-label="More options"]')
-            await click('.message-menu [aria-label="Branch in new chat"]')
+            await click('#message-options-menu [aria-label="Branch in new chat"]')
             await wait("latest.session_id!==" + json.dumps(source_id))
             branch_id = await js("latest.session_id")
             assert fixture.calls == 1
@@ -597,8 +598,10 @@ async def verify(host, profile, fixture):
             assert host.application.memory.load_session(branch_id) == original_history
             await wait('!pending&&messages.querySelector(".message-actions")!==null')
             await click('[aria-label="More options"]')
-            await wait('!document.querySelector(`.message-menu [aria-label="Retry"]`).disabled')
-            await click('.message-menu [aria-label="Retry"]')
+            await wait(
+                '!document.querySelector(`#message-options-menu [aria-label="Retry"]`).disabled'
+            )
+            await click('#message-options-menu [aria-label="Retry"]')
             await wait(
                 "latest.session_id!=="
                 + json.dumps(branch_id)

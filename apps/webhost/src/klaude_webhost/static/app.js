@@ -285,9 +285,10 @@ function isNewCursor(next, previous = cursor) {
   return epoch !== currentEpoch || Number(raw) > Number(currentRaw);
 }
 
-async function jsonRequest(path, method = "GET", body = undefined) {
+async function jsonRequest(path, method = "GET", body = undefined, requestOptions = {}) {
   const epoch = authEpoch;
   const options = { method, credentials: "same-origin", headers: {} };
+  if (requestOptions.signal) options.signal = requestOptions.signal;
   if (clientId) options.headers["X-Klaude-Client"] = clientId;
   if (method !== "GET" && latest && path !== "/api/v1/auth/logout") {
     options.headers["X-Klaude-Session"] = latest.session_id;
@@ -548,6 +549,7 @@ async function snapshot() {
     if (epoch === currentEpoch && Number(raw) < Number(currentRaw)) return;
   }
   latest = data;
+  window.refreshLibraryCapabilities?.();
   setConnection(true, "Connected");
   if (previousModel !== data.model || previousSession !== data.session_id) {
     byId("model-choice").value = "";
@@ -1131,7 +1133,10 @@ async function initialize() {
   if (epoch !== authEpoch) return;
   clientId = client.client_id;
   authenticated = true;
-  showView(readNavigationChoice("page", viewNames, "chat"));
+  const pageQuery = new URLSearchParams(location.search);
+  showView(pageQuery.get("library") === "knowledge" || ["skills", "knowledge"].includes(pageQuery.get("integrations")) ?
+    "integrations" : ["files", "outputs"].includes(pageQuery.get("library")) ?
+      "library" : readNavigationChoice("page", viewNames, "chat"));
   layout.hidden = false;
   layout.inert = false;
   byId("local-access").hidden = true;

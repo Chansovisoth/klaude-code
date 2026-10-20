@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- Share All types, Documents and Media filters across Uploads and Generated,
+  grouping generated research reports under Documents while retaining their
+  existing records and reviewed actions.
+
+- Rename the browser Library's Files tab to Uploads, including its breadcrumb,
+  search/filter labels and preview return text; existing links remain compatible.
+
+- Move browser Knowledge into Integrations beside Skills, preserving search,
+  reviewed learning/source refresh and pagination. Library now contains only
+  Files and Generated; saved Knowledge selections and older links migrate.
+
+- Separate imported Library Files from a dedicated Generated tab for saved
+  research reports and generated images. Filter by stored generation provenance
+  before paging/counting, preserve existing previews/actions, and migrate older
+  Reports-filter links and saved tabs.
+
+- Compact Library Files on mobile: move Add a file to a toolbar plus button,
+  retain all filter/sort directions in the compact control, and replace the
+  mobile table header with 70px file rows and matching loading placeholders.
+  Preserve desktop sortable columns, Material 3 themes and reviewed uploads.
+
+- Add an adaptive, image-first Library preview using the existing Material 3
+  Expressive themes, compact zoom/fit/download controls, touch and keyboard image
+  navigation, desktop details sidebar/mobile sheet, reviewed tag chips and source
+  links, and an Archive/Delete menu retaining destructive confirmation rules.
+
+- Detect images automatically when adding Library files; remove the manual
+  Document/Image choice while retaining the reviewed import.
+
+- Add compact Library List/Grid/Gallery views inspired by Solid Explorer, with
+  honest added dates, image-only month grouping, cached bounded thumbnails,
+  keyboard/touch image navigation, expanded sorting and browser filter history.
+  Preserve the existing flat saved-file inventory and reviewed file operations.
+
 - Add the experimental local WebUI and shared application foundation, with an
   expressive responsive chat shell, eight color palettes, shared-session controls,
   message links and device sharing, file attachments and image thumbnails,

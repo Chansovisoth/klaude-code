@@ -89,7 +89,7 @@ window.ChatMarkdown = (() => {
     if (text) button.append(node("span", text));
     return button;
   }
-  async function copyText(text) {
+  async function copyText(text, container = document.body) {
     if (navigator.clipboard?.writeText) {
       try { await navigator.clipboard.writeText(text); return true; } catch { /* Try the LAN/HTTP fallback. */ }
     }
@@ -100,7 +100,7 @@ window.ChatMarkdown = (() => {
     const previous = Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index).cloneRange());
     const source = node("pre", text, "clipboard-source");
     source.setAttribute("aria-hidden", "true");
-    document.body.append(source);
+    container.append(source);
     const range = document.createRange();
     range.selectNodeContents(source);
     let copied = false;
@@ -678,5 +678,5 @@ window.ChatMarkdown = (() => {
     if (dialogOwner && !dialogOwner.isConnected) actionDialog.close();
     if (menuState && !menuState.article.isConnected) closeMenu();
   }).observe(document.body, { childList: true, subtree: true });
-  return Object.freeze({ create, update, append, metadata, source: (article) => states.get(article)?.source || "" });
+  return Object.freeze({ create, update, append, metadata, copyText, source: (article) => states.get(article)?.source || "" });
 })();

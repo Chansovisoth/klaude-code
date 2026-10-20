@@ -8,8 +8,9 @@ inventory's historical statements that no host/browser API exists.
 | --- | --- | --- |
 | Chat | CommonMark replies with tables/tasks, local code highlighting and copy, stable streaming, response actions, timestamp/Branch/Retry menu, shared Agent, sessions, local model selection, tool reviews, questions, queue/control, device/Library text, PDF, DOCX and image attachments | In-place answer variants, Knowledge/Skill tools, full model/provider, queued attachments, image frame/crop controls and session-management parity |
 | Workspaces | Bounded reads/search/Git views; opt-in local edits | Full workspace lifecycle and coding controls |
-| Library → Files | Unified saved artifacts; All/Documents/Media/Reports type filters, separate Saved/Archived status, search/sort/pages, reviewed Document/Image import, text/image preview, download and tags; archived items support restore and reviewed deletion | Rich document rendering, direct stored-document Learn, research jobs, image generation/analysis and bulk management |
-| Library → Knowledge | Inventories, indexed-text search, reviewed public-URL/text-upload Learn, exact existing-source refresh | Hybrid/model queries, crawl/source creation and broader management |
+| Library → Uploads | List/Grid/Gallery, image-only month-added groups, bounded cached thumbnails, adaptive image preview with zoom/touch controls, reviewed source links/tag chips, URL history, independent type/archive filters and sorting, reviewed imports with automatic image detection, text preview/download/tags/archive/restore/delete | Directory trees, original modification/capture dates, rich document rendering, direct stored-document Learn, research jobs, image generation/analysis and bulk management |
+| Library → Generated | Separate inventory of saved research reports/generated images, List/Grid/Gallery, search/type/archive/sort controls, existing previews/downloads and reviewed tags/archive/restore/delete | Starting Research or image-generation jobs in the browser, arbitrary generated workspace files |
+| Integrations → Knowledge | Inventories, indexed-text search, reviewed public-URL/text-upload Learn, exact existing-source refresh, responsive paging and URL history; legacy Library Knowledge links migrate here | Hybrid/model queries, crawl/source creation and broader management |
 | Integrations → Skills | Installed inventory/filter, reviewed local ZIP/Markdown import, enable/disable, deletion | Discovery, remote installation, update checks and updates |
 | Integrations → Connections | Visible deferred control with configured MCP server count; MCP retained as the server/protocol term | Server/Registry management, secret entry and OAuth |
 | Activity | Public chat events and persisted Library/Skills operation states | Browser domain reconciliation/recovery and broader operation controls |
@@ -19,13 +20,26 @@ inventory's historical statements that no host/browser API exists.
 Initial Library/Skills actions cover parts of inventory F058–F060, F069–F070,
 F072–F073 and F080–F082. They do not establish whole-feature parity. Desktop and
 mobile reuse the existing Material 3 Expressive shell, tokens and reduced motion.
+Uploads has a compact search/filter/sort/add toolbar with 48px action targets.
+Mobile lists omit desktop column headers, use 70px rows and place the first file
+4px below the toolbar. The plus button opens the existing reviewed upload flow
+in a native dialog; desktop retains its sortable columns and inline filters.
+Uploads contains imported documents/media only. Generated uses stored research
+records and generated-image provenance, with separate counts and tab state.
+AI tagging an imported image leaves it in Uploads. Existing artifacts stay in their
+current store; the split is applied before search, sorting and pagination.
+Uploads and Generated share All types/Documents/Media filters. Saved research
+reports appear under Generated → Documents using their existing Research records.
 
 ## Boundaries
 
 - Shared `application.library_management` composes existing artifact, knowledge
   and Skill services. Reads avoid knowledge engine initialization and model/network
-  work. Library items, knowledge inventories/matches/sources and installed Skills
-  use pages sized to complete grid rows near 20 cards (at most 40), with chevrons,
+  work. Uploads uses stable 24-item pages across List/Grid/Gallery, with an eight-page
+  short metadata cache and abortable reads. Grids use two/three/four/six columns;
+  Gallery uses three/four/six and month boundaries may end in partial rows.
+  Knowledge inventories/matches/sources and installed Skills retain pages sized
+  to complete grid rows near 20 cards (at most 40), with chevrons,
   persistent first/last page numbers and ellipses around the current range.
   Filtered counts and the current card capacity determine the actual final page.
   Mobile uses up to five numbered pages with 36–38px wide, 40px tall controls and
@@ -57,6 +71,10 @@ mobile reuse the existing Material 3 Expressive shell, tokens and reduced motion
 - Documents download as attachments. Inline previews allow only bounded
   PNG/JPEG/WebP/GIF images. HTML/SVG and Markdown never execute. Downloads verify
   stored checksums and never launch a host application.
+  Library thumbnails and expanded image previews are separately decoded derivatives
+  (320/2048px), with 32 MiB/40MP sources and the shared decoder limits. Exact
+  revision/hash checks and owner authentication precede access; a private bounded
+  cache avoids repeated decoding. HTTP cache storage remains disabled.
 - Mutations use existing revision/manifest checks and owned subprocesses with a
   180-second owner timeout. Durable receipts deduplicate supplied request IDs.
   Accepted work continues through navigation/logout; host shutdown stops workers.

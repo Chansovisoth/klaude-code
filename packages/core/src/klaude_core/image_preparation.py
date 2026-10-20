@@ -64,10 +64,13 @@ def prepare_image(
     frame: int | None = None,
     crop: tuple[int, int, int, int] | None = None,
     thumbnail: bool = False,
+    thumbnail_size: int = 128,
     cancelled: Callable[[], bool] = lambda: False,
 ) -> tuple[dict[str, Any], bytes]:
     if not data or len(data) > MAX_SOURCE_BYTES:
         raise ValueError("Image sources must fit in 32 MiB")
+    if type(thumbnail_size) is not int or thumbnail_size not in {128, 320}:
+        raise ValueError("Invalid thumbnail size")
     options = {
         "tokens": tokens,
         "detail": detail,
@@ -76,6 +79,7 @@ def prepare_image(
         "frame": frame,
         "crop": crop,
         "thumbnail": thumbnail,
+        "thumbnail_size": thumbnail_size,
     }
     payload = json.dumps(options).encode() + b"\n" + data
     environment = {
@@ -186,7 +190,10 @@ def _decode(data: bytes, options: dict[str, Any]) -> tuple[dict[str, Any], bytes
                 model=options["model"],
             )
             if options.get("thumbnail"):
-                scale = min(1.0, 128 / max(oriented.size))
+                edge = options.get("thumbnail_size", 128)
+                if type(edge) is not int or edge not in {128, 320}:
+                    raise ValueError("Invalid thumbnail size")
+                scale = min(1.0, edge / max(oriented.size))
                 size = (max(1, int(oriented.width * scale)),
                         max(1, int(oriented.height * scale)))
             # Always encode pixels, even when dimensions already fit: an apparently

@@ -44,7 +44,7 @@ TRANSPORT = """
   window.autoOperations = false;
   window.slowSnapshot = false;
   window.countData = Object.fromEntries(['knowledge','document','media','research',
-    'archive','skills'].map(key => [key, {total: 1, limited: false}]));
+    'files','outputs','archive','skills'].map(key => [key, {total: 1, limited: false}]));
   window.fetch = async (resource, options) => {
     const url = new URL(typeof resource === 'string' ? resource : resource.url, location.href);
     if (url.pathname === '/api/v1/session' && (firstSession || slowSnapshot)) {
@@ -63,7 +63,8 @@ TRANSPORT = """
       if (url.pathname.endsWith('/operations') && autoOperations)
         return new Response(JSON.stringify({items:[]}));
       return new Promise(resolve => {
-        const entry = {path:url.pathname, search:url.search, done:false};
+        const entry = {path:url.pathname, search:url.search, done:false,
+          body:options?.body ? JSON.parse(options.body) : null};
         entry.reply = (data, status) => {
           entry.done = true;
           resolve(new Response(JSON.stringify(data), {status,
@@ -175,50 +176,64 @@ async def verify(host, profile, chrome):
             await tab.js("slowSnapshot=false")
             await asyncio.sleep(0.5)
 
-            await tab.click("#nav-library")
-            await skeleton("library-items")
-            await tab.wait('document.querySelector("#library-sections .skeleton-count")!==null')
-            assert await tab.js('byId("library-sections").textContent.includes("Knowledge")')
+            await tab.click("#nav-integrations")
+            await skeleton("knowledge-items")
+            await tab.wait('document.querySelector("#integration-sections .skeleton-count")!==null')
+            assert await tab.js('byId("integration-sections").textContent.includes("Knowledge")')
             await screenshot("library-390.png")
             await reply(
                 "/api/v1/library/counts",
                 {
                     key: {"total": 1}
-                    for key in ("knowledge", "document", "media", "research", "archive", "skills")
+                    for key in ("knowledge", "document", "media", "research", "archive", "skills",
+                                "files", "outputs")
                 },
             )
             await tab.js("autoCounts=true")
             knowledge = {"id": "docs", "sources": 2, "chunks": 10}
             await reply("/api/v1/library/knowledge", page([knowledge]))
-            await tab.wait('byId("library-items").getAttribute("aria-busy")==="false"')
+            await tab.wait('byId("knowledge-items").getAttribute("aria-busy")==="false"')
             await tab.js(
-                'window.savedCard=byId("library-items").firstElementChild;void loadLibrary();true'
+                'window.savedCard=byId("knowledge-items").firstElementChild;'
+                'void loadKnowledge();true'
             )
             await asyncio.sleep(0.2)
             assert await tab.js(
-                'savedCard.isConnected&&!byId("library-items").querySelector(".loading-skeleton")'
+                'savedCard.isConnected&&!byId("knowledge-items").querySelector(".loading-skeleton")'
             )
             await reply(
                 "/api/v1/library/knowledge", {"error": {"message": "Fixture unavailable"}}, 503
             )
-            await tab.wait('byId("library-status").textContent.includes("Fixture unavailable")')
+            await tab.wait('byId("knowledge-status").textContent.includes("Fixture unavailable")')
             assert await tab.js(
-                'savedCard.isConnected&&byId("library-items").getAttribute("aria-busy")==="false"'
+                'savedCard.isConnected&&byId("knowledge-items").getAttribute("aria-busy")==="false"'
             )
 
             assert await tab.js("""
               [...byId('library-sections').querySelectorAll('button')]
-                .map(node=>node.dataset.section).join(',')==='files,knowledge' &&
+                .map(node=>node.dataset.section).join(',')==='files,outputs' &&
               byId('library-sections').querySelector('[data-count-key="files"] .tab-count')
-                .textContent==='3'
+                .textContent==='1'
             """)
+            await tab.click("#nav-library")
             await tab.click('[data-section="files"]')
             await reply("/api/v1/library/items", page([]), search="kind=all")
+            await tab.click('[data-file-view="list"]')
+            await tab.wait('byId("library-items").getAttribute("aria-busy")==="false"')
+            assert await tab.js('byId("library-status").textContent.includes("No uploads")')
+            await screenshot("files-empty-list-390.png")
             await tab.js("""
               byId('artifact-kind').value='document';
               byId('artifact-kind').dispatchEvent(new Event('change'));true
             """)
             await skeleton("library-items")
+            assert await tab.js('''(() => {
+              const row=byId('library-items').querySelector('.skeleton-row');
+              return row && row.getBoundingClientRect().height===68 &&
+                byId('library-items').getBoundingClientRect().top-
+                byId('artifact-filter').getBoundingClientRect().bottom<=6;
+            })()''')
+            await screenshot("files-loading-list-390.png")
             await tab.js("""
               byId('artifact-kind').value='media';
               byId('artifact-kind').dispatchEvent(new Event('change'));true
@@ -247,6 +262,7 @@ async def verify(host, profile, chrome):
                 "kind": "media",
                 "mime": "text/plain",
                 "size": 32,
+                "created": 1792454400,
                 "tags": [],
                 "ai_tags": [],
                 "archived": False,
@@ -255,24 +271,24 @@ async def verify(host, profile, chrome):
             }
             await reply("/api/v1/library/items", page([item]), search="kind=media")
             await tab.wait('byId("library-items").textContent.includes("Saved file")')
+            await tab.click('[data-section="outputs"]')
             await tab.js("""
-              byId('artifact-kind').value='research';
-              byId('artifact-kind').dispatchEvent(new Event('change'));
               byId('artifact-status').value='archived';
               byId('artifact-status').dispatchEvent(new Event('change'));true
             """)
             await reply("/api/v1/library/items", page([]), search="archived=false")
             await skeleton("library-items")
             assert await tab.js("""
-              pendingReads.some(item=>!item.done && item.search.includes('kind=research') &&
+              pendingReads.some(item=>!item.done && item.search.includes('source=output') &&
                 item.search.includes('archived=true')) &&
-              sessionStorage.getItem('klaude.webui.navigation.v1.file-kind')==='research' &&
-              sessionStorage.getItem('klaude.webui.navigation.v1.file-status')==='archived'
+              sessionStorage.getItem('klaude.webui.navigation.v1.output-status')==='archived'
             """)
             report = {**item, "kind": "research", "archived": True}
             await reply("/api/v1/library/items", page([report]), search="archived=true")
-            await tab.wait('byId("library-items").textContent.includes("Report · Archived")')
-            for width in (320, 390, 768, 1440, 390):
+            await tab.wait('byId("library-items").textContent.includes("Report") && '
+                           'byId("file-breadcrumbs").textContent==="LibraryGenerated" && '
+                           'byId("artifact-status").value==="archived"')
+            for index, width in enumerate((320, 390, 768, 1440, 390)):
                 await tab.command(
                     "Emulation.setDeviceMetricsOverride",
                     {
@@ -293,14 +309,37 @@ async def verify(host, profile, chrome):
                   byId('library-view').scrollWidth<=byId('library-view').clientWidth+1
                 """)
                 await screenshot(f"files-{width}.png")
+                # Dense placeholders and empty results also adapt across the table breakpoint.
+                query = f"empty-{width}-{index}"
+                await tab.js(f'byId("artifact-query").value={json.dumps(query)};'
+                             'byId("artifact-filter").requestSubmit()')
+                await skeleton("library-items")
+                assert await tab.js('byId("library-items").querySelector(".skeleton-row")'
+                                    '.getBoundingClientRect().height===68')
+                await screenshot(f"files-loading-list-{width}.png")
+                await reply("/api/v1/library/items", page([]), search=f"query={query}")
+                await tab.wait('byId("library-items").getAttribute("aria-busy")==="false"')
+                assert await tab.js(
+                    '''(() => {
+                      const empty=byId('library-items').querySelector('.library-empty');
+                      return empty?.textContent.includes('No files match') &&
+                        empty.getAttribute('role')==='status' &&
+                        empty.getBoundingClientRect().top>=
+                          byId('artifact-filter').getBoundingClientRect().bottom &&
+                        byId('library-status').textContent==='' &&
+                        !byId('library-items').querySelector('.file-list-header') &&
+                        document.documentElement.scrollWidth<=innerWidth;
+                    })()'''
+                )
+                await screenshot(f"files-empty-list-{width}.png")
+                await tab.js('byId("artifact-query").value="";'
+                             'byId("artifact-filter").requestSubmit()')
+                await tab.wait('byId("library-items").getAttribute("aria-busy")==="false"')
+                assert await tab.js('!byId("library-items").querySelector(".library-empty")')
             assert await tab.js("!byId('artifact-import-panel').open")
-            await tab.click("#artifact-import-panel summary")
-            await tab.js("""
-              byId('artifact-import-kind').value='media';
-              byId('artifact-import-kind').dispatchEvent(new Event('change'));true
-            """)
-            assert await tab.js("byId('artifact-file').accept.includes('image/png')")
-            await tab.click("#artifact-import-panel summary")
+            await tab.click("#file-add")
+            assert await tab.js("!byId('artifact-import-kind') && !byId('artifact-file').accept")
+            await tab.click("#artifact-import-close")
 
             await tab.js('void openArtifact("fixture");true')
             await skeleton("artifact-preview")
@@ -327,7 +366,8 @@ async def verify(host, profile, chrome):
             await tab.click("#artifact-close")
 
             await tab.js('byId("knowledge-library").value="docs"')
-            await tab.click('[data-section="knowledge"]')
+            await tab.click("#nav-integrations")
+            await tab.click('[data-integration="knowledge"]')
             await reply("/api/v1/library/knowledge", page([knowledge]))
             await skeleton("source-items")
             await reply(
@@ -346,7 +386,33 @@ async def verify(host, profile, chrome):
                 ),
             )
             await tab.wait('byId("source-items").textContent.includes("docs-source")')
-            await tab.click("#nav-integrations")
+            assert await tab.js('byId("knowledge-tools").closest("#integrations-view")!==null && '
+                                'byId("library-sections").querySelectorAll("button").length===2')
+            # The moved learning and refresh forms retain reviewed requests and cancellation.
+            for operation in ("knowledge-url", "knowledge-refresh"):
+                if operation == "knowledge-url":
+                    await tab.js('byId("learn-library").value="docs";'
+                                 'byId("learn-url").value="https://example.com/docs";'
+                                 'byId("knowledge-learn").requestSubmit()')
+                else:
+                    await tab.click("#source-items button")
+                await tab.wait('pendingReads.some(item=>!item.done && '
+                               'item.path==="/api/v1/library/review")')
+                assert await tab.js('pendingReads.find(item=>!item.done && '
+                                    'item.path==="/api/v1/library/review").body.draft.operation==='
+                                    + json.dumps(operation))
+                await reply("/api/v1/library/review", {
+                    "review_id": "knowledge-review", "summary": "Review Knowledge change",
+                    "expires_at": 9999999999,
+                })
+                await tab.wait('reviewDialog.open')
+                assert await tab.js('document.activeElement===byId("domain-review-cancel")')
+                await tab.click("#domain-review-cancel")
+                await tab.wait('!reviewDialog.open')
+                await tab.wait('pendingReads.some(item=>!item.done && '
+                               'item.path==="/api/v1/library/discard")')
+                await reply("/api/v1/library/discard", {"discarded": True})
+            await tab.click('[data-integration="skills"]')
             assert await tab.js("""
               document.querySelector('[data-count-key="mcp"]').textContent
                 .includes('Connections') &&
@@ -430,15 +496,20 @@ async def verify(host, profile, chrome):
                         f"saveNavigationChoice('file-kind',{json.dumps(kind)});"
                         f"saveNavigationChoice('file-status',{json.dumps(status)});"
                     )
+                # Simulate an old stored tab with no explicit Library URL state.
+                await tab.js('history.replaceState(null,"",location.pathname)')
                 await tab.command("Page.reload")
                 await tab.wait(
                     "typeof reloadMarker==='undefined' && "
                     "typeof pollTimer!=='undefined' && pollTimer!==null && authenticated"
                 )
                 await tab.wait("pendingReads.some(item=>item.path.endsWith('/items'))")
+                section = "outputs" if kind == "research" else "files"
+                filter_kind = "document" if kind == "research" else kind
                 assert await tab.js(
-                    "currentView==='library' && librarySection==='files' && "
-                    f"byId('artifact-kind').value==={json.dumps(kind)} && "
+                    "currentView==='library' && "
+                    f"librarySection==={json.dumps(section)} && "
+                    f"byId('artifact-kind').value==={json.dumps(filter_kind)} && "
                     f"byId('artifact-status').value==={json.dumps(status)} && "
                     "pendingReads.some(item=>item.search.includes("
                     f"'kind={kind}')&&item.search.includes('archived="
@@ -446,7 +517,7 @@ async def verify(host, profile, chrome):
                 )
                 await reply(
                     "/api/v1/library/counts",
-                    {"document": {"total": 1}, "media": {"total": 2}, "research": {"total": 3}},
+                    {"files": {"total": 3}, "outputs": {"total": 3}},
                 )
                 await reply("/api/v1/library/items", page([item]))
                 await tab.js("""
@@ -457,13 +528,14 @@ async def verify(host, profile, chrome):
                 await tab.wait('byId("library-items").getAttribute("aria-busy")==="false"')
                 assert await tab.js("""
                   byId('library-sections').querySelector('[data-count-key="files"] .tab-count')
-                    .textContent==='6'
+                    .textContent==='3'
                 """)
 
-            await tab.click('[data-section="knowledge"]')
+            await tab.click("#nav-integrations")
+            await tab.click('[data-integration="knowledge"]')
             await reply("/api/v1/library/knowledge", page([knowledge]))
-            await tab.js('knowledgeQuery="pending";void loadLibrary();void refreshModels();true')
-            await skeleton("library-items")
+            await tab.js('knowledgeQuery="pending";void loadKnowledge();void refreshModels();true')
+            await skeleton("knowledge-items")
             await tab.click("#logout")
             await tab.wait("!authenticated")
             await reply("/api/v1/library/knowledge", page([knowledge]))
@@ -480,12 +552,15 @@ async def verify(host, profile, chrome):
                         "passed": [
                             "initial chat, sessions and models",
                             "Library, Sources, Skills and operations",
-                            "Files / Knowledge hierarchy and summed file counts",
+                            "Integrations Knowledge learning and source-refresh reviews",
+                            "Library files and Integrations Knowledge hierarchy and counts",
                             "independent archived report filters and stored navigation",
-                            "file import type independent of active filters",
+                            "automatic file import without a type selector or file restriction",
                             "Connections naming with existing availability",
                             "legacy Media/Archive migration and filter restoration on reload",
                             "Files default and Files layouts at 320/390/768/1440px",
+                            "dense list loading and empty states at mobile/desktop breakpoints",
+                            "Generated empty messages appear in content below the toolbar",
                             "workspace reads",
                             "immediate cancellable item preview",
                             "fast-read delay",

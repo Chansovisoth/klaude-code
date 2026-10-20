@@ -85,17 +85,32 @@ def test_read_routes_support_twenty_item_pages_and_reject_invalid_offsets(browse
             assert _request(host, "GET", route + "?offset=" + offset, **auth)[0] == 400
 
 
-def test_browser_import_review_confirm_status_and_logout_ownership(browser_library):
+@pytest.mark.parametrize("image_format,filename", [
+    (None, "notes.txt"),
+    ("PNG", "renamed.txt"),
+    ("JPEG", "photo.jpeg"),
+    ("WEBP", "picture.webp"),
+    ("GIF", "animation.gif"),
+])
+def test_browser_import_review_confirm_status_and_logout_ownership(
+    browser_library, image_format, filename,
+):
     host, service, auth = browser_library
+    content = b"Hello from browser"
+    if image_format:
+        output = io.BytesIO()
+        Image.new("RGB", (3, 2), "red").save(output, format=image_format)
+        content = output.getvalue()
     owner = hashlib.sha256(auth["cookie"].split("=", 1)[1].encode()).hexdigest()
-    staged = host.transfers.upload(owner, io.BytesIO(b"Hello from browser"), 18, "notes.txt")
-    draft = {"operation": "import", "kind": "document", "upload_id": staged.id}
+    staged = host.transfers.upload(owner, io.BytesIO(content), len(content), filename)
+    draft = {"operation": "import", "upload_id": staged.id}
     no_csrf = {**auth, "csrf": ""}
     assert _request(host, "POST", "/api/v1/library/review", body={"draft": draft},
                     **no_csrf)[0] == 403
     status, _, review = _request(host, "POST", "/api/v1/library/review",
                                  body={"draft": draft}, **auth)
     assert status == 200
+    assert ("as an image" if image_format else "as a file") in review["summary"]
     assert service.listing()["items"] == []
     with pytest.raises(FileNotFoundError):
         host.transfers.open_download(owner, staged.id)
@@ -107,12 +122,21 @@ def test_browser_import_review_confirm_status_and_logout_ownership(browser_libra
     assert result["request_id"] == identity
     assert _wait(service, identity)["state"] == "completed"
     assert _request(host, "POST", "/api/v1/library/submit", body=body, **auth)[0] == 202
-    assert len(service.listing()["items"]) == 1
+    items = service.listing(kind="all")["items"]
+    assert len(items) == 1
+    item = items[0]
+    assert item["kind"] == ("media" if image_format else "document")
+    assert item["filename"] == filename
+    assert item["sha256"] == hashlib.sha256(content).hexdigest()
+    if image_format:
+        assert item["mime"] == "image/" + image_format.lower()
+        assert (item["width"], item["height"]) == (3, 2)
+        assert service.listing(kind="all", images_only=True)["items"][0]["id"] == item["id"]
     assert _request(host, "GET", "/api/v1/library/operation?" + urlencode({"id": identity}),
                     **auth)[2]["state"] == "completed"
     assert _request(host, "POST", "/api/v1/auth/logout", body={}, **auth)[0] == 200
     assert _request(host, "GET", "/api/v1/library/items", **auth)[0] == 401
-    assert len(service.listing()["items"]) == 1
+    assert len(service.listing(kind="all")["items"]) == 1
 
 
 def test_previews_downloads_and_revisions_do_not_execute_documents(browser_library):
@@ -156,7 +180,7 @@ def test_existing_webp_files_preview_with_bounded_recovered_dimensions(
     detail = _request(host, "GET", "/api/v1/library/item?" + urlencode({"id": item["id"]}),
                       **auth)[2]["item"]
     assert (listed["width"], listed["height"]) == (37, 23)
-    assert detail == listed
+    assert detail == {**listed, "source_url": ""}
     path = "/api/v1/library/content?" + urlencode({
         "id": item["id"], "revision": item["revision"], "inline": "1",
     })

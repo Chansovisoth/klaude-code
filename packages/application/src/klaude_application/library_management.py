@@ -22,7 +22,13 @@ from typing import Any, BinaryIO
 from urllib.parse import urlsplit
 
 from klaude_core.config import Config
-from klaude_core.library_artifacts import MAX_BYTES, ArtifactStore, manual_tags
+from klaude_core.library_artifacts import (
+    MAX_BYTES,
+    ArtifactStore,
+    image_header,
+    manual_tags,
+    source_link,
+)
 
 from .background_jobs import OwnedBackgroundJobs
 from .background_worker import execute
@@ -49,6 +55,7 @@ PUBLIC_ARTIFACT = frozenset(
         "ai_tags",
         "archived",
         "revision",
+        "source_url",
     }
 )
 
@@ -115,9 +122,13 @@ class LibraryManagement:
         query: str = "",
         offset: int = 0,
         sort: str = "newest",
+        images_only: bool = False,
+        source: str = "all",
     ) -> dict[str, Any]:
         result = self.artifacts.listing(
-            kind, archived=archived, query=query, offset=offset, sort=sort, include_total=True
+            kind, archived=archived, query=query, offset=offset, sort=sort, include_total=True,
+            images_only=images_only,
+            source=source,
         )
         return self._page({**result, "items": [self.public_artifact(item)
                                                for item in result["items"]]}, offset)
@@ -196,6 +207,8 @@ class LibraryManagement:
             "knowledge": self.knowledge,
             "document": lambda: self.listing(kind="document"),
             "research": lambda: self.listing(kind="research"),
+            "files": lambda: self.listing(kind="all", source="input"),
+            "outputs": lambda: self.listing(kind="all", source="output"),
             "media": lambda: self.listing(kind="media"),
             "archive": lambda: self.listing(kind="all", archived=True),
             "skills": self.skills,
@@ -284,12 +297,25 @@ class LibraryManagement:
                     }
                     resource = "library-import"
                     if operation == "import":
-                        kind = draft.get("kind")
-                        if kind not in {"document", "media"}:
-                            raise ValueError("Choose Documents or Media")
+                        kind = draft.get("kind", "auto")
+                        if not isinstance(kind, str) or kind not in {"auto", "document", "media"}:
+                            raise ValueError("Invalid import type")
+                        if kind == "auto":
+                            # Classify the immutable bytes being reviewed, never
+                            # the browser's MIME declaration or filename suffix.
+                            with destination.open("rb") as captured:
+                                header = captured.read(65536)
+                            try:
+                                image_header(header)
+                            except ValueError:
+                                kind = "document"
+                            else:
+                                kind = "media"
                         fields["artifact_kind"] = kind
+                        file_type = "an image" if kind == "media" else "a file"
                         summary = (
-                            f"Save {filename} ({size:,} bytes) to {kind}. No indexing or execution."
+                            f"Save {filename} ({size:,} bytes) to Files as {file_type}. "
+                            "No indexing or execution."
                         )
                     else:
                         if size > 2 * 1024 * 1024:
@@ -328,7 +354,9 @@ class LibraryManagement:
                                 f"Index {filename} into {library} "
                                 "using the configured embedding model."
                             )
-                elif operation in {"tags", "archive", "restore", "delete", "clear_ai_tags"}:
+                elif operation in {
+                    "tags", "archive", "restore", "delete", "clear_ai_tags", "source_link"
+                }:
                     if set(draft) - {"operation", "target", "revision", "value"}:
                         raise ValueError("Unexpected artifact field")
                     item = self.artifacts.get(draft.get("target", ""))
@@ -345,10 +373,18 @@ class LibraryManagement:
                             raise ValueError("Enter comma-separated tags")
                         manual_tags(draft["value"])
                         fields["value"] = draft["value"]
+                    if operation == "source_link":
+                        if not isinstance(draft.get("value"), str):
+                            raise ValueError("Enter a source link")
+                        fields["value"] = source_link(draft["value"])
                     resource = f"artifact:{item['id']}"
                     summary = f"{operation.replace('_', ' ').capitalize()}: {item['name']}."
                     if operation == "tags":
                         summary += f" Set manual tags to: {fields['value'] or '(none)'}."
+                    if operation == "source_link":
+                        summary += (
+                            f" Set link to: {fields['value'] or '(none)'}. No URL is fetched."
+                        )
                     if operation == "delete":
                         summary += (
                             " Permanently removes the private saved copy. This cannot be undone."
@@ -607,7 +643,7 @@ def run_management_operation(request: dict[str, Any]) -> dict[str, Any]:
             store.import_bytes(content, request["artifact_kind"], request["filename"])
         except ValueError:
             return {"rejected": True}
-    elif operation in {"tags", "archive", "restore", "delete", "clear_ai_tags"}:
+    elif operation in {"tags", "archive", "restore", "delete", "clear_ai_tags", "source_link"}:
         try:
             store.change(
                 request["target"], request["revision"], operation, request.get("value", "")

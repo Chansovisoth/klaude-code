@@ -75,9 +75,18 @@ Workspace tools start with read/list/search/status/diff, with exact allow-once/
 deny reviews when policy asks. Loopback browsers can explicitly activate file
 edits after the clean-worktree check; LAN browsers retain read-only workspace
 tools. Shell commands, full model management and most settings remain unavailable.
-The browser's **Library** includes **Knowledge, Documents, Research, Media and
-Archive**. Import files/images, preview/download saved copies, edit manual tags,
-archive/restore and review permanent deletion. Knowledge supports indexed-text
+The browser's **Library** separates your imported **Uploads** from **Generated**
+content (research reports and generated images).
+Uploads and Generated offer compact List, Grid and image-only Gallery views, with search,
+type/archive filters, sorting and image previews. Both tabs use All types,
+Documents and Media; research reports are Documents. Gallery groups date-sorted
+images by month added; original modification and capture dates are not stored.
+Add files with automatic image detection, preview/download saved copies, edit manual tags,
+archive/restore and review permanent deletion. Image previews adapt from a spacious
+desktop viewer/sidebar to a fullscreen mobile viewer with an optional details
+sheet, chip-based tag editing and reviewed source links. Pinch, pan, swipe,
+double-tap and keyboard controls complement compact zoom/fit/download actions.
+**Integrations → Knowledge** supports indexed-text
 search, explicit URL/text-file learning and refresh of existing docs sources.
 **Integrations → Skills** supports installed packages, reviewed local imports,
 enable/disable and deletion. Accepted operations appear in **Activity**.

@@ -43,6 +43,7 @@ from klaude_tools import build_tools
 from .accounts import AccountStore, LoginLimited, LoginLimiter
 from .attachments import ChatAttachments
 from .lan import lan_ipv4_addresses, private_lan_ip
+from .library_images import ImageBusy, LibraryImages
 from .transfers import MAX_UPLOAD, BrowserTransfers, display_filename
 
 COOKIE = "klaude_webui_session"
@@ -104,6 +105,7 @@ class LocalWebHost:
         self.accounts = accounts
         self.library = library
         self._library_downloads = threading.BoundedSemaphore(2)
+        self.library_images = LibraryImages()
         self.login_limiter = LoginLimiter()
         self.transfers: BrowserTransfers | None = None
         self.attachments = ChatAttachments()
@@ -404,6 +406,9 @@ class LocalWebHost:
             "api_version": "1", "session_id": snapshot["session_id"],
             "message_actions": True,
             "attachments": True,
+            "library_images": True,
+            "library_source_links": True,
+            "library_artifact_sources": True,
             "messages": messages, "state": snapshot["state"],
             "partial": snapshot["partial"][:64_000],
             "cursor": snapshot["cursor"],
@@ -641,6 +646,7 @@ class LocalWebHost:
             if self.transfers is not None:
                 self.transfers.revoke_all()
             self.attachments.revoke()
+            self.library_images.clear()
 
     def stop(self) -> None:
         self.begin_shutdown()
@@ -1490,16 +1496,20 @@ class _Handler(BaseHTTPRequestHandler):
                     raise ValueError("Unknown count filter")
                 result = service.tab_counts()
             elif path == "/api/v1/library/items":
-                if set(query) - {"kind", "archived", "query", "offset", "sort"}:
+                if set(query) - {"kind", "archived", "query", "offset", "sort", "images", "source"}:
                     raise ValueError("Unknown filter")
                 if query.get("archived", "false") not in {"true", "false"}:
                     raise ValueError("Invalid archive filter")
+                if query.get("images", "0") not in {"0", "1"}:
+                    raise ValueError("Invalid image filter")
                 result = service.listing(
                     kind=query.get("kind", "document"),
                     archived=query.get("archived") == "true",
                     query=query.get("query", ""),
                     offset=offset,
                     sort=query.get("sort", "newest"),
+                    images_only=query.get("images") == "1",
+                    source=query.get("source", "all"),
                 )
             elif path == "/api/v1/library/item":
                 if set(query) != {"id"}:
@@ -1511,6 +1521,23 @@ class _Handler(BaseHTTPRequestHandler):
                 ):
                     raise ValueError("Choose an item revision")
                 self._library_content(service, identity, query)
+                return
+            elif path == "/api/v1/library/image":
+                if set(query) != {"id", "revision", "size"}:
+                    raise ValueError("Choose an image revision and size")
+                mime, output = self.owner.library_images.read(
+                    service.artifacts, query["id"], int(query["revision"]), query["size"],
+                    cancelled=lambda: (self.owner._stopping
+                                       or not self.owner.session_active(identity)),
+                )
+                if self.owner._stopping or not self.owner.session_active(identity):
+                    raise ValueError("Image request ended")
+                self._headers(HTTPStatus.OK, mime, len(output))
+                for start in range(0, len(output), 65536):
+                    if self.owner._stopping or not self.owner.session_active(identity):
+                        self.close_connection = True
+                        return
+                    self.wfile.write(output[start:start + 65536])
                 return
             elif path == "/api/v1/library/knowledge":
                 if set(query) - {"library", "query", "offset"}:
@@ -1537,6 +1564,11 @@ class _Handler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.NOT_FOUND, "not_found", "Route not found")
                 return
             self._json(HTTPStatus.OK, result)
+        except (BrokenPipeError, ConnectionResetError):
+            # View changes cancel obsolete thumbnail/inventory requests.
+            self.close_connection = True
+        except ImageBusy:
+            self._error(HTTPStatus.TOO_MANY_REQUESTS, "resource_busy", "Image previews busy; retry")
         except (ValueError, TypeError, KeyError):
             self._error(
                 HTTPStatus.BAD_REQUEST, "invalid_argument", "Invalid filter or item changed; reload"

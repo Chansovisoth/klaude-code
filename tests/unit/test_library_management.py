@@ -406,7 +406,7 @@ def test_tab_counts_use_full_unfiltered_inventories_and_archive_visibility(manag
     counts = manager.tab_counts()
     assert counts == {name: {"total": total, "limited": False} for name, total in {
         "knowledge": 45, "document": 124, "research": 1, "media": 0,
-        "archive": 2, "skills": 45, "mcp": 1,
+        "archive": 2, "skills": 45, "mcp": 1, "files": 124, "outputs": 1,
     }.items()}
     manager.listing(query="missing", offset=20)
     manager.skills(query="missing", offset=20)

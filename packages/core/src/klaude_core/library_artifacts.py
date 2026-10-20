@@ -25,6 +25,7 @@ from collections.abc import Iterator
 from itertools import islice
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 MAX_BYTES = 32 * 1024 * 1024
 PAGE_SIZE = 100
@@ -48,6 +49,28 @@ def manual_tags(value: str) -> list[str]:
     if len(tags) > 20 or any(len(tag) > 40 or plain(tag) != tag for tag in tags):
         raise ValueError("Use up to 20 comma-separated tags, each 1–40 printable characters")
     return tags
+
+
+def source_link(value: str) -> str:
+    """A user-opened reference only; storing a link never fetches its contents."""
+    if not isinstance(value, str) or len(value) > 2048:
+        raise ValueError("Source links must fit in 2048 characters")
+    value = value.strip()
+    if not value:
+        return ""
+    try:
+        parsed = urlsplit(value)
+        valid = (
+            parsed.scheme in {"http", "https"} and parsed.hostname
+            and parsed.username is None and parsed.password is None
+            and parsed.port != 0 and "\\" not in value
+            and not any(c.isspace() or ord(c) < 32 or 127 <= ord(c) <= 159 for c in value)
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("Enter an HTTP or HTTPS source link without credentials or spaces")
+    return value
 
 
 def regular_path(path: Path) -> None:
@@ -157,6 +180,10 @@ class ArtifactStore:
                     "CREATE TABLE IF NOT EXISTS image_tags (artifact TEXT UNIQUE NOT NULL, "
                     "generated_tags TEXT NOT NULL, provenance TEXT NOT NULL)"
                 )
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS artifact_links (artifact TEXT PRIMARY KEY, "
+                    "url TEXT NOT NULL)"
+                )
                 db.commit()
             try:
                 yield db
@@ -210,8 +237,15 @@ class ArtifactStore:
         sort: str = "newest",
         format: str = "",
         include_total: bool = False,
+        images_only: bool = False,
+        source: str = "all",
     ) -> dict[str, Any]:
-        if kind not in (*KINDS, "all") or sort not in {"newest", "oldest", "name"}:
+        orders = {"newest": "created DESC", "oldest": "created ASC",
+                  "name": "name COLLATE NOCASE", "name_desc": "name COLLATE NOCASE DESC",
+                  "largest": "size DESC", "smallest": "size ASC",
+                  "type": "mime COLLATE NOCASE, name COLLATE NOCASE"}
+        if (kind not in (*KINDS, "all") or sort not in orders or type(images_only) is not bool
+                or source not in {"all", "input", "output"}):
             raise ValueError("Unknown artifact filter or order")
         regular_path(self.path)
         if not self.path.exists():
@@ -224,13 +258,22 @@ class ArtifactStore:
         if format:
             where += " AND instr(mime,?)=1"
             values.append(format[:100])
-        order = {"newest": "created DESC", "oldest": "created ASC", "name": "name COLLATE NOCASE"}[
-            sort
-        ]
+        if images_only:
+            where += " AND mime IN ('image/png','image/jpeg','image/webp','image/gif')"
+        order = orders[sort]
         with self.database() as db:
             if include_total:
                 db.execute("BEGIN")
             ai, join = self.tag_columns(db)
+            if source != "all":
+                generated = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='generated_images'"
+                ).fetchone()
+                output = "kind='research'"
+                if generated:
+                    output += (" OR EXISTS (SELECT 1 FROM generated_images "
+                               "WHERE generated_images.artifact=artifacts.id)")
+                where += f" AND {'NOT ' if source == 'input' else ''}({output})"
             if query:
                 columns = ["name", "tags", "origin", "mime"] + (["generated_tags"] if join else [])
                 where += " AND (" + " OR ".join(
@@ -258,6 +301,7 @@ class ArtifactStore:
         if not ID.fullmatch(identity):
             raise ValueError("Invalid artifact ID")
         with self.database() as db:
+            db.execute("BEGIN")
             ai, join = self.tag_columns(db)
             row = db.execute(
                 "SELECT artifacts.rowid,id,kind,name,filename,mime,size,sha256,created,origin,"
@@ -266,9 +310,17 @@ class ArtifactStore:
                 "FROM artifacts" + join + " WHERE id=?",
                 (identity,),
             ).fetchone()
+            # Read legacy stores without creating tables or rewriting their schema.
+            exists = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='artifact_links' AND type='table'"
+            ).fetchone()
+            link = db.execute("SELECT url FROM artifact_links WHERE artifact=?", (identity,)
+                              ).fetchone() if exists else None
         if row is None:
             raise ValueError("Artifact no longer exists; reload the list")
-        return self.metadata(row)
+        result = self.metadata(row)
+        result["source_url"] = source_link(link[0]) if link else ""
+        return result
 
     def store_generated_image(self, data: bytes, spec: dict, remote: str) -> dict[str, Any]:
         """Atomically retain pixels and private reviewed generation provenance."""
@@ -418,10 +470,11 @@ class ArtifactStore:
         self, identity: str, revision: int, operation: str, value: str = ""
     ) -> dict[str, Any]:
         if not ID.fullmatch(identity) or operation not in {
-            "tags", "clear_ai_tags", "archive", "restore", "delete"
+            "tags", "clear_ai_tags", "archive", "restore", "delete", "source_link"
         }:
             raise ValueError("Unknown artifact change")
         tags = manual_tags(value) if operation == "tags" else []
+        url = source_link(value) if operation == "source_link" else ""
         with self.database(write=True) as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
@@ -437,9 +490,19 @@ class ArtifactStore:
             ):
                 raise ValueError("Archive state changed; reload before retrying")
             if operation == "delete":
+                db.execute("DELETE FROM artifact_links WHERE artifact=?", (identity,))
                 db.execute("DELETE FROM generated_images WHERE artifact=?", (identity,))
                 db.execute("DELETE FROM image_tags WHERE artifact=?", (identity,))
                 db.execute("DELETE FROM artifacts WHERE id=?", (identity,))
+            elif operation == "source_link":
+                if url:
+                    db.execute(
+                        "INSERT INTO artifact_links(artifact,url) VALUES(?,?) "
+                        "ON CONFLICT(artifact) DO UPDATE SET url=excluded.url", (identity, url),
+                    )
+                else:
+                    db.execute("DELETE FROM artifact_links WHERE artifact=?", (identity,))
+                db.execute("UPDATE artifacts SET revision=revision+1 WHERE id=?", (identity,))
             elif operation == "clear_ai_tags":
                 db.execute("DELETE FROM image_tags WHERE artifact=?", (identity,))
                 db.execute("UPDATE artifacts SET revision=revision+1 WHERE id=?", (identity,))
