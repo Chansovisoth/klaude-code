@@ -5,10 +5,16 @@ Implemented and checked 2026-10-20.
 The composer paperclip opens **Attach files**, with **From device** and
 **From Library**. Device selection uses the browser file picker and the existing
 authenticated upload route. Library selection searches and pages through saved
-files, then captures the exact unarchived artifact revision and verifies its
+files with the Library's file-type icons, concise type/size labels and authenticated
+image thumbnails, then captures the exact unarchived artifact revision and verifies its
 checksum. Attaching does not modify the original file, Learn/index its contents,
-or perform an ordinary Library import. Images retain the existing private Media
-snapshot behavior needed for later chat turns.
+or perform an ordinary Library import. Library images reuse their original artifact
+ID and captured checksum, including images stored as Documents or Generated; sending
+or reattaching them never creates another Uploads record. The send path rejects an
+archived or changed source rather than sending different bytes. Later image turns
+and restored sessions use that same reference, so removing the original makes its
+pixels unavailable. Device images retain the existing private Media snapshot
+behavior needed for later chat turns.
 
 Selections appear as removable file cards. They remain in the unsent draft
 when submission fails. Snapshots preserve the chips and their keyboard focus.
@@ -158,3 +164,56 @@ Validation for this change:
 The running Python host must restart to expose persisted attachment descriptors
 and the thumbnail endpoint, followed by a browser refresh. Historical text-only
 attachment messages do not acquire previews retroactively.
+
+## Library attachment reuse repair
+
+The Library picker captured the selected bytes but discarded their artifact ID.
+Sending an image therefore created a chat Media snapshot that appeared as a new
+Upload. The private selection now carries the original ID and captured checksum
+through image preparation; existing Library images skip snapshot insertion.
+Document image references verify the actual image header, including when the
+stored filename has a text extension. Device snapshot behavior is unchanged.
+
+Validation on 2026-10-20:
+
+- Attachment, chat-image, image-recovery and artifact regressions: **96 passed in
+  60.47s**, using isolated local HTTP fixtures. This is a focused suite.
+- The 13 attachment tests cover repeated Library sends, exact original IDs,
+  unchanged Uploads/Generated inventories and metadata, restored-chat pixels,
+  images stored as Documents, and rejection of changed/archived image selections.
+- Production mypy passed all 211 source files; scoped Ruff and `git diff --check`
+  passed. No live model or browser smoke was run for this backend repair.
+
+Restart the Python Web UI host to load this change. Existing chat snapshots are
+retained because older conversation references may depend on them.
+
+## Library picker artwork
+
+The attachment Library picker now uses the same `fileIcon`, `artifactImage` and
+preview-eligibility helpers as the main Library. Compact 44px artwork shows PDF,
+document and code icons or authenticated, revision-checked image thumbnails;
+type/size labels use the Library's formatting.
+
+`scripts/webui_attachments_smoke.py` passed in real headless Chrome with decoded
+Library thumbnails, PDF badges and document/code icons. Picker artwork and Attach
+controls fit at 1440, 390 and 320px widths without horizontal overflow; the existing
+attachment flow also passed at 1440, 768, 390 and 320px. There were no JavaScript
+exceptions. JavaScript syntax, scoped Ruff and `git diff --check` passed.
+Screenshots: `/tmp/klaude-attachments-preview/library-picker-{1440,390,320}.png`.
+This browser fixture does not certify physical mobile devices or live-model quality.
+
+Reload the browser page to load the updated static assets.
+
+## Attachment source icons
+
+From device now has a leading laptop icon, switching to a smartphone at the
+existing 560px phone breakpoint. From Library copies the Library navigation
+icon. The decorative SVGs retain the existing button labels and both controls
+fit on one row at 320px.
+
+The real Chrome attachment smoke passed with responsive device icons at 1440,
+390 and 320px, matching Library icon paths, leading placement, and no browser
+exceptions. Existing device/Library attachment, thumbnail, reload and cleanup
+checks also passed. JavaScript syntax, scoped Ruff and `git diff --check` passed.
+Screenshots: `/tmp/klaude-attachments-preview/library-picker-{1440,390,320}.png`.
+Refresh the page to load these static asset changes.

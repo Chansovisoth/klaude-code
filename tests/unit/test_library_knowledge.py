@@ -422,7 +422,7 @@ def test_running_knowledge_task_blocks_generation_after_library_closes(memory):
     controller = host._library.knowledge
     controller.task_started = time.monotonic() - 4
     status = "".join(text for _, text in host._status_fragments())
-    assert "LEARNING" in status and ("queue 1" in status or "q:1" in status) and "ctx" in status
+    assert "Waiting" in status and ("queue 1" in status or "q:1" in status) and "ctx" in status
 
 
 def test_refresh_crawl_uses_cumulative_fetch_budget_and_keeps_current_index(

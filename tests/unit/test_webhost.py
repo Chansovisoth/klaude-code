@@ -947,7 +947,7 @@ def test_webhost_rejects_ambiguous_authority_and_body_framing(tmp_path):
         thread.join(3)
 
 
-def test_webhost_factory_exposes_only_read_only_workspace_tools(tmp_path, monkeypatch):
+def test_webhost_factory_exposes_read_only_workspace_and_retrieval_tools(tmp_path, monkeypatch):
     from klaude_core import config as config_module
     from klaude_core.config import Config
     from klaude_webhost import main as host_main
@@ -963,6 +963,8 @@ def test_webhost_factory_exposes_only_read_only_workspace_tools(tmp_path, monkey
             "grep",
             "git_status",
             "git_diff",
+            "query_knowledge", "read_skill", "web_search", "fetch_url", "http_probe",
+            "current_time",
         }
         assert app.agent.workspace.write_enabled is False
         assert host_main.WEB_CHAT_FORMATTING in app.agent.messages[0]["content"]
@@ -2924,7 +2926,8 @@ def test_webhost_markdown_assets_are_local_pinned_and_keep_csp(tmp_path):
     thread = threading.Thread(target=host.serve_forever, daemon=True)
     thread.start()
     try:
-        for path in ("/markdown.js", "/vendor/markdown-it.min.js", "/vendor/prism.min.js"):
+        for path in ("/markdown.js", "/vendor/markdown-it.min.js", "/vendor/prism.min.js",
+                     "/loading-indicator.js", "/vendor/material-loading-shapes.js"):
             conn = http.client.HTTPConnection("127.0.0.1", host.http.server_port, timeout=3)
             conn.request("GET", path)
             response = conn.getresponse()
@@ -2941,6 +2944,29 @@ def test_webhost_markdown_assets_are_local_pinned_and_keep_csp(tmp_path):
             assert hashlib.sha256((STATIC / "vendor" / name).read_bytes()).hexdigest() == digest
         for name in ("markdown-it-LICENSE.txt", "markdown-it-THIRD-PARTY.txt", "prism-LICENSE.txt"):
             assert (STATIC / "vendor" / name).read_text().strip()
+        material = json.loads((STATIC / "vendor/material-loading-manifest.json").read_text())
+        assert material["graphics_shapes_version"] == "1.0.1"
+        for name, digest in material["assets"].items():
+            assert hashlib.sha256((STATIC / "vendor" / name).read_bytes()).hexdigest() == digest
+        source = (STATIC / "vendor/material-loading-shapes.js").read_text()
+        # The existing app route must be sufficient on a still-running legacy
+        # host whose static allowlist does not know the two indicator paths.
+        app_source = (STATIC / "app.js").read_text()
+        assert source.strip() in app_source
+        assert (STATIC / "loading-indicator.js").read_text().strip() in app_source
+        html = (STATIC / "index.html").read_text()
+        assert 'src="/loading-indicator.js"' not in html
+        assert 'src="/vendor/material-loading-shapes.js"' not in html
+        shapes = json.loads(source.split("Object.freeze(", 1)[1].rsplit(");", 1)[0])
+        assert shapes["names"] == [
+            "soft-burst", "cookie-9", "pentagon", "pill", "sunny", "cookie-4", "oval",
+        ]
+        assert len(shapes["morphs"]) == 7
+        for morph in shapes["morphs"]:
+            assert len(morph["start"]) == len(morph["end"])
+            assert len(morph["start"]) % 6 == 2
+            for path in morph.values():
+                assert path[:2] == path[-2:]  # Closed, native matched cubic outline.
         conn = http.client.HTTPConnection("127.0.0.1", host.http.server_port, timeout=3)
         conn.request("GET", "/vendor/../host.py")
         assert conn.getresponse().status == 401

@@ -11,13 +11,14 @@ import json
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from hashlib import sha256
 from typing import Any, get_args
 
 from klaude_core.memory import Memory
 from klaude_core.session_runtime import decode
 
+from .activity import ActivityState
 from .chat_attachments import ChatAttachmentInput
 from .contracts import EventKind, PublicEvent
 
@@ -111,6 +112,12 @@ class DurableTurns:
                 "CREATE TABLE IF NOT EXISTS application_streams ("
                 "session_id TEXT PRIMARY KEY, epoch TEXT NOT NULL, "
                 "minimum_id INTEGER NOT NULL DEFAULT 0, high_water INTEGER NOT NULL DEFAULT 0)"
+            )
+            # A disposable read projection of public execution events, updated
+            # in their transaction. No private arguments or model text enter it.
+            memory.db.execute(
+                "CREATE TABLE IF NOT EXISTS application_activity ("
+                "session_id TEXT PRIMARY KEY, projection TEXT NOT NULL)"
             )
             memory.db.execute(
                 "CREATE TABLE IF NOT EXISTS application_control ("
@@ -1003,6 +1010,25 @@ class DurableTurns:
         kind: str, payload: dict[str, Any],
     ) -> int:
         memory = self.memory
+        if kind.startswith(("turn.", "tool.", "approval.", "user_input.", "message.")) or (
+            kind == "activity.changed"
+        ):
+            row = memory.db.execute(
+                "SELECT projection FROM application_activity WHERE session_id=?", (session_id,),
+            ).fetchone()
+            activity = ActivityState(**json.loads(row[0])) if row else ActivityState()
+            activity.observe(turn_id, kind, **{k: v for k, v in payload.items() if k != "kind"})
+            memory.db.execute(
+                "INSERT INTO application_activity(session_id,projection) VALUES (?,?) "
+                "ON CONFLICT(session_id) DO UPDATE SET projection=excluded.projection",
+                (session_id, json.dumps(asdict(activity))),
+            )
+            memory.db.execute(
+                "UPDATE session_live SET activity=?, revision=revision+1 "
+                "WHERE session_id=? AND turn_id=?",
+                (activity.label or activity.lifecycle.title(), session_id, turn_id),
+            )
+            payload = {**payload, "current_activity": activity.public()}
         memory.db.execute(
             "INSERT OR IGNORE INTO application_streams(session_id, epoch) VALUES (?,?)",
             (session_id, uuid.uuid4().hex),
@@ -1052,6 +1078,7 @@ class DurableTurns:
             "execution_id": event.execution_id, "interaction_id": event.interaction_id,
             "message_id": event.message_id, "offset": event.offset,
             "executed": event.executed, "status": event.status,
+            "activity": event.activity,
             "sequence": event.sequence,
         }
         with self.memory._db_lock, self.memory.db:
@@ -1118,8 +1145,10 @@ class DurableTurns:
             memory.db.execute(
                 "UPDATE session_live SET revision=revision+1, owner_client_id='', "
                 "owner_lease_until=0, turn_id='', state=?, turn_started_at=0, "
-                "activity='ready', partial='', updated_at=? WHERE session_id=?",
-                ("failed" if state == "failed" else "idle", time.time(), session_id),
+                "activity=?, partial='', updated_at=? WHERE session_id=?",
+                ("failed" if state == "failed" else "idle",
+                 "Done" if state == "completed" else "Error" if state in {"failed", "partial"}
+                 else state.title(), time.time(), session_id),
             )
             epoch = memory.db.execute(
                 "SELECT epoch FROM application_streams WHERE session_id=?",
@@ -1177,6 +1206,9 @@ class DurableTurns:
                     "WHERE session_id=? AND role IN "
                     "('user','assistant') ORDER BY rowid DESC LIMIT 500", (session_id,),
                 ).fetchall()
+                activity_row = memory.db.execute(
+                    "SELECT projection FROM application_activity WHERE session_id=?", (session_id,),
+                ).fetchone()
                 memory.db.commit()
             except BaseException:
                 memory.db.rollback()
@@ -1191,6 +1223,8 @@ class DurableTurns:
                     messages[-1]["attachments"] = json.loads(attachments)
         return {
             "session_id": session_id, "messages": messages,
+            "activity": (ActivityState(**json.loads(activity_row[0])).public(timeline=True)
+                         if activity_row else ActivityState().public(timeline=True)),
             "state": str(live[0]) if live else "idle",
             "partial": str(live[1]) if live else "",
             "partial_message_id": f"{live[2]}:0" if live and live[2] else "",

@@ -638,6 +638,7 @@ def apply_embedded_mcp_mutation(
     path: Path, request: MCPToggle | MCPEnable | MCPOAuthEnable | MCPOAuthLogout | MCPRemove
     | MCPAddDisabled | MCPAddVerified | MCPImportSnapshot, *,
     auth_dir: Path | None = None, journal: OperationJournal | None = None,
+    admitted: bool = False,
 ) -> MCPMutationResult:
     """Run one reviewed terminal mutation through the same fixed effect path.
 
@@ -679,7 +680,12 @@ def apply_embedded_mcp_mutation(
         raise ValueError("Invalid reviewed MCP mutation")
     writer = MCPMutationWriter(path, lambda *_: None, lambda _servers: None,
                                auth_dir=auth_dir, journal=journal)
-    if not writer._admit_journal(request):
+    if admitted:
+        receipt = journal.status(request.identity, request.session_id) if journal else None
+        if (receipt is None or receipt.state != "accepted"
+                or receipt.resource != mcp_resource(path)):
+            raise ValueError("Reviewed MCP admission unavailable")
+    elif not writer._admit_journal(request):
         return MCPMutationResult(request, str(path), "rejected")
     return writer._settle_journal(request, writer._apply(request))
 

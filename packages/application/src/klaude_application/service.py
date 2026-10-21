@@ -19,6 +19,8 @@ from klaude_core.memory import Memory
 from klaude_core.model_runtime import ModelInfo
 from klaude_core.session_runtime import capture
 
+from .activity import classify_activity, tool_outcome
+from .browser_models import BrowserModels
 from .chat_attachments import ChatAttachmentInput
 from .composition import open_local_session
 from .contracts import ApprovalRequest, EventKind, PublicEvent, TurnReceipt, UserInputRequest
@@ -61,6 +63,7 @@ class TurnHandle:
     _pending_offset: int = 0
     _pending_message_id: str = ""
     _final_message_id: str = ""
+    _tool_activities: dict[str, str] = field(default_factory=dict, repr=False)
     _last_flush: float = field(default_factory=time.monotonic, repr=False)
 
     def flush_delta(self) -> str:
@@ -169,6 +172,7 @@ class HeadlessApplication:
         self._requests: dict[str, tuple[tuple[str, str, str, str], TurnHandle]] = {}
         self._active: TurnHandle | None = None
         self._closed = False
+        self.requires_model_selection = False
         self.agent.set_session_context(self.session_id)
 
     @classmethod
@@ -247,22 +251,56 @@ class HeadlessApplication:
         return self._choose_runtime(
             selected, mode, effort,
             expected_revision=expected_revision, request_id=request_id,
+            configured=bool(selected.connection_id),
         )
+
+    def choose_configured_model(
+        self, info: ModelInfo, *, expected_revision: int, request_id: str,
+    ) -> int:
+        """Use an exact freshly verified configured model without changing defaults."""
+        cfg = self.agent.tool_config
+        if not isinstance(cfg, Config):
+            raise ValueError("Model configuration unavailable")
+        models = BrowserModels(cfg)
+        models.current(info)
+        mode = "thinking" if info.capabilities.requires_thinking else "standard"
+        efforts = [value for value in info.capabilities.effort_levels if value != "off"]
+        if mode == "thinking" and not efforts:
+            raise ValueError("Thinking capability is incomplete; refresh the model catalog")
+        effort = ("medium" if "medium" in efforts else efforts[0]) if mode == "thinking" else None
+        runtime = models.runtime(info)
+        try:
+            return self._choose_runtime(
+                info, mode, effort, expected_revision=expected_revision, request_id=request_id,
+                runtime=runtime, configured=True,
+            )
+        finally:
+            if self.agent.runtime is not runtime:
+                close = getattr(runtime, "close", None)
+                if callable(close):
+                    close()
 
     def _choose_runtime(
         self, info: ModelInfo, mode: str, effort: str | None, *,
         expected_revision: int, request_id: str | None,
+        runtime: Any = None, configured: bool = False,
     ) -> int:
         if request_id is not None:
             self._validate_request_id(request_id)
         if type(expected_revision) is not int or expected_revision < 0:
             raise ValueError("invalid settings revision")
-        if info.backend != "ollama" or self.agent.model_info.backend != "ollama":
+        if not configured and (info.backend != "ollama"
+                               or self.agent.model_info.backend != "ollama"):
             raise ValueError("browser model controls currently require Ollama")
         cfg = self.agent.tool_config
         if not isinstance(cfg, Config):
             raise ValueError("local model configuration unavailable")
-        local_runtime_matches(self.agent, cfg)
+        if configured:
+            BrowserModels(cfg).current(info)
+            if getattr(runtime or self.agent.runtime, "backend", info.backend) != info.backend:
+                raise ValueError("Model runtime does not match the configured adapter")
+        else:
+            local_runtime_matches(self.agent, cfg)
         types = info.capabilities.thinking_types
         if mode == "standard":
             if effort is not None or (types is not None and "disabled" not in types):
@@ -279,6 +317,8 @@ class HeadlessApplication:
                 raise RuntimeError("turn is active")
             if self.turns.queue(self.session_id, self.controller_id, include_submitted=False):
                 raise RuntimeError("queued work must finish before changing models")
+            if configured:
+                BrowserModels(cfg).current(info)
             previous = capture(self.agent)
             if previous is None:
                 raise ValueError("current model is not selected")
@@ -304,7 +344,18 @@ class HeadlessApplication:
                 self.agent.reasoning_effort = effort
             self.agent.ollama_think = effort if mode == "thinking" else False
             self.agent.ollama_code_think = self.agent.ollama_think
+            if runtime is not None:
+                previous_runtime = self.agent.runtime
+                self.agent.runtime = runtime
+                self.agent.ollama = runtime
+                close = getattr(previous_runtime, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
             self.agent.set_session_context(self.session_id)
+            self.requires_model_selection = False
             return revision
 
     def resume(self, session_id: str) -> None:
@@ -334,6 +385,7 @@ class HeadlessApplication:
             self.agent.plan_mode = self.turns.session_options(session_id)[1]
             self.agent.set_session_context(session_id)
             self.session_id = session_id
+            self.requires_model_selection = False
 
     def resume_local(self, session_id: str) -> None:
         """Restore an exact saved Ollama choice, then resume private continuity."""
@@ -369,6 +421,49 @@ class HeadlessApplication:
                     pass
                 raise
 
+    def resume_configured(self, session_id: str) -> None:
+        """Revalidate the exact saved provider, definition and credential revision."""
+        with self._lock:
+            if self._active is not None and not self._active.finished.is_set():
+                raise RuntimeError("turn is active")
+            if self.turns.queue(self.session_id, self.controller_id, include_submitted=False):
+                raise RuntimeError("queued work must finish before switching sessions")
+            cfg = self.agent.tool_config
+            if not isinstance(cfg, Config):
+                raise ValueError("Model configuration unavailable")
+            models = BrowserModels(cfg)
+            info, mode, effort = models.saved_info(self.memory, session_id)
+            if (mode == "thinking" and effort not in info.capabilities.effort_levels
+                    or mode == "standard" and info.capabilities.requires_thinking):
+                raise ValueError("Saved reasoning mode is no longer supported by this model")
+            runtime = models.runtime(info)
+            agent = self.agent
+            previous = (agent.runtime, agent.ollama, agent.model, agent.model_info,
+                        agent.reasoning_mode, agent.reasoning_effort,
+                        agent.ollama_think, agent.ollama_code_think)
+            try:
+                agent.runtime = agent.ollama = runtime
+                agent.model, agent.model_info, agent.reasoning_mode = info.model_id, info, mode
+                if effort is not None:
+                    agent.reasoning_effort = effort
+                agent.ollama_think = effort if mode == "thinking" else False
+                agent.ollama_code_think = agent.ollama_think
+                self.resume(session_id)
+            except BaseException:
+                (agent.runtime, agent.ollama, agent.model, agent.model_info,
+                 agent.reasoning_mode, agent.reasoning_effort,
+                 agent.ollama_think, agent.ollama_code_think) = previous
+                close = getattr(runtime, "close", None)
+                if callable(close):
+                    close()
+                raise
+            close = getattr(previous[0], "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+
     def branch_message(self, row_id: int, *, retry: bool = False) -> tuple[str, str | None]:
         """Keep the original conversation and activate its selected prefix."""
         with self._lock:
@@ -388,21 +483,70 @@ class HeadlessApplication:
             self.session_id = target
             return target, prompt
 
-    def start_session(self) -> str:
-        """Create an empty session in the current workspace without model work."""
+    def start_session(
+        self, *, model_info: ModelInfo | None = None, require_selection: bool = False,
+    ) -> str:
+        """Create an empty session, optionally using a host-verified startup model."""
         with self._lock:
             if self._active is not None and not self._active.finished.is_set():
                 raise RuntimeError("turn is active")
             if self.turns.queue(self.session_id, self.controller_id, include_submitted=False):
                 raise RuntimeError("queued work must finish before switching sessions")
+            runtime: Any = None
+            mode, effort = "standard", None
+            if model_info is not None:
+                cfg = self.agent.tool_config
+                if not isinstance(cfg, Config):
+                    raise ValueError("Model configuration unavailable")
+                models = BrowserModels(cfg)
+                models.current(model_info)
+                mode = "thinking" if model_info.capabilities.requires_thinking else "standard"
+                efforts = [item for item in model_info.capabilities.effort_levels if item != "off"]
+                if mode == "thinking":
+                    if not efforts:
+                        raise ValueError("Startup model reasoning capability is unavailable")
+                    effort = "medium" if "medium" in efforts else efforts[0]
+                runtime = models.runtime(model_info)
             session_id = uuid.uuid4().hex
-            self.turns.bind_workspace(
-                session_id, str(self.agent.workdir.resolve()), expected_revision=0,
-            )
+            try:
+                self.turns.bind_workspace(
+                    session_id, str(self.agent.workdir.resolve()), expected_revision=0,
+                )
+                if model_info is not None:
+                    models.current(model_info)
+                    previous = capture(self.agent)
+                    if previous is None:
+                        raise ValueError("Current model is unavailable")
+                    self.turns.set_runtime_choice(session_id, {
+                        **previous, "model": model_info.ref, "mode": mode, "effort": effort,
+                        "definition": model_info.connection_revision,
+                        "credentials": model_info.credential_revision, "at": time.time(),
+                    }, previous, expected_revision=0, request_id=f"startup-{session_id}")
+            except BaseException:
+                close = getattr(runtime, "close", None)
+                if callable(close):
+                    close()
+                raise
             self.agent.restore_session([])
             self.agent.plan_mode = False
+            if model_info is not None:
+                previous_runtime = self.agent.runtime
+                self.agent.model, self.agent.model_info = model_info.model_id, model_info
+                self.agent.reasoning_mode = mode
+                if effort is not None:
+                    self.agent.reasoning_effort = effort
+                self.agent.ollama_think = effort if mode == "thinking" else False
+                self.agent.ollama_code_think = self.agent.ollama_think
+                self.agent.runtime = self.agent.ollama = runtime
+                close = getattr(previous_runtime, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
             self.agent.set_session_context(session_id)
             self.session_id = session_id
+            self.requires_model_selection = require_selection
             return session_id
 
     def reconcile_interrupted(
@@ -434,6 +578,7 @@ class HeadlessApplication:
         identity = viewer_id or self.controller_id
         with self._lock:
             snapshot = self.turns.snapshot(self.session_id, identity)
+            snapshot["requires_model_selection"] = self.requires_model_selection
             if control_epoch is not None and snapshot["control_epoch"] != control_epoch:
                 snapshot["has_control"] = False
             broker = self._active.broker if self._active is not None else None
@@ -470,6 +615,8 @@ class HeadlessApplication:
         with self._lock:
             if self._closed:
                 raise RuntimeError("application is closed")
+            if self.requires_model_selection:
+                raise ValueError("Choose a model before starting this conversation")
             runtime = capture(self.agent)
             if runtime is None:
                 raise ValueError("explicit model/runtime selection required")
@@ -531,6 +678,8 @@ class HeadlessApplication:
         with self._lock:
             if self._closed:
                 raise RuntimeError("application is closed")
+            if self.requires_model_selection:
+                raise ValueError("Choose a model before queueing work in this conversation")
             runtime = capture(self.agent)
             if runtime is None:
                 raise ValueError("explicit model/runtime selection required")
@@ -746,7 +895,8 @@ class HeadlessApplication:
             agent.tools["request_user_input"] = user_input_tool(broker)
         agent.cancellation_check = handle.cancelled.is_set
         agent.execution_observer = lambda tool, identity: handle.emit(
-            "tool.started", tool=tool, execution_id=identity
+            "tool.started", tool=tool, execution_id=identity,
+            activity=handle._tool_activities.get(identity, "Waiting"),
         )
         def guard() -> None:
             if handle.cancelled.is_set():
@@ -782,6 +932,9 @@ class HeadlessApplication:
         saw_error = False
         try:
             handle.emit("turn.started")
+            builder = getattr(agent, "system_prompt_builder", None)
+            if getattr(agent, "browser_tools", None) is not None and callable(builder):
+                agent.set_system_prompt(builder())
             effective_input: str | dict[str, Any] = text
             if attachments:
                 try:
@@ -801,6 +954,10 @@ class HeadlessApplication:
                     final_text = event.payload["content"]
                     model_content = event.payload.get("model_message")
                     saved = True
+                    metadata = event.payload.get("metadata") or {}
+                    if (metadata.get("execution_id")
+                            and tool_outcome(final_text, metadata) == "failed"):
+                        saw_error = True
                 elif event.kind == "error":
                     saw_error = True
                 if handle.cancelled.is_set():
@@ -868,6 +1025,15 @@ class HeadlessApplication:
                 handle.failure = exc
                 handle.state = "interrupted"
                 handle.emit("turn.interrupted", persist=False)
+            if handle.state == "completed":
+                browser_tools = getattr(agent, "browser_tools", None)
+                if browser_tools is not None:
+                    try:
+                        browser_tools.completed(text)
+                    except Exception:
+                        # Auxiliary memory failure cannot rewrite a committed
+                        # conversation or resubmit its already completed turn.
+                        pass
             handle.finished.set()
             if handle.state != "interrupted":
                 try:
@@ -900,6 +1066,15 @@ class HeadlessApplication:
             value = payload.get("content")
             if isinstance(value, str):
                 handle.flush_delta()
+                metadata = payload.get("metadata") or {}
+                # return_direct tools finish through a text event instead of
+                # tool_result. Close that exact execution before the answer.
+                identity = str(metadata.get("execution_id") or "")
+                if identity:
+                    handle._tool_activities.pop(identity, None)
+                    handle.emit("tool.finished", execution_id=identity,
+                                executed=metadata.get("executed") is True,
+                                status=tool_outcome(value, metadata))
                 message_id = f"{handle.turn_id}:{handle._message_index}"
                 if not (payload.get("metadata") or {}).get("streamed"):
                     for start in range(0, len(value), 65_536):
@@ -912,19 +1087,25 @@ class HeadlessApplication:
                 handle._message_offset = 0
         elif event.kind == "tool_start":
             handle.flush_delta()
+            identity = str(payload.get("execution_id", ""))[:64]
+            activity = classify_activity(str(payload.get("tool", "")), payload.get("args") or {},
+                                         payload.get("metadata") or {})
+            if identity:
+                handle._tool_activities[identity] = activity.value
             handle.emit(
                 "tool.requested", tool=str(payload.get("tool", ""))[:128],
-                execution_id=str(payload.get("execution_id", ""))[:64],
+                execution_id=identity, activity=activity.value,
             )
         elif event.kind == "tool_result":
             handle.flush_delta()
             metadata = payload.get("metadata") or {}
             executed = metadata.get("executed") is True
+            handle._tool_activities.pop(str(metadata.get("execution_id", "")), None)
             handle.emit(
                 "tool.finished", tool=str(payload.get("tool", ""))[:128],
                 execution_id=str(metadata.get("execution_id", ""))[:64],
                 executed=executed,
-                status="executed" if executed else "rejected",
+                status=tool_outcome(payload.get("result", ""), metadata),
             )
 
     def close_interactions(self) -> None:
@@ -952,4 +1133,7 @@ class HeadlessApplication:
         close = getattr(self.agent.runtime, "close", None)
         if callable(close):
             close()
+        browser_tools = getattr(self.agent, "browser_tools", None)
+        if browser_tools is not None:
+            browser_tools.close()
         self.memory.db.close()

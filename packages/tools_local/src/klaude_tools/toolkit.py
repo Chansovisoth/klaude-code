@@ -925,6 +925,9 @@ def build_tools(ws: Workspace) -> list[Tool]:
             "Create or overwrite a file with content.",
             obj({"path": S, "content": S}, ["path", "content"]),
             ws.write_file,
+            start_metadata=lambda a: {
+                "file_operation": "overwrite" if ws._jail(a["path"]).exists() else "create",
+            },
             preflight=lambda a: ws.preflight_mutation(a["path"]),
             detail=lambda a: f"write {a.get('path')} ({len(a.get('content', ''))} chars)",
         ),

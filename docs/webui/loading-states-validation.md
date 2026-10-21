@@ -1,5 +1,12 @@
 # Loading skeleton validation
 
+The current shared presentation adds Google's official Material loading
+indicator beside the status description, with static skeleton bars. Chat,
+refresh and active operations use smaller uncontained variants. See
+[`material-loading-indicator.md`](material-loading-indicator.md) for the pinned
+geometry, native motion port and updated browser/packaging validation. The
+request ownership and lifecycle below remain in use.
+
 Implemented and checked 2026-10-20. Slow data reads show compact, themed skeletons
 instead of a blank area or a stand-alone “Loading…” line. A 120 ms delay avoids
 showing placeholders for fast responses. Static page headings, forms and controls
@@ -42,8 +49,9 @@ a skeleton.
 
 Placeholder bars are decorative and non-interactive. Loading status and busy
 attributes describe the real wait. Both system reduced-motion preferences and
-the app's reduced-motion setting disable the pulse animation. No new assets,
-external services, dependencies or HTTP routes are required.
+the app's reduced-motion setting stop the indicator. The initial skeleton slice
+needed no assets or routes; the Material refinement adds locally bundled shape
+data and SVG code with fixed asset routes, without a new runtime dependency.
 
 ## Validation
 

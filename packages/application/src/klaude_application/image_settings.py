@@ -48,7 +48,7 @@ def recover_image_settings(
 
 def save_image_settings(
     cfg: Any, candidate: dict, revision: str, journal: OperationJournal,
-    request_id: str, owner_id: str,
+    request_id: str, owner_id: str, *, admitted: bool = False,
 ) -> dict:
     """Fence one already-reviewed local settings write under its file lock."""
     from klaude_core.image_generation import save
@@ -59,14 +59,20 @@ def save_image_settings(
     ).encode()
     if len(intent) > 262_144:
         raise ValueError("Image-service settings intent exceeds safety limit")
-    receipt = journal.admit(
-        request_id=request_id, owner_id=owner_id, kind="ImageSettingsChange",
-        resource=image_settings_resource(cfg.config_dir),
-        payload={"sha256": hashlib.sha256(intent).hexdigest()},
-        lease_seconds=60,
-    )
-    if not receipt.created:
-        raise OperationConflict("Image-service settings request was already submitted")
+    resource = image_settings_resource(cfg.config_dir)
+    if admitted:
+        existing = journal.status(request_id, owner_id)
+        if existing is None or existing.resource != resource or existing.state != "accepted":
+            raise OperationConflict("Reviewed image-service admission unavailable")
+        receipt = existing
+    else:
+        receipt = journal.admit(
+            request_id=request_id, owner_id=owner_id, kind="ImageSettingsChange",
+            resource=resource, payload={"sha256": hashlib.sha256(intent).hexdigest()},
+            lease_seconds=60,
+        )
+        if not receipt.created:
+            raise OperationConflict("Image-service settings request was already submitted")
     started = False
 
     def before_publish(before: dict, after: dict) -> None:

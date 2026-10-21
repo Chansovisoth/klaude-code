@@ -139,6 +139,38 @@ def test_browser_import_review_confirm_status_and_logout_ownership(
     assert len(service.listing(kind="all")["items"]) == 1
 
 
+@pytest.mark.parametrize("kind", ["document", "media", "research"])
+def test_saved_files_delete_after_review_without_archiving(browser_library, kind):
+    host, service, auth = browser_library
+    if kind == "research":
+        item = service.artifacts.store_report("report.md", "Saved report", job="fixture")
+    elif kind == "media":
+        output = io.BytesIO()
+        Image.new("RGB", (2, 2), "teal").save(output, format="PNG")
+        item = service.artifacts.import_bytes(output.getvalue(), kind, "saved.png")
+    else:
+        item = service.artifacts.import_bytes(b"Saved bytes", kind, "saved.txt")
+    draft = {"operation": "delete", "target": item["id"], "revision": item["revision"]}
+    status, _, review = _request(host, "POST", "/api/v1/library/review",
+                                 body={"draft": draft}, **auth)
+    assert status == 200 and "cannot be undone" in review["summary"]
+    assert not service.artifacts.get(item["id"])["archived"]
+    assert _request(host, "POST", "/api/v1/library/discard",
+                    body={"review_id": review["review_id"]}, **auth)[0] == 200
+    assert service.artifacts.get(item["id"])["revision"] == item["revision"]
+
+    _, _, review = _request(host, "POST", "/api/v1/library/review",
+                            body={"draft": draft}, **auth)
+    identity = uuid.uuid4().hex
+    body = {"review_id": review["review_id"], "request_id": identity,
+            "control_epoch": host.public_snapshot(auth["client_id"])["control_epoch"]}
+    assert _request(host, "POST", "/api/v1/library/submit", body=body, **auth)[0] == 202
+    assert _wait(service, identity)["state"] == "completed"
+    assert _request(host, "POST", "/api/v1/library/submit", body=body, **auth)[0] == 202
+    with pytest.raises(ValueError, match="no longer exists"):
+        service.artifacts.get(item["id"])
+
+
 def test_previews_downloads_and_revisions_do_not_execute_documents(browser_library):
     host, service, auth = browser_library
     item = service.artifacts.import_bytes(b"<script>secret()</script>", "document", "unsafe.html")
@@ -162,6 +194,27 @@ def test_previews_downloads_and_revisions_do_not_execute_documents(browser_libra
     with service.artifacts.database(write=True) as db:
         db.execute("UPDATE artifacts SET content=? WHERE id=?", (b"corrupt", image["id"]))
     assert _bytes_request(host, path, auth["cookie"])[0] == 400
+
+
+def test_authenticated_source_preview_preserves_text_and_public_projection(browser_library):
+    host, service, auth = browser_library
+    source = "<script>unsafe()</script>\r\n\t  " + "long line " * 90 + "\r\n"
+    item = service.artifacts.import_bytes(source.encode(), "document", "source.html")
+    path = "/api/v1/library/item?" + urlencode({"id": item["id"]})
+    assert _request(host, "GET", path)[0] == 401
+    assert _request(host, "GET", path, fetch_site="cross-site", **auth)[0] == 403
+    status, _, detail = _request(host, "GET", path, **auth)
+    assert status == 200
+    assert detail["source_text"] == source
+    assert not detail["source_truncated"] and not detail["source_sanitized"]
+    assert detail["truncated"]  # Legacy terminal lines retain their own limit.
+    assert "origin" not in detail["item"] and "content" not in detail["item"]
+    download = "/api/v1/library/content?" + urlencode({
+        "id": item["id"], "revision": item["revision"],
+    })
+    result, headers, content = _bytes_request(host, download, auth["cookie"])
+    assert result == 200 and content == source.encode()
+    assert headers["Content-Type"] == "application/octet-stream"
 
 
 @pytest.mark.parametrize("kind", ["document", "media"])

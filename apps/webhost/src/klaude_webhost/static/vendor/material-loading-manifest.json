@@ -1,0 +1,39 @@
+{
+  "material_revision": "66b0eeb53afeb6025ffbbd37734b08e5bce197ed",
+  "graphics_shapes_version": "1.0.1",
+  "sources": {
+    "MaterialShapes.java": {
+      "url": "https://raw.githubusercontent.com/material-components/material-components-android/66b0eeb53afeb6025ffbbd37734b08e5bce197ed/lib/java/com/google/android/material/shape/MaterialShapes.java",
+      "sha256": "0e4510f198043e24183532029061af8048978feec7d7c84213a289ad55ef7aaf"
+    },
+    "LoadingIndicatorDrawingDelegate.java": {
+      "url": "https://raw.githubusercontent.com/material-components/material-components-android/66b0eeb53afeb6025ffbbd37734b08e5bce197ed/lib/java/com/google/android/material/loadingindicator/LoadingIndicatorDrawingDelegate.java",
+      "sha256": "90248722df1026eddce98075212633b8027684db2ab5612fee07d7324ea2d234"
+    },
+    "LoadingIndicatorAnimatorDelegate.java": {
+      "url": "https://raw.githubusercontent.com/material-components/material-components-android/66b0eeb53afeb6025ffbbd37734b08e5bce197ed/lib/java/com/google/android/material/loadingindicator/LoadingIndicatorAnimatorDelegate.java",
+      "sha256": "aa495c027eadfd744394ab97a6108f8468603861168fa35140edc2292f569b24"
+    },
+    "graphics-android.aar": {
+      "url": "https://dl.google.com/dl/android/maven2/androidx/graphics/graphics-shapes-android/1.0.1/graphics-shapes-android-1.0.1.aar",
+      "sha256": "7171269a4122feabb071768df46d10b362e47ac75fd0aa8dbcafa1f44f61b40c"
+    },
+    "collection.jar": {
+      "url": "https://dl.google.com/dl/android/maven2/androidx/collection/collection-jvm/1.4.2/collection-jvm-1.4.2.jar",
+      "sha256": "984ce9bd780055eafb8a105aca3f514686bf7b1b6272ec7c645a98ce40fc7db4"
+    },
+    "kotlin.jar": {
+      "url": "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/1.9.24/kotlin-stdlib-1.9.24.jar",
+      "sha256": "858b902696da9cf585ab9d98ffc1c2712269828354dfe9107e3711b084a36468"
+    },
+    "LICENSE": {
+      "url": "https://raw.githubusercontent.com/material-components/material-components-android/66b0eeb53afeb6025ffbbd37734b08e5bce197ed/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    }
+  },
+  "assets": {
+    "material-loading-shapes.js": "32751f6f5024a2e89319d3e9de6b2e6c68ea9ca5ac904396c1db8fee451d460d",
+    "material-loading-LICENSE.txt": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "material-loading-NOTICE.txt": "f308b62e63e8a0ab718b542ec8a36cc0cfcc5a122b51b808efe89938cd7d8b33"
+  }
+}

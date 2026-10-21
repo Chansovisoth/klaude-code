@@ -191,3 +191,18 @@ physical-device validation is claimed for this browser-only change. Harnesses an
 logs: `/tmp/klaude-adaptive-page-check.{py,log}` and
 `/tmp/klaude-adaptive-legacy-check.{py,log}`. Screenshot:
 `/tmp/klaude-webui-preview/responsive-pages-3-columns.png`.
+
+## Settings category spacing
+
+Superseded by the single-category Settings tabs described in
+`settings-tabs-validation.md`; the evidence below records the earlier stacked layout.
+
+Adjacent Settings cards now have a 24px vertical gap, including Model Defaults,
+image generation, Account and Memory. The Interface label retains its existing
+spacing above Themes & Colors. The rule is scoped to Settings.
+
+Isolated authenticated Chrome checks passed at 320/390/768/1440px in light and
+dark: all visible cards remain separated, hiding Account retains the gap before
+Memory, and Settings has no horizontal overflow or JavaScript exceptions.
+Screenshots: `/tmp/klaude-settings-spacing/`; harness:
+`/tmp/klaude-settings-spacing-check.py`. `git diff --check` passed.

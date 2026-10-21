@@ -231,11 +231,7 @@ class SessionDirectory:
 
     def markdown_chunks(self, session_id: str) -> Iterator[str]:
         """Yield the public conversation Markdown; never read model_content."""
-        title = next(
-            (s["title"] for s in self.memory.resumable_sessions()
-             if s["session_id"] == session_id),
-            "Klaude conversation",
-        )
+        title = self.memory.session_title(session_id)
         yield f"# {title}\n\nSession: {session_id}\n"
         for turn in self.memory.public_session_records(session_id):
             content = turn.get("content", "")

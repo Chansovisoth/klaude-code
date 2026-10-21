@@ -20,14 +20,15 @@ router, framework, gesture dependency or competing file-operation owner.
   the old narrow item modal.
 - At the shell's existing 850px breakpoint, the dialog fills the dynamic viewport
   and respects safe areas. The image starts fitted with details closed. Details
-  opens a flexible partial sheet, expands fully and closes through its controls,
-  handle gestures or Escape. Its own scroll container holds long filenames,
+  opens a flexible partial sheet, expands fully and closes through the outside
+  scrim, handle gestures or Escape. Its own scroll container holds long filenames,
   metadata and tag collections; the covered image controls become inert.
 - Compact controls provide zoom in/out, fit, download and details. Desktop also
-  offers expanded image presentation. The top bar has Close, truncated filename,
-  image position and the overflow menu. Archive/Restore and Delete appear in the
-  menu; Download is not duplicated below an image. Existing document preview and
-  download behavior remain available.
+  offers expanded image presentation. The top bar has a truncated filename,
+  image position and one Close cross on the right. The overflow menu sits beside
+  the Details title in place of the duplicate Close button. Archive/Restore and
+  Delete appear in the menu; Download is not duplicated below an image. Existing
+  document preview and download behavior remain available.
 - Pinch and anchored 1–8x zoom, panning, double-tap, fit-only horizontal swipe and
   arrow/button navigation share the same image stage. Zoomed arrow keys pan;
   `+`/`-` zoom and `0`/`F` fit. Switching images resets the transform. Input and
@@ -76,8 +77,8 @@ AI/manual overlap handling. The permanent comma-separated input is gone. As
 before, opening a mutation review closes the file preview; work starts only after
 confirmation, and accepted operations continue through the existing owner.
 
-Delete on a saved item explains the archive-first requirement. Archived files
-offer Restore and Delete. Delete opens a Cancel-focused native confirmation,
+Saved files offer Archive and Delete; archived files offer Restore and Delete.
+Delete opens a Cancel-focused native confirmation without requiring archive,
 names the irreversible operation and keeps the existing exact revision/effect
 checks. Cancel performs no deletion. Menu arrow/Home/End/Tab/Escape/outside-click
 behavior follows the existing chat popover convention. The Markdown browser test
@@ -140,8 +141,8 @@ unsupported. The existing manual-tag and image-input limits are unchanged.
   transform reset, sheet handle dragging, sheet focus/Escape, menu keyboard
   controls, metadata read reuse, source placement and real LAN clipboard fallback
   inside the native dialog. Real owned workers verified reviewed source saving,
-  chip edits with AI tags present, archive, Delete cancellation, archive-first
-  enforcement and confirmed deletion. Reduced motion, private-state cleanup,
+  chip edits with AI tags present, archive, Delete cancellation for saved and
+  archived files and confirmed deletion. Reduced motion, private-state cleanup,
   no external requests and **zero browser exceptions** passed.
 - The existing Library browser, loading and Markdown Chrome scripts also passed.
   Library covers 1,058 files, 50 images and 24 mode/theme/viewport combinations,
@@ -172,3 +173,43 @@ unsupported. The existing manual-tag and image-input limits are unchanged.
 - Existing uncommitted work and all reference files remain preserved. No
   commit/push was performed. Browsers need to refresh and sign in again after
   the graceful host reload.
+
+## Direct file deletion (2026-10-21)
+
+- Saved and archived Library files both offer Delete, including images,
+  documents and Research reports. The viewer, review preparation and shared
+  storage effect no longer require archiving first. The Cancel-focused permanent
+  deletion review and exact revision check remain in place. Original workspace
+  files and independent exported copies remain untouched.
+- Focused Library artifact, management and HTTP regression tests passed:
+  **87 passed in 54.61 seconds**. Coverage includes direct deletion for all three
+  stored kinds, cancellation, changed-file rejection and duplicate HTTP receipts.
+- The Chrome viewer smoke passed with actual PNG/WebP fixtures and owned workers:
+  saved-image and document deletion, saved/archived Delete cancellation, confirmed
+  archived deletion, existing viewer gestures, light/dark responsive layouts and
+  logout cleanup. It reported zero browser exceptions or external requests.
+- Focused Ruff, JavaScript syntax, Python compilation and `git diff --check`
+  passed. This is focused validation rather than a full repository suite.
+- After verifying no active chat work or Library operations, the managed host
+  was gracefully reloaded. Selected conversation, public dialogue, exact runtime,
+  workspace, loopback/LAN listeners and saved hosting preferences were preserved.
+  No real-profile files were deleted as probes. Refresh and sign in again to use
+  the updated host.
+
+## Preview header controls (2026-10-21)
+
+- Image and file previews use one Close cross at the far right of the main
+  header. File options moved to the Details title row, replacing its duplicate
+  Close button. Opening Details focuses its handle; hiding Details also dismisses
+  its menu. Sheet scrim, Escape and drag dismissal remain available.
+- Both isolated Chrome acceptance scripts passed with zero browser exceptions
+  or external requests. Image checks covered 12 light/dark viewport combinations,
+  menu placement and keyboard dismissal, sheet focus/gestures and reviewed file
+  actions. File checks covered 16 source layouts, eight Markdown layouts, exact
+  copying, complete downloads and existing preview safeguards.
+- Desktop and phone screenshots were inspected. Focused Ruff, JavaScript syntax,
+  Python compilation and `git diff --check` passed. This is focused validation,
+  not a full repository test run. Results: `/tmp/klaude-preview-header-images.json`
+  and `/tmp/klaude-preview-header-files.json`.
+- Refresh the browser to load these static asset changes; no host restart is
+  required.

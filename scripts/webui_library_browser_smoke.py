@@ -2,6 +2,7 @@
 
 Run: uv run --frozen --offline python scripts/webui_library_browser_smoke.py
 Uses an isolated profile, private fixtures, and no model/provider generation.
+KLAUDE_TEST_GENERATED_FILTERS_ONLY=1 runs just the Generated filter checks.
 """
 
 from __future__ import annotations
@@ -29,6 +30,98 @@ from klaude_webhost.accounts import AccountStore
 from klaude_webhost.host import LocalWebHost
 from PIL import Image, ImageDraw
 from webui_control_smoke import Tab
+
+CODE_PREVIEW = ('# Unicode 設計 stays literal\ndef greeting(name):\n'
+                '    markup = "<script>window.previewExecuted = true</script>"\n'
+                '    return "Hello, " + name\n\nLONG_VALUE = "' + 'long value ' * 36 + '"\n')
+
+
+async def verify_code_preview(tab, activate, output):
+    async def open_file(name):
+        await tab.js('byId("artifact-query").value=' + json.dumps(name) + ';'
+                     'byId("artifact-filter").requestSubmit()')
+        await tab.wait('filePage?.total===1 && filePage.items[0].name===' + json.dumps(name))
+        await activate(".file-item button")
+        await tab.wait('selectedArtifact?.name===' + json.dumps(name))
+
+    await open_file("sample.py")
+    await tab.wait('byId("artifact-wrap")?.ariaPressed==="true"')
+    expected = json.dumps(CODE_PREVIEW)
+    assert await tab.js('byId("artifact-preview").querySelector("pre").textContent===' + expected)
+    assert await tab.js('!window.previewExecuted && '
+                        '!byId("artifact-preview").querySelector("script")')
+    for theme in ("light", "dark"):
+        await tab.js('document.documentElement.dataset.theme=' + json.dumps(theme))
+        for width in (1440, 768, 390, 320):
+            await tab.command("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": 760, "deviceScaleFactor": 1, "mobile": False,
+            })
+            await asyncio.sleep(.1)
+            for wrapped in (False, True):
+                await activate("#artifact-wrap" if wrapped else "#artifact-no-wrap")
+                # Measure after the existing expressive press/release transform.
+                await asyncio.sleep(.2)
+                state = await tab.js('''(() => {
+                  const preview=byId('artifact-preview'), text=preview.querySelector('pre');
+                  const dialog=byId('artifact-detail'), toolbar=byId('image-toolbar');
+                  const line=text.querySelector('.source-line-text');
+                  return {whiteSpace:getComputedStyle(line).whiteSpace, width:innerWidth,
+                    textColor:getComputedStyle(text).color,
+                    themeColor:getComputedStyle(document.documentElement).color,
+                    overflow:preview.scrollWidth>preview.clientWidth+1,
+                    pageFits:document.documentElement.scrollWidth<=innerWidth &&
+                      dialog.scrollWidth<=dialog.clientWidth,
+                    controlsFit:[...toolbar.querySelectorAll('button')]
+                      .filter(button=>button.getClientRects().length).every(button=>{
+                        const r=button.getBoundingClientRect();
+                        return r.left>=0 && r.right<=innerWidth && r.width>=44 && r.height>=44;
+                      }), controls:[...toolbar.querySelectorAll('button')]
+                        .filter(b=>b.getClientRects().length).map(b=>({id:b.id,
+                          width:b.getBoundingClientRect().width,
+                          height:b.getBoundingClientRect().height})),
+                    scrollLeft:preview.scrollLeft};
+                })()''')
+                assert state["whiteSpace"] == ("pre-wrap" if wrapped else "pre"), state
+                assert state["textColor"] == state["themeColor"], state
+                assert state["overflow"] is not wrapped, state
+                assert state["pageFits"] and state["controlsFit"], state
+                if wrapped:
+                    assert state["scrollLeft"] == 0, state
+                else:
+                    await tab.js('byId("artifact-preview").scrollLeft=100')
+                    assert await tab.js('byId("artifact-preview").scrollLeft>0')
+                    await tab.js('byId("artifact-preview").scrollLeft=0')
+                if width in (1440, 320):
+                    shot = await tab.command("Page.captureScreenshot", {"format": "png"})
+                    mode = "wrap" if wrapped else "no-wrap"
+                    (output / f"code-{mode}-{theme}-{width}.png").write_bytes(
+                        base64.b64decode(shot["data"])
+                    )
+    # The clipboard API and HTTP fallback both copy only the displayed text.
+    await tab.js('Object.defineProperty(navigator,"clipboard",{configurable:true,'
+                 'value:{writeText:async text=>{window.copiedPreview=text}}})')
+    await activate("#artifact-copy")
+    await tab.wait('window.copiedPreview===' + expected)
+    await tab.wait('byId("artifact-copy").textContent==="Copied"')
+    await tab.js('Object.defineProperty(navigator,"clipboard",{value:undefined,configurable:true});'
+                 'window.fallbackPreview="";document.addEventListener("copy",event=>{'
+                 'fallbackPreview=event.clipboardData?.getData("text/plain")},{once:true})')
+    await activate("#artifact-copy")
+    await tab.wait('window.fallbackPreview===' + expected)
+    clipboard_state = await tab.js('({temporary:!!document.querySelector(".clipboard-source"),'
+                                   'focused:document.activeElement?.id})')
+    assert clipboard_state == {"temporary": False, "focused": "artifact-copy"}, clipboard_state
+    await tab.js('delete navigator.clipboard')
+    await activate("#artifact-close")
+    await open_file("sample.py")
+    assert await tab.js('byId("artifact-wrap").ariaPressed==="true" && '
+                        'byId("artifact-copy").textContent==="Copy"')
+    await activate("#artifact-close")
+    for name in ("image-49.webp", "unknown.bin"):
+        await open_file(name)
+        assert await tab.js('byId("preview-text-controls").hidden && '
+                            '!byId("preview-text-controls").children.length')
+        await activate("#artifact-close")
 
 
 async def verify(host, root, chrome):
@@ -100,6 +193,47 @@ async def verify(host, root, chrome):
             assert await tab.js('JSON.stringify([...byId("artifact-kind").options]'
                                 '.map(option=>[option.value,option.textContent]))'
                                 '===JSON.stringify(uploadTypeChoices)')
+            if os.environ.get("KLAUDE_TEST_GENERATED_FILTERS_ONLY") == "1":
+                await activate('[data-file-view="list"]')
+                await tab.js("document.fonts.ready")
+                for width in (320, 390, 768, 1440):
+                    await tab.command("Emulation.setDeviceMetricsOverride", {
+                        "width": width, "height": 820, "deviceScaleFactor": 1,
+                        "mobile": width < 600,
+                    })
+                    await asyncio.sleep(.2)
+                    compact = await tab.js(
+                        "byId('file-options-toggle').getClientRects().length>0"
+                    )
+                    if compact:
+                        await activate("#file-options-toggle")
+                    assert await tab.js('''['artifact-kind','artifact-status','artifact-sort']
+                      .every(id=>byId(id).getClientRects().length>0 && !byId(id).disabled)''')
+                    for kind, expected in (("document", "research"), ("media", "media")):
+                        await tab.js(f"byId('artifact-kind').value='{kind}';"
+                                     "byId('artifact-kind').dispatchEvent(new Event('change'))")
+                        await tab.wait("filePage?.total===3 && filePage.items.every(item=>"
+                                       f"item.kind==='{expected}')")
+                    await tab.js("byId('artifact-kind').value='all';"
+                                 "byId('artifact-kind').dispatchEvent(new Event('change'))")
+                    await tab.wait("filePage?.total===6")
+                    await tab.js("byId('artifact-sort').value='name_desc';"
+                                 "byId('artifact-sort').dispatchEvent(new Event('change'))")
+                    await tab.wait('filePage?.total===6 && '
+                                   'filePage.items.map(item=>item.name).join("|")==='
+                                   'filePage.items.map(item=>item.name).sort().reverse().join("|")')
+                    assert await tab.js("document.documentElement.scrollWidth<=innerWidth && "
+                                        "byId('library-view').scrollWidth<="
+                                        "byId('library-view').clientWidth")
+                    capture = await tab.command("Page.captureScreenshot", {"format": "png"})
+                    (output / f"generated-filters-{width}.png").write_bytes(
+                        base64.b64decode(capture["data"]))
+                    if compact:
+                        await activate("#file-options-toggle")
+                assert not tab.errors, tab.errors
+                print(json.dumps({"generated_filters": "visibility/types/sort passed",
+                                  "widths": [320, 390, 768, 1440], "browser_exceptions": 0}))
+                return
             await tab.js('byId("artifact-kind").value="document";'
                          'byId("artifact-kind").dispatchEvent(new Event("change"))')
             await tab.wait('filePage?.total===3 && '
@@ -320,6 +454,24 @@ async def verify(host, root, chrome):
                 })
                 await activate('[data-section="outputs"]')
                 await activate("#file-breadcrumbs button")
+                await activate('[data-file-view="list"]')
+                await tab.wait('filePage?.total===6 && fileView==="list"')
+                compact = await tab.js("byId('file-options-toggle').getClientRects().length>0")
+                if compact:
+                    await activate("#file-options-toggle")
+                assert await tab.js('''['artifact-kind','artifact-status','artifact-sort']
+                  .every(id=>byId(id).getClientRects().length>0 &&
+                    byId(id).getBoundingClientRect().height>=48)''')
+                await tab.js('byId("artifact-sort").value="name_desc";'
+                             'byId("artifact-sort").dispatchEvent(new Event("change"))')
+                await tab.wait('filePage?.total===6 && '
+                               'filePage.items.map(item=>item.name.toLowerCase()).join("|")==='
+                               'filePage.items.map(item=>item.name.toLowerCase()).sort()'
+                               '.reverse().join("|")')
+                await tab.js('byId("artifact-sort").value="newest";'
+                             'byId("artifact-sort").dispatchEvent(new Event("change"))')
+                if compact:
+                    await activate("#file-options-toggle")
                 for mode, total in (("list", 6), ("grid", 6), ("gallery", 3)):
                     await activate(f'[data-file-view="{mode}"]')
                     await tab.wait(f'filePage?.total==={total} && '
@@ -352,6 +504,7 @@ async def verify(host, root, chrome):
                 assert await tab.js('new URL(location.href).searchParams.get("files-sort")==='
                                     + json.dumps(sort))
             await activate("#file-options-toggle")
+            await verify_code_preview(tab, activate, output)
             await tab.js('byId("artifact-query").value="notes.txt";'
                          'byId("artifact-filter").requestSubmit()')
             await tab.wait('filePage?.total===1 && filePage.items[0].name==="notes.txt"')
@@ -455,6 +608,7 @@ async def verify(host, root, chrome):
                               "closed_import_discards_late_review": True,
                               "inputs_outputs_separate_counts_history_preview": True,
                               "shared_types_documents_include_reports": True,
+                              "code_preview_wrap_copy_http_fallback": True,
                               "corrupt_image_fallback": True,
                               "originals_used_as_thumbnails": False, "layouts": layouts,
                               "longest_task_ms": await tab.js('Math.max(0,...fileLongTasks)'),
@@ -496,7 +650,8 @@ def main():
             created = datetime(2026, month, 20, tzinfo=UTC).timestamp() - index
             with service.artifacts.database(write=True) as db:
                 db.execute("UPDATE artifacts SET created=? WHERE id=?", (created, item["id"]))
-        for name, content in (("notes.txt", b"Fixture note"), ("sample.py", b"print(1)"),
+        for name, content in (("notes.txt", b"Fixture note"),
+                              ("sample.py", CODE_PREVIEW.encode()),
                               ("report.pdf", b"%PDF-1.4 fixture"), ("recording.mp3", b"audio"),
                               ("movie.mp4", b"video"), ("archive.zip", b"zip"),
                               ("unknown.bin", b"\0unknown"), ("vector.svg", b"<svg/>")):

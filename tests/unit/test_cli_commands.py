@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 import typer
+from klaude_application.activity import Activity
 from klaude_cli.main import (
     AGENTS_INSTRUCTION_MAX_CHARS,
     COMMAND_REFERENCE,
@@ -777,8 +778,8 @@ def test_live_activity_uses_original_braille_animation_and_static_style(monkeypa
     monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: 0.1)
     second = tui._status_fragments()[0]
     assert first[0] == second[0] == "class:runtime_busy"
-    assert first[1] == " ⠋ WORKING "
-    assert second[1] == " ⠙ WORKING "
+    assert first[1] == " ⠋ Waiting "
+    assert second[1] == " ⠙ Waiting "
     tui.running = False
     assert tui._status_fragments()[0][0] == "class:runtime_text"
 
@@ -792,13 +793,13 @@ def test_live_activity_uses_progressive_label_and_whole_turn_elapsed(monkeypatch
 
     status = "".join(text for _style, text in tui._status_fragments())
 
-    assert f"{tui.appearance.spinner.animation.frame_at(111.0)} EDITING" in status
+    assert f"{tui.appearance.spinner.animation.frame_at(111.0)} Editing" in status
     assert "11s" in status
     assert "[EDITING]" not in status
     assert "src/app.py" not in status
 
 
-def test_quiet_running_command_transitions_to_waiting_after_threshold(monkeypatch):
+def test_quiet_test_runner_keeps_its_confirmed_activity(monkeypatch):
     tui = _fake_persistent_tui()
     tui.running = True
     tui.activity = "running pytest tests/unit"
@@ -806,11 +807,11 @@ def test_quiet_running_command_transitions_to_waiting_after_threshold(monkeypatc
     tui._activity_started_at = 100.0
 
     monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: 104.9)
-    assert "RUNNING" in "".join(text for _style, text in tui._status_fragments())
+    assert "Running tests" in "".join(text for _style, text in tui._status_fragments())
 
     monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: 105.0)
     status = "".join(text for _style, text in tui._status_fragments())
-    assert "WAITING" in status
+    assert "Running tests" in status
     assert "15s" in status
 
 
@@ -823,7 +824,7 @@ def test_permission_wait_uses_braille_footer_and_compact_elapsed(monkeypatch):
 
     status = "".join(text for _style, text in tui._status_fragments())
 
-    assert f"{tui.appearance.spinner.animation.frame_at(111.0)} WAITING" in status
+    assert f"{tui.appearance.spinner.animation.frame_at(111.0)} Needs input" in status
     assert "1m 11s" in status
     assert "[WAITING]" not in status
 
@@ -2791,7 +2792,7 @@ def test_resumed_observer_status_tracks_remote_worker_lease(tmp_path, monkeypatc
     assert not observer.running
     assert observer._watching_remote
     status = "".join(text for _style, text in observer._status_fragments())
-    assert "EXPLORING" in status
+    assert "Waiting" in status
     assert "36s" in status
     assert "READY" not in status
     assert observer.agent.last_turn_capabilities["callable_tools"] == ["web_search"]
@@ -2880,7 +2881,7 @@ def test_resumed_observer_receives_subagent_lifecycle(tmp_path):
 
     observer._sync_shared_session()
 
-    assert observer.activity == "exploring read/research subagent"
+    assert observer.activity == "ready"  # A child cannot replace the parent activity.
     memory.publish_session_event(
         "shared",
         "remote-owner",
@@ -15422,7 +15423,7 @@ def test_ai_utility_cancel_closes_progress_restores_draft_and_drops_late_result(
     controller = tui._ai_defaults
     controller.utility = ("utility-id", tui.session_id, "recap")
     controller.show("utility")
-    assert "WORKING" in "".join(text for _style, text in tui._status_fragments())
+    assert "Generating response" in "".join(text for _style, text in tui._status_fragments())
     controller.action(PanelAction("ai-defaults-utility-cancel"))
     assert controller.utility is None and tui._choice_kind is None
     assert tui.input.text == "unsent draft"
@@ -15590,3 +15591,17 @@ def test_m1_read_approval_edit_parity_across_headless_line_and_tui(
         assert "read_file" in started
         assert ("write_file" in started) is allow_write
         assert (root / "output.txt").exists() is allow_write
+
+
+@pytest.mark.parametrize("activity", list(Activity))
+def test_all_thirteen_tui_labels_retain_custom_spinner(activity, monkeypatch):
+    from klaude_cli.spinners import SpinnerSettings
+
+    tui = _fake_persistent_tui()
+    tui.appearance.spinner = SpinnerSettings("custom", ("ab", "cd"), 200)
+    tui.activity = activity.value
+    tui.running = activity not in {Activity.DONE, Activity.ERROR}
+    monkeypatch.setattr("klaude_cli.main.time.monotonic", lambda: .2)
+    text = "".join(value for _, value in tui._status_fragments())
+    assert activity.value in text
+    assert (" cd " if tui.running else "★ ") in text

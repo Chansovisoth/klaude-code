@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from typing import Any
 
 from . import vision
@@ -64,7 +65,10 @@ def suggest(cfg: Any, spec: dict) -> dict:
     }
 
 
-def apply(cfg: Any, proposal: dict, selected: list[str]) -> dict:
+def apply(
+    cfg: Any, proposal: dict, selected: list[str], *,
+    before_publish: Callable[[], None] | None = None,
+) -> dict:
     offered, selected = checked_tags(proposal["tags"]), checked_tags(selected)
     if any(tag not in offered for tag in selected):
         raise ValueError("Save only tags from the reviewed proposal")
@@ -73,5 +77,6 @@ def apply(cfg: Any, proposal: dict, selected: list[str]) -> dict:
     if item["sha256"] != proposal["sha256"]:
         raise ValueError("Reviewed image changed")
     return {"status": "complete", "item": ArtifactStore(cfg.data_dir / "library").apply_ai_tags(
-        item["id"], item["revision"], item["sha256"], selected, proposal["provenance"]
+        item["id"], item["revision"], item["sha256"], selected, proposal["provenance"],
+        before_publish=before_publish,
     )}

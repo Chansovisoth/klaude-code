@@ -1,0 +1,8 @@
+Google Material loading indicator geometry and motion
+Copyright 2024 The Android Open Source Project. Apache-2.0.
+Material Components for Android revision: 66b0eeb53afeb6025ffbbd37734b08e5bce197ed
+AndroidX graphics-shapes 1.0.1 performs the original curve matching.
+Generated cubic data and SVG adaptation: Klaude contributors, 2026.
+The Android source is unmodified during export. Android affine shims
+replace platform calls during maintenance only; no Android code runs
+in the browser. See scripts/vendor_webui_loading.py for provenance.

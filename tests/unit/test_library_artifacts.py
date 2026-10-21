@@ -133,6 +133,52 @@ def test_preview_reports_single_line_truncation(artifact):
     assert preview["truncated"] and len(preview["lines"][0]) == 500
 
 
+def test_source_preview_preserves_whitespace_and_legacy_terminal_contract(artifact):
+    store, _, _ = artifact
+    source = "\tdef greeting():\r\n    return '設計'  \r\n\r\n" + "x" * 900 + "\n"
+    item = store.import_bytes(source.encode(), "document", "code.py")
+    legacy = store.preview(item["id"])
+    preview = store.preview(item["id"], include_source=True)
+    assert "source_text" not in legacy
+    assert preview["lines"] == legacy["lines"]
+    assert legacy["truncated"]  # The terminal still clips individual lines.
+    assert preview["source_text"] == source
+    assert not preview["source_truncated"] and not preview["source_sanitized"]
+
+
+def test_empty_source_preview_is_readable(artifact):
+    store, _, _ = artifact
+    item = store.import_bytes(b"", "document", "empty.txt")
+    preview = store.preview(item["id"], include_source=True)
+    assert preview["source_text"] == "" and preview["lines"] == []
+    assert not preview["source_truncated"] and not preview["source_sanitized"]
+
+
+@pytest.mark.parametrize("source,expected", [
+    (b"x" * 16383 + "設計".encode(), "x" * 16383),
+    (b"line\r\n" * 101, "line\r\n" * 100),
+    (b"x" * 20000, "x" * 16384),
+])
+def test_source_preview_bounds_do_not_add_unicode_replacement(artifact, source, expected):
+    store, _, _ = artifact
+    item = store.import_bytes(source, "document", "bounded.txt")
+    preview = store.preview(item["id"], include_source=True)
+    assert preview["source_text"] == expected
+    assert preview["source_truncated"] and not preview["source_sanitized"]
+
+
+def test_source_preview_reports_sanitization_without_changing_saved_bytes(artifact):
+    store, _, _ = artifact
+    original = b"print('hello')\n" * 10 + b"\tinvalid:\xff control:\x1b\n"
+    item = store.import_bytes(original, "document", "unsafe.py")
+    preview = store.preview(item["id"], include_source=True)
+    assert preview["source_sanitized"] and not preview["source_truncated"]
+    assert preview["source_text"].endswith("\tinvalid:� control: \n")
+    assert store.get(item["id"])["sha256"] == hashlib.sha256(original).hexdigest()
+    binary = store.import_bytes(b"binary\0data", "document", "unknown.bin")
+    assert "source_text" not in store.preview(binary["id"], include_source=True)
+
+
 def test_tags_search_sort_types_and_archive_do_not_change_bytes(artifact, tmp_path):
     store, source, item = artifact
     image = tmp_path / "screenshot.png"
@@ -160,17 +206,15 @@ def test_tags_search_sort_types_and_archive_do_not_change_bytes(artifact, tmp_pa
 
 def test_stale_mutations_delete_confirmation_and_original_independence(artifact):
     store, source, item = artifact
-    with pytest.raises(ValueError, match="Archive state"):
-        store.change(item["id"], 1, "delete")
     archived = store.change(item["id"], 1, "archive")
     other = ArtifactStore(store.root)
     restored = other.change(item["id"], archived["revision"], "restore")
     with pytest.raises(ValueError, match="changed elsewhere"):
         store.change(item["id"], archived["revision"], "delete")
     assert store.get(item["id"])["revision"] == restored["revision"]
-    archived = store.change(item["id"], restored["revision"], "archive")
-    store.change(item["id"], archived["revision"], "delete")
-    assert source.exists() and not store.listing("all", archived=True)["items"]
+    store.change(item["id"], restored["revision"], "delete")
+    assert source.exists() and not store.listing("all")["items"]
+    assert not store.listing("all", archived=True)["items"]
     with pytest.raises(ValueError, match="no longer exists"):
         store.get(item["id"])
 

@@ -55,7 +55,7 @@ def recover_model_defaults(
 
 def save_model_defaults(
     cfg: Any, change: DefaultsChange, journal: OperationJournal,
-    request_id: str, owner_id: str,
+    request_id: str, owner_id: str, *, admitted: bool = False,
 ) -> dict[str, Any]:
     """Fence one reviewed role change under the existing preference file lock."""
     intent = json.dumps(
@@ -63,14 +63,20 @@ def save_model_defaults(
     ).encode()
     if len(intent) > 128_000:
         raise ValueError("Model Defaults intent exceeds safety limit")
-    receipt = journal.admit(
-        request_id=request_id, owner_id=owner_id, kind="ModelDefaultsChange",
-        resource=model_defaults_resource(cfg.data_dir),
-        payload={"sha256": hashlib.sha256(intent).hexdigest()},
-        lease_seconds=60,
-    )
-    if not receipt.created:
-        raise OperationConflict("Model Defaults request was already submitted")
+    resource = model_defaults_resource(cfg.data_dir)
+    if admitted:
+        existing = journal.status(request_id, owner_id)
+        if existing is None or existing.resource != resource or existing.state != "accepted":
+            raise OperationConflict("Reviewed Model Defaults admission unavailable")
+        receipt = existing
+    else:
+        receipt = journal.admit(
+            request_id=request_id, owner_id=owner_id, kind="ModelDefaultsChange",
+            resource=resource, payload={"sha256": hashlib.sha256(intent).hexdigest()},
+            lease_seconds=60,
+        )
+        if not receipt.created:
+            raise OperationConflict("Model Defaults request was already submitted")
     started = False
 
     def before_publish(before: dict[str, Any], after: dict[str, Any]) -> None:

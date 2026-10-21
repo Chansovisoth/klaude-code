@@ -4,6 +4,13 @@ window.ChatAttachmentsUI = (() => {
   const dialog = byId("attach-dialog");
   const list = byId("chat-attachments");
   const status = byId("attach-status");
+  byId("attach-close").append(libraryIcon("close"));
+  for (const type of ["laptop", "smartphone"]) {
+    const icon = libraryIcon(type);
+    icon.classList.add(`attachment-device-${type}`);
+    byId("attach-device").prepend(icon);
+  }
+  byId("attach-library").prepend(byId("nav-library").querySelector("svg").cloneNode(true));
   let selected = [];
   let jobs = 0;
   let generation = 0;
@@ -12,14 +19,14 @@ window.ChatAttachmentsUI = (() => {
   let rendered = "";
   const messageCards = new WeakMap();
 
-  function fileType(item) {
+  function attachmentType(item) {
     const extension = item.name.split(".").pop().toUpperCase();
     if (item.image) return "Image";
     if (item.mime === "application/pdf" || extension === "PDF") return "PDF";
     return /^[A-Z0-9]{1,8}$/.test(extension) && item.name.includes(".") ? extension : "File";
   }
   function fileCard(item, previewURL = "") {
-    const type = fileType(item);
+    const type = attachmentType(item);
     const card = document.createElement("div");
     card.className = "attachment-card";
     card.setAttribute("role", "listitem");
@@ -105,7 +112,7 @@ window.ChatAttachmentsUI = (() => {
         const remove = document.createElement("button");
         remove.type = "button";
         remove.className = "icon-button";
-        remove.textContent = "×";
+        remove.append(libraryIcon("close"));
         remove.setAttribute("aria-label", `Remove ${item.name}`);
         remove.disabled = pending;
         remove.addEventListener("click", () => {
@@ -127,7 +134,7 @@ window.ChatAttachmentsUI = (() => {
       selected.some(item => item.truncated) ? "Long file text is truncated to 32,000 characters." : "";
     byId("chat-attachment-status").textContent = label;
     byId("chat-attachment-status").hidden = !label;
-    byId("send").disabled = pending || jobs > 0 || Boolean(waiting);
+    byId("send").disabled = pending || jobs > 0 || Boolean(waiting) || Boolean(latest?.requires_model_selection);
     byId("steer").disabled = pending || jobs > 0 || Boolean(selected.length);
     byId("attach-file").disabled = pending || !available;
     byId("attach-file").title = available ? "Attach file" :
@@ -204,12 +211,16 @@ window.ChatAttachmentsUI = (() => {
       const rows = data.items.map(item => {
         const row = document.createElement("div");
         row.className = "attachment-library-item";
+        const artwork = document.createElement("span");
+        artwork.className = "file-artwork";
+        artwork.setAttribute("aria-hidden", "true");
+        artwork.append(canPreviewImage(item) ? artifactImage(item) : fileIcon(item));
         const detail = document.createElement("div");
         const title = document.createElement("strong");
         title.textContent = item.name;
         const meta = document.createElement("p");
         meta.className = "muted";
-        meta.textContent = `${item.mime} · ${(item.size / 1024).toFixed(1)} KiB`;
+        meta.textContent = `${fileType(item)[1]} · ${fileSize(item.size)}`;
         detail.append(title, meta);
         const button = document.createElement("button");
         button.type = "button";
@@ -222,7 +233,7 @@ window.ChatAttachmentsUI = (() => {
           catch (error) { status.textContent = error.message; }
           finally { button.disabled = false; }
         });
-        row.append(detail, button);
+        row.append(artwork, detail, button);
         return row;
       });
       byId("attach-library-items").replaceChildren(...rows);

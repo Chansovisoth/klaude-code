@@ -168,6 +168,10 @@ def save_defaults(
                 else ()
             )
         )
+        if change.field == "vision_enabled" and change.value and change.bindings:
+            if updated.vision is None:
+                raise SettingsConflictError("Vision model changed; review again")
+            refs = (updated.vision, *updated.vision_fallbacks)
         bindings = {
             reference: (revision, credentials)
             for reference, revision, credentials in change.bindings

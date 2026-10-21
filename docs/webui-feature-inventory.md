@@ -3622,3 +3622,20 @@ read/search/diff and tool protections include both account filenames. The same
 single-owner permissions apply after login; additional users, role/workspace ACLs
 and 2FA remain unimplemented. HTTP LAN still transmits login traffic without
 network encryption, as described by the existing hosting preference.
+
+
+### Browser feature completion update (2026-10-21)
+
+Memory, Connections, conversation lifecycle/downloads, configured model/effort
+selection, shared agent/Search/Fetch/Research settings, saved-file Knowledge Learn,
+Knowledge/Skill/web/MCP chat tools and Generated Research/image job controls now
+have browser implementations. This supersedes
+older deferral statements for those specific operations. Full parity remains
+incomplete: see the current [coverage](webui/coverage.md),
+[completion plan](webui/feature-completion-plan.md) and
+[validation](webui/feature-completion-validation.md) for exact scope and evidence.
+
+The media continuation also implements shared default roles/fallbacks, explicit
+startup/new-chat defaults, image-service setup, reviewed image analysis and
+selected AI tags, owned Vision stop, and exact-state Defaults/image-service
+recovery. Evidence and bounds: [media controls](webui/media-controls-validation.md).

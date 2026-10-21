@@ -35,7 +35,7 @@ def read_memory_inventory(database: Path, memory_file: Path) -> dict[str, object
             text = raw.decode("utf-8", errors="replace")
     count = hidden = 0
     facts: list[str] = []
-    entries: list[dict[str, str]] = []
+    entries: list[dict[str, object]] = []
     for line in text.splitlines():
         entry = _parse_memory_line(line)
         if entry is None:
@@ -48,11 +48,13 @@ def read_memory_inventory(database: Path, memory_file: Path) -> dict[str, object
             if len(facts) < 8:
                 facts.append(public[:120])
             if len(entries) < 200:
-                entries.append({"id": entry.id, "fact": public[:500]})
+                entries.append({"id": entry.id, "fact": public[:500],
+                                **({"truncated": True} if len(public) > 500 else {})})
     return {
         "enabled": not row or row[0] == "1",
         "count": count,
         "facts": facts,
         "hidden": hidden,
         "entries": entries,
+        **({"more": True} if count - hidden > len(entries) else {}),
     }

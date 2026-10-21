@@ -247,6 +247,9 @@ def test_expired_owner_is_interrupted_and_cannot_append_or_finish(tmp_path):
     memory.db.commit()
     with pytest.raises(RuntimeError, match="outcome unknown"):
         _admit(store, request="second", worker="new-worker")
+    interrupted = store.snapshot("session")["activity"]
+    assert interrupted["lifecycle"] == "interrupted"
+    assert interrupted["label"] != "Done" and interrupted["active_count"] == 0
     assert store.reconcile_interrupted("session", first.fence)
     second = _admit(store, request="second", worker="new-worker")
     assert second.fence == first.fence + 1
@@ -273,6 +276,7 @@ def test_expired_owner_is_interrupted_and_cannot_append_or_finish(tmp_path):
 
     reopened, resumed = _open(tmp_path)
     assert resumed.receipt("second").state == "completed"
+    assert resumed.snapshot("session")["activity"]["label"] == "Done"
     retry = _admit(resumed, request="second", worker="third")
     assert retry.created is False and retry.turn_id == second.turn_id
     assert "private-canary" not in str(resumed.snapshot("session"))

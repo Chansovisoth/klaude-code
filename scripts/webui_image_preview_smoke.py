@@ -87,20 +87,37 @@ async def verify(host, root, chrome, images):
             tab.wait = wait
 
             async def click(selector):
+                await tab.js("Promise.race([Promise.all([...document.querySelectorAll("
+                             "'dialog[open]')].flatMap(d=>d.getAnimations({subtree:true}))"
+                             ".filter(a=>a.effect.getTiming().iterations!==Infinity)"
+                             ".map(a=>a.finished.catch(()=>{}))),"
+                             "new Promise(resolve=>setTimeout(resolve,350))])")
                 point = await tab.js(
-                    """(() => {
+                    """(async () => {
                   const button=document.querySelector("""
                     + json.dumps(selector)
                     + """);
                   if (!button || button.disabled || button.closest('[inert]')) return null;
                   button.scrollIntoView({block:'nearest',inline:'nearest'});
+                  await new Promise(requestAnimationFrame);
                   const rect=button.getBoundingClientRect();
                   const point={x:rect.x+rect.width/2,y:rect.y+rect.height/2};
                   if (!button.contains(document.elementFromPoint(point.x,point.y))) return null;
                   return rect.width&&rect.height ? point : null;
                 })()"""
                 )
-                assert point, selector
+                if not point:
+                    shot = await tab.command("Page.captureScreenshot", {"format": "png"})
+                    (output / "failed-control.png").write_bytes(base64.b64decode(shot["data"]))
+                    raise AssertionError((selector, await tab.js("""(() => {
+                      const b=document.querySelector(""" + json.dumps(selector) + """);
+                      const r=b.getBoundingClientRect();
+                      return {disabled:b.disabled,hidden:b.closest('[hidden]')?.id,
+                        inert:b.closest('[inert]')?.id,rect:r.toJSON(),
+                        hit:document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)?.outerHTML,
+                        source:byId('artifact-source-status').textContent,
+                        tags:byId('artifact-tags-status').textContent};
+                    })()""")))
                 await tab.command(
                     "Input.dispatchMouseEvent",
                     {
@@ -157,6 +174,12 @@ async def verify(host, root, chrome, images):
                     'g")?.naturalWidth>0'
                 )
 
+            async def open_menu():
+                if await tab.js('artifactDialog.dataset.details==="closed"'):
+                    await tab.click("#image-details")
+                    await asyncio.sleep(0.35)
+                await tab.click("#artifact-more")
+
             async def key(key, code=None):
                 for kind in ("keyDown", "keyUp"):
                     await tab.command(
@@ -194,9 +217,8 @@ async def verify(host, root, chrome, images):
                 'Id("artifact-metadata").textContent.includes("Modified")'
             )
             assert await tab.js(
-                'byId("artifact-source").parentElement.classList.contains("prev'
-                'iew-file-details") && ![...artifactDialog.querySelectorAll("h3'
-                '")].some(node=>node.textContent==="Source")'
+                'byId("artifact-source").parentElement.classList.contains("preview-source") && '
+                'byId("artifact-source-title").textContent==="Source"'
             )
             assert await tab.js(
                 'byId("artifact-tags-input").type==="hidden" && byId("artifact-'
@@ -205,7 +227,7 @@ async def verify(host, root, chrome, images):
             await tab.click("#artifact-tags-more")
             assert await tab.js('byId("artifact-tag-list").children.length===40')
             await tab.click("#artifact-tags-more")
-            await tab.click("#artifact-more")
+            await open_menu()
             assert await tab.js(
                 '[...byId("artifact-menu").querySelectorAll("button")].map(b=>b'
                 '.textContent).join(",").startsWith("Archive,Delete")'
@@ -218,12 +240,16 @@ async def verify(host, root, chrome, images):
                 '-more") && byId("artifact-more").getAttribute("aria-expanded")'
                 '==="false"'
             )
-            await tab.click("#artifact-more")
+            await open_menu()
+            saved_id = await tab.js("selectedArtifact.id")
             await tab.js('byId("artifact-menu").querySelectorAll("button")[1].click()')
+            await tab.wait('reviewDialog.open && managementReview?.operation==="delete"')
             assert await tab.js(
-                'artifactDialog.open && byId("preview-status").textContent.incl'
-                'udes("Archive this file") && !reviewDialog.open'
+                '!artifactDialog.open && document.activeElement===byId("domain-review-cancel")'
             )
+            assert not host.library.artifacts.get(saved_id)["archived"]
+            await tab.click("#domain-review-cancel")
+            await open_first()
             await tab.click("#artifact-preview")
             first = await tab.js("selectedArtifact.id")
             reads = await tab.js("detailReads.length")
@@ -264,7 +290,7 @@ async def verify(host, root, chrome, images):
                         },
                     )
                     if width <= 850:
-                        await tab.js('byId("preview-sheet-close").click()')
+                        await tab.js('byId("preview-sheet-scrim").click()')
                     elif await tab.js('artifactDialog.dataset.details==="closed"'):
                         await tab.click("#image-details")
                     await asyncio.sleep(0.35)
@@ -312,9 +338,31 @@ async def verify(host, root, chrome, images):
                     if width <= 850:
                         await tab.wait(
                             'artifactDialog.querySelector(".preview-main").inert && documen'
-                            't.activeElement===byId("preview-sheet-close")'
+                            't.activeElement===byId("preview-sheet-handle")'
                         )
-                        await tab.click("#preview-sheet-handle")
+                    assert await tab.js('''(() => {
+                      const heading=artifactDialog.querySelector('.preview-heading');
+                      const close=byId('artifact-close').getBoundingClientRect();
+                      const title=heading.querySelector('.preview-heading-text')
+                        .getBoundingClientRect();
+                      const more=byId('artifact-more'), rect=more.getBoundingClientRect();
+                      const row=byId('preview-sheet-handle').parentElement;
+                      const details=row.getBoundingClientRect();
+                      const closes=artifactDialog.querySelectorAll(
+                        'button[aria-label="Close file preview"]');
+                      return close.left>=title.right &&
+                        close.right<=heading.getBoundingClientRect().right &&
+                        more.parentElement===row && rect.top>=details.top &&
+                        rect.bottom<=details.bottom &&
+                        rect.width>=44 && rect.height>=44 && !byId('preview-sheet-close') &&
+                        closes.length===1;
+                    })()'''), (theme, width, height)
+                    await open_menu()
+                    assert await tab.js('byId("artifact-menu").matches(":popover-open")')
+                    await key("Escape")
+                    await tab.wait('artifactDialog.dataset.details!=="closed" && '
+                                   'document.activeElement===byId("artifact-more")')
+                    if width <= 850:
                         assert await tab.js('artifactDialog.dataset.details==="full"')
                         await asyncio.sleep(0.35)
                         assert await tab.js(
@@ -339,7 +387,7 @@ async def verify(host, root, chrome, images):
                 },
             )
             await tab.command("Emulation.setTouchEmulationEnabled", {"enabled": True})
-            await tab.js('byId("preview-sheet-close").click();byId("image-fit").click()')
+            await tab.js('byId("preview-sheet-scrim").click();byId("image-fit").click()')
             rect = await tab.js(
                 'JSON.stringify(byId("artifact-preview").getBoundingClientRect().toJSON())'
             )
@@ -418,9 +466,9 @@ async def verify(host, root, chrome, images):
             # Source editing and chip edits preserve the existing reviewed worker.
             await open_first()
             await tab.click("#image-details")
-            await tab.click("#artifact-source button:last-child")
+            await tab.click("#artifact-source-edit")
             assert await tab.js(
-                'byId("artifact-source-form").closest(".preview-file-details")!==null'
+                'byId("artifact-source-form").closest(".preview-source")!==null'
             )
             await tab.js(
                 'byId("artifact-source-input").value="https://example.test/refe'
@@ -436,6 +484,8 @@ async def verify(host, root, chrome, images):
                     break
                 await asyncio.sleep(0.05)
             assert current["source_url"] == "https://example.test/reference?q=1#image"
+            await tab.wait('byId("artifact-source-status").textContent==="Saved."')
+            await tab.click("#artifact-close")
             await tab.click("#library-refresh")
             await tab.wait('!byId("library-items").classList.contains("is-loading")')
             await open_first()
@@ -455,7 +505,10 @@ async def verify(host, root, chrome, images):
             assert await tab.js(
                 'byId("artifact-tag-editor").hidden===false && byId("artifact-t'
                 'ag-list").querySelectorAll("button").length===20'
-            )
+            ), await tab.js("({editor:byId('artifact-tag-editor').hidden,"
+                           "chips:byId('artifact-tag-list').textContent,"
+                           "disabled:byId('artifact-tags-edit').disabled,"
+                           "focus:document.activeElement.outerHTML})")
             await tab.click("#artifact-tag-list button")
             await tab.wait('byId("artifact-tag-list").querySelectorAll("button").length===19')
             await tab.js(
@@ -473,11 +526,13 @@ async def verify(host, root, chrome, images):
                 await asyncio.sleep(0.05)
             assert "reviewed tag" in current["tags"] and len(current["tags"]) == 20
             assert current["source_url"] and current["sha256"] == images[0]["sha256"]
+            await tab.wait('byId("artifact-tags-status").textContent==="Saved."')
+            await tab.click("#artifact-close")
 
             await tab.click("#library-refresh")
             await tab.wait('!byId("library-items").classList.contains("is-loading")')
             await open_first()
-            await tab.click("#artifact-more")
+            await open_menu()
             await tab.js('byId("artifact-menu").querySelector("button").click()')
             await tab.wait('reviewDialog.open && managementReview?.operation==="archive"')
             assert not host.library.artifacts.get(first)["archived"]
@@ -495,7 +550,7 @@ async def verify(host, root, chrome, images):
             )
             await tab.wait("filePage?.items.length===1 && filePage.items[0].archived")
             await open_first()
-            await tab.click("#artifact-more")
+            await open_menu()
             await tab.js('byId("artifact-menu").querySelectorAll("button")[1].click()')
             await tab.wait('reviewDialog.open && managementReview?.operation==="delete"')
             assert await tab.js(
@@ -508,7 +563,7 @@ async def verify(host, root, chrome, images):
             await tab.click("#domain-review-cancel")
             assert host.library.artifacts.get(first)["archived"]
             await open_first()
-            await tab.click("#artifact-more")
+            await open_menu()
             await tab.js('byId("artifact-menu").querySelectorAll("button")[1].click()')
             await tab.wait("reviewDialog.open")
             await tab.click("#domain-review-confirm")
@@ -534,6 +589,32 @@ async def verify(host, root, chrome, images):
             assert await tab.js(
                 "parseFloat(getComputedStyle(artifactDialog).animationDuration)<.01"
             )
+            # Saved images and documents can be deleted without an archive operation.
+            for kind in ("media", "document"):
+                if kind == "document":
+                    item = host.library.artifacts.import_bytes(
+                        b"Private saved copy", "document", "direct-delete.txt"
+                    )
+                    await tab.js(f"openArtifact({json.dumps(item['id'])})")
+                    await tab.wait("artifactDialog.open && selectedArtifact?.id === "
+                                   + json.dumps(item["id"]))
+                target = await tab.js("selectedArtifact.id")
+                assert not host.library.artifacts.get(target)["archived"]
+                await open_menu()
+                await tab.js('byId("artifact-menu").querySelectorAll("button")[1].click()')
+                await tab.wait('reviewDialog.open && managementReview?.operation==="delete"')
+                assert await tab.js("document.activeElement===byId('domain-review-cancel')")
+                assert not host.library.artifacts.get(target)["archived"]
+                await tab.click("#domain-review-confirm")
+                await tab.wait("!reviewDialog.open")
+                for _ in range(200):
+                    try:
+                        host.library.artifacts.get(target)
+                    except ValueError:
+                        break
+                    await asyncio.sleep(0.05)
+                else:
+                    raise AssertionError("Saved artifact deletion did not finish")
             assert await tab.js(
                 '!performance.getEntriesByType("resource").some(entry=>new URL('
                 "entry.name).origin!==location.origin)"
@@ -553,7 +634,8 @@ async def verify(host, root, chrome, images):
                         "touch_pinch_pan_swipe_double_tap": True,
                         "metadata_read_cache": True,
                         "reviewed_source_tags_archive_delete": True,
-                        "delete_cancel_and_archive_rule": True,
+                        "saved_and_archived_delete_cancel": True,
+                        "saved_images_and_documents_direct_delete": True,
                         "reduced_motion": True,
                         "logout_cleanup": True,
                         "external_requests": 0,

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
-from klaude_core.chat_images import ChatImages
+from klaude_core.chat_images import AttachmentPath, ChatImages
 from klaude_core.image_preparation import MAX_SOURCE_BYTES, prepare_image
 from klaude_core.library_artifacts import image_header, plain
 from klaude_core.process_input import PrivateProcessInput
@@ -37,6 +37,7 @@ class ChatAttachment:
     truncated: bool = False
     mime: str = "application/octet-stream"
     thumbnail: bytes = field(default=b"", repr=False)
+    artifact_id: str = field(default="", repr=False)
 
     @property
     def sha256(self) -> str:
@@ -95,7 +96,9 @@ def extract_document(data: bytes, suffix: str, cancelled: Callable[[], bool]) ->
             writer.close()
 
 
-def prepare_attachment(name: str, data: bytes, *, preview: bool = False) -> ChatAttachment:
+def prepare_attachment(
+    name: str, data: bytes, *, preview: bool = False, artifact_id: str = "",
+) -> ChatAttachment:
     if (not isinstance(name, str) or not name or name in {".", ".."} or len(name) > 160
             or Path(name).name != name or "\\" in name or plain(name, 160) != name):
         raise ValueError("Invalid attachment filename")
@@ -116,7 +119,8 @@ def prepare_attachment(name: str, data: bytes, *, preview: bool = False) -> Chat
             except ValueError:
                 # The file icon remains; turn preparation still verifies pixels.
                 pass
-        return ChatAttachment(name, data, image=True, mime=mime, thumbnail=thumbnail)
+        return ChatAttachment(name, data, image=True, mime=mime, thumbnail=thumbnail,
+                              artifact_id=artifact_id)
     suffix = Path(name).suffix.lower()
     if data.startswith(b"%PDF-") or suffix in {".pdf", ".docx"}:
         document_type = ".pdf" if data.startswith(b"%PDF-") else suffix
@@ -140,7 +144,8 @@ def prepare_attachment(name: str, data: bytes, *, preview: bool = False) -> Chat
         mime = "text/plain"
     if not text.strip():
         raise ValueError("No readable text found. Scanned PDFs need OCR; attach an image instead")
-    return ChatAttachment(name, data, text, truncated=truncated, mime=mime)
+    return ChatAttachment(name, data, text, truncated=truncated, mime=mime,
+                          artifact_id=artifact_id)
 
 
 @dataclass(frozen=True)
@@ -159,7 +164,7 @@ class ChatAttachmentInput:
     @property
     def identity(self) -> str:
         return hashlib.sha256(json.dumps([
-            [f.name, f.sha256, f.text, f.image] for f in self.files
+            [f.name, f.sha256, f.text, f.image, f.artifact_id] for f in self.files
         ], ensure_ascii=False).encode()).hexdigest()
 
     def public_text(self, text: str) -> str:
@@ -184,9 +189,12 @@ class ChatAttachmentInput:
                 for index, file in enumerate(images):
                     directory = Path(temporary) / str(index)
                     directory.mkdir(mode=0o700)
-                    path = directory / file.name
+                    path = AttachmentPath(directory / file.name)
                     path.write_bytes(file.data)
                     path.chmod(0o600)
+                    if file.artifact_id:
+                        path.stored_id = file.artifact_id
+                        path.source_sha256 = file.sha256
                     paths.append(path)
                 prepared = context.compose(text, tuple(paths), session_id)
                 if isinstance(prepared, dict):

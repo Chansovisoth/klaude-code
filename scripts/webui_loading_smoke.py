@@ -220,7 +220,7 @@ async def verify(host, profile, chrome):
             await reply("/api/v1/library/items", page([]), search="kind=all")
             await tab.click('[data-file-view="list"]')
             await tab.wait('byId("library-items").getAttribute("aria-busy")==="false"')
-            assert await tab.js('byId("library-status").textContent.includes("No uploads")')
+            assert await tab.js('byId("library-items").textContent.includes("No uploads")')
             await screenshot("files-empty-list-390.png")
             await tab.js("""
               byId('artifact-kind').value='document';
@@ -391,6 +391,7 @@ async def verify(host, profile, chrome):
             # The moved learning and refresh forms retain reviewed requests and cancellation.
             for operation in ("knowledge-url", "knowledge-refresh"):
                 if operation == "knowledge-url":
+                    await tab.click("#integration-add-knowledge")
                     await tab.js('byId("learn-library").value="docs";'
                                  'byId("learn-url").value="https://example.com/docs";'
                                  'byId("knowledge-learn").requestSubmit()')
@@ -416,7 +417,7 @@ async def verify(host, profile, chrome):
             assert await tab.js("""
               document.querySelector('[data-count-key="mcp"]').textContent
                 .includes('Connections') &&
-              document.querySelector('[data-count-key="mcp"]').disabled
+              !document.querySelector('[data-count-key="mcp"]').disabled
             """)
             await skeleton("skill-items")
             await reply("/api/v1/integrations/skills", page([]))

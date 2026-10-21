@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import sqlite3
@@ -210,6 +211,7 @@ def test_browser_attachment_sources_are_owner_tab_and_session_scoped(tmp_path, m
         second = _request(host, "POST", "/api/v1/clients", body={}, **auth)[2]["client_id"]
         auth["client_id"] = client
         item = library.artifacts.import_bytes(b"Library secret 123", "document", "private.md")
+        inventory = library.listing(kind="all")
         body = {"artifact_id": item["id"], "revision": item["revision"]}
         assert _request(host, "POST", "/api/v1/chat/attachments", body=body)[0] == 403
         assert _request(host, "POST", "/api/v1/chat/attachments", body=body,
@@ -230,6 +232,7 @@ def test_browser_attachment_sources_are_owner_tab_and_session_scoped(tmp_path, m
         snapshot = _request(host, "GET", "/api/v1/session", **auth)[2]
         assert "Library secret 123" not in json.dumps(snapshot)
         assert snapshot["messages"][0]["attachments"][0]["name"] == "private.md"
+        assert library.listing(kind="all") == inventory
         assert _request(host, "POST", "/api/v1/turns", body=turn, **auth)[0] == 202
         owner = next(iter(host._sessions))
         staged = host.transfers.upload(owner, io.BytesIO(b"Device bytes"), 12, "upload.txt")
@@ -287,6 +290,116 @@ def test_browser_attachment_sources_are_owner_tab_and_session_scoped(tmp_path, m
     finally:
         host.stop()
         serving.join(3)
+
+
+@pytest.mark.parametrize("kind,name,generated", [
+    ("media", "saved.png", False),
+    ("document", "saved.png", False),
+    ("document", "saved.txt", False),
+    ("media", "generated.png", True),
+])
+def test_browser_library_images_reuse_original_without_creating_uploads(
+    vision_lab, kind, name, generated,
+):
+    from klaude_application import HeadlessApplication
+    from klaude_core.memory import Memory
+
+    from .test_chat_images import agent_for
+    from .test_library_artifacts import png
+
+    cfg, _, store, _, calls, *_ = vision_lab
+    original = store.import_bytes(png(), kind, name)
+    original = store.get(original["id"])
+    if generated:
+        with store.database(write=True) as db:
+            db.execute("INSERT INTO generated_images VALUES (?,?,?)",
+                       (original["id"], "generated-fixture", "{}"))
+    agent = agent_for(vision_lab)
+    agent.tool_config = cfg
+    agent.workspace = Workspace(agent.workdir)
+    memory = Memory(cfg.data_dir / "memory.md", cfg.data_dir / "sessions.db")
+    app = HeadlessApplication(agent, memory, allow_approvals=False)
+    library = LibraryManagement(cfg, agent.workdir)
+    inventory = {source: library.listing(kind="all", source=source)
+                 for source in ("all", "input", "output")}
+    host = LocalWebHost(app, library=library)
+    serving = threading.Thread(target=host.serve_forever, daemon=True)
+    serving.start()
+    restored = agent_for(vision_lab)
+    try:
+        _, headers, login = _request(host, "POST", "/api/v1/auth/exchange",
+                                     body={"code": host.bootstrap_url.partition("#")[2]},
+                                     origin=host.origin)
+        auth = {"cookie": headers["Set-Cookie"].split(";", 1)[0], "csrf": login["csrf"],
+                "origin": host.origin}
+        auth["client_id"] = _request(host, "POST", "/api/v1/clients", body={}, **auth)[2][
+            "client_id"
+        ]
+        status, _, selected = _request(
+            host, "POST", "/api/v1/chat/attachments",
+            body={"artifact_id": original["id"], "revision": original["revision"]}, **auth,
+        )
+        assert status == 201 and selected["image"]
+        assert "artifact_id" not in selected
+        for index in range(2):
+            status, _, result = _request(
+                host, "POST", "/api/v1/turns",
+                body={"request_id": f"library-image-{index}", "text": "Describe the colors",
+                      "attachments": [selected["id"]]}, **auth,
+            )
+            assert status == 202, result
+            deadline = time.monotonic() + 5
+            while app.active_turn_count() and time.monotonic() < deadline:
+                time.sleep(.01)
+            assert not app.active_turn_count()
+            assert app.receipt(f"library-image-{index}").state == "completed", app.snapshot()
+            assert {source: library.listing(kind="all", source=source)
+                    for source in inventory} == inventory
+            sent = [data for path, data in calls if path == "/api/chat"][-1]
+            assert base64.b64decode(sent["messages"][-1]["images"][0]) == png()
+        saved = memory.load_session(app.session_id)
+        for message in saved:
+            if message["role"] == "user":
+                assert message["model_content"]["image_inputs"][0]["id"] == original["id"]
+        assert store.get(original["id"]) == original
+        restored.restore_session(saved)
+        assert not [event for event in restored.run("What colors were in the image?")
+                    if event.kind == "error"]
+        sent = [data for path, data in calls if path == "/api/chat"][-1]
+        assert any(message.get("images") for message in sent["messages"])
+        assert {source: library.listing(kind="all", source=source)
+                for source in inventory} == inventory
+    finally:
+        host.stop()
+        serving.join(3)
+        agent.runtime.close()
+        restored.runtime.close()
+
+
+@pytest.mark.parametrize("change", ["archive", "content"])
+def test_library_image_changed_after_selection_cannot_send_different_bytes(vision_lab, change):
+    from .test_chat_images import agent_for
+    from .test_library_artifacts import png
+
+    _, _, store, item, calls, *_ = vision_lab
+    file = prepare_attachment(item["filename"], png(), artifact_id=item["id"])
+    attachment = ChatAttachmentInput((file,))
+    if change == "archive":
+        store.change(item["id"], item["revision"], "archive")
+    else:
+        changed = png() + b"changed"
+        with store.database(write=True) as db:
+            db.execute("UPDATE artifacts SET content=?,size=?,sha256=? WHERE id=?",
+                       (changed, len(changed), hashlib.sha256(changed).hexdigest(), item["id"]))
+    before = store.listing("all", archived=change == "archive")
+    agent = agent_for(vision_lab)
+    try:
+        with pytest.raises(ValueError, match="current image|file changed"):
+            attachment.compose("Describe", agent, "chat")
+        assert not any(path == "/api/chat" for path, _ in calls)
+        assert store.listing("all", archived=change == "archive") == before
+    finally:
+        agent.runtime.close()
 
 
 def test_image_thumbnail_is_small_oriented_and_has_no_source_metadata():

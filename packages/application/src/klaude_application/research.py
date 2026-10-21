@@ -172,6 +172,11 @@ class ResearchService:
             raise ValueError("Invalid Research create action")
         return execute_research_request(command.worker_fields())
 
+    def run(self, command: ResearchRun) -> dict[str, Any]:
+        if not isinstance(command, ResearchRun):
+            raise ValueError("Invalid Research run action")
+        return execute_research_request(command.worker_fields())
+
     def control(self, command: ResearchControl) -> dict[str, Any]:
         if not isinstance(command, (
             ResearchCreate, ResearchDefaultsChange, ResearchLoad,

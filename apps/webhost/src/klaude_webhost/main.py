@@ -5,16 +5,21 @@ from __future__ import annotations
 import argparse
 import asyncio
 import signal
+import uuid
 from dataclasses import replace
 from pathlib import Path
 
 from klaude_application import HeadlessApplication, open_local_session
+from klaude_application.browser_models import BrowserModels
+from klaude_application.browser_tools import BrowserTools
 from klaude_application.library_management import LibraryManagement
 from klaude_application.workspace_reads import WorkspaceReadService
+from klaude_core.ai_defaults import read_defaults
 from klaude_core.chat_images import ChatImages
 from klaude_core.config import load_config
 from klaude_core.model_runtime import OllamaRuntime
 from klaude_core.ollama import Ollama
+from klaude_core.settings_store import read_settings
 
 from .accounts import AccountStore
 from .host import READ_ONLY_TOOLS, LocalWebHost
@@ -39,6 +44,13 @@ def create_application(workdir: Path, *, session_id: str | None = None) -> Headl
         agent.image_context = ChatImages(cfg, agent)
         agent.tools = {name: tool for name, tool in agent.tools.items()
                        if name in READ_ONLY_TOOLS}
+        browser_tools = BrowserTools(cfg, memory)
+        agent.tools.update({tool.name: tool for tool in browser_tools.tools()})
+        agent.skill_reader = browser_tools.skill_reader
+        agent.browser_tools = browser_tools  # type: ignore[attr-defined]
+        agent.browser_models = BrowserModels(cfg)  # type: ignore[attr-defined]
+        base_prompt = str(agent.messages[0]["content"])
+        agent.system_prompt_builder = lambda: browser_tools.prompt(base_prompt, agent)
         reads = WorkspaceReadService(agent.workspace)
         agent.tools["read_file"] = replace(
             agent.tools["read_file"], fn=reads.read_file,
@@ -59,7 +71,23 @@ def create_application(workdir: Path, *, session_id: str | None = None) -> Headl
         agent.gate.policies["request_user_input"] = "allow"
         app = HeadlessApplication(agent, memory, session_id, allow_user_input_tool=True)
         if session_id is not None:
-            app.resume_local(session_id)
+            app.resume_configured(session_id)
+        else:
+            preferences = read_settings(cfg.data_dir / "chat-preferences.json")
+            selections = preferences.get("model_default_selections", {})
+            if isinstance(selections, dict) and selections.get("chat") in {"manual", "automatic"}:
+                reference = read_defaults(cfg).chat
+                if reference:
+                    try:
+                        info = BrowserModels(cfg).verify_ref(reference)
+                        app.choose_configured_model(info, expected_revision=0,
+                                                    request_id=f"startup-{uuid.uuid4().hex}")
+                    except (ValueError, RuntimeError, OSError):
+                        # Keep account/settings access available without generating
+                        # through an unselected replacement for the saved model.
+                        app.requires_model_selection = True
+                else:
+                    app.requires_model_selection = True
         binding = app.turns.workspace(app.session_id)
         path = str(workdir.resolve())
         if binding is None:
@@ -68,7 +96,10 @@ def create_application(workdir: Path, *, session_id: str | None = None) -> Headl
             raise ValueError("session belongs to another workspace")
         return app
     except BaseException:
-        close = getattr(runtime, "close", None)
+        owned_tools = getattr(agent, "browser_tools", None)
+        if owned_tools is not None:
+            owned_tools.close()
+        close = getattr(agent.runtime, "close", None)
         if callable(close):
             close()
         memory.db.close()
@@ -132,7 +163,7 @@ def main() -> None:
             print(accounts.initial_password_path, flush=True)
         else:
             print("Sign in with your local admin account.", flush=True)
-        print("Browser tools: read-only until local edit activation.", flush=True)
+        print("Workspace tools start read-only. External MCP tools require review.", flush=True)
         print("Press Ctrl+C to stop the host.", flush=True)
     def stop(_signum: int, _frame: object) -> None:
         # shutdown() must run outside serve_forever's thread.

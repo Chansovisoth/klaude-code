@@ -68,11 +68,13 @@ if TYPE_CHECKING:
 
 import httpx
 import typer
+from klaude_application.activity import Activity, ActivityState, classify_activity, tool_outcome
 from klaude_application.activity_text import activity_elapsed as _activity_elapsed
 from klaude_application.activity_text import activity_value as _activity_value
 from klaude_application.activity_text import completed_activity_text as _completed_activity_text
 from klaude_application.activity_text import subagent_activity_text as _subagent_activity_text
 from klaude_application.composition import compose_agent
+from klaude_application.contracts import PublicEvent
 from klaude_application.knowledge import KnowledgeReader
 from klaude_application.lifecycle import SessionTurn
 from klaude_application.mcp_mutations import apply_embedded_mcp_mutation
@@ -5066,7 +5068,29 @@ def _http_probe_display_lines(metadata: dict, result: str) -> list[str]:
 
 
 def _live_activity_label(activity: str) -> str:
-    """Map public live activity text to one progressive lifecycle label."""
+    """Read canonical activities, with conservative legacy-session fallback."""
+    if activity in {item.value for item in Activity}:
+        return activity
+    normalized = str(activity).strip().casefold()
+    if normalized in {"cancelled", "interrupted"}:
+        return normalized.title()
+    if normalized.startswith("waiting for") and any(
+        word in normalized for word in ("approval", "input")
+    ):
+        return Activity.NEEDS_INPUT.value
+    if normalized.startswith("generating image"):
+        return Activity.GENERATING_IMAGES.value
+    if normalized.startswith("editing"):
+        return Activity.EDITING.value
+    if normalized.startswith("running "):
+        return classify_activity("run_shell", {"command": activity[8:]}).value
+    if normalized.startswith(("working", "thinking", "drafting")):
+        return Activity.GENERATING_RESPONSE.value
+    return Activity.WAITING.value
+
+
+def _legacy_live_activity_label(activity: str) -> str:
+    """Historical labels used only by the explicit activity demo."""
     normalized = str(activity).strip().casefold()
     if normalized.split(" ", 1)[0] in {
         "read_file",
@@ -7066,75 +7090,9 @@ def _ask_line_user_input(
 def _configured_mcp_tools(
     cfg, *, servers: dict[str, MCPServerConfig] | None = None, strict: bool = False
 ) -> list[Tool]:
-    """Load cached external MCP schemas without connecting during TUI startup."""
-    from klaude_core.mcp_client import (
-        MCPClientManager,
-        MCPRegistry,
-        namespaced_tool_name,
-    )
+    from klaude_application.mcp_tools import configured_mcp_tools
 
-    if servers is None:
-        registry = MCPRegistry(cfg.mcp_servers_file)
-        try:
-            servers = registry.load()
-        except ValueError:
-            if strict:
-                raise
-            return []
-    if not any(server.enabled and server.tools for server in servers.values()):
-        return []
-    client = getattr(cfg, "_mcp_client_manager", None)
-    if client is None:
-        auth_dir = getattr(cfg, "mcp_auth_dir", cfg.mcp_servers_file.parent / "mcp-auth")
-        client = MCPClientManager(auth_dir=auth_dir)
-        cfg._mcp_client_manager = client
-
-    def make_invoke(server, remote_name: str):
-        def invoke(**arguments):
-            response = client.call(server, remote_name, arguments)
-            failed = response.get("is_error") is True
-            return {"content": json.dumps(response, ensure_ascii=False), "metadata": {
-                "is_error": failed, "status": "failed" if failed else "succeeded",
-                "mcp_server": server.name, "mcp_tool": remote_name,
-            }}
-
-        return invoke
-
-    def make_detail(server_name: str, remote_name: str):
-        return lambda args: (
-            f"{server_name}.{remote_name} " + json.dumps(args, ensure_ascii=False)[:160]
-        )
-
-    result: list[Tool] = []
-    used_names: set[str] = set()
-    for server in servers.values():
-        if not server.enabled:
-            continue
-        for remote in server.tools:
-            remote_name = str(remote.get("name") or "")
-            if not remote_name:
-                continue
-            local_name = namespaced_tool_name(server.name, remote_name)
-            if local_name in used_names:
-                continue
-            used_names.add(local_name)
-            schema = remote.get("inputSchema")
-            parameters = (
-                dict(schema)
-                if isinstance(schema, dict)
-                else {"type": "object", "properties": {}}
-            )
-
-            result.append(
-                Tool(
-                    local_name,
-                    f"MCP server {server.name}: {str(remote.get('description') or remote_name)}",
-                    parameters,
-                    make_invoke(server, remote_name),
-                    detail=make_detail(server.name, remote_name),
-                )
-            )
-    return result
+    return configured_mcp_tools(cfg, servers=servers, strict=strict)
 
 
 def _close_agent_mcp(agent) -> None:
@@ -11007,6 +10965,8 @@ class PersistentChatTUI:
         )
         was_watching = self._watching_remote
         self._watching_remote = bool(remote_owner)
+        if remote_owner:
+            self.activity = str(live.get("activity") or "Waiting")
         if was_watching and not remote_owner and live.get("state") == "running":
             if not result.recovered:
                 self._append(
@@ -11046,6 +11006,11 @@ class PersistentChatTUI:
                     self._append(text)
             elif event["kind"] == "activity":
                 self.activity = str(payload.get("text", "working"))
+            elif event["kind"] == "application.public.v1":
+                current = payload.get("current_activity")
+                if isinstance(current, dict):
+                    self.activity = (str(current["label"]) if current.get("label") else
+                                     str(current.get("lifecycle", "Waiting")).title())
             elif event["kind"] == "capabilities":
                 snapshot = payload.get("snapshot")
                 if isinstance(snapshot, dict):
@@ -11063,10 +11028,7 @@ class PersistentChatTUI:
                 if activity:
                     self._append(f"\n{activity}\n")
             elif event["kind"] == "subagent":
-                if payload.get("kind") == "subagent_started":
-                    role = _activity_value(payload.get("role"), limit=40).replace("_", "/")
-                    self.activity = f"exploring {role} subagent"
-                elif activity := _subagent_activity_text(payload):
+                if activity := _subagent_activity_text(payload):
                     if self.show_activity_updates:
                         self._append(f"\n{activity}\n")
             elif event["kind"] == "input_request":
@@ -11121,7 +11083,9 @@ class PersistentChatTUI:
                     )
                     + "\n"
                 )
-                self.activity = "ready"
+                self.activity = ("Interrupted" if payload.get("recovered") else
+                                 "Cancelled" if payload.get("cancelled") else
+                                 "Error" if payload.get("failed") else "Done")
                 self._remote_turn_started_at = 0.0
                 self.status_error = ""
                 # The other process owns a separate Agent instance. Refresh
@@ -11225,7 +11189,7 @@ class PersistentChatTUI:
             elapsed = _activity_elapsed(self._turn_elapsed_seconds())
             indicator = self._spinner_frame()
             return [
-                ("class:runtime_busy", f" {indicator} WAITING "),
+                ("class:runtime_busy", f" {indicator} Needs input "),
                 ("class:runtime_text", f"{elapsed}  "),
                 ("class:runtime_text", "type y/n/a · Enter confirm (empty allows once) "),
                 ("class:runtime_text", f"{tool} "),
@@ -11234,7 +11198,7 @@ class PersistentChatTUI:
             elapsed = _activity_elapsed(self._turn_elapsed_seconds())
             indicator = self._spinner_frame()
             return [
-                ("class:runtime_busy", f" {indicator} WAITING "),
+                ("class:runtime_busy", f" {indicator} Needs input "),
                 ("class:runtime_text", f"{elapsed}  "),
                 (
                     "class:runtime_text",
@@ -11290,12 +11254,6 @@ class PersistentChatTUI:
         if getattr(getattr(self, "_model_manager", None), "busy", False):
             activity = ("waiting for cancellation" if self._model_manager.cancelling
                         else "managing models")
-        if (
-            self._activity_started_at is not None
-            and _live_activity_label(activity) == "RUNNING"
-            and time.monotonic() - self._activity_started_at >= COMMAND_WAITING_THRESHOLD_SECONDS
-        ):
-            activity = "waiting for command output"
         if debug_started is not None:
             debug_age = max(0, time.monotonic() - debug_started)
             activity = DEBUG_LABEL_ACTIVITY_STATES[
@@ -11306,11 +11264,11 @@ class PersistentChatTUI:
             if worker_active
             else "★"
         )
-        state = (
-            f"{indicator} {_live_activity_label(activity)}"
-            if worker_active
-            else f"{indicator} READY"
-        )
+        activity_label = (_legacy_live_activity_label(activity) if debug_active
+                          else _live_activity_label(activity))
+        idle_label = (activity if activity in {"Done", "Error", "Cancelled", "Interrupted"}
+                      else "READY")
+        state = f"{indicator} {activity_label if worker_active else idle_label}"
         state_style = "class:runtime_busy" if worker_active else "class:runtime_text"
         elapsed = ""
         if self._library.research.task:
@@ -17807,7 +17765,8 @@ class PersistentChatTUI:
                 self._append("\n" + partial)
         else:
             self._remote_turn_started_at = 0.0
-        self.activity = str(live["activity"] or "working") if remote_active else "session resumed"
+        self.activity = ("Interrupted" if live["state"] == "interrupted" else
+                         str(live["activity"] or "working"))
 
     def _open_resume(self) -> None:
         sessions = self.memory.resumable_sessions()
@@ -18734,6 +18693,26 @@ class PersistentChatTUI:
         prior_subagent_observer = getattr(self.agent, "subagent_event_observer", None)
         prior_cancellation_check = getattr(self.agent, "cancellation_check", None)
         prior_execution_guard = getattr(self.agent, "execution_guard", None)
+        activity_state = ActivityState()
+        activity_state.observe(turn_id, "turn.started")
+        last_activity = ""
+        prior_activity_sink = getattr(self, "_turn_activity_sink", None)
+
+        def publish_activity(event: PublicEvent) -> None:
+            nonlocal last_activity
+            event = replace(event, session_id=self.session_id, turn_id=turn_id)
+            activity_state.observe(turn_id, event.kind, **{
+                key: value for key, value in asdict(event).items()
+                if key not in {"kind", "turn_id"}
+            })
+            accepted_turn.publish_execution(event)
+            label = activity_state.label
+            if label != last_activity:
+                self._emit("activity", label)
+                self._publish_shared_event("activity", {"text": label}, turn_id=turn_id)
+                last_activity = label
+
+        self._turn_activity_sink: Callable[[PublicEvent], None] | None = publish_activity
 
         def flush_edits() -> None:
             if not pending_edits:
@@ -18766,10 +18745,7 @@ class PersistentChatTUI:
                 "system",
                 {"event": "subagent_activity", **payload},
             )
-            if event.kind == "subagent_started":
-                role = _activity_value(event.role.value, limit=40).replace("_", "/")
-                self._emit("activity", f"exploring {role} subagent")
-            elif activity := _subagent_activity_text(payload):
+            if activity := _subagent_activity_text(payload):
                 if self.show_activity_updates:
                     self._emit("append", f"\n{activity}\n")
 
@@ -18803,16 +18779,14 @@ class PersistentChatTUI:
             input_started = True
             if isinstance(effective_message, dict) and effective_message.get("image_inputs"):
                 self._emit("chat_images_saved")
-            if not cancel_event.is_set():
-                self._emit("activity", "working")
-                self._publish_shared_event("activity", {"text": "working"}, turn_id=turn_id)
             self.agent.capability_observer = publish_capabilities
             self.agent.subagent_event_observer = publish_subagent
             self.agent.cancellation_check = cancel_event.is_set
             effective_scope = scope if scope is not None else (
                 TurnScope.REVIEW if read_only else None
             )
-            events = iter_agent_events(self.agent, effective_message, scope=effective_scope)
+            events = iter_agent_events(self.agent, effective_message, scope=effective_scope,
+                                       on_activity=publish_activity)
             for event in events:
                 payload = event.payload
                 if event.kind not in {"tool_start", "tool_result"} or (
@@ -18827,9 +18801,6 @@ class PersistentChatTUI:
                     break
                 if event.kind == "text_delta" and payload.get("content"):
                     piece = payload["content"]
-                    if not assistant_started:
-                        self._emit("activity", "working")
-                        self._publish_shared_event("activity", {"text": "working"}, turn_id=turn_id)
                     streamed = True
                     assistant_parts.append(
                         self._emit_assistant_text(piece, initial=not assistant_started)
@@ -18840,6 +18811,8 @@ class PersistentChatTUI:
                     content = payload["content"]
                     direct_metadata = payload.get("metadata") or {}
                     if direct_metadata.get("execution_id"):
+                        if tool_outcome(content, direct_metadata) == "failed":
+                            turn_failed = True
                         audit = {
                             "phase": "result",
                             "execution_id": direct_metadata["execution_id"],
@@ -18852,11 +18825,6 @@ class PersistentChatTUI:
                             self.session_id, "system", {"event": "tool_audit", **audit}
                         )
                     if not (payload.get("metadata") or {}).get("streamed"):
-                        if not assistant_started:
-                            self._emit("activity", "working")
-                            self._publish_shared_event(
-                                "activity", {"text": "working"}, turn_id=turn_id
-                            )
                         assistant_parts.append(
                             self._emit_assistant_text(content, initial=not assistant_started)
                         )
@@ -18893,9 +18861,6 @@ class PersistentChatTUI:
                     )
                     if tool in {"web_search", "fetch_url", "http_probe"}:
                         pending_metadata[tool] = payload.get("metadata") or {}
-                    activity = _active_tool_status(tool, args)
-                    self._emit("activity", activity)
-                    self._publish_shared_event("activity", {"text": activity}, turn_id=turn_id)
                     if not self.show_activity_updates and tool not in {
                         "web_search",
                         "fetch_url",
@@ -18940,10 +18905,6 @@ class PersistentChatTUI:
                     )
                     if self.show_activity_updates:
                         if tool == "delegate_task":
-                            self._emit("activity", "working on response")
-                            self._publish_shared_event(
-                                "activity", {"text": "working on response"}, turn_id=turn_id
-                            )
                             if cancel_event.is_set():
                                 cancelled = True
                                 break
@@ -18958,10 +18919,6 @@ class PersistentChatTUI:
                                 self._record_activity_update(
                                     "unchanged", str(edit.get("path", "file")), turn_id=turn_id
                                 )
-                            self._emit("activity", "working")
-                            self._publish_shared_event(
-                                "activity", {"text": "working"}, turn_id=turn_id
-                            )
                             if cancel_event.is_set():
                                 cancelled = True
                                 break
@@ -18984,10 +18941,6 @@ class PersistentChatTUI:
                         lines = [f"   {preview}"]
                     if lines:
                         self._emit("append", "\n" + "\n".join(lines) + "\n")
-                    self._emit("activity", "working on response")
-                    self._publish_shared_event(
-                        "activity", {"text": "working on response"}, turn_id=turn_id
-                    )
                 elif event.kind == "error":
                     message = payload["message"]
                     turn_failed = True
@@ -19001,11 +18954,7 @@ class PersistentChatTUI:
                 elif event.kind == "retry":
                     self._emit("append", f"\n-> retry [{payload['reason']}]\n")
                 elif event.kind == "progress":
-                    stage = _activity_value(payload["stage"], limit=240)
-                    self._emit("activity", f"working {stage}")
-                    self._publish_shared_event(
-                        "activity", {"text": f"working {stage}"}, turn_id=turn_id
-                    )
+                    pass  # Internal model stages do not classify task activity.
                 if cancel_event.is_set():
                     cancelled = True
                     break
@@ -19047,6 +18996,7 @@ class PersistentChatTUI:
                     {"event": "runtime_error", "message": str(exc)},
                 )
         finally:
+            self._turn_activity_sink = prior_activity_sink
             self.agent.capability_observer = prior_capability_observer
             self.agent.subagent_event_observer = prior_subagent_observer
             if prior_cancellation_check is not None:
@@ -19098,16 +19048,21 @@ class PersistentChatTUI:
                 "model_metadata": metadata,
                 "turn_capabilities": getattr(self.agent, "last_turn_capabilities", {}),
             }
+            completion_unconfirmed = False
             if accepted_turn.journal is None:
                 self._publish_shared_event(
                     "turn_done", completion_payload, turn_id=turn_id,
                 )
             try:
-                accepted_turn.release(
+                released = accepted_turn.release(
                     state="interrupted" if cancelled else "failed" if turn_failed else "idle",
                     completion_payload=completion_payload,
                 )
+                if not released:
+                    completion_unconfirmed = True
             except sqlite3.Error as exc:
+                completion_unconfirmed = True
+                turn_failed = True
                 self._emit("error", f"session lease cleanup failed: {exc}")
             if self._accepted_turn is accepted_turn:
                 self._accepted_turn = None
@@ -19121,6 +19076,8 @@ class PersistentChatTUI:
                         ),
                     },
                     "cancelled": cancelled,
+                    "failed": turn_failed,
+                    "interrupted": completion_unconfirmed,
                 },
             )
 
@@ -19133,6 +19090,11 @@ class PersistentChatTUI:
             "answer": "n",
             "done": threading.Event(),
         }
+        interaction_id = uuid.uuid4().hex
+        activity_sink = getattr(self, "_turn_activity_sink", None)
+        if activity_sink is not None:
+            activity_sink(PublicEvent("approval.required", "", "", 0,
+                                      interaction_id=interaction_id, tool=tool))
         waiting_status = f"waiting for {tool.replace('_', ' ')} approval"
         self._emit("activity", waiting_status)
         if self._turn_id:
@@ -19150,6 +19112,9 @@ class PersistentChatTUI:
                     f"Permission for {tool.replace('_', ' ')}",
                     turn_id=self._turn_id,
                 )
+                if activity_sink is not None:
+                    activity_sink(PublicEvent("approval.resolved", "", "", 0,
+                                              interaction_id=interaction_id, tool=tool))
                 return "n"
         answer = str(request["answer"])
         self._record_activity_update(
@@ -19157,6 +19122,9 @@ class PersistentChatTUI:
             f"Permission for {tool.replace('_', ' ')}",
             turn_id=self._turn_id,
         )
+        if activity_sink is not None:
+            activity_sink(PublicEvent("approval.resolved", "", "", 0,
+                                      interaction_id=interaction_id, tool=tool))
         return answer
 
     def _ask_user_input(
@@ -19169,6 +19137,10 @@ class PersistentChatTUI:
         if self.shutting_down or self.cancel_requested.is_set():
             return None
         request_id = uuid.uuid4().hex
+        activity_sink = getattr(self, "_turn_activity_sink", None)
+        if activity_sink is not None:
+            activity_sink(PublicEvent("user_input.required", "", "", 0,
+                                      interaction_id=request_id))
         request: dict[str, object] = {
             "request_id": request_id,
             "question": question,
@@ -19201,7 +19173,13 @@ class PersistentChatTUI:
         while not done.wait(0.1):
             if self.shutting_down or self.cancel_requested.is_set():
                 self._emit("user_input_cancel", request_id)
+                if activity_sink is not None:
+                    activity_sink(PublicEvent("user_input.resolved", "", "", 0,
+                                              interaction_id=request_id))
                 return None
+        if activity_sink is not None:
+            activity_sink(PublicEvent("user_input.resolved", "", "", 0,
+                                      interaction_id=request_id))
         answer = request.get("answer")
         if not isinstance(answer, str):
             return None
@@ -19987,14 +19965,7 @@ class PersistentChatTUI:
                         CANCEL_CHOICE,
                     )
             elif kind == "activity":
-                activity = str(payload)
-                was_running = _live_activity_label(self.activity) == "RUNNING"
-                is_running = _live_activity_label(activity) == "RUNNING"
-                self.activity = activity
-                if is_running and not was_running:
-                    self._activity_started_at = now
-                elif not is_running:
-                    self._activity_started_at = None
+                self.activity = str(payload)
             elif kind == "error":
                 self.status_error = str(payload)
                 self._append(f"\n[error] {payload}\n")
@@ -20193,6 +20164,7 @@ class PersistentChatTUI:
                 self.ui_state.context_window = _agent_context_window(self.agent)
                 _apply_token_usage(self.ui_state, payload)
             elif kind == "turn_done":
+                completion = payload if isinstance(payload, dict) else {}
                 metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
                 self.ui_state.model = self.agent.model
                 self.ui_state.effort = _agent_effort_label(self.agent)
@@ -20200,7 +20172,9 @@ class PersistentChatTUI:
                 _apply_token_usage(self.ui_state, metadata)
                 self.running = False
                 self._turn_id = ""
-                self.activity = "ready"
+                self.activity = ("Interrupted" if completion.get("interrupted") else
+                                 "Cancelled" if completion.get("cancelled") else
+                                 "Error" if completion.get("failed") else "Done")
                 self._activity_started_at = None
                 if self._permission_request and self.cancel_requested.is_set():
                     self._answer_permission("n")

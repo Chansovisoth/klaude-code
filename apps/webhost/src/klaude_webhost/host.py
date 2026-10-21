@@ -20,12 +20,19 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from klaude_application import HeadlessApplication
+from klaude_application.browser_jobs import generated_jobs
+from klaude_application.browser_models import BrowserModels
+from klaude_application.browser_sessions import public_markdown, workspace_sessions
+from klaude_application.browser_settings import read_browser_settings
+from klaude_application.browser_tools import ASSISTANT_READ_TOOLS
 from klaude_application.chat_attachments import prepare_attachment
 from klaude_application.contracts import UserInputRequest
 from klaude_application.coordination import CursorExpired
 from klaude_application.library_artifacts import ArtifactService
 from klaude_application.library_management import LibraryManagement
 from klaude_application.local_runtime import saved_local_choice
+from klaude_application.mcp_inventory import read_mcp_inventory
+from klaude_application.memory_inventory import read_memory_inventory
 from klaude_application.model_capabilities import read_capabilities
 from klaude_application.operation_journal import OperationConflict
 from klaude_application.workspace_reads import WorkspaceReadService
@@ -51,7 +58,7 @@ MAX_BODY = 256 * 1024
 STATIC = Path(__file__).with_name("static")
 READ_ONLY_TOOLS = frozenset({
     "read_file", "list_dir", "workspace_info", "grep", "git_status", "git_diff",
-})
+}) | ASSISTANT_READ_TOOLS
 FILE_EDIT_TOOLS = frozenset({"write_file", "edit_file"})
 
 
@@ -399,7 +406,13 @@ class LocalWebHost:
                     pending.id, controller_id=review_identity,
                     control_epoch=review_epoch,
                 )
-                allowed = READ_ONLY_TOOLS | (FILE_EDIT_TOOLS if edits_enabled else frozenset())
+                external: frozenset[str] = getattr(
+                    getattr(self.application.agent, "browser_tools", None),
+                    "mcp_names", frozenset(),
+                )
+                allowed = READ_ONLY_TOOLS | external | (
+                    FILE_EDIT_TOOLS if edits_enabled else frozenset()
+                )
                 if review is not None and review["tool"] in allowed:
                     approvals.append({"id": pending.id, **review})
         return {
@@ -409,7 +422,14 @@ class LocalWebHost:
             "library_images": True,
             "library_source_links": True,
             "library_artifact_sources": True,
+            "profile_management": self.library is not None,
+            "media_management": self.library is not None,
+            "requires_model_selection": snapshot.get("requires_model_selection", False),
+            "model_providers": getattr(self.application.agent, "browser_models", None) is not None,
+            "model_connection": self.application.agent.model_info.connection_id,
+            "effort_levels": list(self.application.agent.model_info.capabilities.effort_levels),
             "messages": messages, "state": snapshot["state"],
+            "activity": snapshot["activity"],
             "partial": snapshot["partial"][:64_000],
             "cursor": snapshot["cursor"],
             "model": self.application.agent.model,
@@ -417,7 +437,11 @@ class LocalWebHost:
             "mode": self.application.agent.reasoning_mode,
             "effort": (self.application.agent.reasoning_effort
                        if self.application.agent.reasoning_mode == "thinking" else None),
-            "tools": "file edits enabled" if edits_enabled else "read-only",
+            "tools": "file edits enabled" if edits_enabled else (
+                "Workspace read-only · MCP reviews"
+                if getattr(getattr(self.application.agent, "browser_tools", None), "mcp_names", ())
+                else "read-only"
+            ),
             "approvals": approvals, "questions": questions,
             "active_turn_id": self.application.active_turn_id(),
             "has_control": snapshot["has_control"],
@@ -430,23 +454,30 @@ class LocalWebHost:
             "history_truncated": len(messages) < len(snapshot["messages"]),
         }
 
-    def sessions(self) -> list[dict[str, Any]]:
+    def sessions(self, *, archived: bool = False) -> list[dict[str, Any]]:
         """Show only bounded sessions bound to this host's workspace."""
         with self._lock:
-            path = str(self.application.agent.workdir.resolve())
             rows = []
-            for item in self.application.sessions.recent(100):
-                binding = self.application.turns.workspace(item.session_id)
-                if binding is None or binding[0] != path:
-                    continue
+            for item in workspace_sessions(
+                self.application.memory, self.application.agent.workdir, archived=archived,
+            ):
                 try:
-                    saved_local_choice(
-                        self.application.agent, self.application.memory, item.session_id,
-                    )
+                    models = getattr(self.application.agent, "browser_models", None)
+                    if models is not None:
+                        try:
+                            models.saved(self.application.memory, item["session_id"])
+                        except ValueError:
+                            saved_local_choice(
+                                self.application.agent, self.application.memory, item["session_id"],
+                            )
+                    else:
+                        saved_local_choice(
+                            self.application.agent, self.application.memory, item["session_id"],
+                        )
                     compatible = True
                 except ValueError:
                     compatible = False
-                rows.append({**asdict(item), "resumable": compatible})
+                rows.append({**item, "resumable": compatible})
                 if len(rows) >= 30:
                     break
             return rows
@@ -521,14 +552,45 @@ class LocalWebHost:
             if control is not None and control != (viewer, control_epoch):
                 raise ValueError("session control changed")
             if session_id:
+                if self.library is not None and self.library.session_busy(session_id):
+                    raise RuntimeError("Conversation management change is active or unconfirmed")
                 binding = self.application.turns.workspace(session_id)
                 if (binding is None or binding[0] !=
                         str(self.application.agent.workdir.resolve())):
                     raise ValueError("session belongs to another workspace")
-                self.application.resume_local(session_id)
+                models = getattr(self.application.agent, "browser_models", None)
+                if models is not None:
+                    try:
+                        models.saved(self.application.memory, session_id)
+                    except ValueError:
+                        self.application.resume_local(session_id)
+                    else:
+                        self.application.resume_configured(session_id)
+                else:
+                    self.application.resume_local(session_id)
                 selected = session_id
             else:
-                selected = self.application.start_session()
+                from klaude_core.ai_defaults import read_defaults
+                from klaude_core.settings_store import read_settings
+
+                cfg = self.application.agent.tool_config
+                info, require_selection = None, False
+                if isinstance(cfg, Config):
+                    preferences = read_settings(cfg.data_dir / "chat-preferences.json")
+                    selections = preferences.get("model_default_selections", {})
+                    if isinstance(selections, dict) and selections.get("chat") in {
+                        "manual", "automatic"
+                    }:
+                        reference = read_defaults(cfg).chat
+                        if reference:
+                            info = BrowserModels(cfg).verify_ref(reference)
+                        else:
+                            require_selection = True
+                selected = self.application.start_session(
+                    model_info=info, require_selection=require_selection,
+                )
+            if session_id:
+                self.application.requires_model_selection = False
             self.application.agent.workspace.write_enabled = False
             for name in FILE_EDIT_TOOLS:
                 self.application.agent.tools.pop(name, None)
@@ -668,6 +730,12 @@ class LocalWebHost:
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "KlaudeWebUI/0.1"
+
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except (ConnectionResetError, BrokenPipeError):
+            self.close_connection = True
     protocol_version = "HTTP/1.1"
 
     def setup(self) -> None:
@@ -707,8 +775,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _json(self, status: int, value: dict[str, Any], *, cookie: str = "") -> None:
         payload = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()
-        self._headers(status, "application/json; charset=utf-8", len(payload), cookie=cookie)
-        self.wfile.write(payload)
+        try:
+            self._headers(status, "application/json; charset=utf-8", len(payload), cookie=cookie)
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def _error(self, status: int, code: str, message: str) -> None:
         self.close_connection = True
@@ -737,6 +808,11 @@ class _Handler(BaseHTTPRequestHandler):
         origin = origins[0] if origins else None
         expected = getattr(self.server, "host_origin", "")
         return origin == expected if mutation else origin in (None, expected)
+
+    def _mcp_management_allowed(self) -> bool:
+        # Authenticated owner reviews work on both production listeners. Legacy
+        # bootstrap-only embedded hosts retain local-only MCP management.
+        return not bool(getattr(self.server, "host_lan", False)) or self.owner.accounts is not None
 
     def _authenticated(self, *, mutation: bool = False) -> tuple[str, _BrowserSession] | None:
         if self.owner._stopping:
@@ -810,11 +886,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._headers(HTTPStatus.OK, "font/ttf", len(payload))
             self.wfile.write(payload)
             return
-        if path in ("/", "/app.js", "/library.js", "/attachments.js", "/style.css", "/markdown.js",
+        if path in ("/", "/app.js", "/library.js", "/management.js", "/media.js", "/attachments.js",
+                    "/style.css", "/markdown.js",
+                    "/loading-indicator.js", "/vendor/material-loading-shapes.js",
                     "/vendor/markdown-it.min.js", "/vendor/prism.min.js"):
             name = {"/": "index.html", "/app.js": "app.js", "/library.js": "library.js",
                     "/attachments.js": "attachments.js",
+                    "/management.js": "management.js",
+                    "/media.js": "media.js",
                     "/style.css": "style.css", "/markdown.js": "markdown.js",
+                    "/loading-indicator.js": "loading-indicator.js",
+                    "/vendor/material-loading-shapes.js": "vendor/material-loading-shapes.js",
                     "/vendor/markdown-it.min.js": "vendor/markdown-it.min.js",
                     "/vendor/prism.min.js": "vendor/prism.min.js"}[path]
             payload = (STATIC / name).read_bytes()
@@ -882,12 +964,75 @@ class _Handler(BaseHTTPRequestHandler):
             if self._viewer(auth[0]) is None:
                 return
             try:
-                items = self.owner.sessions()
-            except (OSError, ValueError, sqlite3.Error):
+                params = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                if set(params) - {"archived"} or params.get("archived", ["false"]) not in (
+                    ["true"], ["false"],
+                ):
+                    raise ValueError("Invalid session filter")
+                items = self.owner.sessions(archived=params.get("archived") == ["true"])
+            except ValueError:
+                self._error(HTTPStatus.BAD_REQUEST, "invalid_argument", "Invalid session filter")
+                return
+            except (OSError, sqlite3.Error):
                 self._error(HTTPStatus.SERVICE_UNAVAILABLE, "storage_unavailable",
                             "Sessions temporarily unavailable")
                 return
             self._json(HTTPStatus.OK, {"sessions": items})
+        elif path == "/api/v1/sessions/export":
+            try:
+                params = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                if set(params) != {"id"} or len(params["id"]) != 1:
+                    raise ValueError("Choose a conversation")
+                identity = params["id"][0]
+                payload = public_markdown(
+                    self.owner.application.memory, self.owner.application.agent.workdir, identity,
+                )
+            except ValueError:
+                self._error(HTTPStatus.BAD_REQUEST, "invalid_argument",
+                            "Conversation unavailable or exceeds browser export limits")
+                return
+            except (OSError, sqlite3.Error):
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE, "storage_unavailable",
+                            "Conversation export temporarily unavailable")
+                return
+            self._headers(HTTPStatus.OK, "text/markdown; charset=utf-8", len(payload),
+                          attachment=f"klaude-{identity}.md")
+            self.wfile.write(payload)
+        elif path in {"/api/v1/models/connections", "/api/v1/models/catalog"}:
+            if self._viewer(auth[0]) is None:
+                return
+            try:
+                cfg = self.owner.application.agent.tool_config
+                if not isinstance(cfg, Config):
+                    raise ValueError("Model configuration unavailable")
+                models_service = BrowserModels(cfg)
+                params = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                if path.endswith("/connections"):
+                    if params:
+                        raise ValueError("Unknown model filter")
+                    model_result = {"connections": models_service.inventory()}
+                else:
+                    if (set(params) not in ({"connection"}, {"connection", "purpose"})
+                            or len(params["connection"]) != 1
+                            or ("purpose" in params and params["purpose"] != ["defaults"])):
+                        raise ValueError("Choose a configured connection")
+                    if "purpose" in params:
+                        from klaude_application.browser_media_settings import default_model_catalog
+
+                        model_result = {"models": default_model_catalog(
+                            cfg, params["connection"][0],
+                        )}
+                    else:
+                        model_result = {"models": [
+                            {"id": item.ref, "name": item.display_name,
+                             "effort_levels": list(item.capabilities.effort_levels)}
+                            for item in models_service.catalog(params["connection"][0])
+                        ]}
+            except (ValueError, RuntimeError, OSError):
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE, "model_unavailable",
+                            "Model catalog unavailable; check the connection and credentials")
+                return
+            self._json(HTTPStatus.OK, model_result)
         elif path == "/api/v1/models/local":
             if self._viewer(auth[0]) is None:
                 return
@@ -917,7 +1062,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._download(auth[0], path)
         elif path == "/api/v1/chat/attachments/preview":
             self._attachment_preview(auth[0])
-        elif path.startswith("/api/v1/library/") or path == "/api/v1/integrations/skills":
+        elif path.startswith("/api/v1/library/") or path in {
+            "/api/v1/integrations/skills", "/api/v1/integrations/connections",
+            "/api/v1/settings/memory",
+            "/api/v1/settings/agent",
+            "/api/v1/settings/models",
+        }:
             self._library_read(path, auth[0])
         else:
             self._error(HTTPStatus.NOT_FOUND, "not_found", "Route not found")
@@ -1056,6 +1206,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._attachment_change(path, body, auth[0], viewer)
         elif path in {
             "/api/v1/library/review", "/api/v1/library/submit", "/api/v1/library/discard",
+            "/api/v1/library/cancel",
         }:
             self._library_change(path, body, auth[0], viewer)
         elif path == "/api/v1/auth/logout":
@@ -1274,9 +1425,13 @@ class _Handler(BaseHTTPRequestHandler):
                             "Session temporarily unavailable")
                 return
             self._json(HTTPStatus.OK, {"session_id": selected})
-        elif path in {"/api/v1/session/model", "/api/v1/session/mode"}:
-            key = "model_id" if path.endswith("/model") else "mode"
-            if (set(body) != {"request_id", key, "expected_revision", "control_epoch"}
+        elif path in {"/api/v1/session/model", "/api/v1/session/mode",
+                      "/api/v1/session/configured-model"}:
+            key = ("model_ref" if path.endswith("/configured-model")
+                   else "model_id" if path.endswith("/model") else "mode")
+            required = {"request_id", key, "expected_revision", "control_epoch"}
+            if (not required <= set(body)
+                    or set(body) - required - ({"effort"} if key == "mode" else set())
                     or not isinstance(body["request_id"], str)
                     or not 0 < len(body["request_id"]) <= 128
                     or not body["request_id"].isascii()
@@ -1293,10 +1448,29 @@ class _Handler(BaseHTTPRequestHandler):
             if key == "mode" and body[key] not in {"standard", "thinking"}:
                 self._error(HTTPStatus.BAD_REQUEST, "invalid_argument", "Invalid mode")
                 return
+            if "effort" in body and (body["effort"] is not None and (
+                not isinstance(body["effort"], str)
+                or body["effort"] not in {"minimal", "low", "medium", "high", "max"}
+            )):
+                self._error(HTTPStatus.BAD_REQUEST, "invalid_argument", "Invalid thinking effort")
+                return
             try:
-                info = self.owner.verified_local_model(
-                    body[key] if key == "model_id" else self.owner.application.agent.model
-                )
+                cfg = self.owner.application.agent.tool_config
+                current = self.owner.application.agent.model_info
+                if key == "model_ref":
+                    if not isinstance(cfg, Config):
+                        raise ValueError("Model configuration unavailable")
+                    info = BrowserModels(cfg).verify_ref(body[key])
+                elif (key == "mode" and current.connection_id
+                      and (current.backend != "ollama"
+                           or current.connection_id != DEFAULT_IDS["ollama"])):
+                    if not isinstance(cfg, Config):
+                        raise ValueError("Model configuration unavailable")
+                    info = BrowserModels(cfg).verify_ref(current.ref)
+                else:
+                    info = self.owner.verified_local_model(
+                        body[key] if key == "model_id" else self.owner.application.agent.model
+                    )
                 with self.owner._lock:
                     if (expected_session is not None
                             and expected_session != self.owner.application.session_id):
@@ -1304,7 +1478,12 @@ class _Handler(BaseHTTPRequestHandler):
                     control = self.owner.application.control()
                     if control is not None and control != (viewer, body["control_epoch"]):
                         raise ValueError("session control changed")
-                    if key == "model_id":
+                    if key == "model_ref":
+                        revision = self.owner.application.choose_configured_model(
+                            info, expected_revision=body["expected_revision"],
+                            request_id=body["request_id"],
+                        )
+                    elif key == "model_id":
                         revision = self.owner.application.choose_local_model(
                             info, expected_revision=body["expected_revision"],
                             request_id=body["request_id"],
@@ -1318,13 +1497,14 @@ class _Handler(BaseHTTPRequestHandler):
                             credential_revision=current.credential_revision,
                         )
                         revision = self.owner.application.choose_reasoning(
-                            body["mode"], "medium" if body["mode"] == "thinking" else None,
+                            body["mode"], body.get("effort", "medium")
+                            if body["mode"] == "thinking" else None,
                             expected_revision=body["expected_revision"],
                             request_id=body["request_id"], info=info,
                         )
             except ModelDiscoveryError:
                 self._error(HTTPStatus.SERVICE_UNAVAILABLE, "model_unavailable",
-                            "Local model catalog unavailable")
+                            "Configured model catalog unavailable")
                 return
             except ValueError as exc:
                 self._error(HTTPStatus.CONFLICT, "model_unavailable", str(exc)[:200])
@@ -1452,7 +1632,11 @@ class _Handler(BaseHTTPRequestHandler):
                         interaction_id, controller_id=viewer,
                         control_epoch=epoch,
                     )
-                    allowed = READ_ONLY_TOOLS | (
+                    external: frozenset[str] = getattr(
+                        getattr(self.owner.application.agent, "browser_tools", None),
+                        "mcp_names", frozenset(),
+                    )
+                    allowed = READ_ONLY_TOOLS | external | (
                         FILE_EDIT_TOOLS if self.owner._edits_activated
                         and self.owner.application.agent.workspace.write_enabled
                         and not getattr(self.server, "host_lan", False) else frozenset()
@@ -1487,11 +1671,20 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.BAD_REQUEST, "invalid_argument", "Ambiguous filter")
             return
         query = {key: value[0] for key, value in params.items()}
+        result: dict[str, Any]
         try:
             offset = int(query.get("offset", "0"))
             if not 0 <= offset <= 1_000_000 or any(len(value) > 256 for value in query.values()):
                 raise ValueError("Invalid filter")
-            if path == "/api/v1/library/counts":
+            if path == "/api/v1/library/vision":
+                if set(query) != {"artifact", "revision"}:
+                    raise ValueError("Choose an exact saved image")
+                result = service.vision_results(query["artifact"], int(query["revision"]))
+            elif path == "/api/v1/library/jobs":
+                if query:
+                    raise ValueError("Unknown job filter")
+                result = generated_jobs(service.cfg)
+            elif path == "/api/v1/library/counts":
                 if query:
                     raise ValueError("Unknown count filter")
                 result = service.tab_counts()
@@ -1552,6 +1745,25 @@ class _Handler(BaseHTTPRequestHandler):
                 if set(query) - {"query", "offset"}:
                     raise ValueError("Unknown Skills filter")
                 result = service.skills(query=query.get("query", ""), offset=offset)
+            elif path == "/api/v1/integrations/connections":
+                if query:
+                    raise ValueError("Unknown connection filter")
+                result = read_mcp_inventory(service.cfg.mcp_servers_file)
+                result["management_allowed"] = self._mcp_management_allowed()
+            elif path == "/api/v1/settings/memory":
+                if query:
+                    raise ValueError("Unknown memory filter")
+                result = read_memory_inventory(service.cfg.sessions_db, service.cfg.memory_file)
+            elif path == "/api/v1/settings/agent":
+                if query:
+                    raise ValueError("Unknown setting filter")
+                result = read_browser_settings(service.cfg)
+            elif path == "/api/v1/settings/models":
+                from klaude_application.browser_media_settings import media_settings
+
+                if query:
+                    raise ValueError("Unknown model setting filter")
+                result = media_settings(service.cfg)
             elif path == "/api/v1/library/operations":
                 if query:
                     raise ValueError("Unknown operation filter")
@@ -1681,6 +1893,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             session_id = self.owner.application.session_id
+            artifact_id = ""
             if set(body) == {"upload_id"} and isinstance(body["upload_id"], str):
                 if self.owner.transfers is None:
                     raise ValueError("Uploads unavailable")
@@ -1696,9 +1909,10 @@ class _Handler(BaseHTTPRequestHandler):
                 name, data = ArtifactService(self.owner.library.artifacts.root).attachment(
                     body["artifact_id"], body["revision"],
                 )
+                artifact_id = body["artifact_id"]
             else:
                 raise ValueError("Choose a device upload or a current Library file")
-            attachment = prepare_attachment(name, data, preview=True)
+            attachment = prepare_attachment(name, data, preview=True, artifact_id=artifact_id)
             with self.owner._lock:
                 if (not self.owner.session_active(identity) or self.owner._stopping
                         or self.owner.application.session_id != session_id):
@@ -1724,7 +1938,11 @@ class _Handler(BaseHTTPRequestHandler):
             with self.owner._lock:
                 if self.owner._stopping or not self.owner.session_active(identity):
                     raise OperationConflict("Sign in again")
-                if path.endswith("/discard"):
+                if path.endswith("/cancel"):
+                    if set(body) != {"request_id"} or not isinstance(body["request_id"], str):
+                        raise ValueError("Choose an exact image operation")
+                    self._json(HTTPStatus.OK, service.cancel_vision(body["request_id"]))
+                elif path.endswith("/discard"):
                     if set(body) != {"review_id"} or not isinstance(body["review_id"], str):
                         raise ValueError("Invalid review")
                     service.discard(viewer, body["review_id"])
@@ -1733,6 +1951,14 @@ class _Handler(BaseHTTPRequestHandler):
                     if set(body) != {"draft"} or not isinstance(body["draft"], dict):
                         raise ValueError("Invalid review")
                     draft = body["draft"]
+                    if (draft.get("operation") == "session-delete"
+                            and draft.get("target") == self.owner.application.session_id):
+                        raise ValueError("Switch conversations before deleting")
+                    if (str(draft.get("operation", "")).startswith("mcp-")
+                            and not self._mcp_management_allowed()):
+                        self._error(HTTPStatus.FORBIDDEN, "forbidden",
+                                    "MCP management over LAN requires owner account sign-in")
+                        return
                     upload_id = draft.get("upload_id")
                     if upload_id is not None:
                         if not isinstance(upload_id, str) or self.owner.transfers is None:
@@ -1764,8 +1990,31 @@ class _Handler(BaseHTTPRequestHandler):
                         raise OperationConflict(
                             "Wait for the chat turn and queue to finish before making changes"
                         )
-                    result = service.submit(viewer, body["review_id"], body["request_id"])
+                    if (not self._mcp_management_allowed()
+                            and service.local_review(viewer, body["review_id"])):
+                        self._error(HTTPStatus.FORBIDDEN, "forbidden",
+                                    "MCP management over LAN requires owner account sign-in")
+                        return
+                    current = self.owner.application.session_id
+                    action = service.reviewed_session_action(viewer, body["review_id"], current)
+                    if action == "session-delete":
+                        raise ValueError("Switch conversations before deleting")
+
+                    def new_chat() -> None:
+                        self.owner.switch_session(
+                            viewer, f"archive-{body['request_id']}", current, "",
+                            body["control_epoch"],
+                        )
+
+                    result = service.submit(
+                        viewer, body["review_id"], body["request_id"],
+                        before_start=new_chat if action == "session-archive" else None,
+                    )
+                    if result["kind"] == "session-archive":
+                        result["session_id"] = self.owner.application.session_id
                     self._json(HTTPStatus.ACCEPTED, result)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
         except OperationConflict as exc:
             self._error(HTTPStatus.CONFLICT, "resource_busy", str(exc)[:240])
         except (ValueError, TypeError, KeyError) as exc:

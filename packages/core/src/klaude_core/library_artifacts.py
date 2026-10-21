@@ -7,6 +7,7 @@ never invoke a model or an indexer.
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import hashlib
 import json
@@ -21,7 +22,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -423,7 +424,9 @@ class ArtifactStore:
             ),
         )
         row = db.execute("SELECT * FROM artifacts WHERE id=?", (identity,)).fetchone()
-        return self.metadata(row)
+        # New artifacts have no source link. Keep the insertion receipt consistent
+        # with a subsequent detail read without opening a second transaction.
+        return {**self.metadata(row), "source_url": ""}
 
     def import_bytes(self, data: bytes, kind: str, filename: str) -> dict[str, Any]:
         """Import an already captured upload, without trusting a caller's host path."""
@@ -483,7 +486,7 @@ class ArtifactStore:
             if row is None or row["revision"] != revision:
                 raise ValueError("Artifact changed elsewhere; reload before retrying")
             if (
-                operation in {"restore", "delete"}
+                operation == "restore"
                 and not row["archived"]
                 or operation == "archive"
                 and row["archived"]
@@ -539,7 +542,8 @@ class ArtifactStore:
         return json.loads(row[0]) if row else {}
 
     def apply_ai_tags(
-        self, identity: str, revision: int, checksum: str, tags: list[str], provenance: dict
+        self, identity: str, revision: int, checksum: str, tags: list[str], provenance: dict,
+        *, before_publish: Callable[[], None] | None = None,
     ) -> dict:
         from .image_tags import checked_tags
 
@@ -552,7 +556,7 @@ class ArtifactStore:
             item = db.execute("SELECT revision,sha256,kind,archived,tags FROM artifacts WHERE id=?",
                               (identity,)).fetchone()
             if (item is None or item["revision"] != revision or item["sha256"] != checksum
-                    or item["kind"] != "media" or item["archived"]):
+                    or item["kind"] not in {"media", "document"} or item["archived"]):
                 raise ValueError("Image changed; reload and review tags again")
             old = db.execute("SELECT generated_tags,provenance FROM image_tags WHERE artifact=?",
                              (identity,)).fetchone()
@@ -568,12 +572,14 @@ class ArtifactStore:
             if len(saved) > 20:
                 raise ValueError("Keep at most 20 AI tags; clear existing AI tags before retrying")
             sources = {tag: sources[tag] for tag in saved}
+            if before_publish is not None:
+                before_publish()
             db.execute("INSERT OR REPLACE INTO image_tags VALUES (?,?,?)",
                        (identity, json.dumps(saved), json.dumps(sources)))
             db.execute("UPDATE artifacts SET revision=revision+1 WHERE id=?", (identity,))
         return self.get(identity)
 
-    def preview(self, identity: str) -> dict[str, Any]:
+    def preview(self, identity: str, *, include_source: bool = False) -> dict[str, Any]:
         item = self.get(identity)
         with self.database() as db:
             row = db.execute(
@@ -581,7 +587,8 @@ class ArtifactStore:
             ).fetchone()
         if row is None:
             raise ValueError("Artifact no longer exists; reload the list")
-        data = row[0]
+        # SQLite substr() can return NULL for an empty BLOB.
+        data = row[0] or b""
         if item["kind"] != "media" and b"\0" not in data:
             try:
                 text = data.decode("utf-8")
@@ -591,14 +598,57 @@ class ArtifactStore:
             if sum(char.isprintable() or char in "\r\n\t" for char in text) >= len(text) * 0.95:
                 original_lines = text.splitlines()
                 lines = [plain(line, 500) for line in original_lines[:100]]
-                return {
+                result: dict[str, Any] = {
                     "item": item,
                     "lines": lines,
                     "truncated": item["size"] > len(data)
                     or len(original_lines) > 100
                     or any(len(line) > 500 for line in original_lines[:100]),
                 }
+                if include_source:
+                    # Browser source is an exact bounded prefix, not the terminal's
+                    # sanitized/shortened lines. Do not invent a replacement character
+                    # when the read ends inside a valid UTF-8 sequence.
+                    complete = item["size"] <= len(data)
+                    sanitized = False
+                    try:
+                        source = codecs.getincrementaldecoder("utf-8")().decode(
+                            data, final=complete
+                        )
+                    except UnicodeDecodeError:
+                        source = codecs.getincrementaldecoder("utf-8")("replace").decode(
+                            data, final=complete
+                        )
+                        sanitized = True
+                    safe = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", " ", source)
+                    source_lines = safe.splitlines(keepends=True)
+                    result.update(
+                        source_text="".join(source_lines[:100]),
+                        source_truncated=not complete or len(source_lines) > 100,
+                        source_sanitized=sanitized or safe != source,
+                    )
+                return result
         return {"item": item, "lines": [], "fallback": "Binary preview · export or open externally"}
+
+    def read_content(self, identity: str, revision: int, *, limit: int = MAX_BYTES) -> bytes:
+        """Read checksummed bytes from one current saved revision, bounded before allocation."""
+        if (not ID.fullmatch(identity) or type(revision) is not int
+                or type(limit) is not int or not 0 <= limit <= MAX_BYTES):
+            raise ValueError("Invalid saved-file read")
+        with self.database() as db:
+            db.execute("BEGIN")
+            row = db.execute("SELECT rowid,revision,archived,size,sha256 FROM artifacts WHERE id=?",
+                             (identity,)).fetchone()
+            if (row is None or row["revision"] != revision or row["archived"]
+                    or not 0 <= row["size"] <= limit):
+                raise ValueError("Saved file changed or exceeds its read limit")
+            with db.blobopen("artifacts", "content", row["rowid"], readonly=True) as blob:
+                if len(blob) != row["size"]:
+                    raise ValueError("Stored content size check failed")
+                payload = blob.read(limit + 1)
+            if len(payload) != row["size"] or hashlib.sha256(payload).hexdigest() != row["sha256"]:
+                raise ValueError("Stored content checksum failed")
+        return payload
 
     def export(self, identity: str, destination: Path, *, revision: int | None = None) -> Path:
         item = self.get(identity)

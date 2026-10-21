@@ -107,6 +107,58 @@ async def verify(host, root, chrome, fixture):
             await tab.wait('ChatAttachmentsUI.ids().length === 1 && !ChatAttachmentsUI.preparing()')
             await tab.click("#attach-library")
             await tab.wait('document.querySelectorAll(".attachment-library-item").length === 20')
+            await tab.wait('document.querySelector(".attachment-library-item img")'
+                           '?.naturalWidth > 0')
+            assert await tab.js('document.querySelector(".attachment-library-item .file-icon-pdf '
+                                '.file-icon-badge")?.textContent === "PDF"')
+            assert await tab.js('Boolean(document.querySelector(".attachment-library-item '
+                                '.file-icon-code .icon")) && Boolean(document.querySelector('
+                                '".attachment-library-item .file-icon-text .icon"))')
+            for width, height in [(1440, 900), (390, 640), (320, 480)]:
+                await tab.command("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False,
+                })
+                await asyncio.sleep(.15)
+                source_icons = await tab.js("""(() => {
+                  const device=byId('attach-device'), library=byId('attach-library');
+                  const icons=[...device.querySelectorAll('svg')]
+                    .filter(icon=>icon.getClientRects().length);
+                  return {device:icons.length===1 && (icons[0].classList
+                      .contains('attachment-device-smartphone')?'smartphone':'laptop'),
+                    library:library.querySelector('svg')?.innerHTML===
+                      byId('nav-library').querySelector('svg').innerHTML,
+                    leading:device.firstElementChild.tagName==='svg' &&
+                      library.firstElementChild.tagName==='svg',
+                    sameRow:device.getBoundingClientRect().top===
+                      library.getBoundingClientRect().top,
+                    decorative:[...device.querySelectorAll('svg'),library.querySelector('svg')]
+                      .every(icon=>icon.getAttribute('aria-hidden')==='true')};
+                })()""")
+                assert source_icons == {
+                    "device": "smartphone" if width <= 560 else "laptop",
+                    "library": True, "leading": True, "sameRow": True, "decorative": True,
+                }, source_icons
+                assert await tab.js("""(() => {
+                  const dialog = byId('attach-dialog');
+                  const bounds = dialog.getBoundingClientRect();
+                  return bounds.left >= 0 && bounds.right <= innerWidth &&
+                    bounds.top >= 0 && bounds.bottom <= innerHeight &&
+                    dialog.scrollWidth <= dialog.clientWidth &&
+                    [...document.querySelectorAll('.attachment-library-item')].every(row => {
+                      const art = row.querySelector('.file-artwork').getBoundingClientRect();
+                      const button = row.querySelector('button').getBoundingClientRect();
+                      return art.width === 44 && art.height === 44 &&
+                        Math.min(button.width, button.height) >= 44 &&
+                        row.scrollWidth <= row.clientWidth;
+                    });
+                })()""")
+                screenshot = await tab.command("Page.captureScreenshot", {"format": "png"})
+                (output / f"library-picker-{width}.png").write_bytes(
+                    base64.b64decode(screenshot["data"])
+                )
+            await tab.command("Emulation.setDeviceMetricsOverride", {
+                "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False,
+            })
             await tab.click("#attach-next")
             await tab.wait('document.querySelectorAll(".attachment-library-item").length === 5')
             await tab.js('byId("attach-search").value="saved.md";'
@@ -213,6 +265,8 @@ async def verify(host, root, chrome, fixture):
             assert not tab.errors, tab.errors
             print(json.dumps({"device_and_library": True, "private_input": True,
                               "image_thumbnails": True, "pdf_icons": True,
+                              "library_picker_artwork": True,
+                              "responsive_source_icons": True,
                               "sent_cards_reload": True,
                               "active_reply": True, "logout_cleanup": True,
                               "console_errors": len(tab.errors), "viewports": sizes,
@@ -246,8 +300,9 @@ def main():
         fixture = AttachmentFixture()
         app.agent.runtime = app.agent.ollama = fixture
         library = LibraryManagement(cfg, root)
-        for index in range(24):
-            library.artifacts.import_bytes(b"Other file", "document", f"other-{index}.md")
+        for index in range(22):
+            name = f"other-{index}.py" if index == 21 else f"other-{index}.md"
+            library.artifacts.import_bytes(b"Other file", "document", name)
         library.artifacts.import_bytes(b"library-private-82", "document", "saved.md")
         (root / "device.txt").write_text("device-private-47")
         (root / "unsupported.exe").write_bytes(b"MZ\0bad")
@@ -261,6 +316,8 @@ def main():
         draw.polygon([(0, 240), (150, 115), (270, 240)], fill="#587c71")
         draw.polygon([(160, 240), (280, 140), (320, 240)], fill="#8caea3")
         picture.save(root / "HU7hXeGbsAAYPuz.jpg", format="JPEG")
+        library.artifacts.import_bytes((root / "HU7hXeGbsAAYPuz.jpg").read_bytes(),
+                                       "media", "library-picture.jpg")
         writer = PdfWriter()
         page = writer.add_blank_page(width=300, height=300)
         font = writer._add_object(DictionaryObject({
@@ -277,6 +334,7 @@ def main():
         pdf = io.BytesIO()
         writer.write(pdf)
         (root / "report.pdf").write_bytes(pdf.getvalue())
+        library.artifacts.import_bytes(pdf.getvalue(), "document", "library-report.pdf")
         # A completed image turn seeds the presentation fixture. Pixel delivery
         # through the real fenced worker is covered by test_chat_attachments.py.
         image = prepare_attachment("HU7hXeGbsAAYPuz.jpg",

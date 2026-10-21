@@ -10,7 +10,7 @@ EventKind = Literal[
     "tool.started", "tool.finished", "approval.required", "approval.resolved",
     "user_input.required", "user_input.resolved", "turn.completed",
     "turn.partial", "turn.failed", "turn.cancelled", "turn.interrupted",
-    "queue.changed", "settings.changed", "stream.reset_required",
+    "queue.changed", "settings.changed", "stream.reset_required", "activity.changed",
 ]
 
 
@@ -29,6 +29,7 @@ class PublicEvent:
     executed: bool | None = None
     status: str = ""
     cursor: str = ""
+    activity: str = ""
 
 
 @dataclass(frozen=True)

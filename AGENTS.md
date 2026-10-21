@@ -122,14 +122,17 @@ Workspace layout:
   `klaude mcp recover-oauth NAME` verifies the exact reviewed final state and
   finishes the one credential deletion. OAuth login discovery and token exchange
   occur before definition admission; other credential changes and older binaries
-  do not participate in the resource fence. Browser MCP mutations remain off.
+  do not participate in the resource fence. Browser owner actions now support
+  local and password-authenticated LAN MCP add-disabled, discovery/enable, disable and removal through this
+  same witnessed journal; interactive OAuth and browser recovery remain deferred.
 - `apps/cli`: Typer commands, Rich terminal rendering, deterministic command
   reference/help, chat loop wiring, tool display formatting, docs/session/memory
   CLI commands.
 - `apps/webhost`: experimental `klaude-webui` loopback launcher, persistent local
   admin account, owner cookie/CSRF/Origin checks, public snapshot/SSE replay and a
   minimal chat and workspace page. Its shared Agent begins with only
-  read/list/search/status/diff tools. M5 adds browser queue/steer/cancel,
+  read/list/search/status/diff tools, lazy Knowledge/Skills/web reads and
+  reviewed configured MCP calls. M5 adds browser queue/steer/cancel,
   structured question replies, per-tab control handles and bounded workspace
   browsing, same-workspace session list/new/resume with exact saved-runtime
   checks, a live local Ollama model picker, and idle-boundary Standard/Thinking
@@ -141,9 +144,13 @@ Workspace layout:
   action request IDs, session/revision checks and the single worker lease remain
   independent of control handoff. Submitted queue receipts remain available as
   history but do not block idle controls or appear as pending work. Model
-  selection requires an exact installed catalog entry and fresh `/api/show`
-  completion/tool declarations; browser Thinking
-  currently uses the existing medium effort. Loopback clients may explicitly
+  selection requires an exact configured catalog entry and fresh `/api/show`
+  completion/tool declarations for native Ollama. Browser Thinking uses supported
+  adapter efforts; native boolean Thinking retains medium. Configured local/cloud
+  choices share typed revisioned runtime controls, and exact saved-runtime resume
+  checks definition/credential revisions without catalog or generation calls.
+  Model definitions/default roles and Model Manager remain separate work.
+  Loopback clients may explicitly
   activate file edits only after the
   existing clean-worktree/branch check; `write_file` and `edit_file` then use
   exact allow-once/deny review with content preview and hash. LAN cannot
@@ -164,6 +171,14 @@ Workspace layout:
   when switching; Library URLs remain authoritative for reload/back/forward.
   Generated empty states render in the content area below its toolbar, with an
   accessible status message and no empty list column header.
+  Generated shares Uploads' Type, Status and Sort controls: inline above the
+  existing 650px content breakpoint, expandable below it. Its 48px plus button
+  sits to the right of the toolbar controls and opens
+  a native Create dialog with Image and Research tabs. Each tab contains its
+  existing form and job history below it, preserving drafts when switching tabs
+  and retaining explicit generation/Research reviews. Tabs support arrow and
+  Home/End navigation. Closing, switching tabs, navigation or sign-out discards
+  late preparation reviews; sign-out clears both drafts.
   Legacy Research tabs and Uploads report filters migrate to Generated. Existing
   kind=all API and CLI/TUI reads remain compatible. Missing source-filter support
   on a running old host shows restart guidance instead of mixing inventories.
@@ -204,21 +219,67 @@ Workspace layout:
   Native item details use a shared image-first viewer: a spacious desktop stage
   and collapsible details sidebar, or a fullscreen phone/tablet stage with a
   closed/partial/full details sheet. Existing tonal roles, Roboto, local SVG icons,
-  expressive radii and motion remain authoritative. Compact controls offer
+  expressive radii and motion remain authoritative. Image and file previews have
+  one Close cross at the top right; File options lives beside the Details title,
+  with no duplicate details Close button. Compact controls offer
   download, fit and 1–8x zoom relative to fit; the derivative remains bounded to
   2048px. Pointer pinch/pan, double-tap and fit-only swipe navigation complement
   keyboard zoom/pan/previous/next. Details gestures never navigate the image.
   Escape dismisses a menu/sheet before the viewer; closing restores Uploads focus
   and scroll. Metadata reports only filename, MIME, size, dimensions and Added.
-  Manual/AI tags use wrapping chips and Show more; manual edits retain their
-  existing 20-tag/40-character bounds and explicit review. Source-link editing
-  appears at the bottom of File details. Optional links use an additive private
+  The inspector has Details and AI Review tabs, with keyboard arrows/Home/End,
+  separate remembered scroll positions and preserved form drafts. Details owns
+  compact metadata (separate file type and MIME rows), source links, tags and
+  existing Learn controls. AI Review is available for current saved images and
+  shows the latest analysis, exact model-reference disclosure, creation/expiry
+  metadata, Copy/Expand actions, latest tag suggestions and the question form.
+  Context/output token controls live in collapsed Advanced; budgets and prompts
+  retain their existing semantics. Analysis uses the shared allowlisted Markdown
+  renderer, including literal HTML and safe links, without additional truncation.
+  Expand opens a native full-review reader; Copy preserves the complete stored
+  Markdown through the existing secure/HTTP clipboard paths. AI Review has an
+  expressive empty state, full-width Review image action and an explicitly named
+  Generate tag suggestions action. Actual suggestions use wrapping multi-select
+  filter chips with selected counts, Clear selection and Save N tags. Existing
+  manual/AI tags are excluded case-insensitively; choices stay in memory through
+  cancelled/rejected saves and require a separate reviewed save. Review image
+  and Suggest image tags confirmations use action-specific text titles, filename,
+  visible provider/cost notices and collapsed Technical details containing the
+  exact server-reviewed model order, budgets, capability checks and continuation
+  behavior. Suggestions are never automatically stored. Pending/failed requests keep the previous
+  review available until expiry; the open inspector/tab returns after reviews.
+  The UI retains only the current image's cached results in memory, checks the
+  existing 24-hour retention and clears private content on sign-out. There is no
+  persistent history UI. Phone/tablet inspectors use the existing full-height
+  sheet with one content scroll region, safe areas and handle/Escape dismissal.
+  Evidence: `docs/webui/file-inspector-validation.md`.
+  Readable text/code previews reuse the viewer header, scroll region, fixed
+  contextual toolbar and details sheet. Bundled DOM-only Prism adds syntax
+  highlighting and decorative line numbers; Markdown offers safe Preview/Source
+  modes without executing uploaded HTML or fetching embedded images. Wrap is the
+  default; No wrap scrolls internally. Copy preserves the bounded source text
+  with its indentation, tabs and original line endings through the existing
+  HTTP/LAN clipboard fallback. The authenticated detail projection adds optional
+  source fields (16 KiB / 100 lines), with truncation/control-sanitization notices
+  and complete-file Download. Legacy terminal lines keep their existing limits;
+  older hosts retain that normalized fallback until restart. Empty files preview
+  without error. Evidence: `docs/webui/file-preview-refinement.md`.
+  Manual/AI tags use wrapping chips and Show more. Details offers an inline
+  manual-tag draft with removable chips, Enter/+ additions, case-insensitive
+  duplicates and whitespace normalization, retaining its 20-tag/40-character
+  bounds and explicit reviewed Save tags. Opening it never runs inference;
+  available backend suggestions add only to the draft. Source has compact
+  Add/Edit/Remove actions, safe external links with visual URL truncation and an
+  inline HTTP(S) editor. Both editors preserve drafts on failure, restore saved
+  values on Cancel and update stored values only after confirmed backend success.
+  Optional links use an additive private
   artifact_links table, HTTP(S)-only validation and the existing fixed reviewed,
   revision-checked worker. Old stores stay read-only on browse; links are never
   fetched and private origin paths remain excluded. Archive/Restore and Delete
-  live in the top-right native popover using the chat menu's styling/keyboard
-  convention. Delete retains archive-first gating and a Cancel-focused permanent
-  deletion review. Preview metadata has a 24-item/30-second cache, invalidated on
+  live in the Details heading's native popover using the chat menu's styling/keyboard
+  convention. Saved and archived files both offer a Cancel-focused permanent
+  deletion review, with exact revision checks and no archive prerequisite.
+  Preview metadata has a 24-item/30-second cache, invalidated on
   refresh, operations and sign-out. Source editing is disabled on older hosts.
   Gallery preview navigation crosses page boundaries without moving the grid.
   Library image derivatives use only authenticated typed IDs and exact revisions,
@@ -229,7 +290,41 @@ Workspace layout:
   checks remain active for cached results. HTTP responses stay no-store.
   Implementation and evidence: `docs/webui/library-browser-validation.md`.
   Viewer implementation and evidence: `docs/webui/image-preview-validation.md`.
-  Integrations contains Skills and Knowledge, plus the deferred Connections tab.
+  Integrations contains Skills, Knowledge and Connections. Connections now
+  lists configured MCP servers and offers owner-reviewed remote add-disabled,
+  discovery/enable, disable and removal. Its keyed compact rows share the Skills
+  layout and confirmed-state switches. Clicking a row opens native details for
+  status, transport, tool count, source and OAuth metadata; Enable/Disable and
+  Remove server live there too. Pending/unconfirmed changes keep switches
+  unavailable, while cancelled or rejected changes retain the confirmed state.
+  Skills and configured Connections enable/disable switches apply directly from
+  the click, without a confirmation dialog. Details switches behave the same way
+  and keep their dialog open. Only these state changes use the direct path;
+  add/import/removal and other actions keep their existing confirmation.
+  The direct path still prepares an exact backend snapshot and submits one durable
+  request ID, preserving stale-write checks, pending locks and receipt polling.
+  Lost acknowledgements retain their original ID and lock until resolved; they
+  are never resubmitted automatically.
+  Password-authenticated owner sessions can use these actions on both the
+  local and LAN listeners. Bootstrap-only embedded hosts retain local-only MCP
+  management. Both review preparation and submission enforce this rule; cookie,
+  Origin/CSRF, idle-turn, fingerprint and journal checks remain in force.
+  All/Enabled/Disabled filters combine with the name/description search. Compact
+  rows omit absent descriptions and show confirmed status, transport and tool
+  count. Add/details dialogs use bounded compact layouts; successful updates
+  remain visible after inventory reload. Filters and notices clear on sign-out.
+  Evidence: `docs/webui/connections-layout-validation.md`.
+  Skills, Knowledge and Connections use Library-style search toolbars with 48px
+  plus buttons. Import Skill, Add to Knowledge and Add an MCP connection open
+  their forms in a shared native dialog before the existing explicit review.
+  Closing, navigating or signing out invalidates preparation so late reviews
+  cannot reopen it. Knowledge text search is debounced; search fields retain
+  Enter submission without a separate Search button.
+  Evidence: `docs/webui/integrations-toolbars-validation.md`.
+  Enabled cached schemas load at browser
+  turn boundaries, default to exact review and recheck their definition before
+  execution; unresolved definition fences suppress tool loading. Registry
+  discovery, secret capture and interactive OAuth remain in the CLI.
   Knowledge retains inventories, text search, reviewed learning and source
   refresh, with its own status, responsive pagination and cancellable reads.
   `integrations=knowledge` URLs preserve selection/search/pages and browser history;
@@ -237,14 +332,127 @@ Workspace layout:
   there. Switching between Knowledge and Skills preserves Knowledge state, and
   leaving the panel rejects obsolete reads while accepted work continues.
   Existing Library Knowledge HTTP services and CLI/TUI navigation remain compatible.
+  Skills, Knowledge libraries and indexed sources use compact, keyed rows with
+  20-item browser pages. Skills show a bounded description and confirmed-state
+  switch; installation/index metadata and deletion live in a native details
+  dialog. Switches apply directly, show pending operations and retain
+  the prior confirmed value on failure. Unconfirmed operations stay unavailable
+  for retry pending local inspection. Library search is debounced in its single
+  field; Refresh deduplicates reads, retains active filters/view/tab/search/sort
+  and keeps loaded content on failure.
+  Refresh controls across chat, Library, Integrations, Models and Settings share
+  the conversation refresh icon with descriptive accessible labels and tooltips;
+  source refresh retains its exact review. Loading replaces the icon in place.
+  Mobile navigation keeps Chat, Workspaces,
+  Library and Integrations plus a native More menu for Models/Activity/Settings; desktop
+  destinations remain visible. Allowlisted primary view URLs extend existing
+  Library/Integrations history without clearing unsent chat text. Settings uses
+  Account, Theme, Agent, Models and Memory tabs, showing one category at
+  a time. Keyboard arrows/Home/End select tabs; the phone tab strip scrolls.
+  Allowlisted settings URLs and tab-local storage restore selection on reload,
+  navigation and Back/Forward. Tab changes preserve ordinary form drafts and
+  discard obsolete preparation reviews; Account is absent on bootstrap hosts.
+  Models groups Model Defaults and Image generation service in separate cards
+  with 16px spacing. Former Images URLs and saved selections migrate to Models.
+  The main Models destination browses configured connections and their existing
+  bounded catalogs, with search and 20-item browser pages. Use model changes only
+  the current idle conversation through the composer's fenced runtime action;
+  Model Defaults opens Settings for new-chat defaults. Duplicate submissions are
+  blocked while preserving the selected thinking effort. Failed refreshes retain
+  loaded models; aborted/obsolete reads cannot restore data after sign-out.
+  Legacy local-only hosts retain their catalog path. Connection/credential setup,
+  downloads, serving and Model Manager remain terminal operations.
+  Evidence: `docs/webui/models-page-validation.md`.
+  Settings uses a compact heading, full-width cards and shared label/control
+  rows with 10px vertical padding. Controls and their explicit Review action stay
+  on the same line; narrow cards put the label above that pair. Native container
+  queries respond to the available card width, including desktop sidebars.
+  At desktop widths (851px and above), Settings categories form a sticky vertical
+  list on the left of the active panel. Smaller layouts retain the horizontal
+  categories. The same tab controls preserve drafts, URLs/history and linked
+  panels; their ARIA orientation and arrow-key direction update on resize.
+  Desktop uses Up/Down, smaller layouts Left/Right, with Home/End in both.
+  The Settings columns fill the available main area, with 24px outer padding
+  (16px on phones), a compact 160px category list and the remaining width for
+  content. Settings no longer caps or centers its content column. Cards and the
+  Models stack use natural heights rather than filling the scroll region.
+  Execution limits and related Model Defaults use responsive grids based on the
+  actual card width; control pairs remain bounded to 32rem and number inputs
+  retain their smaller limit. Models separates available models, model roles,
+  Utility/Vision options, fallbacks and image service setup without changing
+  their individual reviews. Short model-role labels stay beside their controls
+  on narrow cards. Startup chat, Utility, Research and Vision labels have
+  decorative 18px chat, wrench, search and eye icons from the local SVG helper,
+  using the muted theme color and retaining their native input associations.
+  Theme palettes use four compact columns, or eight when the
+  card has room, retaining the existing swatches, theme tokens and Apply flow.
+  Agent groups use native expandable sections, with Date and time and Execution
+  initially open. Browser-native disclosure markers are replaced by decorative
+  rounded SVG triangles that rotate with the native open state and use the muted
+  theme color; click, touch and keyboard behavior remain native. Date and time
+  offers an IANA timezone selector with Automatic
+  following the host timezone. It uses the existing revision-checked settings
+  save path and applies to future WebUI turns without changing the OS timezone.
+  The browser now includes the local `current_time` read tool, allowed by default
+  and governed by the existing availability/permission controls. It returns the
+  current weekday, offset-aware local time, timezone and UTC time; an explicit
+  timezone override does not change the saved preference. Browser prompts refresh
+  clock context before every turn, replacing cached runtime clock lines while
+  preserving machine/location metadata. Named zones use standard ZoneInfo DST
+  rules and invalid names fail validation. No network service is used for time.
+  Evidence: `docs/webui/date-time-validation.md`.
+  Optional Utility/Vision fallbacks start collapsed below the primary model
+  controls; their headings reuse the muted 18px wrench and eye role icons.
+  Disclosure state and ordinary input drafts survive tab changes in the
+  current page; sign-out resets disclosure state. Confirmed-state switches reuse
+  the existing Material track without changing their reviewed save behavior.
+  Source/model values remain complete; long model labels truncate only visually
+  and disclose their selected label in a tooltip. Existing token semantics,
+  settings revisions and recovery remain unchanged.
+  Evidence: `docs/webui/settings-tabs-validation.md`.
+  Model Defaults automatically loads the selected connection's catalog on entry
+  and connection changes; Refresh models repeats that metadata read. Its existing
+  catalog route accepts `purpose=defaults` for per-role hints. Native Ollama uses
+  bounded `/api/show` batches to separate completion, tool and image support;
+  embedding-only models are excluded. Chat/Research require tools, while Vision
+  does not. Utility, Research and Vision exclude known mandatory-Thinking models
+  and unsupported adapters; unknown capabilities are labeled Verify on review.
+  Exact existing review checks remain authoritative. Utility/Vision fallbacks
+  share their primary role's choices. Saved references and unsaved drafts survive
+  catalog changes; failed refreshes retain loaded models. No inference or default
+  save runs automatically. Evidence: `docs/webui/model-defaults-validation.md`.
+  The disabled-generation hint links Model Defaults to its card in Settings →
+  Models, closing Create and preserving chat and generation drafts.
+  Settings tabs, category headings and Agent section headings use decorative
+  local outline icons while retaining their visible text labels.
+  Settings has
+  bounded Memory inventory/filter/add/edit/forget and automatic memory controls,
+  plus reviewed shared execution limits, read-tool availability and permissions,
+  Web search provider/result/depth and service endpoint settings, page-reader
+  routing/fallback switches and saved Research budgets. Search/Fetch preferences
+  and sanitized Memory/code-generation contexts refresh before each browser turn.
+  File details offers reviewed Learn for current saved UTF-8 text/code, PDF/DOCX
+  and Research reports. Learning checks exact revisions, saved status, bounded
+  content and checksums before embeddings, retaining stable artifact source IDs.
+  Text input is limited to 2 MiB; disposable PDF/DOCX extraction rejects truncated
+  output beyond 32,000 characters.
+  Field-level expected values reject stale saves while preserving unrelated
+  terminal preferences. Prompt refresh loads current public facts and installed
+  Skill metadata. Evidence: `docs/webui/feature-completion-validation.md`.
+  Skills search/page URLs use bounded `skills-q`/`skills-page` fields and restore
+  through refresh, tab changes and Back/Forward. Enlarged text wraps navigation
+  labels and collection headings; the phone bar's intrinsic ResizeObserver
+  reserves its actual height, retaining safe areas and native keyboard/viewport
+  behavior. Collection controls expose their metadata as accessible descriptions,
+  and Skill switches retain visible checked/unchecked cues in forced colors.
   Integrations exposes installed Skills, reviewed local ZIP/Markdown import,
   activation and deletion. Uploads uses stable 24-item pages across its three modes;
   grids use two/three/four/six columns and Gallery uses three/four/six. Month groups
   can end in partial rows. An eight-page, 30-second metadata cache avoids repeated
   reads when presentation changes and clears on refresh, operations and sign-out.
-  Knowledge matches/sources and installed Skills retain pages sized to complete
-  grid rows near 20 cards (at most 40), with filters applied before paging.
-  Three-column grids show 21 cards. The browser composes at most
+  Knowledge matches/sources and installed Skills use compact rows with 20-item
+  pages, with filters applied before paging. Legacy card hosts remain readable.
+  The browser composes at most
   two bounded reads without changing CLI/TUI store batches or requiring a host
   restart. Pagination follows the actual card capacity, and resizing preserves
   the page containing the former first item.
@@ -260,9 +468,9 @@ Workspace layout:
   count their own saved artifacts across all types using stored provenance.
   Integrations keeps Skills
   and Connections distinct; Connections shows the configured MCP server count
-  only and remains disabled in the browser. MCP remains the protocol/server term.
-  Persistent Memory management belongs under Settings in the planned IA; browser
-  Memory management is not implemented by this navigation reorganization.
+  and opens its working management panel in the browser. MCP remains the protocol/server term.
+  Persistent Memory management lives under Settings; this includes the reviewed
+  browser Memory operations added by feature completion work.
   Populated Library and Skills lists omit redundant per-page count summaries;
   delayed skeletons represent pending reads; status text reports empty results,
   inventory limits and errors.
@@ -310,8 +518,8 @@ Workspace layout:
   invalidating all browser cookies and SSE; accepted agent work remains owned.
   Bootstrap exchanges are disabled on account-enabled hosts. Embedded fixtures
   retain the older bootstrap seam. The browser header's Account shortcut opens
-  Settings → Your local account directly. Password forms clear on leaving
-  Settings or signing out; authentication epochs reject stale snapshot/error
+  Settings → Account directly. Password forms clear on leaving Account,
+  leaving Settings or signing out; authentication epochs reject stale snapshot/error
   responses after sign-out. Foreground startup prints the credential-file path,
   never the initial password; local reveal toggles back to hidden. Account
   password changes revoke sessions, and sign-out returns to the sign-in form.
@@ -322,11 +530,30 @@ Workspace layout:
   handlers. Authenticated browser uploads stage bounded private files with a
   per-profile quota and expiry; owner-scoped downloads verify checksums and force
   attachments. Logout and shutdown revoke staged files. The terminal chat path
-  still runs embedded. Artifact download
-  adapters, nonlocal provider/model selection, effort-level controls and broader
-  domain mutations remain for M6. Switching sessions clears browser file-edit
+  still runs embedded. Configured provider selection, supported efforts and
+  workspace-scoped conversation rename/archive/restore/delete and bounded public
+  Markdown download are now available. The conversation panel uses an Archive
+  action for the current conversation at an idle boundary: after exact review,
+  request/resource admission opens a new chat before the owned archive worker
+  starts. Replayed requests do not open another chat; failure to start a new chat
+  rejects the archive without starting its worker. Active replies and queued
+  messages retain their existing guards. Current-conversation deletion remains
+  unavailable. Archived history and attachments remain restorable.
+  The conversation panel also uses an Archive toggle for saved/archived lists;
+  its drawer closes on outside tap or Escape,
+  with no separate close button or status dropdown.
+  Conversation rows use one centered 16px vertical-dot management icon; only
+  conversation titles use overflow ellipses, never the icon button.
+  Session lists use compact 36px rows with 2px gaps, a 36px search field and
+  reduced vertical spacing around the drawer controls.
+  Remaining model/domain settings and coding
+  controls still need browser contracts. Switching sessions clears browser file-edit
   activation and requires explicit activation again.
   The chat paperclip offers device uploads and revision-checked Library files.
+  From device has a leading laptop icon, switching to a smartphone in the existing
+  phone layout at 560px; From Library uses the Library navigation icon.
+  Its Library picker reuses Library file-type icons, concise type/size labels and
+  authenticated image thumbnails in compact rows.
   A message accepts four files, including two images, within 32 MiB total.
   Selected and sent attachments use tonal file cards with filename, type and size;
   PDFs have a PDF badge and images show a decoded, metadata-free 128px thumbnail.
@@ -339,9 +566,14 @@ Workspace layout:
   public dialogue contains the prompt and filenames only. PDF/DOCX parsers run
   in disposable resource-limited processes. Images use the existing enabled
   Vision and exact active-model capability checks, pixel preparation and private
-  Media snapshots. Owner/tab/session-scoped selections expire after 30 minutes;
-  logout and shutdown revoke them, while accepted turns retain their captured
-  bytes. Text and image input hashes participate in durable request deduplication.
+  artifact references. Library images reuse their original artifact ID and captured
+  checksum without adding an Uploads record, including images stored as Documents
+  or Generated. Changed/archived image selections must be chosen again; later chat
+  image references depend on the original remaining available. Device images retain
+  the existing private Media snapshots. Owner/tab/session-scoped selections expire
+  after 30 minutes; logout and shutdown revoke them, while accepted turns retain
+  their captured bytes. Text and image input hashes participate in durable request
+  deduplication.
   Attachments can be prepared during a reply; sending them waits for an idle turn.
   Sending does not Learn/index text or enable Vision. If the attachment script
   or server capability is missing, the paperclip is disabled with an explicit
@@ -349,6 +581,31 @@ Workspace layout:
   host; that host must reload before new attachment routes become available.
   Validation and format
   limits: `docs/webui/chat-attachments-validation.md`.
+  Generated now has reviewed Research queue/start/stop and configured-image-
+  service generation/cancellation/output recovery. These use existing typed
+  Research/Image commands and durable stores; accepted jobs outlive navigation
+  and logout. Research keeps saved provider/budget bindings and fresh evidence;
+  image recovery never submits another generation. Ordinary management workers
+  retain 180-second limits; Research uses its saved deadline plus 30 seconds and
+  generation uses 330 seconds. Settings now exposes reviewed shared Model Defaults,
+  ordered Utility/Vision fallbacks, Utility output budget, Vision activation and
+  image-service test/save. Explicit Chat defaults apply to fresh chats/startup;
+  unset or unavailable startup choices require model selection without generating
+  through a replacement. Existing conversations retain their exact runtime.
+  Research can use its separate saved role or the current chat model.
+  Defaults/image-service saves use the same witnessed receipt as CLI/TUI and have
+  reviewed exact-state browser recovery without replay or model contact.
+  Library image details offers reviewed analysis and AI-tag suggestions, followed
+  by a separate review of explicitly selected offered tags. Images stored as
+  Documents retain their original ID/type. Source reads check stored size before
+  allocation, revision and checksum. Tag writes recheck the operation fence inside
+  the artifact transaction. Owned Vision requests use a 300-second worker limit;
+  Stop releases their resource only after the owned process group is reaped.
+  Private results stay outside chat/journal bodies, with 64 records, a 24 MiB
+  SQLite cap and 24-hour availability; exact owner receipt/image revisions guard
+  result reads. Broader domain reconciliation remains separate work.
+  Media evidence: `docs/webui/media-controls-validation.md`.
+  Evidence: `docs/webui/feature-completion-validation.md`.
   Its read-only workspace file and search tools use the shared application
   WorkspaceReadService, which caps underlying input/output, anchors directory
   listing and search to opened descriptors, and anchors bounded Git status/diff
@@ -405,6 +662,15 @@ a separate explicitly authorized operation.
 
 ## User-Facing Terms
 
+WebUI dialog close controls use the shared local SVG cross with accessible
+names and icon-button styling, including conversation, attachment, message and
+file-preview dialogs. Labeled Download and Archive/Restore actions place their
+local SVG icon before the text and retain it across state changes.
+All native dialogs share backdrop click/tap dismissal, including dynamically
+created message dialogs. A press must begin and end on the exposed backdrop;
+inside clicks, multi-touch, cancelled gestures and drags do not dismiss it.
+Only the targeted dialog closes, using its existing cleanup/review-discard path.
+
 The planned product WebUI must use Material Design 3 Expressive, with LineageOS
 and end-4/dots-hyprland as user-requested visual references. Use cohesive tonal
 palettes, expressive shapes, grouped controls and fluid, interruptible motion.
@@ -412,7 +678,7 @@ Preserve stable streaming/code reading, immediate approval/cancel actions and
 reduced-motion support. The v2 planning spec owns the detailed design direction;
 the initial Expressive shell now provides Chat/Workspaces, a tab-local Activity
 view, responsive conversation drawer and activity panel, and browser-only
-Settings → INTERFACE → Themes & Colors. System/Light/Dark and eight palettes
+Settings → Theme → Themes & Colors. System/Light/Dark and eight palettes
 (Slate, Lavender, Sage, Peach, Ocean, Rose, Teal, Amber) preview before Apply
 and persist under a versioned localStorage key with same-origin tab updates.
 Slate uses neutral white/charcoal surfaces, accents, text and outlines. The
@@ -477,23 +743,52 @@ Browser reads use shared, request-owned skeletons after a 120 ms delay: initial
 chat/history, session lists, local model inventory, Library/Skills cards, tab
 counts, source lists, workspace reads, item previews and operation inventory.
 Known content remains visible during same-context refreshes; changed contexts
-clear outdated content. Preview dialogs open immediately, and closing one rejects
+clear outdated content. Library, Knowledge and Skills omit redundant Refreshing
+status text while retaining refresh busy indicators and error messages.
+Preview dialogs open immediately, and closing one rejects
 late results. Busy state clears on completion/errors/sign-out, and old requests
 cannot remove a newer loader. Workspace/session/model reads reject stale auth
-results. Skeletons use theme tones, decorative bars and accessible loading status;
-reduced motion disables pulsing. Static settings and live work progress retain
-their real controls/status rather than placeholder content. Validation:
-`docs/webui/loading-states-validation.md`.
+results. Page loading uses the official Material seven-shape indicator beside
+meaningful status text and static content skeletons. Its matched cubic morphs are
+exported from pinned Google Material/AndroidX sources; a small SVG adaptation
+retains the native 650ms cadence, 200/.6 spring and 50°/90° rotation. Contained
+48px page indicators and uncontained 24/32px chat, refresh and operation indicators
+use existing primary/container theme roles. One animation scheduler stops for
+hidden content and system/app reduced motion; removed nodes release their state.
+Chat retains real activity labels and static completion/error/input states.
+Operation polls preserve active indicator identity. Static settings and live
+work progress retain their real controls/status. Indicator geometry and runtime
+are bundled into the existing external `app.js` asset so older running hosts
+need only a browser reload. Send displays an immediate uncontained Sending
+indicator inside the conversation output; chat activity uses a readable 32px
+indicator below the user message and above the assistant response, retaining
+its animation through snapshots. The composer contains no loading row.
+Completed execution details remain beside that response. Hosts without typed
+activity retain a Generating response indicator until idle or input is required. Failed sends
+keep the draft and clear the pending indicator. Auth/session changes reject
+stale send cleanup. Regenerate the bundle with
+`python3 scripts/bundle_webui_loading.py` after editing its indicator sources.
+Validation: `docs/webui/loading-states-validation.md` and
+`docs/webui/material-loading-indicator.md`.
 The navbar's leading hamburger toggles conversations on desktop and mobile.
 Page refresh restores the selected page and Library/Integrations section after sign-in,
 using allowlisted identifiers in optional sessionStorage; new tabs default to Chat.
 Account is a circular username initial; Sign out and Send are icon-only with
 accessible names (Send becomes Queue message while a turn is active).
+Desktop composer Enter sends; Shift+Enter inserts a newline. IME composition,
+modified/repeated Enter and disabled sends are guarded. Touch-only software
+keyboards retain multiline Enter with the Send button available; desktop pointer
+or non-touch devices use the shortcut. The keyboard hint is screen-reader text.
 Chat places model, Thinking and Plan controls to the left of Send. The Chat title
 is screen-reader-only; status and tool policy share the composer footer with the
 session ID. Cancel and Steer occupy a compact top toolbar only during an active
 turn, leaving no heading row while idle. The model picker closes on outside
 clicks or taps and Escape; controls inside the picker remain usable.
+When the conversation is at least 100px from its bottom, a floating Go to latest
+down-arrow appears above the composer. It returns to the newest message with
+smooth scrolling (instant with reduced motion or without scroll-end support),
+then hides near the bottom. Scrolling by hand interrupts the jump.
+New content preserves the existing position while reading older messages.
 Compact phone layouts use native CSS
 viewport sizing and safe areas; the browser owns focused-input keyboard scrolling.
 They retain 44px primary touch targets, grow the composer within a bound, and
@@ -1764,21 +2059,31 @@ Chat slash commands currently include:
   retains `fetch_url` when searching is forbidden; disabled/no-tools boundaries
   still win. Evidence: `docs/s3a-url-fetch-validation.md`.
   New PSE/Serper adapters remain separate work; S3b registry grouping is implemented.
-  The footer uses the selected Spinner animation (Braille dots by default)
-  while active, with progressive states and a
-  compact unit-based elapsed value such as `⠋ WORKING 4s`, `⠙ EXPLORING 7s`,
-  `⠹ EDITING 11s`, `⠸ RUNNING 16s`, `⠼ LEARNING 18s`, and `⠴ WAITING 20s`.
+  Chat activity uses the shared execution-event projection in
+  `klaude_application.activity`: Writing code, Editing, Applying changes,
+  Generating images, Creating files, Analyzing data, Running tests, Validating,
+  Waiting, Generating response, Done, Error and Needs input. Activities remain
+  separate from turn lifecycle states. The TUI keeps the selected Spinner
+  animation and whole-turn elapsed time; WebUI offers a compact current label
+  with an expandable, bounded execution timeline. Its checkpoint is committed
+  atomically with existing public events and survives reconnect/resume.
   Transcript badges retain only completed outcomes such as `[EXPLORED] (9s)`,
   `[EDITED] (30s)`, `[RAN]`, `[LEARNED]`,
   `APPROVED`, `DENIED`, and `CANCELLED`; never persist generic `WORKING` or
   `WAITING` milestones. Updates must come from real model/tool/permission events and
   must never reveal a model's private chain-of-thought or scratchpad text. They
   are persisted with the session and mirrored to clients following via `/resume`.
-  `WAITING` is a live footer state when Klaude needs user input, including a
-  permission decision, or after a running command has remained without a result
-  for five seconds. A command begins as `RUNNING`, becomes `WAITING` only while
-  quiet, and completes as `RAN` or `FAILED`. Permission waits complete as
+  Needs input means an actual blocking question or permission decision. Waiting
+  means a pending operation whose activity cannot be classified safely. Quiet
+  test runners keep Running tests. Known file operations and single shell
+  commands are classified deterministically; arbitrary scripts and MCP names
+  stay generic. Requested tools do not count as executed. Overlapping executions
+  retain the oldest active label; child-agent details never replace the parent.
+  Done requires a successfully committed overall turn, never a tool result.
+  Recoverable tool failures remain in history; terminal failures show Error.
+  Cancellation/interruption retain their lifecycle labels. Permission waits complete as
   `APPROVED`, `DENIED`, or `CANCELLED`; never persist `WAITED`.
+  Mapping, limitations and validation: `docs/agent-activity-validation.md`.
   Permissions presents one `Current configuration` row above grouped, aligned
   per-tool rows. Entering it opens Custom, Balanced, Cautious, Read Only, and
   Full Access presets. Custom is first and selected whenever the effective map
@@ -2412,11 +2717,11 @@ Chat slash commands currently include:
   filesystem thread cannot be forcibly terminated, and abandoned presence expires.
   This does not yet make session actions, queued-turn starts, or settings writes
   asynchronous; those remain separate responsiveness work.
-  An observing client must show the shared progressive activity (`WORKING`,
-  `EXPLORING`, `EDITING`, `RUNNING`, `LEARNING`, or `WAITING`) while that remote worker lease
-  is active with the same animated Braille indicator even though its own local
-  worker flag is false, and return to `★ READY` after the remote lease is
-  released or expires. Before every provider request the worker publishes the
+  An observing client shows the shared canonical activity while the remote
+  worker lease is active, using its selected spinner even when its own local
+  worker flag is false. Confirmed terminal outcomes retain Done, Error,
+  Cancelled or Interrupted; legacy sessions without these events stay generic.
+  Before every provider request the worker publishes the
   same sanitized `TurnCapabilities` snapshot supplied to that model. An observer
   joining mid-turn receives the latest snapshot atomically with its session
   snapshot; later updates refresh its live `/status` without changing the

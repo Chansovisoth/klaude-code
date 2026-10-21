@@ -17,6 +17,7 @@ window.ChatMarkdown = (() => {
   let messageMenu = null;
   let menuState = null;
   const icons = {
+    close: ["m6 6 12 12M6 18 18 6"],
     copy: ["M9 9h11v11H9z", "M5 15H3V3h12v2"],
     check: ["m5 12 4 4L19 6"],
     speaker: ["M11 4 6 8H3v8h3l5 4V4Z", "M15 8a6 6 0 0 1 0 8", "M18 5a10 10 0 0 1 0 14"],
@@ -156,18 +157,16 @@ window.ChatMarkdown = (() => {
         // A native close event can arrive after another action reopened it.
         if (!actionDialog.open) { actionDialog.replaceChildren(); dialogOwner = null; }
       });
-      actionDialog.addEventListener("click", (event) => {
-        if (event.target !== actionDialog) return;
-        const bounds = actionDialog.getBoundingClientRect();
-        if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) actionDialog.close();
-      });
       document.body.append(actionDialog);
     }
     const heading = node("div", undefined, "dialog-heading");
     const name = node("h2", title);
     name.id = "message-dialog-title";
-    const close = node("button", "Close", "quiet");
+    const close = node("button", undefined, "icon-button quiet");
     close.type = "button";
+    close.setAttribute("aria-label", `Close ${title.toLowerCase()}`);
+    close.title = "Close";
+    close.append(icon("close"));
     close.addEventListener("click", () => actionDialog.close());
     heading.append(name, close);
     actionDialog.replaceChildren(heading);
@@ -557,6 +556,16 @@ window.ChatMarkdown = (() => {
     if (current.length) result.push(current);
     return result;
   }
+  function renderDocument(source) {
+    const body = node("div", undefined, "markdown-body");
+    const plain = () => { body.textContent = source; body.classList.add("message-plain"); };
+    try {
+      const parsed = groups(source);
+      if (!parsed) plain();
+      else for (const tokens of parsed) body.append(renderTokens(tokens));
+    } catch { plain(); }
+    return body;
+  }
   function protectedNode(element) {
     if (element.contains(document.activeElement)) return true;
     const selection = window.getSelection();
@@ -678,5 +687,6 @@ window.ChatMarkdown = (() => {
     if (dialogOwner && !dialogOwner.isConnected) actionDialog.close();
     if (menuState && !menuState.article.isConnected) closeMenu();
   }).observe(document.body, { childList: true, subtree: true });
-  return Object.freeze({ create, update, append, metadata, copyText, source: (article) => states.get(article)?.source || "" });
+  return Object.freeze({ create, update, append, metadata, copyText, highlight, renderDocument,
+    source: (article) => states.get(article)?.source || "" });
 })();

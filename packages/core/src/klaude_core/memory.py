@@ -224,14 +224,15 @@ class Memory:
                 session_id TEXT, ts REAL, role TEXT, content TEXT, model_content TEXT
             )"""
         )
-        turn_columns = {row[1] for row in self.db.execute("PRAGMA table_info(turns)").fetchall()}
-        if "model_content" not in turn_columns:
-            self.db.execute("ALTER TABLE turns ADD COLUMN model_content TEXT")
-        # Public file descriptors and small, decoded previews are independent of
-        # private model input. Keeping them on the dialogue row shares its lifecycle.
-        for column in ("attachments", "attachment_previews"):
-            if column not in turn_columns:
-                self.db.execute(f"ALTER TABLE turns ADD COLUMN {column} TEXT")
+        # A browser worker and terminal can open an older database together.
+        # Inspect and migrate under the same SQLite write transaction so neither
+        # uses a stale column list after another process publishes the migration.
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            turn_columns = {row[1] for row in self.db.execute("PRAGMA table_info(turns)")}
+            for column in ("model_content", "attachments", "attachment_previews"):
+                if column not in turn_columns:
+                    self.db.execute(f"ALTER TABLE turns ADD COLUMN {column} TEXT")
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -512,8 +513,15 @@ class Memory:
         """Process-local intent while an asynchronous preference save is unconfirmed."""
         self._auto_memory_override = enabled
 
-    def set_auto_memory(self, enabled: bool) -> None:
+    def set_auto_memory(self, enabled: bool, *, expected_enabled: bool | None = None) -> None:
         with self._db_lock, self.db:
+            if expected_enabled is not None:
+                self.db.execute("BEGIN IMMEDIATE")
+                row = self.db.execute(
+                    "SELECT value FROM settings WHERE key='auto_memory_enabled'"
+                ).fetchone()
+                if (not row or row[0] == "1") != expected_enabled:
+                    raise ValueError("Memory setting changed; reload before saving")
             self.db.execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                 ("auto_memory_enabled", "1" if enabled else "0"),
@@ -1380,11 +1388,28 @@ class Memory:
             return "Untitled session"
         return " ".join(_as_text(_decode_content(first[0])).split())[:160] or "Untitled session"
 
-    def rename_session(self, session_id: str, name: str) -> None:
+    def rename_session(
+        self, session_id: str, name: str, *, expected_name: str | None = None,
+        expected_workspace: str | None = None,
+    ) -> None:
         name = " ".join(name.split())
         if not name or len(name) > 160:
             raise ValueError("Session name must contain 1–160 characters.")
         with self._db_lock, self.db:
+            if expected_name is not None or expected_workspace is not None:
+                self.db.execute("BEGIN IMMEDIATE")
+            if expected_workspace is not None:
+                binding = self.db.execute(
+                    "SELECT path FROM application_workspace WHERE session_id=?", (session_id,),
+                ).fetchone()
+                if binding is None or binding[0] != expected_workspace:
+                    raise ValueError("Session workspace changed; reload before saving")
+            if expected_name is not None:
+                named = self.db.execute(
+                    "SELECT name FROM session_names WHERE session_id=?", (session_id,),
+                ).fetchone()
+                if (str(named[0]) if named else "") != expected_name:
+                    raise ValueError("Session name changed; review again")
             self.db.execute(
                 "INSERT OR REPLACE INTO session_names VALUES (?, ?)",
                 (session_id, name),
@@ -1559,6 +1584,7 @@ class Memory:
         for table in (
             "application_queue", "application_control", "application_workspace",
             "application_session_options", "application_streams", "application_decisions",
+            "application_activity",
         ):
             if table in tables:
                 self.db.execute(f"DELETE FROM {table} WHERE session_id=?", (session_id,))
@@ -1569,7 +1595,11 @@ class Memory:
                 "SELECT 1 FROM session_archive WHERE session_id=?", (session_id,)
             ).fetchone() is not None
 
-    def change_session_archive(self, session_id: str, operation: str) -> None:
+    def change_session_archive(
+        self, session_id: str, operation: str, *, expected_total_turns: int | None = None,
+        expected_last_row: int | None = None,
+        expected_workspace: str | None = None,
+    ) -> None:
         """Atomically archive/restore/delete, excluding active worker leases.
 
         Archive changes browsing visibility only. Turns, events, names and recall
@@ -1581,6 +1611,20 @@ class Memory:
         with self._db_lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
+                if expected_workspace is not None:
+                    binding = self.db.execute(
+                        "SELECT path FROM application_workspace WHERE session_id=?", (session_id,),
+                    ).fetchone()
+                    if binding is None or binding[0] != expected_workspace:
+                        raise ValueError("Session workspace changed; reload before saving")
+                if expected_total_turns is not None:
+                    actual = self.db.execute(
+                        "SELECT COUNT(*),COALESCE(MAX(rowid),0) FROM turns WHERE session_id=?",
+                        (session_id,),
+                    ).fetchone()
+                    if (actual[0] != expected_total_turns
+                            or expected_last_row is not None and actual[1] != expected_last_row):
+                        raise ValueError("Session changed; review the action again")
                 if not self.db.execute(
                     "SELECT 1 FROM turns WHERE session_id=? LIMIT 1", (session_id,)
                 ).fetchone():
@@ -1658,6 +1702,7 @@ class Memory:
             for table in (
                 "application_queue", "application_workspace", "application_control",
                 "application_streams", "application_session_options",
+                "application_activity",
             ):
                 if table in tables:
                     session_ids.extend(str(row[0]) for row in self.db.execute(

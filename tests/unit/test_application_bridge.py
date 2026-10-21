@@ -401,6 +401,8 @@ def test_cancel_pending_approval_cannot_run_tool(tmp_path) -> None:
         assert not app.decide(pending[0].id, "allow_once")
         events = await consumer
         assert (await handle.result()).state == "cancelled"
+        assert app.snapshot()["activity"]["lifecycle"] == "cancelled"
+        assert app.snapshot()["activity"]["label"] != "Done"
         assert all(event.kind != "tool.started" for event in events)
         assert await handle.join()
         await app.close()
@@ -460,10 +462,38 @@ def test_worker_does_not_block_async_loop_or_leak_provider_failure(tmp_path) -> 
         assert events[-1].kind == "turn.failed"
         assert all("secret" not in event.text for event in events)
         assert (await handle.result()).state == "failed"
+        assert app.snapshot()["activity"]["label"] == "Error"
         assert await handle.join()
         await app.close()
 
     asyncio.run(exercise())
+
+
+def test_recovered_tool_failure_and_direct_failure_have_distinct_task_outcomes(tmp_path):
+    def fail():
+        raise RuntimeError("Fixture operation failed")
+
+    async def exercise(root, *, direct):
+        root.mkdir()
+        tool = Tool("fixture_action", "Fixture action", {"type": "object", "properties": {}},
+                    fail, return_direct=direct)
+        app = _application(root, ScriptedRuntime([
+            _tool_call("fixture_action"), {"role": "assistant", "content": "Recovered response."},
+        ]), tools=[tool], permissions={"fixture_action": "allow"})
+        handle = app.submit("Use the fixture action")
+        events = await _collect(handle)
+        snapshot = app.snapshot()
+        finished = next(e for e in events if e.kind == "tool.finished")
+        assert finished.executed and finished.status == "failed"
+        assert any(row["kind"] == "tool.finished" and row["label"] == "Error"
+                   for row in snapshot["activity"]["timeline"])
+        assert snapshot["activity"]["label"] == ("Error" if direct else "Done")
+        assert (await handle.result()).state == ("partial" if direct else "completed")
+        assert snapshot["messages"][-1]["content"]
+        await app.close()
+
+    asyncio.run(exercise(tmp_path / "recovered", direct=False))
+    asyncio.run(exercise(tmp_path / "direct", direct=True))
 
 
 def test_stream_cancellation_closes_generator_and_worker(tmp_path) -> None:
@@ -612,3 +642,55 @@ def test_dirty_workspace_keeps_writes_disabled(tmp_path, monkeypatch) -> None:
 
     asyncio.run(exercise())
     assert not (tmp_path / "new.txt").exists()
+
+
+def test_approval_execution_and_reconnect_restore_exact_activity(tmp_path):
+    from klaude_application.coordination import DurableTurns
+
+    entered, release = threading.Event(), threading.Event()
+
+    def run_tests():
+        entered.set()
+        assert release.wait(5)
+        return "fixture operation finished"
+
+    tool = Tool("run_tests", "Fixture test operation", {"type": "object", "properties": {}},
+                run_tests)
+    app = _application(tmp_path, ScriptedRuntime([
+        _tool_call("run_tests"), {"role": "assistant", "content": "Finished the request."},
+    ]), tools=[tool], permissions={"run_tests": "ask"})
+
+    async def exercise():
+        handle = app.submit("Run the tests", request_id="activity")
+        try:
+            for _ in range(100):
+                pending = app.pending_interactions()
+                if pending and app.snapshot()["activity"]["label"] == "Needs input":
+                    break
+                await asyncio.sleep(.01)
+            assert app.snapshot()["activity"]["label"] == "Needs input"
+            assert not entered.is_set()
+            assert app.decide(pending[0].id, "allow_once")
+            assert entered.wait(2)
+            reader = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
+            try:
+                reconnected = DurableTurns(reader).snapshot(app.session_id)
+                assert reconnected["activity"]["label"] == "Running tests"
+                assert reconnected["activity"]["active_count"] == 1
+                assert reader.session_live_state(app.session_id)["activity"] == "Running tests"
+                events = app.replay(reconnected["cursor"])
+                assert not events
+            finally:
+                reader.db.close()
+            release.set()
+            events = await _collect(handle)
+            assert (await handle.result()).state == "completed"
+            assert app.snapshot()["activity"]["label"] == "Done"
+            history = app.snapshot()["activity"]["timeline"]
+            assert any(row["kind"] == "tool.finished" for row in history)
+            assert next(e for e in events if e.kind == "tool.started").activity == "Running tests"
+        finally:
+            release.set()
+            await app.close()
+
+    asyncio.run(exercise())

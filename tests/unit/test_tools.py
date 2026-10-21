@@ -47,6 +47,20 @@ def test_git_diff_tool_description_matches_worktree_diff(tmp_path):
     assert tools["git_diff"].description == "Show the current working-tree diff."
 
 
+def test_write_activity_observes_creation_and_overwrite_without_mutating_files(tmp_path):
+    from klaude_application.activity import Activity, classify_activity
+
+    (tmp_path / "existing.py").write_text("original\n")
+    tool = next(tool for tool in build_tools(Workspace(tmp_path)) if tool.name == "write_file")
+    for path, expected in (("existing.py", Activity.EDITING), ("new.py", Activity.WRITING_CODE),
+                           ("report.md", Activity.CREATING_FILES)):
+        args = {"path": path, "content": "new content"}
+        assert classify_activity(tool.name, args, tool.start_metadata(args)) == expected
+    assert (tmp_path / "existing.py").read_text() == "original\n"
+    assert not (tmp_path / "new.py").exists()
+    assert not (tmp_path / "report.md").exists()
+
+
 def test_read_file_can_page_later_lines_without_changing_default_output(tmp_path):
     source = tmp_path / "long.py"
     source.write_text("".join(f"line {number}\n" for number in range(1, 301)))

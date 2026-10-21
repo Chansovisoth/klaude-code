@@ -8,6 +8,7 @@ from klaude_core import Agent
 from klaude_core.memory import Memory
 from klaude_core.session_runtime import capture
 
+from .contracts import PublicEvent
 from .coordination import DurableTurns, LeaseLost
 
 
@@ -116,6 +117,13 @@ class SessionTurn:
         else:
             self.memory.log_turn(
                 self.session_id, "assistant", content, model_content=model_content,
+            )
+
+    def publish_execution(self, event: PublicEvent) -> None:
+        """Mirror terminal execution through the existing fenced public journal."""
+        if self.journal is not None and self.started and self.fence is not None:
+            self.journal.append_public(
+                self.session_id, self.turn_id, self.client_id, self.fence, event,
             )
 
     def release(

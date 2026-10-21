@@ -1,6 +1,6 @@
 """Private image snapshots and a provider-neutral chat image contract.
 
-History stores bounded Media references, never base64 pixels. Only the request
+History stores bounded artifact references, never base64 pixels. Only the request
 projection materializes pixels for an enabled, verified, approved endpoint.
 """
 
@@ -50,7 +50,7 @@ def references(value: object) -> list[dict[str, Any]]:
             or set(item) - {"id", "sha256", "mime", "width", "height", "name", "scope", "options"}
             or not isinstance(item["id"], str)
             or not ID.fullmatch(item["id"])
-            or not item["id"].startswith("media:")
+            or not item["id"].startswith(("media:", "document:"))
             or not isinstance(item["sha256"], str)
             or not re.fullmatch(r"[a-f0-9]{64}", item["sha256"])
             or not isinstance(item["scope"], str)
@@ -147,6 +147,7 @@ class AttachmentPath(Path):
     _flavour = getattr(type(Path()), "_flavour", None)
     image_options: dict[str, Any]
     stored_id = ""
+    source_sha256 = ""
 
     def __new__(cls, path: Path, options: dict | None = None):
         result = super().__new__(cls, path)
@@ -447,19 +448,22 @@ class ChatImages:
                 raise ValueError("Choose a current image source up to 32 MiB")
             with self.store.database() as db:
                 row = db.execute(
-                    "SELECT content FROM artifacts WHERE id=?", (stored_id,)
+                    "SELECT substr(content,1,?) FROM artifacts WHERE id=?",
+                    (maximum + 1, stored_id),
                 ).fetchone()
             data = bytes(row[0]) if row else b""
-            if hashlib.sha256(data).hexdigest() != item["sha256"]:
+            if len(data) != item["size"] or hashlib.sha256(data).hexdigest() != item["sha256"]:
                 raise ValueError("Stored image checksum failed")
         else:
             data = read_file(path, maximum + 1)
         if len(data) > maximum:
             raise ValueError(f"Chat images must fit in {maximum:,} bytes for this provider")
+        digest = hashlib.sha256(data).hexdigest()
+        if getattr(path, "source_sha256", "") not in {"", digest}:
+            raise ValueError("Library file changed; choose the attachment again")
         metadata, _ = prepare_image(data, **options, cancelled=self.agent.cancellation_check)
         mime, _, _ = image_header(data[:65536])
         width, height = metadata["source_width"], metadata["source_height"]
-        digest = hashlib.sha256(data).hexdigest()
         if not stored_id:
             item = self.snapshot(data, path, session, digest)
         return {
@@ -543,7 +547,7 @@ class ChatImages:
         item = self.store.get(ref["id"])
         if item["size"] > MAX_SOURCE_BYTES or item["sha256"] != ref["sha256"]:
             raise ValueError("Stored chat image changed or exceeds its size bound")
-        if item["mime"] != ref["mime"]:
+        if item["kind"] == "media" and item["mime"] != ref["mime"]:
             raise ValueError("Stored chat image metadata changed")
         with self.store.database() as db:
             data = db.execute(
@@ -556,6 +560,8 @@ class ChatImages:
             or hashlib.sha256(data[0]).hexdigest() != ref["sha256"]
         ):
             raise ValueError("Stored chat image checksum failed")
+        if image_header(bytes(data[0][:65536]))[0] != ref["mime"]:
+            raise ValueError("Stored chat image metadata changed")
         options = ref.get("options", {})
         info = self.agent.model_info
         source_size = (options.get("crop") or [0, 0, ref["width"], ref["height"]])[2:]

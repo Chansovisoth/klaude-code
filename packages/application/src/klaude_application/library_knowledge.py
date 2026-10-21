@@ -13,6 +13,7 @@ from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
 from klaude_core.fetch_settings import public_fetch_settings
+from klaude_core.library_artifacts import ID as ARTIFACT_ID
 from klaude_core.library_artifacts import regular_path
 
 from .library_inventory import public_text
@@ -30,12 +31,12 @@ class KnowledgeRequestError(ValueError):
 class KnowledgeAction:
     """Reviewed user intent; worker roots and credentials are supplied separately."""
 
-    operation: Literal["learn", "learn-report", "query", "refresh"]
+    operation: Literal["learn", "learn-report", "learn-artifact", "query", "refresh"]
     library: str
     source: str = ""
     query: str = ""
     artifact: str = ""
-    revision: str = ""
+    revision: str | int = ""
     source_identity: str = ""
 
     @classmethod
@@ -44,7 +45,7 @@ class KnowledgeAction:
             raise KnowledgeRequestError("Invalid Knowledge request")
         operation = draft.get("operation")
         if not isinstance(operation, str) or operation not in {
-            "learn", "learn-report", "query", "refresh"
+            "learn", "learn-report", "learn-artifact", "query", "refresh"
         }:
             raise KnowledgeRequestError("Unknown Knowledge operation")
         raw_library = draft.get("library", "")
@@ -54,6 +55,7 @@ class KnowledgeAction:
         allowed = {
             "learn": {"operation", "library", "source"},
             "learn-report": {"operation", "library", "source", "artifact", "revision"},
+            "learn-artifact": {"operation", "library", "artifact", "revision"},
             "query": {"operation", "library", "query"},
             "refresh": {"operation", "library", "source", "source_identity"},
         }[operation]
@@ -85,20 +87,25 @@ class KnowledgeAction:
             or not 1 <= len(revision) <= 128 or not revision.isprintable()
         ):
             raise KnowledgeRequestError("Report changed; reload before learning it")
+        if operation == "learn-artifact" and (
+            not isinstance(artifact, str) or not ARTIFACT_ID.fullmatch(artifact)
+            or type(revision) is not int or revision < 1
+        ):
+            raise KnowledgeRequestError("File changed; reload before learning it")
         return cls(
-            cast(Literal["learn", "learn-report", "query", "refresh"], operation),
+            cast(Literal["learn", "learn-report", "learn-artifact", "query", "refresh"], operation),
             library, source, query, artifact, revision, source_identity,
         )
 
-    def worker_fields(self) -> dict[str, str]:
-        fields = {"operation": self.operation, "library": self.library}
+    def worker_fields(self) -> dict[str, Any]:
+        fields: dict[str, Any] = {"operation": self.operation, "library": self.library}
         if self.operation in {"learn", "refresh"}:
             fields["source"] = self.source
         if self.operation == "refresh":
             fields["source_identity"] = self.source_identity
         if self.operation == "query":
             fields["query"] = self.query
-        if self.operation == "learn-report":
+        if self.operation in {"learn-report", "learn-artifact"}:
             fields["artifact"] = self.artifact
             fields["revision"] = self.revision
         return fields
@@ -154,6 +161,45 @@ def library_name(value: str) -> str:
             "Use a library name of 1–80 printable characters without slashes"
         )
     return value
+
+
+def artifact_text(data_dir: Path, identity: str, revision: int) -> tuple[str, str]:
+    """Read one reviewed Library revision with bounded bytes and checksum checks."""
+    from klaude_core.library_artifacts import ArtifactStore
+
+    store = ArtifactStore(data_dir / "library")
+    item = store.get(identity)
+    with store.database() as db:
+        db.execute("BEGIN")
+        row = db.execute("SELECT rowid,revision,archived,size,sha256 FROM artifacts WHERE id=?",
+                         (identity,)).fetchone()
+        if (row is None or row["revision"] != revision or item["revision"] != revision
+                or row["archived"] or row["size"] > MAX_SOURCE_BYTES
+                or item["sha256"] != row["sha256"]):
+            raise KnowledgeRequestError(
+                "Choose a saved file of at most 2 MiB at its current revision"
+            )
+        with db.blobopen("artifacts", "content", row["rowid"], readonly=True) as blob:
+            payload = blob.read(MAX_SOURCE_BYTES + 1)
+        if len(payload) != row["size"] or hashlib.sha256(payload).hexdigest() != row["sha256"]:
+            raise KnowledgeRequestError("Stored file checksum failed; no text was indexed")
+    suffix = Path(item["filename"]).suffix.lower()
+    if suffix in {".pdf", ".docx"}:
+        from .chat_attachments import extract_document
+
+        text, truncated = extract_document(payload, suffix, lambda: False)
+        if truncated:
+            raise KnowledgeRequestError(
+                "Document exceeds 32,000 extracted characters; split it first"
+            )
+    else:
+        try:
+            text = payload.decode("utf-8-sig")
+        except UnicodeError:
+            raise KnowledgeRequestError("Choose UTF-8 text, PDF or DOCX") from None
+    if "\0" in text or not text.strip():
+        raise KnowledgeRequestError("The file contains no readable text")
+    return text, item["name"]
 
 
 def read_text_file(path: Path, limit: int = MAX_SOURCE_BYTES) -> tuple[str, bytes]:
@@ -322,8 +368,13 @@ def run_operation(request: dict[str, Any]) -> dict[str, Any]:
                         for hit in hits[:6]
                     ],
                 }
-            if operation in {"learn", "learn-report"}:
-                if operation == "learn-report":
+            if operation in {"learn", "learn-report", "learn-artifact"}:
+                if operation == "learn-artifact":
+                    text, title = artifact_text(
+                        cfg.data_dir, request["artifact"], request["revision"]
+                    )
+                    source = "artifact:" + request["artifact"]
+                elif operation == "learn-report":
                     from klaude_core.library_artifacts import ArtifactStore
 
                     store = ArtifactStore(cfg.data_dir / "library")
@@ -343,7 +394,7 @@ def run_operation(request: dict[str, Any]) -> dict[str, Any]:
                     )
                 else:
                     source = str(request["source"])
-                if operation == "learn-report":
+                if operation in {"learn-report", "learn-artifact"}:
                     pass
                 elif source.startswith(("http://", "https://")):
                     source = canonicalize_public_url(source)

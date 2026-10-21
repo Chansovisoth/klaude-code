@@ -463,3 +463,52 @@ or explicitly; decoded pixels are cached only in the host's bounded private memo
   `/tmp/klaude-checkpoint-package.log`.
 - No new dependencies or lockfile changes. Physical-device, Safari and full
   screen-reader/accessibility testing remain outside this checkpoint's evidence.
+
+## Text and code preview controls
+
+The source-layout and whitespace refinements in
+[`file-preview-refinement.md`](file-preview-refinement.md) supersede the initial
+text-control implementation described below. The optional authenticated source
+projection preserves tabs and line endings; terminal/legacy-host lines retain
+their original normalization. See that report for current browser evidence.
+
+Readable text/code files now offer **Wrap**, **No wrap** and **Copy** in the fixed
+preview toolbar. Wrap is selected when a preview opens. No wrap preserves line
+layout and scrolls long lines horizontally within the preview; switching back to
+Wrap resets horizontal scrolling. The code font and text color use the existing
+theme roles.
+
+Copy writes the exact displayed preview text, preserving spaces, line breaks and
+Unicode. It shows a checkmark, **Copied** feedback and an accessible status, and
+retains keyboard focus while preventing overlapping copy requests. The existing
+clipboard helper supports the HTTP/LAN selection fallback. Copy uses the bounded
+preview; the truncation notice and Download link identify how to get a complete
+file. These controls are cleared while loading, on close and for image/binary
+previews. Reload the browser page to load the updated static assets.
+
+Validation: the real Chrome Library browser smoke passed its existing navigation,
+image and reviewed-action checks plus 16 text-preview wrap/theme/width states at
+1440, 768, 390 and 320px. It verified contained horizontal scrolling, matching theme
+text colors, exact Unicode/indentation copying through the clipboard API and real
+HTTP fallback, retained Copy focus, default reset on reopen, literal HTML, and
+hidden controls for image/binary previews. There were zero browser exceptions.
+Scoped Ruff, JavaScript syntax and `git diff --check` passed. This is browser-fixture
+validation, not the full unit suite or physical-device coverage. Evidence:
+`/tmp/klaude-code-preview-smoke.json` and
+`/tmp/klaude-library-browser-preview/code-{wrap,no-wrap}-{light,dark}-{1440,320}.png`.
+
+### Generated filter visibility
+
+Removed the Generated-only rule that hid the filter dropdowns on wide content.
+Generated now matches Uploads: Type, Status and Sort appear inline at the existing
+650px content breakpoint; compact layouts expose them through Filters and sort.
+The Create plus button remains beside the toolbar controls.
+
+`KLAUDE_TEST_GENERATED_FILTERS_ONLY=1 .venv/bin/python
+scripts/webui_library_browser_smoke.py` passed with real generated image/report
+fixtures at 320/390/768/1440px. It checked visible, enabled controls, Documents and
+Media inventories, descending name order and no horizontal page overflow, with
+zero JavaScript exceptions. Phone and desktop screenshots were visually checked:
+`/tmp/klaude-library-browser-preview/generated-filters-{390,1440}.png`.
+Focused Ruff, Python compilation and `git diff --check` passed. This records the
+focused filter run; no new full browser or repository suite pass is claimed.

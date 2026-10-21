@@ -4,7 +4,7 @@
 // knowledge snippets are always DOM text; downloaded documents never execute.
 let librarySection = readNavigationChoice("library-section",
   ["files", "outputs", "knowledge", "document", "research", "media", "archive"], "files");
-let integrationSection = readNavigationChoice("integration-section", ["skills", "knowledge"], "skills");
+let integrationSection = readNavigationChoice("integration-section", ["skills", "knowledge", "connections"], "skills");
 if (librarySection === "knowledge") {
   librarySection = "files"; integrationSection = "knowledge";
   saveNavigationChoice("library-section", librarySection);
@@ -73,6 +73,7 @@ let knowledgeLocationPage = null;
 let sourceLocationPage = null;
 let sourceOffset = 0;
 let skillsOffset = 0;
+let skillsLocationPage = null;
 let knowledgeQuery = "";
 const LIBRARY_PAGE_SIZE = 20;
 const domainPageSizes = { library: 24, knowledge: 20, sources: 20, skills: 20 };
@@ -86,7 +87,15 @@ let artifactRead = null;
 let tabCountsLoad = 0;
 let legacyTabCounts = false;
 let skillsSearchTimer = null;
+let knowledgeSearchTimer = null;
+let fileSearchTimer = null;
+let skillsRead = null;
 let installedSkills = [];
+let detailSkill = null;
+let skillReviewPending = false;
+const skillChanges = new Map();
+const skillFailures = new Map();
+const domainRefreshes = new Map();
 let selectedArtifact = null;
 let managementReview = null;
 let operationSignature = null;
@@ -94,6 +103,15 @@ let operationPollBusy = false;
 const reviewDialog = byId("domain-review");
 const artifactDialog = byId("artifact-detail");
 const importDialog = byId("artifact-import-panel");
+const integrationAddDialog = byId("integration-add-panel");
+let integrationAddGeneration = 0;
+let integrationAddSection = null;
+const integrationAddForms = {
+  skills: { form: "skill-import", title: "Import a Skill" },
+  knowledge: { form: "knowledge-learn", title: "Add to Knowledge" },
+  connections: { form: "connection-add", title: "Add an MCP connection" },
+};
+const skillDialog = byId("skill-detail");
 let importGeneration = 0;
 const legacyPageRoutes = new Set();
 const compactDomainPages = window.matchMedia("(max-width: 560px)");
@@ -110,7 +128,67 @@ function domainButton(label, action, className = "quiet") {
   button.addEventListener("click", action);
   return button;
 }
+function reconcileRows(container, rows) {
+  const previous = new Map([...container.children].map(row => [row.dataset.rowKey, row]));
+  const keep = new Set();
+  rows.forEach((row, index) => {
+    const old = previous.get(row.dataset.rowKey);
+    const next = old?.dataset.rowSignature === row.dataset.rowSignature ? old : row;
+    keep.add(next);
+    if (container.children[index] !== next) container.insertBefore(next, container.children[index] || null);
+  });
+  for (const row of [...container.children]) if (!keep.has(row)) row.remove();
+}
+function collectionEmpty(container, title, description, icon = "file") {
+  const empty = domainText("section", "", "collection-empty");
+  empty.append(libraryIcon(icon), domainText("h2", title), domainText("p", description, "muted"));
+  container.replaceChildren(empty);
+}
+function collectionRow(key, title, metadata, icon, action, signature) {
+  const row = domainText("article", "", "library-card collection-row");
+  row.dataset.rowKey = key;
+  row.dataset.rowSignature = signature;
+  const open = domainButton("", action, "collection-open");
+  open.setAttribute("aria-description", metadata);
+  const artwork = domainText("span", "", "collection-icon");
+  artwork.append(libraryIcon(icon));
+  const text = domainText("span", "", "collection-content");
+  const name = domainText("span", title, "collection-title"); name.title = title;
+  text.append(name, domainText("span", metadata, "collection-metadata"));
+  open.append(artwork, text, libraryIcon("next"));
+  row.append(open);
+  return row;
+}
+function countLabel(count, singular) {
+  return count == null ? `${singular[0].toUpperCase() + singular.slice(1)} count unavailable` :
+    `${count.toLocaleString()} ${singular}${count === 1 ? "" : "s"}`;
+}
+async function refreshDomain(prefix) {
+  if (domainRefreshes.has(prefix)) return;
+  const button = byId(prefix === "library" ? "library-refresh" : "skills-refresh");
+  const token = { timer: null, indicator: null };
+  domainRefreshes.set(prefix, token);
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  token.timer = setTimeout(() => {
+    if (domainRefreshes.get(prefix) !== token || !window.MaterialLoading) return;
+    token.indicator = MaterialLoading.create({ size: "small" });
+    button.prepend(token.indicator);
+  }, 120);
+  if (prefix === "library") { clearTimeout(fileSearchTimer); filePages.clear(); artifactDetails.clear(); }
+  try {
+    await Promise.allSettled([prefix === "library" ? loadLibrary() : loadIntegrationSection(), loadTabCounts()]);
+  } finally {
+    clearTimeout(token.timer); token.indicator?.remove();
+    if (domainRefreshes.get(prefix) === token) {
+      domainRefreshes.delete(prefix);
+      button.disabled = false;
+      button.setAttribute("aria-busy", "false");
+    }
+  }
+}
 function activeDomainStatus() {
+  if (currentView === "settings") return "memory-status";
   return currentView === "integrations" ? `${integrationSection}-status` : "library-status";
 }
 function domainError(error, target = activeDomainStatus()) {
@@ -376,15 +454,36 @@ const fileIconPaths = {
   expand: "M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5",
   search: "M15 15a7 7 0 1 1 0-10 7 7 0 0 1 0 10Zm0 0 6 6",
   options: "M4 7h16M4 17h16M8 4v6m8 4v6",
+  disclosure: "M8.7 4.8a1.5 1.5 0 0 0-2.3 1.3v11.8a1.5 1.5 0 0 0 2.3 1.3l9.4-5.9a1.5 1.5 0 0 0 0-2.6L8.7 4.8Z",
   close: "m6 6 12 12M6 18 18 6",
   more: "M12 4a1 1 0 1 0 0 2 1 1 0 0 0 0-2M12 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2M12 18a1 1 0 1 0 0 2 1 1 0 0 0 0-2",
   download: "M12 3v12m-5-5 5 5 5-5M4 17v4h16v-4",
+  copy: "M9 9h11v11H9ZM5 15H3V3h12v2", check: "m5 12 4 4L19 6",
+  laptop: "M4 4h16v12H4ZM4 16l-2 4h20l-2-4M9 18h6",
+  smartphone: "M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2ZM10 5h4M11 19h2",
   fit: "M3 9V3h6m6 0h6v6M3 15v6h6m6 0h6v-6M8 8h8v8H8z",
   plus: "M12 5v14M5 12h14", minus: "M5 12h14",
+  link: "M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-2 2M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l2-2",
+  sparkles: "m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3ZM20 2v4m-2-2h4",
   info: "M12 16v-4m0-4h.01M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z",
   trash: "M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7",
+  knowledge: "M12 5C8 2 4 3 2 4v15c4-2 7-1 10 1 3-2 6-3 10-1V4c-2-1-6-2-10 1Zm0 0v15",
+  skill: "M4 8h4V5a2 2 0 0 1 4 0v3h6v4h2a2 2 0 0 1 0 4h-2v5H4v-5h2a2 2 0 0 0 0-4H4V8Z",
+  connection: "M8 3v5m8-5v5M6 8h12v4a6 6 0 0 1-12 0V8Zm6 10v3",
+  account: "M20 21v-2a8 8 0 0 0-16 0v2M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z",
+  chat: "M4 4h16v12H8l-4 4V4ZM8 8h8M8 12h5",
+  vision: "M2 12s3-7 10-7 10 7 10 7-3 7-10 7S2 12 2 12ZM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
+  theme: "M12 3a9 9 0 0 0 0 18h1a2.5 2.5 0 0 0 0-5h-.5a1.5 1.5 0 0 1 0-3H17a4 4 0 0 0 4-4c0-3.3-4-6-9-6ZM7 10h.01M9 6.5h.01M14 6.5h.01M17 9h.01",
+  agent: "M12 3v4M5 7h14v13H5ZM2 11v5m20-5v5M9 11h.01M15 11h.01M9 16h6",
+  models: "m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5",
+  clock: "M12 7v5l3 2M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z",
+  memory: "M12 18V5M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5M17.997 5.125a4 4 0 0 1 2.526 5.77M18 18a4 4 0 0 0 2-7.464M20.303 16.369A4 4 0 1 1 12 18M6.003 5.125a4 4 0 0 0-2.526 5.77M6 18a4 4 0 0 1-2-7.464M3.697 16.369A4 4 0 1 0 12 18",
+  tools: "m14 6 4 4 3-3a6 6 0 0 1-8 7L6 21l-3-3 7-7a6 6 0 0 1 7-8l-3 3Z",
+  shield: "M12 3 3 7v5c0 5 9 10 9 10s9-5 9-10V7l-9-4Zm-4 9 3 3 5-6",
+  web: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM3 12h18M12 3a18 18 0 0 0 0 18 18 18 0 0 0 0-18Z",
 };
 function libraryIcon(type) {
+  if (type === "refresh") return byId("refresh-sessions").querySelector("svg").cloneNode(true);
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("class", "icon");
@@ -398,6 +497,18 @@ function libraryIcon(type) {
   path.setAttribute("d", fileIconPaths[type] || fileIconPaths.file);
   svg.append(path);
   return svg;
+}
+function decorateDisclosure(summary) {
+  if (summary.classList.contains("rounded-disclosure")) return summary;
+  summary.classList.add("rounded-disclosure");
+  const icon = libraryIcon("disclosure"); icon.classList.add("disclosure-indicator");
+  summary.prepend(icon);
+  return summary;
+}
+for (const summary of document.querySelectorAll("details:not(.model-menu, .agent-activity) > summary")) decorateDisclosure(summary);
+for (const button of document.querySelectorAll("[data-refresh-icon]")) button.append(libraryIcon("refresh"));
+for (const node of document.querySelectorAll("#settings-sections [data-settings], #settings-view [data-settings-icon]")) {
+  node.prepend(libraryIcon(node.dataset.settingsIcon || node.dataset.settings));
 }
 function fileType(item) {
   const extension = item.filename.split(".").pop().toLowerCase();
@@ -464,9 +575,10 @@ function restoreLibraryLocation() {
 function rememberLibraryLocation(replace = false) {
   if (!authenticated || currentView !== "library") return;
   const url = new URL(location.href);
+  url.searchParams.delete("view");
   url.searchParams.delete("session"); url.searchParams.delete("message");
   for (const key of [...url.searchParams.keys()])
-    if (key === "integrations" || key.startsWith("knowledge-") || key === "sources-page") url.searchParams.delete(key);
+    if (["integrations", "settings", "sources-page"].includes(key) || key.startsWith("knowledge-") || key.startsWith("skills-")) url.searchParams.delete(key);
   url.searchParams.set("library", librarySection);
   const state = { "files-view": fileView, "files-type": fileKind, "files-status": fileStatus,
     "files-sort": byId("artifact-sort").value, "files-q": byId("artifact-query").value,
@@ -485,8 +597,14 @@ function rememberLibraryLocation(replace = false) {
 function restoreIntegrationLocation() {
   const query = new URLSearchParams(location.search);
   if (query.get("library") === "knowledge") integrationSection = "knowledge";
-  else if (["skills", "knowledge"].includes(query.get("integrations"))) integrationSection = query.get("integrations");
+  else if (["skills", "knowledge", "connections"].includes(query.get("integrations"))) integrationSection = query.get("integrations");
   else return;
+  if (integrationSection === "skills") {
+    byId("skills-query").value = (query.get("skills-q") || "").slice(0, 200);
+    const page = Number(query.get("skills-page") || 1);
+    skillsLocationPage = Number.isSafeInteger(page) && page > 0 && page <= 50001 ? page : 1;
+    return;
+  }
   if (integrationSection !== "knowledge") return;
   const library = (query.get("knowledge-library") || "").slice(0, 80);
   const select = byId("knowledge-library");
@@ -506,33 +624,42 @@ function rememberIntegrationLocation(replace = false) {
   if (!authenticated || currentView !== "integrations") return;
   saveNavigationChoice("integration-section", integrationSection);
   const url = new URL(location.href);
+  url.searchParams.delete("view");
   url.searchParams.delete("session"); url.searchParams.delete("message");
   for (const key of [...url.searchParams.keys()])
-    if (key === "library" || key.startsWith("files-") || key.startsWith("knowledge-") || key === "sources-page") url.searchParams.delete(key);
+    if (["library", "settings", "sources-page"].includes(key) || key.startsWith("files-") || key.startsWith("knowledge-") || key.startsWith("skills-")) url.searchParams.delete(key);
   url.searchParams.set("integrations", integrationSection);
   if (integrationSection === "knowledge") {
     const state = { "knowledge-library": byId("knowledge-library").value,
       "knowledge-q": knowledgeQuery, "knowledge-page": String(knowledgeLocationPage ?? Math.floor(knowledgeOffset / domainPageSizes.knowledge) + 1),
       "sources-page": String(sourceLocationPage ?? Math.floor(sourceOffset / domainPageSizes.sources) + 1) };
     for (const [key, value] of Object.entries(state)) if (value) url.searchParams.set(key, value);
+  } else if (integrationSection === "skills") {
+    const query = byId("skills-query").value;
+    if (query) url.searchParams.set("skills-q", query);
+    url.searchParams.set("skills-page", String(skillsLocationPage ?? Math.floor(skillsOffset / domainPageSizes.skills) + 1));
   }
   const next = url.pathname + url.search;
   if (next !== location.pathname + location.search) history[replace ? "replaceState" : "pushState"](history.state, "", next);
 }
 function renderIntegrationSection() {
+  if (integrationAddDialog.open && integrationAddSection !== integrationSection) integrationAddDialog.close();
   byId("skills-panel").hidden = integrationSection !== "skills";
   byId("knowledge-panel").hidden = integrationSection !== "knowledge";
+  byId("connections-panel").hidden = integrationSection !== "connections";
   for (const button of byId("integration-sections").querySelectorAll("[data-integration]"))
     button.setAttribute("aria-pressed", String(button.dataset.integration === integrationSection));
 }
 function loadIntegrationSection() {
   renderIntegrationSection();
-  if (integrationSection === "knowledge") loadKnowledge(); else loadSkills();
+  if (integrationSection === "connections") return window.BrowserManagement?.loadConnections();
+  return integrationSection === "knowledge" ? loadKnowledge() : loadSkills();
 }
 function stopIntegrationReads() {
-  knowledgeRead?.abort(); sourceRead?.abort();
+  knowledgeRead?.abort(); sourceRead?.abort(); skillsRead?.abort();
   knowledgeLoad += 1; sourcesLoad += 1; skillsLoad += 1;
   clearTimeout(skillsSearchTimer);
+  clearTimeout(knowledgeSearchTimer);
   for (const id of ["knowledge-items", "source-items", "skill-items"]) cancelLoading(byId(id));
 }
 function renderFileToolbar() {
@@ -543,11 +670,13 @@ function renderFileToolbar() {
   options.setAttribute("aria-description", sortLabel);
   const crumbs = byId("file-breadcrumbs");
   const outputs = librarySection === "outputs";
+  byId("generated-tools").hidden = !outputs;
+  if (outputs) window.BrowserManagement?.loadJobs();
   byId("file-add").hidden = outputs;
+  byId("image-add").hidden = !outputs;
+  if (!outputs) byId("image-generate-panel").close();
   byId("artifact-query").placeholder = outputs ? "Search generated files…" : "Search uploads…";
   byId("artifact-filter").querySelector(".file-search-label span").textContent = outputs ? "Find generated files" : "Find uploads";
-  byId("file-search-submit").setAttribute("aria-label", outputs ? "Search generated files" : "Search uploads");
-  byId("file-search-submit").title = outputs ? "Search generated files" : "Search uploads";
   const root = domainButton("Library", () => {
     fileKind = "all"; fileStatus = "saved"; libraryOffset = 0;
     byId("artifact-kind").value = "all"; byId("artifact-status").value = "saved";
@@ -642,6 +771,7 @@ function renderFileItems(data) {
 }
 
 async function loadLibrary() {
+  clearTimeout(fileSearchTimer);
   if (latest && latest.library_images !== true) {
     if (fileView === "gallery") fileView = "grid";
     if (!["newest", "oldest", "name"].includes(byId("artifact-sort").value))
@@ -677,21 +807,30 @@ async function loadLibrary() {
       return loadLibrary();
     }
     renderFileItems(data);
-    let emptyMessage = data.items.length ? "" :
-      byId("artifact-query").value ? "No files match this search and filters." : fileStatus === "archived" ?
-        "No archived files match this type." : librarySection === "outputs" ?
-          "No generated files match this type. Research reports and generated images created in the CLI appear here." : "No uploads match this type. Add a file to get started.";
-    if (fileView === "gallery") emptyMessage = data.items.length ?
-      "" : "No supported images match this search and filters.";
-    if (section === "outputs" && emptyMessage) {
-      const empty = domainText("p", emptyMessage, "domain-status library-empty");
-      empty.setAttribute("role", "status");
-      grid.replaceChildren(empty);
-    } else byId("library-status").textContent = emptyMessage;
+    const searching = Boolean(byId("artifact-query").value.trim());
+    const filtered = fileKind !== "all" || fileStatus !== "saved";
+    const title = searching ? "No files match this search" : filtered ? "No files match these filters" :
+      fileView === "gallery" ? "No images yet" : section === "outputs" ? "No generated files yet" : "No uploads yet";
+    if (!data.items.length) {
+      collectionEmpty(grid, title, searching || filtered ?
+        "Try another search or change the type and status filters." : fileView === "gallery" ?
+          "Supported images appear here. Try List or Grid to see other files." : section === "outputs" ?
+            "Research reports and generated images created in the CLI appear here." : "Add a file to get started.",
+        fileView === "gallery" ? "image" : "file");
+      grid.firstChild.classList.add("library-empty");
+      grid.firstChild.setAttribute("role", "status");
+    }
+    byId("library-status").textContent = "";
     updateDomainPager("library", offset, data);
     grid.dataset.contentKey = key;
     rememberLibraryLocation(true);
-  } catch (error) { if (load === libraryLoad) domainError(error); }
+  } catch (error) {
+    if (load === libraryLoad && error.name !== "AbortError") {
+      finish();
+      if (!grid.children.length) collectionEmpty(grid, "Files could not be loaded", "Use Refresh to try again.");
+      domainError(error);
+    }
+  }
   finally { finish(); }
 }
 
@@ -711,7 +850,7 @@ async function loadKnowledge() {
   if (grid.dataset.contentKey !== key) byId("knowledge-pages").hidden = true;
   if (byId("source-items").dataset.library !== byId("knowledge-library").value)
     byId("knowledge-sources").hidden = true;
-  const finish = beginLoading(grid, { kind: "cards", count: Math.min(6, pageSize),
+  const finish = beginLoading(grid, { kind: "rows", count: Math.min(6, pageSize),
     preserve: grid.dataset.contentKey === key, label: "Loading Knowledge…" });
   byId("knowledge-status").textContent = "";
   try {
@@ -750,17 +889,20 @@ async function loadKnowledge() {
       const option = domainText("option", item.id);
       option.value = item.id;
       byId("knowledge-library").append(option);
-      const card = domainText("article", "", "library-card knowledge-card");
-      card.append(domainText("span", "KNOWLEDGE", "eyebrow"), domainText("h2", item.id),
-        domainText("p", `${item.sources ?? "Unknown"} sources · ${item.chunks ?? "Unknown"} chunks`, "muted"),
-        domainButton("Explore library", () => {
+      const card = collectionRow(item.id, item.id,
+        `${countLabel(item.sources, "source")} · ${countLabel(item.chunks, "chunk")}`, "knowledge", () => {
           byId("knowledge-library").value = item.id;
           byId("learn-library").value = item.id;
           byId("knowledge-query").focus();
           sourceOffset = 0;
+          for (const row of grid.querySelectorAll(".collection-open")) row.setAttribute("aria-pressed", String(row === card.firstChild));
           rememberIntegrationLocation();
           loadKnowledgeSources().catch((error) => domainError(error));
-        }));
+        }, JSON.stringify(item));
+      card.classList.add("knowledge-card");
+      card.firstChild.setAttribute("aria-label", `Explore library ${item.id}`);
+      card.firstChild.setAttribute("aria-pressed", String(previous === item.id));
+      card.dataset.rowSignature += ":" + String(previous === item.id);
       nodes.push(card);
     }
     if (previous && !data.items.some((item) => item.id === previous)) {
@@ -769,11 +911,12 @@ async function loadKnowledge() {
       byId("knowledge-library").append(option);
     }
     byId("knowledge-library").value = previous;
-    byId("knowledge-items").replaceChildren(...nodes);
+    reconcileRows(grid, nodes);
     updateDomainPager("knowledge", offset, data);
     byId("knowledge-status").textContent = data.items.length ?
       data.limited ? "Inventory limited to 1,000." : "" :
       "No knowledge yet. Learn a URL or text file to create your first library.";
+    if (!data.items.length) collectionEmpty(grid, "No knowledge yet", "Learn a URL or text file to create your first library.", "knowledge");
     grid.dataset.contentKey = key;
     rememberIntegrationLocation(true);
     finish();
@@ -782,12 +925,177 @@ async function loadKnowledge() {
   finally { finish(); }
 }
 
+function sourceLanguage(item) {
+  const extension = item.filename.split(".").pop().toLowerCase();
+  return ({ html: "html", htm: "html", xml: "xml", svg: "xml", css: "css",
+    js: "js", mjs: "js", cjs: "js", ts: "ts", py: "py", json: "json",
+    sh: "sh", bash: "bash", sql: "sql", yml: "yaml", yaml: "yaml", toml: "toml",
+    diff: "diff", patch: "diff", md: "markdown", markdown: "markdown" })[extension] || "text";
+}
+function numberedSource(source, language) {
+  const pre = domainText("pre", "", "artifact-text");
+  const code = domainText("code", "", "source-code");
+  const highlighted = document.createElement("code");
+  if (window.ChatMarkdown?.highlight) ChatMarkdown.highlight(highlighted, source, language);
+  else highlighted.textContent = source;
+  let line, number = 0;
+  const nextLine = () => {
+    const row = domainText("span", "", "source-line");
+    const gutter = domainText("span", "", "source-line-number");
+    gutter.dataset.number = String(++number); gutter.setAttribute("aria-hidden", "true");
+    line = domainText("span", "", "source-line-text");
+    row.append(gutter, line); code.append(row);
+  };
+  nextLine();
+  const walker = document.createTreeWalker(highlighted, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const text = walker.currentNode, ancestors = [];
+    for (let parent = text.parentElement; parent !== highlighted; parent = parent.parentElement) ancestors.unshift(parent);
+    for (const part of text.data.split(/(\r\n|\r|\n)/)) {
+      if (/^(\r\n|\r|\n)$/.test(part)) {
+        const ending = domainText("span", part, "source-line-ending");
+        ending.setAttribute("aria-hidden", "true"); line.append(ending); nextLine();
+      } else if (part) {
+        let parent = line;
+        for (const ancestor of ancestors) { const span = ancestor.cloneNode(false); parent.append(span); parent = span; }
+        parent.append(document.createTextNode(part));
+      }
+    }
+  }
+  pre.append(code); return pre;
+}
+
 // Presentation and gestures remain local to the existing native file dialog.
 const artifactViewer = (() => {
   const preview = byId("artifact-preview"), panel = byId("artifact-information");
   const menu = byId("artifact-menu"), more = byId("artifact-more");
   const phone = matchMedia("(max-width: 850px)");
+  const inspectorTabs = byId("inspector-tabs"), inspectorScroll = panel.querySelector(".preview-information-scroll");
+  let inspectorTab = "details", inspectorArtifact = null;
+  const inspectorScrolls = { details: 0, "ai-review": 0 };
+  function selectInspector(tab, focus = false) {
+    const selected = byId(`inspector-tab-${tab}`);
+    if (!selected || selected.disabled) return;
+    inspectorScrolls[inspectorTab] = inspectorScroll.scrollTop;
+    inspectorTab = tab;
+    for (const button of inspectorTabs.querySelectorAll("[role='tab']")) {
+      const active = button === selected;
+      button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1;
+      byId(button.getAttribute("aria-controls")).hidden = !active;
+    }
+    inspectorScroll.scrollTop = inspectorScrolls[tab];
+    if (focus) selected.focus({ preventScroll: true });
+  }
+  for (const tab of inspectorTabs.querySelectorAll("[role='tab']"))
+    tab.addEventListener("click", () => selectInspector(tab.dataset.inspector));
+  inspectorTabs.addEventListener("keydown", event => {
+    const tabs = [...inspectorTabs.querySelectorAll("[role='tab']")].filter(tab => !tab.disabled);
+    const index = tabs.indexOf(document.activeElement);
+    if (index < 0) return;
+    const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 :
+      event.key === "ArrowRight" ? (index + 1) % tabs.length :
+        event.key === "ArrowLeft" ? (index - 1 + tabs.length) % tabs.length : null;
+    if (next !== null) { event.preventDefault(); selectInspector(tabs[next].dataset.inspector, true); }
+  });
+  document.addEventListener("klaude-auth-reset", () => {
+    selectInspector("details"); inspectorArtifact = null;
+    inspectorScrolls.details = inspectorScrolls["ai-review"] = 0;
+  });
   let item = null, draftTags = [], editingTags = false, allTags = false;
+  let editingSource = false, suggestedTags = [], suggestionsSignature = "";
+  const metadataChanges = new Map();
+  const normalizeTag = value => value.trim().replace(/\s+/gu, " ");
+  const tagKey = value => normalizeTag(value).toLocaleLowerCase();
+  const metadataKey = operation => `${item?.id}:${operation}`;
+  const metadataBusy = () => [...metadataChanges.values()].some(change => change.target === item?.id);
+  function editorStatus(operation, message = "", error = false) {
+    const target = byId(operation === "tags" ? "artifact-tags-status" : "artifact-source-status");
+    target.textContent = message; target.dataset.state = error ? "error" : "";
+  }
+  function editorControls() {
+    const busy = metadataBusy();
+    for (const id of ["artifact-source-form", "artifact-tags"]) {
+      byId(id).setAttribute("aria-busy", String(busy));
+      for (const control of byId(id).querySelectorAll("input,button")) control.disabled = busy;
+    }
+    byId("artifact-source-edit").disabled = busy || latest?.library_source_links !== true;
+    byId("artifact-source-remove").disabled = busy || latest?.library_source_links !== true;
+    byId("artifact-tags-edit").disabled = busy;
+    byId("artifact-source-save").disabled = busy || !editingSource ||
+      byId("artifact-source-input").value.trim() === (item?.source_url || "");
+    byId("artifact-tags-save").disabled = busy || !editingTags ||
+      JSON.stringify(draftTags) === JSON.stringify(item?.tags || []);
+  }
+  async function saveMetadata(operation, value) {
+    if (!item || metadataBusy() || reviewDialog.open) return;
+    const key = metadataKey(operation), target = item, epoch = authEpoch;
+    const change = { operation, target: target.id, phase: "preparing", request_id: null };
+    metadataChanges.set(key, change); editorStatus(operation, "Preparing confirmation…"); editorControls();
+    const current = () => authenticated && epoch === authEpoch && item === target && artifactDialog.open;
+    try {
+      const opened = await prepareChange({ operation, target: target.id, revision: target.revision, value }, {
+        current,
+        onAccepted: receipt => {
+          change.phase = "accepted"; change.request_id = receipt.request_id;
+          if (current()) { editorStatus(operation, "Saving…"); editorControls(); }
+        },
+        onDiscard: review => {
+          if (epoch !== authEpoch) return;
+          if (review.uncertain) { change.phase = "unknown"; change.request_id = review.request_id; }
+          else metadataChanges.delete(key);
+          if (current()) {
+            editorStatus(operation, review.uncertain ? "Save unconfirmed. Your draft is kept; check Activity before trying again." :
+              review.uncertain === false ? "Save failed. Your draft is kept." : "Save cancelled. Your draft is kept.", Boolean(review.uncertain !== undefined));
+            editorControls();
+          }
+        },
+      });
+      if (!opened && metadataChanges.get(key) === change) metadataChanges.delete(key);
+    } catch (error) {
+      metadataChanges.delete(key);
+      if (current()) editorStatus(operation, `${error.message || "Could not save."} Your draft is kept.`, true);
+    } finally { if (current()) editorControls(); }
+  }
+  document.addEventListener("klaude-operations", async event => {
+    for (const [key, change] of metadataChanges) {
+      const receipt = event.detail.find(operation => operation.request_id === change.request_id);
+      if (!receipt || change.phase === "refreshing" || !["completed", "failed", "cancelled", "unknown"].includes(receipt.state)) continue;
+      if (receipt.state === "unknown") {
+        change.phase = "unknown";
+        if (item?.id === change.target) { editorStatus(change.operation, "Save unconfirmed. Your draft is kept; check Activity before trying again.", true); editorControls(); }
+        continue;
+      }
+      if (!authenticated || item?.id !== change.target || !artifactDialog.open) { metadataChanges.delete(key); continue; }
+      if (receipt.state !== "completed") {
+        metadataChanges.delete(key); editorStatus(change.operation, "Could not save. Your draft is kept. The file may have changed; reopen it to inspect the current version.", true); editorControls(); continue;
+      }
+      change.phase = "refreshing";
+      const epoch = authEpoch;
+      try {
+        const result = await domainRequest(`/api/v1/library/item?${new URLSearchParams({ id: change.target })}`);
+        metadataChanges.delete(key);
+        if (epoch !== authEpoch || item?.id !== change.target || !artifactDialog.open) continue;
+        item = result.item; selectedArtifact = item;
+        artifactDetails.set(item.id, { time: Date.now(), data: result });
+        if (change.operation === "tags") { editingTags = false; byId("artifact-tag-new").value = ""; }
+        else editingSource = false;
+        if (!editingTags) draftTags = [...item.tags];
+        renderSource(); renderTags(); renderMenu();
+        byId("artifact-download").href = artifactUrl(item);
+        window.BrowserVision?.select(canPreviewImage(item) && !item.archived ? item : null);
+        editorStatus(change.operation, "Saved."); editorControls();
+      } catch (error) {
+        change.phase = "unknown";
+        if (epoch === authEpoch && item?.id === change.target) editorStatus(change.operation, "Save completed, but the updated file could not be read. Your draft is kept; reopen the file to inspect it.", true);
+      }
+    }
+  });
+  document.addEventListener("klaude-vision-suggestions", event => {
+    const result = event.detail;
+    suggestedTags = result && item && result.artifact === item.id && result.revision === item.revision ? result.tags : [];
+    renderTagSuggestions();
+  });
+  document.addEventListener("klaude-auth-reset", () => { metadataChanges.clear(); suggestedTags = []; editingSource = false; });
   let scale = 1, panX = 0, panY = 0, gesture = null, pinch = null, lastTap = null;
   const pointers = new Map();
   const notice = text => { byId("preview-status").textContent = text; };
@@ -799,18 +1107,20 @@ const artifactViewer = (() => {
     if (focus && artifactDialog.open) more.focus();
   }
   function setDetails(state, focus = false) {
+    if (phone.matches && state !== "closed") state = "full";
     if (state !== "closed") artifactDialog.classList.remove("image-expanded");
+    else closeMenu();
     artifactDialog.dataset.details = state;
     panel.inert = state === "closed";
     byId("image-details").setAttribute("aria-expanded", String(state !== "closed"));
     byId("image-details").setAttribute("aria-label", state === "closed" ? "Show file details" : "Hide file details");
-    byId("preview-sheet-handle").setAttribute("aria-label", state === "full" ? "Partially expand file details" : "Expand file details");
+    byId("preview-sheet-handle").setAttribute("aria-label", phone.matches && state !== "closed" ? "Close file inspector" : "Expand file details");
     byId("preview-sheet-scrim").hidden = !phone.matches || state === "closed";
     artifactDialog.querySelector(".preview-main").inert = phone.matches && state !== "closed";
     if (focus && state === "closed") byId("image-details").focus({ preventScroll: true });
     else if (focus) requestAnimationFrame(() => {
       if (artifactDialog.open && artifactDialog.dataset.details !== "closed")
-        byId("preview-sheet-close").focus({ preventScroll: true });
+        byId("preview-sheet-handle").focus({ preventScroll: true });
     });
   }
   function transform() {
@@ -852,11 +1162,6 @@ const artifactViewer = (() => {
     if (!item) return;
     const target = item;
     closeMenu();
-    if (operation === "delete" && !target.archived) {
-      notice("Archive this file before permanently deleting it.");
-      more.focus();
-      return;
-    }
     artifactDialog.close();
     prepareChange({ operation, target: target.id, revision: target.revision,
       ...(value !== undefined ? { value } : {}) }).catch(error => domainError(error));
@@ -871,7 +1176,6 @@ const artifactViewer = (() => {
       const button = domainButton("", () => review(operation), "message-action" + (operation === "delete" ? " danger" : ""));
       button.setAttribute("role", "menuitem");
       button.append(libraryIcon(icon), domainText("span", label));
-      if (operation === "delete" && !item.archived) button.title = "Archive this file before permanent deletion";
       menu.append(button);
     }
   }
@@ -889,7 +1193,7 @@ const artifactViewer = (() => {
       chip.title = manual ? "Manual tag" : "AI tag";
       chip.append(domainText("span", tag));
       if (editingTags && manual) {
-        const remove = domainButton("", () => { draftTags = draftTags.filter(value => value !== tag); renderTags(); byId("artifact-tag-new").focus(); }, "icon-button");
+        const remove = domainButton("", () => { draftTags = draftTags.filter(value => value !== tag); editorStatus("tags"); renderTags(); byId("artifact-tag-new").focus(); }, "icon-button");
         remove.setAttribute("aria-label", `Remove tag ${tag}`);
         remove.append(libraryIcon("close")); chip.append(remove);
       }
@@ -900,23 +1204,47 @@ const artifactViewer = (() => {
     moreTags.hidden = editingTags || combined.length <= 8;
     moreTags.textContent = allTags ? "Show less" : `Show all ${combined.length} tags`;
     moreTags.setAttribute("aria-expanded", String(allTags));
+    renderTagSuggestions(); editorControls();
   }
-  function addTag() {
+  function renderTagSuggestions() {
+    const offered = suggestedTags.filter(tag => ![...draftTags, ...(item?.ai_tags || [])].some(existing => tagKey(existing) === tagKey(tag)));
+    const signature = JSON.stringify([editingTags, offered]);
+    if (signature === suggestionsSignature) return;
+    suggestionsSignature = signature;
+    byId("artifact-tag-suggestions").hidden = !editingTags || !offered.length;
+    byId("artifact-tag-suggestion-list").replaceChildren(...offered.map(tag => {
+      const button = domainButton(`+ ${tag}`, () => addTag(tag), "preview-tag tag-suggestion");
+      button.setAttribute("aria-label", `Add suggested tag ${tag}`); return button;
+    }));
+    editorControls();
+  }
+  function addTag(suggestion) {
     const input = byId("artifact-tag-new");
-    const values = [...new Set([...draftTags, ...input.value.split(",").map(value => value.trim()).filter(Boolean)])];
-    if (values.length > 20 || values.some(value => value.length > 40 || /[\x00-\x1f\x7f-\x9f]/.test(value))) {
+    if (metadataBusy()) return false;
+    const values = [...draftTags];
+    for (const value of (typeof suggestion === "string" ? suggestion : input.value).split(",").map(normalizeTag).filter(Boolean))
+      if (![...values, ...(item?.ai_tags || [])].some(tag => tagKey(tag) === tagKey(value))) values.push(value);
+    if (values.length > 20 || values.some(value => Array.from(value).length > 40 || /[\x00-\x1f\x7f-\x9f]/.test(value))) {
+      editorStatus("tags", "Use up to 20 printable tags of at most 40 characters.", true);
       input.setCustomValidity("Use up to 20 printable tags of at most 40 characters."); input.reportValidity(); return false;
     }
-    input.setCustomValidity(""); draftTags = values; input.value = ""; renderTags(); return true;
+    editorStatus("tags"); input.setCustomValidity(""); draftTags = values;
+    if (typeof suggestion !== "string") input.value = "";
+    renderTags(); return true;
   }
   function editSource() {
-    byId("artifact-source-form").hidden = false;
+    editingSource = true; editorStatus("source_link");
     byId("artifact-source-input").value = item.source_url || "";
+    renderSource();
     byId("artifact-source-input").focus();
   }
   function renderSource() {
     const source = byId("artifact-source");
-    source.replaceChildren(); byId("artifact-source-form").hidden = true;
+    source.replaceChildren(); source.hidden = editingSource;
+    byId("artifact-source-form").hidden = !editingSource;
+    byId("artifact-source-edit").hidden = editingSource;
+    byId("artifact-source-edit").textContent = item?.source_url ? "Edit" : "+ Add link";
+    byId("artifact-source-remove").hidden = editingSource || !item?.source_url;
     let url;
     try {
       url = new URL(item.source_url);
@@ -924,69 +1252,157 @@ const artifactViewer = (() => {
     } catch { url = null; }
     if (url) {
       const link = domainText("a", item.source_url);
+      link.className = "inspector-source-link"; link.title = item.source_url;
       link.href = url.href; link.target = "_blank"; link.rel = "noopener noreferrer";
       link.setAttribute("aria-label", `Open source link ${item.source_url}`); source.append(link);
       source.append(domainButton("Copy link", async () => {
         notice(await ChatMarkdown.copyText(item.source_url, artifactDialog) ? "Source link copied." : "Select the source link to copy it.");
       }));
+    } else source.append(domainText("p", "No source link added.", "muted"));
+    byId("artifact-source-edit").title = latest?.library_source_links === true ? "" : "Restart the WebUI host to edit source links";
+    editorControls();
+  }
+  function renderTextControls(text, source = "", markdown = false) {
+    const controls = byId("preview-text-controls");
+    controls.replaceChildren();
+    controls.hidden = !text;
+    if (!text) return;
+    let mode = "source";
+    let renderedMarkdown = null;
+    const showMode = value => {
+      mode = value;
+      if (mode === "preview") {
+        renderedMarkdown ||= ChatMarkdown.renderDocument(source);
+        preview.replaceChildren(renderedMarkdown);
+      } else preview.replaceChildren(text);
+      preview.scrollTop = preview.scrollLeft = 0;
+      for (const button of controls.querySelectorAll("[data-mode]")) button.setAttribute("aria-pressed", String(button.dataset.mode === mode));
+      preview.setAttribute("aria-label", mode === "preview" ? "Markdown preview" : "File source preview");
+    };
+    if (markdown && window.ChatMarkdown?.renderDocument) {
+      const modes = domainText("div", "", "preview-wrap-options");
+      modes.setAttribute("role", "group"); modes.setAttribute("aria-label", "Markdown view");
+      for (const [value, label] of [["preview", "Preview"], ["source", "Source"]]) {
+        const button = domainButton(label, () => showMode(value));
+        button.dataset.mode = value; button.id = `artifact-mode-${value}`;
+        button.setAttribute("aria-controls", "artifact-preview");
+        button.setAttribute("aria-pressed", String(value === mode)); modes.append(button);
+      }
+      controls.append(modes);
     }
-    const edit = domainButton(url ? "Edit link" : "+ Add source link", editSource);
-    edit.disabled = latest?.library_source_links !== true;
-    if (edit.disabled) edit.title = "Restart the WebUI host to edit source links";
-    source.append(edit);
+    const wrapping = domainText("div", "", "preview-wrap-options");
+    wrapping.setAttribute("role", "group");
+    wrapping.setAttribute("aria-label", "Line wrapping");
+    const setWrap = value => {
+      text.dataset.wrap = String(value);
+      preview.dataset.wrap = String(value);
+      for (const button of wrapping.children) button.setAttribute("aria-pressed", String(button.dataset.wrap === text.dataset.wrap));
+      if (value) preview.scrollLeft = 0;
+    };
+    for (const [value, label, id] of [[true, "Wrap", "artifact-wrap"], [false, "No wrap", "artifact-no-wrap"]]) {
+      const button = domainButton(label, () => setWrap(value));
+      button.id = id; button.dataset.wrap = String(value);
+      button.setAttribute("aria-controls", "artifact-preview");
+      wrapping.append(button);
+    }
+    setWrap(true);
+    let copying = false;
+    const copy = domainButton("", async () => {
+      if (copying) return;
+      copying = true;
+      copy.setAttribute("aria-busy", "true");
+      const success = await ChatMarkdown.copyText(source, artifactDialog);
+      if (!copy.isConnected || !artifactDialog.open) return;
+      copying = false;
+      copy.removeAttribute("aria-busy");
+      copy.replaceChildren(libraryIcon(success ? "check" : "copy"), domainText("span", success ? "Copied" : "Copy"));
+      notice(success ? "Preview text copied." : "Copy unavailable. Select the preview text and copy it using your browser.");
+      if (success) setTimeout(() => {
+        if (copy.isConnected) copy.replaceChildren(libraryIcon("copy"), domainText("span", "Copy"));
+      }, 1800);
+    }, "quiet preview-copy-button");
+    copy.id = "artifact-copy";
+    copy.title = "Copy preview text";
+    copy.setAttribute("aria-label", "Copy preview text");
+    copy.append(libraryIcon("copy"), domainText("span", "Copy"));
+    controls.append(wrapping, copy);
+    if (markdown && window.ChatMarkdown?.renderDocument) showMode("preview");
   }
   function render(data) {
-    item = data.item; editingTags = allTags = false; draftTags = [...item.tags];
+    item = data.item; editingTags = allTags = editingSource = false; draftTags = [...item.tags];
+    suggestedTags = []; editorStatus("tags"); editorStatus("source_link");
     const image = canPreviewImage(item);
     artifactDialog.classList.toggle("is-image", image);
     byId("artifact-detail-title").textContent = item.name;
     byId("artifact-detail-title").title = item.name;
-    const nodes = image ? [artifactImage(item, true)] : [domainText("pre", data.lines.join("\n"), "artifact-text")];
-    if (data.truncated) nodes.push(domainText("p", "Preview truncated. Download for the complete file.", "muted"));
+    const language = sourceLanguage(item);
+    byId("artifact-subtitle").textContent = `${librarySection === "outputs" ? "Generated" : "Uploads"} · ${image ? "Image" : language === "text" ? fileType(item)[1] : language.toUpperCase()} · ${fileSize(item.size)}`;
+    const source = typeof data.source_text === "string" ? data.source_text : data.lines.join("\n");
+    const readable = !image && !data.fallback && (typeof data.source_text === "string" || data.lines.length > 0);
+    const nodes = image ? [artifactImage(item, true)] : readable ? [numberedSource(source, language)] :
+      [domainText("p", "Preview unavailable for this file type. Download the original file to open it.", "preview-unavailable")];
     preview.replaceChildren(...nodes);
+    const truncated = data.source_truncated ?? data.truncated;
+    byId("preview-truncation").textContent = !image && truncated ? "Preview truncated. Download for the complete file." : "";
+    byId("preview-source-note").textContent = !image && data.source_sanitized ? "Unsafe control characters or invalid text were replaced in this preview. Download preserves the original bytes." : "";
+    renderTextControls(readable ? nodes[0] : null, source, language === "markdown");
     preview.querySelector("img")?.addEventListener("load", transform, { once: true });
     resetZoom();
-    const rows = [["Filename", item.filename], ["Type", `${fileType(item)[1]} · ${item.mime}`], ["Size", `${fileSize(item.size)} (${item.size.toLocaleString()} bytes)`],
+    const rows = [["Filename", item.filename], ["Type", fileType(item)[1]], ["MIME type", item.mime], ["Size", `${fileSize(item.size)} (${item.size.toLocaleString()} bytes)`],
       ...(item.width && item.height ? [["Dimensions", `${item.width.toLocaleString()} × ${item.height.toLocaleString()} px`]] : []),
       ...(Number.isFinite(item.created) ? [["Added", new Date(item.created * 1000).toLocaleString()]] : []),
       ...(item.archived ? [["Status", "Archived"]] : [])];
     byId("artifact-metadata").replaceChildren(...rows.flatMap(([label, value]) => [domainText("dt", label), domainText("dd", value)]));
     renderSource(); renderTags(); renderMenu();
+    byId("inspector-tab-ai-review").disabled = !image || item.archived;
+    byId("inspector-tab-ai-review").title = image && !item.archived ? "" : "AI Review is available for saved images.";
+    if (inspectorArtifact !== item.id) {
+      inspectorArtifact = item.id; inspectorScrolls.details = inspectorScrolls["ai-review"] = 0;
+      inspectorScroll.scrollTop = 0;
+    }
+    selectInspector(image && !item.archived ? inspectorTab : "details");
+    window.BrowserVision?.select(image && !item.archived ? item : null);
+    byId("artifact-learn").hidden = !latest?.profile_management || image || item.archived || item.size > 2 * 1024 * 1024;
+    byId("artifact-learn-library").value = byId("knowledge-library").value || "";
     byId("artifact-tags").hidden = false;
     byId("image-toolbar").hidden = false;
-    for (const id of ["image-fit", "image-expand", "artifact-download"]) byId(id).hidden = !image;
+    for (const id of ["image-fit", "image-expand"]) byId(id).hidden = !image;
+    byId("artifact-download").hidden = false;
     artifactDialog.querySelector(".preview-zoom-controls").hidden = !image;
     byId("artifact-download").href = artifactUrl(item);
     byId("artifact-download").download = item.filename;
     byId("artifact-actions").replaceChildren();
-    if (!image) {
-      const download = domainText("a", "Download", "download-link");
-      download.href = artifactUrl(item); download.download = item.filename;
-      byId("artifact-actions").append(download);
-    }
+    preview.setAttribute("aria-label", image ? "Image preview" : language === "markdown" ? "Markdown preview" : "File source preview");
     more.disabled = false; notice("");
   }
   function begin(image, opening) {
+    window.BrowserVision?.select(null);
     item = null; closeMenu(); resetZoom(); notice("");
+    renderTextControls(null);
+    byId("artifact-subtitle").textContent = "";
+    byId("preview-truncation").textContent = ""; byId("preview-source-note").textContent = "";
+    preview.scrollTop = preview.scrollLeft = 0;
     if (document.activeElement === more) preview.focus({ preventScroll: true });
     more.disabled = true;
     artifactDialog.classList.toggle("is-image", Boolean(image));
     byId("artifact-metadata").replaceChildren(); byId("artifact-source").replaceChildren();
     byId("artifact-source-form").hidden = true;
+    editingSource = false; suggestedTags = []; editorStatus("tags"); editorStatus("source_link");
+    byId("artifact-learn").hidden = true;
     byId("artifact-tag-new").value = "";
     byId("artifact-tag-new").setCustomValidity("");
     byId("artifact-tag-count").textContent = "";
     byId("image-toolbar").hidden = true;
     if (opening) { artifactDialog.classList.remove("image-expanded"); setDetails(phone.matches ? "closed" : "partial"); }
   }
-  for (const [id, icon] of [["artifact-close", "previous"], ["artifact-more", "more"], ["image-zoom-out", "minus"], ["image-zoom-in", "plus"], ["image-fit", "fit"], ["artifact-download", "download"], ["image-details", "info"], ["preview-sheet-close", "close"]]) byId(id).append(libraryIcon(icon));
+  for (const [id, icon] of [["artifact-close", "close"], ["artifact-more", "more"], ["image-zoom-out", "minus"], ["image-zoom-in", "plus"], ["image-fit", "fit"], ["artifact-download", "download"], ["image-details", "info"]]) byId(id).append(libraryIcon(icon));
   byId("image-details").append(domainText("span", "Details"));
   byId("image-zoom-in").onclick = () => zoom(scale * 1.5);
   byId("image-zoom-out").onclick = () => zoom(scale / 1.5);
   byId("image-fit").onclick = resetZoom;
   byId("image-details").onclick = () => setDetails(artifactDialog.dataset.details === "closed" ? "partial" : "closed", true);
-  byId("preview-sheet-close").onclick = byId("preview-sheet-scrim").onclick = () => setDetails("closed", true);
-  byId("preview-sheet-handle").onclick = event => { if (event.detail && sheetStart === undefined) return; setDetails(artifactDialog.dataset.details === "full" ? "partial" : "full"); };
+  byId("preview-sheet-scrim").onclick = () => setDetails("closed", true);
+  byId("preview-sheet-handle").onclick = event => { if (event.detail && sheetStart === undefined) return; setDetails(phone.matches ? "closed" : artifactDialog.dataset.details === "full" ? "partial" : "full", true); };
   let sheetStart;
   byId("preview-sheet-handle").addEventListener("pointerdown", event => { sheetStart = event.clientY; event.currentTarget.setPointerCapture(event.pointerId); });
   byId("preview-sheet-handle").addEventListener("pointerup", event => {
@@ -1019,15 +1435,44 @@ const artifactViewer = (() => {
     event.stopPropagation();
   });
   document.addEventListener("click", event => { if (!menu.contains(event.target) && !more.contains(event.target)) closeMenu(); });
-  byId("artifact-tags-edit").onclick = () => { editingTags = true; renderTags(); byId("artifact-tag-new").focus(); };
-  byId("artifact-tags-cancel").onclick = () => { editingTags = false; draftTags = [...item.tags]; renderTags(); byId("artifact-tags-edit").focus(); };
+  byId("artifact-source-title").prepend(libraryIcon("link"));
+  byId("artifact-tag-add").append(libraryIcon("plus"));
+  byId("artifact-tags-edit").onclick = () => { editingTags = true; draftTags = [...item.tags]; editorStatus("tags"); renderTags(); byId("artifact-tag-new").focus(); };
+  byId("artifact-tags-cancel").onclick = () => { editingTags = false; draftTags = [...item.tags]; byId("artifact-tag-new").value = ""; editorStatus("tags"); renderTags(); byId("artifact-tags-edit").focus(); };
   byId("artifact-tags-more").onclick = () => { allTags = !allTags; renderTags(); };
   byId("artifact-tag-add").onclick = addTag;
-  byId("artifact-tag-new").addEventListener("input", event => event.target.setCustomValidity(""));
+  byId("artifact-tag-new").addEventListener("input", event => { event.target.setCustomValidity(""); editorStatus("tags"); });
   byId("artifact-tag-new").addEventListener("keydown", event => { if (event.key === "Enter") { event.preventDefault(); addTag(); } });
-  byId("artifact-source-cancel").onclick = () => { byId("artifact-source-form").hidden = true; byId("artifact-source").querySelector("button:last-child")?.focus(); };
-  byId("artifact-source-form").addEventListener("submit", event => { event.preventDefault(); review("source_link", byId("artifact-source-input").value); });
-  byId("artifact-tags").addEventListener("submit", event => { event.preventDefault(); if (editingTags && !addTag()) return; review("tags", byId("artifact-tags-input").value); });
+  byId("artifact-source-edit").onclick = editSource;
+  byId("artifact-source-remove").onclick = () => { editingSource = true; byId("artifact-source-input").value = ""; renderSource(); saveMetadata("source_link", ""); };
+  byId("artifact-source-cancel").onclick = () => { editingSource = false; byId("artifact-source-input").value = item.source_url || ""; editorStatus("source_link"); renderSource(); byId("artifact-source-edit").focus(); };
+  byId("artifact-source-input").addEventListener("input", event => { event.target.setCustomValidity(""); editorStatus("source_link"); editorControls(); });
+  byId("artifact-source-form").addEventListener("submit", event => {
+    event.preventDefault();
+    const input = byId("artifact-source-input"), value = input.value.trim();
+    if (!item || !editingSource || value === (item.source_url || "")) return;
+    try {
+      if (value) {
+        const url = new URL(value);
+        if (!/^https?:\/\/[^/]/i.test(value) || !["http:", "https:"].includes(url.protocol) || url.username || url.password || url.port === "0" || /[\s\\\x00-\x1f\x7f-\x9f]/u.test(value) || Array.from(value).length > 2048) throw new Error("Invalid source URL");
+      }
+    } catch {
+      editorStatus("source_link", "Enter a valid HTTP or HTTPS link without credentials or spaces.", true); input.focus(); return;
+    }
+    saveMetadata("source_link", value);
+  });
+  byId("artifact-learn").addEventListener("submit", event => {
+    event.preventDefault();
+    if (!item) return;
+    const draft = { operation: "artifact-learn", target: item.id, revision: item.revision, library: byId("artifact-learn-library").value.trim() };
+    artifactDialog.close();
+    prepareChange(draft).catch(error => domainError(error));
+  });
+  byId("artifact-tags").addEventListener("submit", event => {
+    event.preventDefault();
+    if (!item || !editingTags || !addTag() || JSON.stringify(draftTags) === JSON.stringify(item.tags)) return;
+    saveMetadata("tags", draftTags.join(", "));
+  });
   preview.addEventListener("pointerdown", event => {
     if (!preview.querySelector("img") || event.button > 0) return;
     event.preventDefault(); preview.focus({ preventScroll: true });
@@ -1068,7 +1513,7 @@ const artifactViewer = (() => {
     gesture = pinch = null;
   }
   for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) preview.addEventListener(type, endPointer);
-  preview.addEventListener("dblclick", event => event.preventDefault());
+  preview.addEventListener("dblclick", event => { if (artifactDialog.classList.contains("is-image")) event.preventDefault(); });
   preview.addEventListener("wheel", event => { if (!preview.querySelector("img") || !event.ctrlKey) return; event.preventDefault(); zoom(scale * Math.exp(-event.deltaY * .01), event.clientX, event.clientY); }, { passive: false });
   artifactDialog.addEventListener("cancel", event => {
     if (more.getAttribute("aria-expanded") === "true") { event.preventDefault(); closeMenu(true); }
@@ -1078,7 +1523,10 @@ const artifactViewer = (() => {
     if (event.key !== "Escape" || !phone.matches || artifactDialog.dataset.details === "closed") return;
     event.preventDefault(); event.stopPropagation(); setDetails("closed", true);
   });
-  return { begin, render, reset: () => { closeMenu(); resetZoom(); item = null; draftTags = []; byId("artifact-source-input").value = ""; byId("artifact-tag-new").value = ""; byId("artifact-source-form").hidden = true; setDetails("closed"); },
+  return { begin, render, reset: () => { closeMenu(); resetZoom(); renderTextControls(null);
+    window.BrowserVision?.select(null);
+    for (const id of ["artifact-subtitle", "preview-truncation", "preview-source-note"]) byId(id).textContent = "";
+    item = null; draftTags = []; byId("artifact-source-input").value = ""; byId("artifact-tag-new").value = ""; byId("artifact-source-form").hidden = true; byId("artifact-learn-library").value = ""; byId("artifact-learn").hidden = true; setDetails("closed"); },
     toggleExpanded: () => { const expanded = !artifactDialog.classList.contains("image-expanded"); setDetails(expanded ? "closed" : "partial"); artifactDialog.classList.toggle("image-expanded", expanded); return expanded; },
     key: event => {
       if (event.target.closest(".preview-information, #artifact-menu") || !preview.querySelector("img")) return false;
@@ -1089,7 +1537,6 @@ const artifactViewer = (() => {
 })();
 
 async function openArtifact(id) {
-  byId("artifact-close").title = librarySection === "outputs" ? "Back to Generated" : "Back to Uploads";
   artifactRead?.abort(); artifactRead = new AbortController();
   const load = ++artifactLoad, opening = !artifactDialog.open;
   const known = imageSequence.find(item => item.id === id) || filePage?.items.find(item => item.id === id);
@@ -1116,7 +1563,7 @@ async function openArtifact(id) {
     selectedArtifact = data.item; artifactViewer.render(data); updateImageNavigation();
   } catch (error) {
     if (load !== artifactLoad || !artifactDialog.open) return;
-    if (error.name !== "AbortError") preview.textContent = error.message || "Could not load this item.";
+    if (error.name !== "AbortError") preview.replaceChildren(domainText("p", error.message || "Could not load this item.", "preview-unavailable"));
     if (error.status === 401) showLocalAccess();
   } finally { finish(); }
 }
@@ -1143,7 +1590,7 @@ function updateImageNavigation() {
   byId("image-navigation").hidden = !image;
   const paged = fileView === "gallery";
   byId("image-position").textContent = index >= 0 ?
-    `${(paged ? imageSequenceOffset : 0) + index + 1} / ${imageSequenceTotal}` : image ? "Image preview" : librarySection === "outputs" ? "Generated" : "Uploads";
+    `${(paged ? imageSequenceOffset : 0) + index + 1} / ${imageSequenceTotal}` : image ? "Image preview" : "";
   byId("image-previous").disabled = previewNavigation || index < 0 ||
     index === 0 && (!paged || imageSequenceOffset === 0);
   byId("image-next").disabled = previewNavigation || index < 0 ||
@@ -1209,7 +1656,7 @@ async function loadKnowledgeSources() {
   const grid = byId("source-items");
   const key = JSON.stringify([library, offset]);
   if (grid.dataset.contentKey !== key) byId("sources-pages").hidden = true;
-  const finish = beginLoading(grid, { kind: "cards", count: 3,
+  const finish = beginLoading(grid, { kind: "rows", count: 3,
     preserve: grid.dataset.contentKey === key, label: "Loading sources…" });
   byId("knowledge-sources").hidden = false;
   try {
@@ -1220,15 +1667,22 @@ async function loadKnowledgeSources() {
       return loadKnowledgeSources();
     }
     const cards = data.items.map((source) => {
-      const card = domainText("article", "", "library-card");
-      card.append(domainText("h3", source.id), domainText("p", source.url, "muted"),
-        domainText("p", `${source.kind} · ${source.files} files`, "muted"),
-        domainButton("Review refresh", () => prepareChange({ operation: "knowledge-refresh",
-          library: source.library, source: source.id, source_identity: source.identity })
-          .catch((error) => domainError(error))));
+      const card = domainText("article", "", "library-card collection-row source-row");
+      card.dataset.rowKey = source.id; card.dataset.rowSignature = JSON.stringify(source);
+      const text = domainText("div", "", "collection-content");
+      text.append(domainText("h3", source.id, "collection-title"), domainText("p", source.url, "collection-description"),
+        domainText("span", `${source.kind} · ${countLabel(source.files, "file")}`, "collection-metadata"));
+      const refresh = domainButton("", () => prepareChange({ operation: "knowledge-refresh",
+        library: source.library, source: source.id, source_identity: source.identity })
+        .catch((error) => domainError(error)), "icon-button quiet refresh-button");
+      const label = `Review refresh for source ${source.id}`;
+      refresh.setAttribute("aria-label", label); refresh.title = label;
+      refresh.append(libraryIcon("refresh"));
+      card.append(libraryIcon("text"), text, refresh);
       return card;
     });
-    byId("source-items").replaceChildren(...cards);
+    reconcileRows(grid, cards);
+    byId("knowledge-sources-title").textContent = `Sources · ${library}`;
     byId("knowledge-sources").hidden = !data.items.length;
     updateDomainPager("sources", offset, data);
     grid.dataset.contentKey = key;
@@ -1245,6 +1699,7 @@ async function loadKnowledgeSources() {
 byId("sources-next").addEventListener("click", () => { sourceOffset += domainPageSizes.sources; rememberIntegrationLocation(); loadKnowledgeSources().catch((error) => domainError(error)); });
 byId("sources-previous").addEventListener("click", () => { sourceOffset = Math.max(0, sourceOffset - domainPageSizes.sources); rememberIntegrationLocation(); loadKnowledgeSources().catch((error) => domainError(error)); });
 byId("knowledge-library").addEventListener("change", () => {
+  clearTimeout(knowledgeSearchTimer);
   byId("learn-library").value = byId("knowledge-library").value;
   sourceOffset = 0;
   knowledgeQuery = "";
@@ -1252,14 +1707,23 @@ byId("knowledge-library").addEventListener("change", () => {
   knowledgeOffset = 0;
   rememberIntegrationLocation(); loadKnowledge();
 });
-byId("knowledge-search").addEventListener("submit", (event) => {
-  event.preventDefault();
+function searchKnowledge() {
+  clearTimeout(knowledgeSearchTimer);
+  if (!authenticated || currentView !== "integrations" || integrationSection !== "knowledge") return;
   const library = byId("knowledge-library").value;
   const query = byId("knowledge-query").value.trim();
   if (query && !library) { byId("knowledge-status").textContent = "Choose a library first."; return; }
   knowledgeQuery = query;
   knowledgeOffset = 0;
+  knowledgeLocationPage = null;
   rememberIntegrationLocation(); loadKnowledge();
+}
+byId("knowledge-search").addEventListener("submit", (event) => {
+  event.preventDefault(); searchKnowledge();
+});
+byId("knowledge-query").addEventListener("input", () => {
+  clearTimeout(knowledgeSearchTimer);
+  knowledgeSearchTimer = setTimeout(searchKnowledge, 200);
 });
 
 async function uploadForReview(file, limit = 32 * 1024 * 1024) {
@@ -1277,34 +1741,80 @@ async function uploadForReview(file, limit = 32 * 1024 * 1024) {
   }
   return data.id;
 }
-async function prepareChange(draft, { current = () => true, beforeOpen = () => {} } = {}) {
+async function prepareChange(draft, { current = () => true, beforeOpen = () => {}, onAccepted, onDiscard, filename = "" } = {}) {
   const result = await domainRequest("/api/v1/library/review", "POST", { draft });
   if (!current()) {
     domainRequest("/api/v1/library/discard", "POST", { review_id: result.review_id }).catch(() => {});
     return;
   }
-  managementReview = { ...result, request_id: requestId() };
-  byId("domain-review-title").textContent = draft.operation === "delete" ? "Delete file permanently?" : "Review change";
-  byId("domain-review-confirm").textContent = draft.operation === "delete" ? "Delete permanently" : "Confirm";
-  byId("domain-review-confirm").classList.toggle("danger", draft.operation === "delete");
-  byId("domain-review-summary").textContent = result.summary;
-  byId("domain-review-status").textContent = "Changes begin only after confirmation. Accepted work continues if you leave this page.";
+  managementReview = { ...result, request_id: requestId(), onAccepted, onDiscard };
+  const destructive = ["delete", "skill-delete", "memory-delete", "mcp-remove", "session-delete"].includes(draft.operation);
+  const ai = ["vision-analyze", "vision-tags"].includes(draft.operation), tags = draft.operation === "vision-tags";
+  reviewDialog.classList.toggle("ai-confirmation", ai);
+  byId("domain-review-title").textContent = ai ? tags ? "Suggest image tags?" : "Review image?" : destructive ?
+    draft.operation === "delete" ? "Delete file permanently?" : "Remove this item?" : "Review change";
+  byId("domain-review-confirm").textContent = ai ? tags ? "Suggest tags" : "Review image" : destructive ? "Delete permanently" : "Confirm";
+  byId("domain-review-confirm").classList.toggle("danger", destructive);
+  byId("domain-review-summary").textContent = ai ? tags ? "Klaude will analyze this image and suggest tags for you to review." :
+    "Klaude will analyze this image to answer your question." : result.summary;
+  byId("domain-review-target").hidden = !ai;
+  byId("domain-review-target").textContent = ai ? filename : "";
+  byId("domain-review-target").title = ai ? filename : "";
+  byId("domain-review-notice").hidden = !ai;
+  byId("domain-review-notice").textContent = ai ? "Image data will be sent to the configured model provider(s). Provider charges may apply." +
+    (tags ? " Suggested tags are not saved automatically." : "") : "";
+  byId("domain-review-technical").hidden = !ai;
+  byId("domain-review-technical").open = false;
+  byId("domain-review-technical-summary").textContent = ai ? result.summary : "";
+  byId("domain-review-status").textContent = ai ? "" : "Changes begin only after confirmation. Accepted work continues if you leave this page.";
   byId("domain-review-confirm").disabled = false;
   beforeOpen();
   reviewDialog.showModal();
   byId("domain-review-cancel").focus();
+  return managementReview;
 }
+
+async function submitToggleChange(draft, { current = () => true, onSubmitting, onAccepted, onDiscard } = {}) {
+  if (!["skill-enabled", "mcp-enable", "mcp-disable"].includes(draft.operation))
+    throw new Error("This action requires confirmation");
+  // The switch click is the owner's action. Keep the existing exact snapshot,
+  // revision checks and durable submission without opening a second dialog.
+  const prepared = await domainRequest("/api/v1/library/review", "POST", { draft });
+  const discard = () => domainRequest("/api/v1/library/discard", "POST", { review_id: prepared.review_id }).catch(() => {});
+  if (!current()) { discard(); return; }
+  const receipt = { ...prepared, request_id: requestId() };
+  onSubmitting?.(receipt);
+  try {
+    const operation = await domainRequest("/api/v1/library/submit", "POST", {
+      review_id: receipt.review_id, request_id: receipt.request_id,
+    });
+    receipt.accepted = true;
+    onAccepted?.(operation);
+  } catch (error) {
+    if (error.name === "AbortError") throw error;
+    receipt.uncertain = error.status === undefined || error.status >= 500;
+    if (!receipt.uncertain) { discard(); throw error; }
+    // A lost acknowledgement may already have changed storage. Preserve its
+    // request ID and pending lock; polling can resolve the original receipt.
+    onDiscard?.(receipt);
+  }
+  await loadOperations();
+  return receipt;
+}
+
 reviewDialog.addEventListener("close", () => {
   const old = managementReview;
   managementReview = null;
   if (old && authenticated && !old.accepted) {
     domainRequest("/api/v1/library/discard", "POST", { review_id: old.review_id }).catch(() => {});
+    old.onDiscard?.(old);
   }
 });
 byId("domain-review-confirm").addEventListener("click", async () => {
   if (!managementReview || !latest) return;
   const review = managementReview;
   const epoch = authEpoch;
+  const sourceSession = latest.session_id;
   const current = () => managementReview === review && authenticated && epoch === authEpoch;
   byId("domain-review-confirm").disabled = true;
   try {
@@ -1312,14 +1822,25 @@ byId("domain-review-confirm").addEventListener("click", async () => {
       review_id: review.review_id, request_id: review.request_id,
     });
     review.accepted = true;
+    review.onAccepted?.(operation);
     if (current()) {
       reviewDialog.close();
       for (const id of ["artifact-file", "learn-file", "skill-file"]) byId(id).value = "";
       const target = activeDomainStatus();
       byId(target).textContent = `Accepted · ${operation.kind}. Track progress in Activity.`;
+      if (operation.session_id && operation.session_id !== sourceSession) {
+        showView("chat");
+        toggleSessions(false);
+        await snapshot().catch(showError);
+        if (authenticated && epoch === authEpoch) {
+          rememberLinkedSession();
+          await refreshSessions().catch(showError);
+        }
+      }
     }
     await loadOperations();
   } catch (error) {
+    review.uncertain = error.status === undefined || error.status >= 500;
     if (current() && error.name !== "AbortError") {
       if (error.status === 401) showLocalAccess();
       else byId("domain-review-status").textContent = `${error.message}. Check Activity if the connection was interrupted; retrying uses the same request ID.`;
@@ -1332,10 +1853,13 @@ function bindUploadForm(id, action, statusId) {
     event.preventDefault();
     const button = byId(id).querySelector('button[type="submit"]');
     if (button.disabled) return;
+    const epoch = authEpoch, generation = integrationAddGeneration;
+    const current = () => epoch === authEpoch && authenticated && (statusId !== "integration-add-status" ||
+      integrationAddDialog.open && generation === integrationAddGeneration);
     button.disabled = true;
     byId(statusId).textContent = "Preparing review…";
-    try { await action(); byId(statusId).textContent = "Ready for review."; }
-    catch (error) { domainError(error, statusId); }
+    try { await action(); if (current()) byId(statusId).textContent = "Ready for review."; }
+    catch (error) { if (current()) domainError(error, statusId); }
     finally { button.disabled = false; }
   });
 }
@@ -1348,35 +1872,44 @@ bindUploadForm("artifact-import", async () => {
   });
 }, "artifact-import-status");
 bindUploadForm("knowledge-learn", async () => {
+  const context = integrationAddContext("knowledge");
+  if (!context.current()) return;
   const library = byId("learn-library").value;
   const source = byId("learn-url").value.trim();
   const file = byId("learn-file").files[0];
   if (source && file) throw new Error("Choose a URL or a text file, then review it separately.");
   if (file) {
     const upload_id = await uploadForReview(file, 2 * 1024 * 1024);
-    await prepareChange({ operation: "knowledge-upload", upload_id, library });
-  } else await prepareChange({ operation: "knowledge-url", library, source });
-}, "knowledge-status");
+    if (context.current()) await prepareChange({ operation: "knowledge-upload", upload_id, library }, context);
+  } else await prepareChange({ operation: "knowledge-url", library, source }, context);
+}, "integration-add-status");
 bindUploadForm("skill-import", async () => {
+  const context = integrationAddContext("skills");
+  if (!context.current()) return;
+  const name = byId("skill-name").value, library = byId("skill-library").value;
   const upload_id = await uploadForReview(byId("skill-file").files[0], 2 * 1024 * 1024);
-  await prepareChange({ operation: "skill-import", upload_id,
-    name: byId("skill-name").value, library: byId("skill-library").value });
-}, "skills-status");
+  if (context.current()) await prepareChange({ operation: "skill-import", upload_id, name, library }, context);
+}, "integration-add-status");
 
 async function loadSkills() {
   clearTimeout(skillsSearchTimer);
+  skillsRead?.abort(); skillsRead = new AbortController();
   const pageSize = syncDomainPageSize("skills");
+  if (skillsLocationPage !== null) {
+    skillsOffset = Math.min(skillsLocationPage - 1, Math.floor(1000000 / pageSize)) * pageSize;
+    skillsLocationPage = null;
+  }
   const load = ++skillsLoad;
   const offset = skillsOffset;
   const query = byId("skills-query").value;
   const grid = byId("skill-items");
   const key = JSON.stringify([query, offset]);
   if (grid.dataset.contentKey !== key) byId("skills-pages").hidden = true;
-  const finish = beginLoading(grid, { kind: "cards", count: Math.min(6, pageSize),
+  const finish = beginLoading(grid, { kind: "rows", count: Math.min(6, pageSize),
     preserve: grid.dataset.contentKey === key, label: "Loading Skills…" });
   byId("skills-status").textContent = "";
   try {
-    const data = await gridPage("/api/v1/integrations/skills", { query, offset }, pageSize);
+    const data = await gridPage("/api/v1/integrations/skills", { query, offset }, pageSize, { signal: skillsRead.signal });
     if (load !== skillsLoad) return;
     if (!data.items.length && offset > 0) {
       skillsOffset = Math.max(0, offset - pageSize);
@@ -1386,47 +1919,154 @@ async function loadSkills() {
     renderSkills();
     grid.dataset.contentKey = key;
     updateDomainPager("skills", offset, data);
+    rememberIntegrationLocation(true);
     byId("skills-status").textContent = data.items.length ?
       data.limited ? "Inventory limited to 1,000." : "" :
       query ? "No Skills match your search." : "No installed Skills. Import a package to get started.";
+    if (!data.items.length) collectionEmpty(grid, query ? "No Skills match this search" : "No installed Skills",
+      query ? "Try another name or description." : "Import a package to get started.", "skill");
   } catch (error) { if (load === skillsLoad) domainError(error, "skills-status"); }
   finally { finish(); }
 }
 function renderSkills() {
   const nodes = installedSkills.map((skill) => {
-      const card = domainText("article", "", "library-card skill-card");
-      card.append(domainText("span", skill.enabled ? "ENABLED" : "DISABLED", "eyebrow"),
-        domainText("h2", skill.name), domainText("p", skill.description || "No description provided."),
-        domainText("p", `${skill.source_label} · ${skill.indexed_file_count} indexed files · ${skill.library}`, "muted"));
-      const actions = domainText("div", "", "dialog-actions");
-      const change = (operation, extra = {}) => prepareChange({ operation, name: skill.name,
-        identity: skill.identity, expected_enabled: skill.enabled, ...extra }).catch((error) => domainError(error, "skills-status"));
-      actions.append(domainButton(skill.enabled ? "Disable" : "Enable", () => change("skill-enabled", { enabled: !skill.enabled })),
-        domainButton("Delete", () => change("skill-delete"), "danger"));
-      card.append(actions);
-      return card;
+    const row = collectionRow(skill.name, skill.name, skill.enabled ? "Enabled" : "Disabled",
+      "skill", () => openSkill(skill), JSON.stringify(skill));
+    row.classList.add("skill-card", "integration-card");
+    row.firstChild.setAttribute("aria-label", `Details for ${skill.name}`);
+    row.firstChild.setAttribute("aria-description", `${skill.description || "No description provided."} ${skill.enabled ? "Enabled" : "Disabled"}.`);
+    const text = row.querySelector(".collection-content");
+    text.insertBefore(domainText("span", skill.description || "No description provided.", "collection-description"), text.lastChild);
+    const toggle = domainButton("", () => changeSkill(skill, "skill-enabled"), "skill-toggle integration-toggle");
+    toggle.setAttribute("role", "switch");
+    toggle.setAttribute("aria-checked", String(skill.enabled));
+    toggle.setAttribute("aria-label", `Enable ${skill.name}`);
+    toggle.title = skill.enabled ? `Disable ${skill.name}` : `Enable ${skill.name}`;
+    toggle.append(domainText("span", "", "skill-switch-track integration-switch-track"));
+    row.append(toggle, domainText("span", "", "skill-row-status integration-row-status"));
+    return row;
     });
-  byId("skill-items").replaceChildren(...nodes);
+  reconcileRows(byId("skill-items"), nodes);
+  updateSkillStates();
+  if (skillDialog.open) {
+    const current = installedSkills.find(skill => skill.name === detailSkill?.name);
+    if (current) { detailSkill = current; renderSkillDetails(); }
+  }
 }
+function skillPendingText(name) {
+  const change = skillChanges.get(name);
+  return change ? change.phase === "review" ? "Awaiting review" :
+    change.phase === "unknown" ? "Unconfirmed · check Activity before retrying" : "Updating…" : skillFailures.get(name) || "";
+}
+function updateSkillStates() {
+  for (const row of byId("skill-items").querySelectorAll(".skill-card")) {
+    const name = row.dataset.rowKey, pending = skillChanges.has(name);
+    const toggle = row.querySelector(".skill-toggle");
+    toggle.disabled = pending || skillReviewPending;
+    toggle.setAttribute("aria-busy", String(pending));
+    const status = row.querySelector(".skill-row-status");
+    status.textContent = skillPendingText(name);
+    status.setAttribute("role", "status");
+  }
+  if (skillDialog.open) renderSkillDetails();
+}
+function renderSkillDetails() {
+  if (!detailSkill) return;
+  const skill = detailSkill;
+  byId("skill-detail-title").textContent = skill.name;
+  byId("skill-detail-description").textContent = skill.description || "No description provided.";
+  const metadata = byId("skill-detail-metadata");
+  metadata.replaceChildren();
+  for (const [label, value] of [["Status", skill.enabled ? "Enabled" : "Disabled"],
+    ["Installation", skill.source_label], ["Indexed files", skill.indexed_file_count], ["Knowledge library", skill.library]]) {
+    if (value !== undefined && value !== null) metadata.append(domainText("dt", label), domainText("dd", String(value)));
+  }
+  byId("skill-detail-status").textContent = skillPendingText(skill.name);
+  byId("skill-detail-change").textContent = skill.enabled ? "Disable" : "Enable";
+  for (const id of ["skill-detail-change", "skill-detail-delete"]) byId(id).disabled = skillChanges.has(skill.name) || skillReviewPending;
+}
+function openSkill(skill) {
+  detailSkill = skill; renderSkillDetails(); skillDialog.showModal();
+}
+async function changeSkill(skill, operation) {
+  if (skillChanges.has(skill.name) || skillReviewPending || reviewDialog.open) return;
+  const direct = operation === "skill-enabled";
+  const epoch = authEpoch, state = { phase: direct ? "preparing" : "review" };
+  skillChanges.set(skill.name, state); skillFailures.delete(skill.name);
+  skillReviewPending = true; updateSkillStates();
+  const current = () => authenticated && epoch === authEpoch && skillChanges.get(skill.name) === state;
+  const mayOpenReview = () => current() && currentView === "integrations" && integrationSection === "skills";
+  try {
+    await (direct ? submitToggleChange : prepareChange)({ operation, name: skill.name, identity: skill.identity,
+      expected_enabled: skill.enabled, ...(operation === "skill-enabled" ? { enabled: !skill.enabled } : {}) }, {
+      current: mayOpenReview,
+      beforeOpen: () => { if (skillDialog.open) skillDialog.close(); },
+      onSubmitting: receipt => {
+        if (!current()) return;
+        state.phase = "submitting"; state.request_id = receipt.request_id; updateSkillStates();
+      },
+      onAccepted: (operation) => {
+        if (!current()) return;
+        state.phase = "accepted"; state.request_id = operation.request_id; updateSkillStates();
+      },
+      onDiscard: (review) => {
+        if (!current()) return;
+        if (review.uncertain) { state.phase = "unknown"; state.request_id = review.request_id; }
+        else skillChanges.delete(skill.name);
+        updateSkillStates();
+      },
+    });
+    if (current() && !mayOpenReview() && ["preparing", "review"].includes(state.phase)) skillChanges.delete(skill.name);
+  } catch (error) {
+    if (current()) {
+      skillChanges.delete(skill.name);
+      skillFailures.set(skill.name, "Could not update Skill. Its confirmed state is unchanged.");
+      domainError(error, "skills-status");
+    }
+  } finally {
+    if (epoch === authEpoch) { skillReviewPending = false; updateSkillStates(); }
+  }
+}
+byId("skill-detail-close").append(libraryIcon("close"));
+byId("skill-detail-close").addEventListener("click", () => skillDialog.close());
+byId("skill-detail-change").addEventListener("click", () => changeSkill(detailSkill, "skill-enabled"));
+byId("skill-detail-delete").addEventListener("click", () => changeSkill(detailSkill, "skill-delete"));
 async function loadOperations() {
   if (operationPollBusy || !authenticated) return;
   operationPollBusy = true;
   const finish = beginLoading(byId("domain-operations"), { kind: "rows", count: 3, label: "Loading operations…" });
   try {
     const data = await domainRequest("/api/v1/library/operations");
+    let skillSettled = false;
+    for (const [name, pending] of skillChanges) {
+      const operation = data.items.find(item => item.request_id === pending.request_id);
+      if (!operation || !["completed", "failed", "unknown"].includes(operation.state)) continue;
+      if (operation.state === "unknown") pending.phase = "unknown";
+      else {
+        skillChanges.delete(name); skillSettled = true;
+        if (operation.state === "failed") skillFailures.set(name, "Update rejected. Its confirmed state is unchanged.");
+      }
+    }
+    updateSkillStates();
+    document.dispatchEvent(new CustomEvent("klaude-operations", { detail: data.items }));
     const signature = data.items.map((item) => `${item.request_id}:${item.state}`).join("|");
+    const render = signature !== operationSignature;
     const changed = operationSignature !== null && signature !== operationSignature;
     operationSignature = signature;
-    byId("domain-operations").replaceChildren(...data.items.map((item) => {
+    if (render) byId("domain-operations").replaceChildren(...data.items.map((item) => {
       const node = domainText("article", "", "operation-row");
       const status = item.state === "unknown" ? "Unconfirmed · local reconciliation required; do not resubmit" :
         item.state === "failed" ? "Rejected · reload and review the current item" : item.state;
       node.append(domainText("strong", item.kind.replaceAll("-", " ")), domainText("span", status),
         domainText("small", item.request_id, "muted"));
+      if (window.MaterialLoading && ["accepted", "running", "cancelling"].includes(item.state)) {
+        node.dataset.working = "true";
+        node.prepend(MaterialLoading.create({ size: "medium" }));
+      }
       return node;
     }));
-    if (!data.items.length) byId("domain-operations").append(domainText("p", "No Library or integration operations yet.", "muted"));
-    if (changed && data.items.some((item) => ["completed", "failed", "unknown"].includes(item.state))) {
+    if (render && !data.items.length) byId("domain-operations").append(domainText("p", "No Library or integration operations yet.", "muted"));
+    if (skillSettled || changed && data.items.some((item) => ["completed", "failed", "unknown"].includes(item.state))) {
       loadTabCounts();
       filePages.clear(); artifactDetails.clear();
       if (currentView === "library") loadLibrary();
@@ -1438,7 +2078,7 @@ async function loadOperations() {
 
 byId("nav-library").addEventListener("click", () => showView("library"));
 byId("nav-integrations").addEventListener("click", () => showView("integrations"));
-byId("library-refresh").addEventListener("click", () => { filePages.clear(); artifactDetails.clear(); loadLibrary(); loadTabCounts(); });
+byId("library-refresh").addEventListener("click", () => refreshDomain("library"));
 for (const button of byId("file-view-modes").children) {
   button.append(libraryIcon(button.dataset.fileView));
   button.addEventListener("click", () => {
@@ -1447,8 +2087,41 @@ for (const button of byId("file-view-modes").children) {
     rememberLibraryLocation(); loadLibrary();
   });
 }
-byId("file-search-submit").append(libraryIcon("search"));
 byId("file-add").append(libraryIcon("plus"));
+function integrationAddContext(section) {
+  const generation = integrationAddGeneration, epoch = authEpoch;
+  return {
+    current: () => authenticated && epoch === authEpoch && currentView === "integrations" &&
+      integrationSection === section && integrationAddSection === section && integrationAddDialog.open &&
+      generation === integrationAddGeneration,
+    beforeOpen: () => integrationAddDialog.close(),
+  };
+}
+for (const button of document.querySelectorAll("[data-integration-add]")) {
+  button.append(libraryIcon("plus"));
+  button.addEventListener("click", () => {
+    const section = button.dataset.integrationAdd;
+    if (!authenticated || currentView !== "integrations" || integrationSection !== section || reviewDialog.open) return;
+    integrationAddGeneration += 1; integrationAddSection = section;
+    byId("integration-add-title").textContent = integrationAddForms[section].title;
+    byId("integration-add-status").textContent = "";
+    for (const panel of integrationAddDialog.querySelectorAll("[data-integration-form]"))
+      panel.hidden = panel.dataset.integrationForm !== section;
+    const form = byId(integrationAddForms[section].form);
+    form.reset();
+    if (section === "knowledge") byId("learn-library").value = byId("knowledge-library").value;
+    integrationAddDialog.showModal();
+    form.querySelector("input").focus();
+  });
+}
+byId("integration-add-close").append(libraryIcon("close"));
+byId("integration-add-close").addEventListener("click", () => integrationAddDialog.close());
+integrationAddDialog.addEventListener("close", () => {
+  if (integrationAddDialog.open) return;
+  integrationAddGeneration += 1; integrationAddSection = null;
+  for (const item of Object.values(integrationAddForms)) byId(item.form).reset();
+  byId("integration-add-status").textContent = "";
+});
 byId("file-add").addEventListener("click", () => {
   importGeneration += 1;
   byId("artifact-import-status").textContent = "";
@@ -1470,7 +2143,7 @@ byId("artifact-filter").addEventListener("keydown", (event) => {
   byId("file-options-toggle").setAttribute("aria-expanded", "false");
   byId("file-options-toggle").focus();
 });
-byId("skills-refresh").addEventListener("click", () => { loadIntegrationSection(); loadTabCounts(); });
+byId("skills-refresh").addEventListener("click", () => refreshDomain("integrations"));
 for (const button of byId("integration-sections").querySelectorAll("[data-integration]")) {
   button.addEventListener("click", () => {
     if (integrationSection === button.dataset.integration) return;
@@ -1480,14 +2153,17 @@ for (const button of byId("integration-sections").querySelectorAll("[data-integr
   });
 }
 byId("skills-query").addEventListener("input", () => {
-  skillsOffset = 0;
-  skillsLoad += 1;
+  skillsOffset = 0; skillsLocationPage = null;
+  skillsLoad += 1; skillsRead?.abort();
   clearTimeout(skillsSearchTimer);
-  skillsSearchTimer = setTimeout(loadSkills, 200);
+  skillsSearchTimer = setTimeout(() => { rememberIntegrationLocation(); loadSkills(); }, 200);
 });
-byId("skills-filter").addEventListener("submit", (event) => { event.preventDefault(); skillsOffset = 0; loadSkills(); });
-byId("skills-previous").addEventListener("click", () => { skillsOffset = Math.max(0, skillsOffset - domainPageSizes.skills); loadSkills(); });
-byId("skills-next").addEventListener("click", () => { skillsOffset += domainPageSizes.skills; loadSkills(); });
+byId("skills-filter").addEventListener("submit", (event) => {
+  event.preventDefault(); skillsOffset = 0; skillsLocationPage = null;
+  rememberIntegrationLocation(); loadSkills();
+});
+byId("skills-previous").addEventListener("click", () => { skillsOffset = Math.max(0, skillsOffset - domainPageSizes.skills); rememberIntegrationLocation(); loadSkills(); });
+byId("skills-next").addEventListener("click", () => { skillsOffset += domainPageSizes.skills; rememberIntegrationLocation(); loadSkills(); });
 for (const button of document.querySelectorAll("#library-sections button")) {
   button.addEventListener("click", () => {
     if (librarySection === button.dataset.section) return;
@@ -1512,7 +2188,16 @@ for (const button of document.querySelectorAll("#library-sections button")) {
     loadLibrary();
   });
 }
-byId("artifact-filter").addEventListener("submit", (event) => { event.preventDefault(); libraryOffset = 0; rememberLibraryLocation(); loadLibrary(); });
+byId("artifact-filter").addEventListener("submit", (event) => {
+  event.preventDefault(); clearTimeout(fileSearchTimer);
+  libraryOffset = 0; rememberLibraryLocation(); loadLibrary();
+});
+byId("artifact-query").addEventListener("input", () => {
+  clearTimeout(fileSearchTimer); fileRead?.abort(); libraryLoad += 1;
+  fileSearchTimer = setTimeout(() => {
+    libraryOffset = 0; rememberLibraryLocation(); loadLibrary();
+  }, 200);
+});
 byId("artifact-sort").addEventListener("change", () => { libraryOffset = 0; rememberLibraryLocation(); loadLibrary(); });
 for (const id of ["artifact-kind", "artifact-status"]) {
   byId(id).addEventListener("change", () => {
@@ -1534,7 +2219,7 @@ for (const prefix of Object.keys(domainGrids)) {
     const offset = (Number(button.dataset.page) - 1) * domainPageSizes[prefix];
     if (prefix === "library") { libraryOffset = offset; rememberLibraryLocation(); loadLibrary(); }
     else if (prefix === "knowledge") { knowledgeOffset = offset; rememberIntegrationLocation(); loadKnowledge(); }
-    else if (prefix === "skills") { skillsOffset = offset; loadSkills(); }
+    else if (prefix === "skills") { skillsOffset = offset; rememberIntegrationLocation(); loadSkills(); }
     else { sourceOffset = offset; rememberIntegrationLocation(); loadKnowledgeSources().catch((error) => domainError(error)); }
   });
 }
@@ -1556,7 +2241,7 @@ const domainGridObserver = new ResizeObserver(() => {
       if (measureDomainPageSize("library") !== domainPageSizes.library) loadLibrary();
     } else if (currentView === "integrations") {
       const prefix = integrationSection;
-      if (measureDomainPageSize(prefix) !== domainPageSizes[prefix]) loadIntegrationSection();
+      if (prefix in domainPageSizes && measureDomainPageSize(prefix) !== domainPageSizes[prefix]) loadIntegrationSection();
       else if (integrationSection === "knowledge" && byId("source-items").getClientRects().length &&
           measureDomainPageSize("sources") !== domainPageSizes.sources)
         loadKnowledgeSources().catch((error) => domainError(error));
@@ -1570,21 +2255,34 @@ document.addEventListener("klaude-view", (event) => {
     if (new URLSearchParams(location.search).get("library") === "knowledge") { showView("integrations"); return; }
     restoreLibraryLocation(); rememberLibraryLocation(true); loadLibrary();
   } else {
+    clearTimeout(fileSearchTimer);
     fileRead?.abort();
     libraryLoad += 1; cancelLoading(byId("library-items"));
   }
   if (event.detail === "integrations") {
     restoreIntegrationLocation(); renderIntegrationSection(); rememberIntegrationLocation(true); loadIntegrationSection();
-  } else stopIntegrationReads();
+  } else { stopIntegrationReads(); integrationAddDialog.close(); }
   if (authenticated && !["library", "integrations"].includes(event.detail)) {
     const url = new URL(location.href);
     for (const key of [...url.searchParams.keys()])
-      if (["library", "integrations", "sources-page"].includes(key) || key.startsWith("files-") || key.startsWith("knowledge-")) url.searchParams.delete(key);
+      if (["library", "integrations", "sources-page"].includes(key) || key.startsWith("files-") || key.startsWith("knowledge-") || key.startsWith("skills-")) url.searchParams.delete(key);
     history.replaceState(history.state, "", url.pathname + url.search + url.hash);
   }
   if (["library", "integrations", "activity"].includes(event.detail)) loadOperations();
 });
 document.addEventListener("klaude-auth-reset", () => {
+  integrationAddGeneration += 1; integrationAddDialog.close();
+  clearTimeout(fileSearchTimer);
+  for (const token of domainRefreshes.values()) {
+    clearTimeout(token.timer); token.indicator?.remove();
+  }
+  domainRefreshes.clear();
+  for (const id of ["library-refresh", "skills-refresh"]) {
+    byId(id).disabled = false; byId(id).setAttribute("aria-busy", "false");
+  }
+  skillChanges.clear(); skillFailures.clear(); skillReviewPending = false; detailSkill = null;
+  skillDialog.close();
+  for (const id of ["skill-detail-title", "skill-detail-description", "skill-detail-metadata", "skill-detail-status"]) byId(id).replaceChildren();
   stopIntegrationReads();
   fileRead?.abort(); artifactRead?.abort(); filePages.clear(); artifactDetails.clear(); filePage = null;
   libraryImageCapability = undefined;
@@ -1601,6 +2299,7 @@ document.addEventListener("klaude-auth-reset", () => {
   artifactLoad += 1;
   libraryOffset = knowledgeOffset = sourceOffset = skillsOffset = 0;
   knowledgeLocationPage = sourceLocationPage = null;
+  skillsLocationPage = null;
   knowledgeQuery = "";
   clearTimeout(skillsSearchTimer);
   legacyPageRoutes.clear();
@@ -1641,6 +2340,10 @@ document.addEventListener("klaude-auth-reset", () => {
   byId("knowledge-library").replaceChildren();
   byId("learn-library").value = ""; byId("learn-url").value = "";
   byId("domain-review-summary").textContent = "";
+  byId("domain-review-target").textContent = "";
+  byId("domain-review-notice").textContent = "";
+  byId("domain-review-technical-summary").textContent = "";
+  byId("domain-review-technical").open = false;
   byId("domain-review-status").textContent = "";
   byId("artifact-detail-title").textContent = "Saved item";
   byId("library-status").textContent = "";
@@ -1648,18 +2351,24 @@ document.addEventListener("klaude-auth-reset", () => {
   byId("knowledge-status").textContent = "";
 });
 window.addEventListener("popstate", () => {
+  integrationAddDialog.close();
   if (!authenticated) return;
   if (artifactDialog.open) artifactDialog.close();
+  if (skillDialog.open) skillDialog.close();
   const query = new URLSearchParams(location.search);
-  if (query.get("library") === "knowledge" || ["skills", "knowledge"].includes(query.get("integrations"))) {
+  if (query.get("library") === "knowledge" || ["skills", "knowledge", "connections"].includes(query.get("integrations"))) {
     restoreIntegrationLocation();
-    if (currentView !== "integrations") showView("integrations");
+    if (currentView !== "integrations") showView("integrations", { restore: true });
     else { renderIntegrationSection(); rememberIntegrationLocation(true); loadIntegrationSection(); }
   } else if (["files", "outputs"].includes(query.get("library"))) {
     restoreLibraryLocation();
-    if (currentView !== "library") showView("library"); else loadLibrary();
-  } else if (["library", "integrations"].includes(currentView)) showView("chat");
+    if (currentView !== "library") showView("library", { restore: true }); else loadLibrary();
+  } else {
+    const view = viewNames.includes(query.get("view")) ? query.get("view") : "chat";
+    if (currentView !== view) showView(view, { restore: true });
+    else if (view === "settings") showSettingsSection(query.get("settings") || settingsSection, { restore: true });
+  }
 });
 setInterval(() => {
-  if (authenticated && ["library", "integrations", "activity"].includes(currentView) && !document.hidden) loadOperations();
+  if (authenticated && (["library", "integrations", "activity", "settings"].includes(currentView) || window.BrowserManagement?.hasPending()) && !document.hidden) loadOperations();
 }, 2000);

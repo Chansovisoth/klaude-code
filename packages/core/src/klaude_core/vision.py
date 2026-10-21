@@ -325,17 +325,12 @@ def inspect_model(
 def image(cfg: Any, identity: str, revision: int) -> tuple[dict, bytes]:
     store = ArtifactStore(cfg.data_dir / "library")
     item = store.get(identity)
-    if item["kind"] != "media" or item["archived"] or item["revision"] != revision:
-        raise ValueError("Choose a current, unarchived Media image; reload its detail")
+    if (item["kind"] not in {"media", "document"} or item["archived"]
+            or item["revision"] != revision):
+        raise ValueError("Choose a current, unarchived Library image; reload its detail")
     if item["size"] > MAX_SOURCE_BYTES:
         raise ValueError("Vision source images must fit in 32 MiB")
-    with store.database() as db:
-        row = db.execute(
-            "SELECT content,revision FROM artifacts WHERE id=?", (identity,)
-        ).fetchone()
-    if row is None or row["revision"] != revision:
-        raise ValueError("Image changed; reload and review again")
-    data = bytes(row["content"])
+    data = store.read_content(identity, revision, limit=MAX_SOURCE_BYTES)
     if hashlib.sha256(data).hexdigest() != item["sha256"]:
         raise ValueError("Stored image checksum failed")
     mime, width, height = image_header(data)

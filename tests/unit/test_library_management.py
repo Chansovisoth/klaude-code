@@ -19,6 +19,7 @@ from klaude_application.library_management import (
 )
 from klaude_application.operation_journal import OperationConflict
 from klaude_core.config import Config
+from PIL import Image
 
 
 @pytest.fixture
@@ -223,15 +224,45 @@ def test_artifact_lifecycle_uses_atomic_revisions_and_retains_originals(manager)
     current = manager.artifacts.get(item["id"])
     assert _change(manager, current, "restore")["state"] == "completed"
     current = manager.artifacts.get(item["id"])
-    with pytest.raises(ValueError, match="Archive"):
-        manager.prepare("browser", {"operation": "delete", "target": current["id"],
-                                    "revision": current["revision"]})
+    review = manager.prepare("browser", {"operation": "delete", "target": current["id"],
+                                         "revision": current["revision"]})
+    manager.discard("browser", review["review_id"])
+    assert not manager.artifacts.get(current["id"])["archived"]
     assert _change(manager, current, "archive")["state"] == "completed"
     current = manager.artifacts.get(item["id"])
     assert manager.listing(kind="all", archived=True)["items"][0]["id"] == item["id"]
     assert _change(manager, current, "delete")["state"] == "completed"
     assert source.read_text() == "Original workspace file"
     assert manager.listing(kind="all", archived=True)["items"] == []
+
+
+@pytest.mark.parametrize("kind", ["document", "media", "research"])
+def test_saved_artifact_delete_rechecks_review_revision_without_archiving(manager, kind):
+    if kind == "research":
+        item = manager.artifacts.store_report("report.md", "Saved report", job="fixture")
+    elif kind == "media":
+        output = io.BytesIO()
+        Image.new("RGB", (2, 2), "teal").save(output, format="PNG")
+        item = manager.artifacts.import_bytes(output.getvalue(), kind, "saved.png")
+    else:
+        item = manager.artifacts.import_bytes(b"Saved bytes", kind, "saved.txt")
+    draft = {"operation": "delete", "target": item["id"], "revision": item["revision"]}
+    review = manager.prepare("browser", draft)
+    assert "cannot be undone" in review["summary"]
+    assert not manager.artifacts.get(item["id"])["archived"]
+    manager.discard("browser", review["review_id"])
+    assert manager.artifacts.get(item["id"])["revision"] == item["revision"]
+
+    stale = manager.prepare("browser", draft)
+    current = manager.artifacts.change(item["id"], item["revision"], "tags", "changed")
+    identity = uuid.uuid4().hex
+    manager.submit("browser", stale["review_id"], identity)
+    assert _wait(manager, identity)["state"] == "failed"
+    assert manager.artifacts.get(item["id"])["revision"] == current["revision"]
+    assert not current["archived"]
+    assert _change(manager, current, "delete")["state"] == "completed"
+    with pytest.raises(ValueError, match="no longer exists"):
+        manager.artifacts.get(item["id"])
 
 
 def test_reviews_expire_are_owner_bound_and_release_private_snapshots(manager):

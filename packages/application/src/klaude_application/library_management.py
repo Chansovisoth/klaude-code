@@ -32,6 +32,15 @@ from klaude_core.library_artifacts import (
 
 from .background_jobs import OwnedBackgroundJobs
 from .background_worker import execute
+from .browser_jobs import OPERATIONS as GENERATED_OPERATIONS
+from .browser_jobs import operation_timeout, prepare_generated_operation, run_generated_operation
+from .browser_management import OPERATIONS as PROFILE_OPERATIONS
+from .browser_management import prepare_profile_operation, run_profile_operation
+from .browser_media_settings import OPERATIONS as MEDIA_SETTINGS_OPERATIONS
+from .browser_media_settings import WITNESSED, prepare_media_setting, run_media_setting
+from .browser_vision import OPERATIONS as VISION_OPERATIONS
+from .browser_vision import READ_OPERATIONS as VISION_READ_OPERATIONS
+from .browser_vision import prepare_vision_operation, run_vision_operation
 from .library_inventory import knowledge_inventory, knowledge_search
 from .library_knowledge import KnowledgeAction, knowledge_worker_request, source_inventory
 from .mcp_inventory import read_mcp_inventory
@@ -158,9 +167,12 @@ class LibraryManagement:
                           "total": len(items), "limited": result.get("more", False)}, offset)
 
     def detail(self, identity: str) -> dict[str, Any]:
-        result = self.artifacts.preview(identity)
+        result = self.artifacts.preview(identity, include_source=True)
         return {"item": self.public_artifact(result["item"]), "lines": result["lines"],
-                "truncated": result.get("truncated", False)}
+                "truncated": result.get("truncated", False),
+                **{key: result[key] for key in (
+                    "source_text", "source_truncated", "source_sanitized", "fallback"
+                ) if key in result}}
 
     def knowledge(self, library: str = "", query: str = "", *,
                   offset: int = 0) -> dict[str, Any]:
@@ -365,8 +377,6 @@ class LibraryManagement:
                         or item["revision"] != draft["revision"]
                     ):
                         raise ValueError("Item changed; reload before reviewing")
-                    if operation == "delete" and not item["archived"]:
-                        raise ValueError("Archive the item before permanent deletion")
                     fields = {"target": item["id"], "revision": item["revision"]}
                     if operation == "tags":
                         if not isinstance(draft.get("value"), str):
@@ -461,6 +471,16 @@ class LibraryManagement:
                         f"{verb} {action.source} into {action.library}. "
                         "Fetches public URLs and uses the configured embedding model."
                     )
+                elif operation in GENERATED_OPERATIONS:
+                    fields, resource, summary = prepare_generated_operation(self.cfg, draft)
+                elif operation in MEDIA_SETTINGS_OPERATIONS:
+                    fields, resource, summary = prepare_media_setting(self.cfg, draft)
+                elif operation in VISION_OPERATIONS:
+                    fields, resource, summary = prepare_vision_operation(self.cfg, draft)
+                elif operation in PROFILE_OPERATIONS:
+                    fields, resource, summary = prepare_profile_operation(
+                        self.cfg, draft, self.workspace,
+                    )
                 else:
                     raise ValueError("Unsupported Library operation")
                 token = secrets.token_hex(16)
@@ -474,7 +494,30 @@ class LibraryManagement:
                     snapshot.cleanup()
                 raise
 
-    def submit(self, owner: str, token: str, request_id: str) -> dict[str, Any]:
+    def local_review(self, owner: str, token: str) -> bool:
+        with self._lock:
+            review = self._reviews.get(token)
+            return bool(review is not None and review.owner == owner
+                        and review.operation.startswith("mcp-"))
+
+    def reviewed_session_action(self, owner: str, token: str, session_id: str) -> str:
+        with self._lock:
+            review = self._reviews.get(token)
+            if (review is not None and review.owner == owner
+                    and review.operation in {"session-archive", "session-delete"}
+                    and review.fields.get("target") == session_id):
+                return review.operation
+            return ""
+
+    def session_busy(self, session_id: str) -> bool:
+        if self._journal is None and not (self.data / "operations.db").exists():
+            return False
+        return self.journal.resource_busy(f"session:{session_id}")
+
+    def submit(
+        self, owner: str, token: str, request_id: str, *,
+        before_start: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
             self._purge()
             review = self._reviews.get(token)
@@ -495,6 +538,17 @@ class LibraryManagement:
                 payload={"review": review.id, **intent},
             )
             if receipt.created:
+                review.submitted = True
+                review.request_id = request_id
+                if before_start is not None:
+                    try:
+                        before_start()
+                    except Exception:
+                        # Admission validates the exact request/resource before the
+                        # host changes chats. No worker effect has begun yet.
+                        self.journal.finish(request_id, OWNER, receipt.fence,
+                                            state="failed", outcome="failed")
+                        raise
                 request = {
                     "kind": "library_management_operation",
                     "config_dir": str(self.cfg.config_dir),
@@ -530,11 +584,13 @@ class LibraryManagement:
                         request["knowledge_request"]["upload_identity"] = (
                             review.fields["sha256"] + ":" + review.fields["filename"]
                         )
-                review.submitted = True
-                review.request_id = request_id
-                self.journal.start(request_id, OWNER, receipt.fence)
+                if (not review.operation.startswith("mcp-")
+                        and review.operation not in WITNESSED):
+                    self.journal.start(request_id, OWNER, receipt.fence)
                 self._active[request_id] = (receipt.fence, review)
-                self._jobs.submit(request_id, request, timeout=180)
+                timeout = operation_timeout(review.operation, review.fields)
+                self._jobs.submit(request_id, request, timeout=timeout,
+                                  notify_cancel=review.operation in VISION_READ_OPERATIONS)
                 if self._keeper is None:
                     self._keeper = threading.Thread(
                         target=self._keep_leases, name="klaude-library-leases", daemon=True
@@ -553,6 +609,18 @@ class LibraryManagement:
                         self._finish(identity, False)
 
     def _event(self, kind: str, value: object) -> None:
+        if kind == "background_stopped" and isinstance(value, tuple):
+            identity = value[0]
+            with self._lock:
+                active = self._active.get(identity)
+                if active is not None and active[1].operation in VISION_READ_OPERATIONS:
+                    self._active.pop(identity)
+                    try:
+                        self.journal.finish(identity, OWNER, active[0],
+                                            state="cancelled", outcome="cancelled")
+                    except (OSError, sqlite3.Error, OperationFenceLost):
+                        pass
+            return
         if kind != "background_result" or not isinstance(value, tuple):
             return
         identity, _, result, error = value
@@ -601,6 +669,28 @@ class LibraryManagement:
             return {"items": []}
         return {"items": [asdict(item) for item in self.journal.recent(OWNER, limit=30)]}
 
+    def cancel_vision(self, identity: str) -> dict[str, Any]:
+        with self._lock:
+            receipt = self.status(identity)
+            if receipt["kind"] not in VISION_READ_OPERATIONS:
+                raise ValueError("Only an image analysis or tag suggestion can be stopped here")
+            if receipt["state"] in {"completed", "failed", "cancelled"}:
+                return receipt
+            if identity not in self._active:
+                raise OperationConflict("Image operation is unconfirmed; inspect its saved state")
+            self.journal.request_cancel(identity, OWNER)
+            self._jobs.cancel(identity)
+            return self.status(identity)
+
+    def vision_results(self, identity: str, revision: int) -> dict[str, Any]:
+        from .browser_vision import results
+
+        view = results(self.cfg, identity, revision)
+        if view["pending"] is not None:
+            with self._lock:
+                view["pending"]["cancellable"] = view["pending"]["request_id"] in self._active
+        return view
+
     def close(self) -> None:
         with self._lock:
             self._closed = True
@@ -626,8 +716,13 @@ def run_management_operation(request: dict[str, Any]) -> dict[str, Any]:
     if cfg.data_dir.resolve() != data.resolve():
         raise ValueError("Operation root changed")
     journal = OperationJournal(data / "operations.db")
-    journal.check_effect(request["request_id"], OWNER, request["fence"])
     operation = request["operation"]
+    if operation.startswith("mcp-") or operation in WITNESSED:
+        # The shared definition writer records its witness while admission is
+        # still accepted, then starts and checks the effect inside the file lock.
+        journal.renew(request["request_id"], OWNER, request["fence"])
+    else:
+        journal.check_effect(request["request_id"], OWNER, request["fence"])
     store = ArtifactStore(data / "library")
     if operation in {"import", "knowledge-upload", "skill-import"}:
         source = Path(request["source"])
@@ -687,6 +782,25 @@ def run_management_operation(request: dict[str, Any]) -> dict[str, Any]:
             return {"rejected": True}
         if result.get("status") not in {"learned", "unchanged", "refreshed"}:
             return {"ok": False}
+    elif operation in GENERATED_OPERATIONS:
+        try:
+            return run_generated_operation(cfg, request)
+        except ValueError:
+            return {"rejected": True}
+    elif operation in MEDIA_SETTINGS_OPERATIONS:
+        from klaude_core.settings_store import SettingsConflictError
+
+        try:
+            return run_media_setting(cfg, request)
+        except (ValueError, SettingsConflictError):
+            return {"rejected": True}
+    elif operation in VISION_OPERATIONS:
+        try:
+            return run_vision_operation(cfg, request)
+        except ValueError:
+            return {"rejected": True}
+    elif operation in PROFILE_OPERATIONS:
+        return run_profile_operation(cfg, request)
     else:
         raise ValueError("Unknown operation")
     return {"ok": True}
