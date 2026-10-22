@@ -3,6 +3,7 @@
 Run: uv run --frozen --offline python scripts/webui_library_browser_smoke.py
 Uses an isolated profile, private fixtures, and no model/provider generation.
 KLAUDE_TEST_GENERATED_FILTERS_ONLY=1 runs just the Generated filter checks.
+KLAUDE_TEST_LIBRARY_VIEWS_ONLY=1 runs through responsive views and image previews.
 """
 
 from __future__ import annotations
@@ -147,6 +148,7 @@ async def verify(host, root, chrome):
             await tab.command("Page.enable")
 
             async def activate(selector):
+                await tab.wait('!document.querySelector(".shell").inert')
                 point = await tab.js('''(() => {
                   const button=document.querySelector(''' + json.dumps(selector) + ''');
                   button.scrollIntoView({block:'nearest'});
@@ -174,6 +176,8 @@ async def verify(host, root, chrome):
                 host.accounts.initial_password()
             ) + ';byId("account-login").requestSubmit()')
             await tab.wait('latest?.session_id && pollTimer !== null')
+            # Keep the main Library unobscured when the viewport becomes a drawer layout.
+            await tab.js('setContextPanel(false)')
             await tab.js('''window.fileRequests=[];window.originalFetch=window.fetch;
               window.fetch=(input,options)=>{fileRequests.push(String(input));
                 return originalFetch(input,options);};''')
@@ -446,6 +450,14 @@ async def verify(host, root, chrome):
                     })()''')
                     await tab.click("#artifact-close")
 
+            if os.environ.get("KLAUDE_TEST_LIBRARY_VIEWS_ONLY") == "1":
+                assert not tab.errors, tab.errors
+                print(json.dumps({"library_views": ["list", "grid", "gallery"],
+                                  "responsive_layouts": len(layouts),
+                                  "history_search_pagination_preview": True,
+                                  "browser_exceptions": 0, "screenshots": str(output)}, indent=2))
+                return
+
             await tab.js('document.documentElement.dataset.motion="reduced"')
             # Both sources reuse the adaptive browser without mixing collections.
             for width in (320, 1440):
@@ -511,13 +523,15 @@ async def verify(host, root, chrome):
             await tab.click(".file-item button")
             await tab.wait('byId("artifact-preview").textContent.includes("Fixture note")')
             assert await tab.js('byId("image-navigation").hidden && '
-                                'byId("artifact-actions").querySelector("a").textContent==="Download"')
-            await tab.js('byId("artifact-tags-input").value="smoke, reference";'
+                                'byId("artifact-download").download==="notes.txt"')
+            await tab.click("#artifact-tags-edit")
+            await tab.js('byId("artifact-tag-new").value="smoke, reference";'
                          'byId("artifact-tags").requestSubmit()')
             await tab.wait('byId("domain-review").open')
             await tab.click("#domain-review-confirm")
             await tab.wait('!byId("domain-review").open')
             await tab.wait('filePage?.items[0].tags.includes("smoke")')
+            await activate("#artifact-close")
             # Import from an unrelated search/type scope without choosing storage.
             await tab.js('byId("artifact-kind").value="document";'
                          'byId("artifact-kind").dispatchEvent(new Event("change"))')

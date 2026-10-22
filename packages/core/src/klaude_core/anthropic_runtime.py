@@ -12,7 +12,7 @@ import httpx
 
 from .compatible_runtime import CompatibleModelError, CompatibleRuntime
 from .http_model_transport import CancellableHTTPTransport
-from .image_content import ANTHROPIC_IMAGE_BYTES, image_parts
+from .image_content import ANTHROPIC_IMAGE_BYTES, MAX_IMAGES, image_parts
 from .model_connections import DEFAULT_URLS
 from .model_runtime import ModelCapabilities, chat_completion_messages, validated_chat_calls
 
@@ -136,7 +136,7 @@ class AnthropicRuntime(CancellableHTTPTransport):
             source = next(originals) if role != "tool" else {}
             parts = image_parts(source, max_bytes=ANTHROPIC_IMAGE_BYTES)
             image_count += len(parts)
-            if image_count > 2 or (parts and self.image_model != model):
+            if image_count > MAX_IMAGES or (parts and self.image_model != model):
                 raise AnthropicModelError("Image support or image count is invalid for this model")
             if role == "system":
                 system.append(message["content"])

@@ -83,6 +83,19 @@ async def verify(host, root, cfg, servers):
             target = json.load(r)
         async with websockets.connect(target["webSocketDebuggerUrl"]) as ws:
             tab = Tab(ws)
+            async def saved():
+                deadline = asyncio.get_running_loop().time() + 30
+                while asyncio.get_running_loop().time() < deadline:
+                    state = await tab.js("({hidden:byId('models-save-bar').hidden, "
+                                         "saving:SettingsDrafts.category('models').saving, "
+                                         "status:byId('models-save-status').textContent})")
+                    if state["hidden"]:
+                        return
+                    if not state["saving"]:
+                        raise AssertionError(state)
+                    await asyncio.sleep(.1)
+                raise AssertionError(await tab.js("byId('models-save-status').textContent"))
+
             await tab.command("Runtime.enable")
             await tab.command("Page.enable")
             await tab.command("Page.navigate", {"url": host.bootstrap_url})
@@ -107,6 +120,9 @@ async def verify(host, root, cfg, servers):
             await tab.js("byId('default-value-vision').value='ollama@alpha/portrait';"
                          "byId('default-output-tokens').value='256';"
                          "byId('image-service-url').value='http://127.0.0.1:1234';"
+                         "byId('default-value-vision').dispatchEvent(new Event('change'));"
+                         "byId('default-output-tokens').dispatchEvent(new Event('input'));"
+                         "byId('image-service-url').dispatchEvent(new Event('input'));"
                          "byId('default-model-connection').value='beta';"
                          "byId('default-model-connection').dispatchEvent(new Event('change'))")
             await tab.wait("[...byId('default-value-vision').options].some("
@@ -125,15 +141,19 @@ async def verify(host, root, cfg, servers):
             servers[1].fail = False
             await tab.js("byId('default-value-vision').value='ollama@beta/photo';"
                          "byId('default-value-vision').closest('form').requestSubmit()")
-            await tab.wait("reviewDialog.open")
-            await tab.click("#domain-review-cancel")
-            await tab.wait("!reviewDialog.open && !BrowserManagement.busy('media-defaults')")
             assert read_defaults(cfg).vision is None
-            assert await tab.js("byId('default-value-vision').value==='ollama@beta/photo'")
-            await tab.js("byId('default-value-vision').closest('form').requestSubmit()")
-            await tab.wait("reviewDialog.open")
-            await tab.click("#domain-review-confirm")
-            await tab.wait("!reviewDialog.open && !BrowserManagement.hasPending()")
+            assert await tab.js("!reviewDialog.open && !byId('models-save-bar').hidden")
+            await tab.click("#models-discard")
+            assert await tab.js("!byId('default-value-vision').value && "
+                               "byId('models-save-bar').hidden")
+            await tab.js("byId('default-value-vision').value='ollama@beta/photo';"
+                         "byId('default-value-vision').dispatchEvent(new Event('change'));"
+                         "byId('default-output-tokens').value='256';"
+                         "byId('default-output-tokens').dispatchEvent(new Event('input'));"
+                         "byId('image-service-url').value='http://127.0.0.1:1234';"
+                         "byId('image-service-url').dispatchEvent(new Event('input'))")
+            await tab.click("#models-save")
+            await saved()
             assert read_defaults(cfg).vision == "ollama@beta/photo"
             assert await tab.js("byId('default-output-tokens').value==='256' && "
                                "byId('image-service-url').value==='http://127.0.0.1:1234'")
@@ -166,6 +186,31 @@ async def verify(host, root, cfg, servers):
                         (output / f"{theme}-{width}.png").write_bytes(
                             base64.b64decode(capture["data"])
                         )
+            # Vision activation is a focused data-access confirmation; cancelling
+            # keeps the draft and never enables the backend implicitly.
+            await tab.click("#default-vision-enabled")
+            await tab.click("#models-save")
+            await tab.wait("byId('settings-security')?.open")
+            assert await tab.js("byId('settings-security-details').textContent.includes('images')")
+            await tab.click("#settings-security-cancel")
+            await tab.wait("!byId('models-save').disabled")
+            assert not read_defaults(cfg).vision_enabled
+            await tab.click("#models-save")
+            await tab.wait("byId('settings-security').open")
+            await tab.click("#settings-security-confirm")
+            await saved()
+            assert read_defaults(cfg).vision_enabled
+            for order in (("portrait", "text-tools"), ("text-tools", "portrait")):
+                for index, name in enumerate(order):
+                    await tab.js(f"byId('default-value-fallbacks-{index}').value="
+                                 + json.dumps(f"ollama@alpha/{name}") + ";"
+                                 f"byId('default-value-fallbacks-{index}')"
+                                 ".dispatchEvent(new Event('change'))")
+                await tab.click("#models-save")
+                await saved()
+                assert read_defaults(cfg).fallbacks == tuple(
+                    f"ollama@alpha/{name}" for name in order
+                )
             # An obsolete catalog response cannot restore private choices after logout.
             await tab.js("""window.originalFetch=fetch.bind(window);window.fetch=(input,options)=>
               String(input).includes('/models/catalog') ? new Promise(resolve=>{
@@ -183,7 +228,8 @@ async def verify(host, root, cfg, servers):
             assert all(path in {"/api/tags", "/api/show"}
                        for server in servers for path in server.calls)
             return {"automatic_role_lists": "passed", "connection_refresh_drafts": "passed",
-                    "review_cancel_save": "passed", "logout_race": "passed",
+                    "staged_discard_save": "passed", "vision_confirmation": "passed",
+                    "ordered_fallback_saves": "passed", "logout_race": "passed",
                     "layouts": layouts, "inference_calls": 0, "console_errors": 0}
     finally:
         process.terminate()

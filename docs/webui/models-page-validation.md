@@ -65,3 +65,19 @@ Changed implementation: `static/index.html`, `static/app.js`, `static/media.js`,
 `scripts/webui_models_smoke.py`; MCP evidence is recorded in
 `connections-layout-validation.md`. `AGENTS.md` and `coverage.md` reflect the
 supported browser surface. Unrelated dirty-worktree changes were preserved.
+
+## Expressive rows and hover corners — 2026-10-22
+
+Model rows now reuse Integrations' `library-card collection-row` component and
+`collection-list` container: tonal surfaces, icon tiles, shared spacing and stable
+12px inner/23px row-end corners. The confirmed current model gets a secondary
+tonal surface; Use model retains its explicit action and existing idle/control
+guards. Model identities and Thinking efforts still come from the catalog.
+
+Provider hover no longer changes the selected 30px corners. The shared generic
+hover/press fix also prevents the spring from briefly producing zero-radius
+corners elsewhere. The configured/legacy Models smoke passed again, including
+selection, Thinking preservation, search/pagination, failure, refresh and sign-out
+checks. Eight additional actual light/dark layouts passed at 320/390/850/1440px;
+desktop and 320px screenshots were inspected. See `hover-corners-validation.md`
+for the frame-sampled regression and its limits.

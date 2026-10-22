@@ -67,23 +67,24 @@ async def verify(host, root, chrome):
                          'new MutationObserver(records=>loadingFrameWrites+=records.filter('
                          'r=>r.attributeName==="d").length).observe(document.body,'
                          '{attributes:true,subtree:true,attributeFilter:["d"]})')
-            # Endpoint order and exact native rotation/cadence; the overshoot
-            # intentionally enters the next morph, as the Android delegate does.
-            samples = await tab.js('Array.from({length:8},(_,i)=>MaterialLoading.frameAt(i*650))')
-            assert [s["index"] for s in samples] == [0, 1, 2, 3, 4, 5, 6, 0]
-            assert all(abs(s["progress"]) < 1e-8 for s in samples)
-            for i, sample in enumerate(samples):
-                assert abs((sample["rotation"] - (-90 + i * 140)) % 360) < 1e-7
-            assert await tab.js('MaterialLoading.frameAt(280).index===1 && '
-                                'MaterialLoading.frameAt(280).progress>.08 && '
-                                'MaterialLoading.frameAt(550).progress===0')
+            # Current end-4 source: 800ms cadence, 90-degree/350ms quadratic
+            # leaps, 12-second continuous rotation and a 750ms zoom envelope.
+            samples = await tab.js('Array.from({length:8},(_,i)=>MaterialLoading.frameAt(i*800))')
+            assert [s["index"] for s in samples] == [0, 0, 1, 2, 3, 4, 5, 6]
+            assert all(s["progress"] == 0 for s in samples)
+            assert await tab.js('MaterialLoading.frameAt(900).progress>0 && '
+                                'MaterialLoading.frameAt(900).progress<1 && '
+                                'MaterialLoading.frameAt(1000).progress===1 && '
+                                'MaterialLoading.frameAt(900).zoom>1 && '
+                                'Math.abs(MaterialLoading.frameAt(1150).rotation-124.5)<.0001')
 
             async def shot(name):
                 result = await tab.command("Page.captureScreenshot", {"format": "png"})
                 (OUT / name).write_bytes(base64.b64decode(result["data"]))
 
             for theme in ("light", "dark"):
-                await tab.js('document.documentElement.dataset.theme=' + json.dumps(theme))
+                await tab.js('applyAppearance({...appearance,theme:' +
+                             json.dumps(theme) + '},true)')
                 for width in (360, 390, 768, 1280):
                     await tab.command("Emulation.setDeviceMetricsOverride", {
                         "width": width, "height": 820, "deviceScaleFactor": 1, "mobile": False,
@@ -100,10 +101,12 @@ async def verify(host, root, chrome):
                         ),
                     }
                     await shot(f"chat-{theme}-{width}.png")
+            await tab.js('showView("chat");renderAgentActivity({turn_id:"fixture",'
+                         'label:"Running tests",lifecycle:"running",timeline:[]})')
             await tab.js('window.runningIndicator=byId("agent-activity").querySelector('
                          '".material-loading");window.firstPath=runningIndicator.querySelector("path")'
                          '.getAttribute("d")')
-            # Native spring settling leaves the path still until the next morph;
+            # The 200ms morph holds its target until the next 800ms leap;
             # wait through that interval instead of sampling a fixed 150ms gap.
             await tab.wait('runningIndicator.querySelector("path").getAttribute("d")'
                            '!==firstPath')
@@ -140,7 +143,7 @@ async def verify(host, root, chrome):
                   size:'large',contained:true,label:MaterialLoading.names[i]});
                 shape.style.cssText='width:112px;height:112px';
                 shape.querySelector('path').setAttribute('d',MaterialLoading.pathAt(
-                  MaterialLoading.frameAt(i*650)));
+                  MaterialLoading.frameAt(i===0?0:i*800+200)));
                 shape.querySelector('g').setAttribute('transform','rotate(-90)');
                 box.append(shape,document.createTextNode(MaterialLoading.names[i]));strip.append(box);
               }
@@ -150,7 +153,7 @@ async def verify(host, root, chrome):
             await tab.js('document.documentElement.dataset.motion="reduced"')
             await asyncio.sleep(.05)
             await tab.js('''[...byId('m3-shape-strip').querySelectorAll('path')].forEach((path,i)=>{
-              path.setAttribute('d',MaterialLoading.pathAt(MaterialLoading.frameAt(i*650)));
+              path.setAttribute('d',MaterialLoading.pathAt(MaterialLoading.frameAt(i===0?0:i*800+200)));
             })''')
             await shot("seven-official-shapes.png")
             await tab.js('byId("m3-shape-strip").remove()')
@@ -159,8 +162,9 @@ async def verify(host, root, chrome):
             await asyncio.sleep(.25)
             assert await tab.js('loadingFrameWrites') == writes
             await tab.js('document.documentElement.dataset.motion="full"')
-            await asyncio.sleep(.15)
-            assert await tab.js('loadingFrameWrites') > writes
+            # Held shapes do not rewrite their identical path during rotation.
+            # Resume must reach the next 800ms leap, not write within 150ms.
+            await tab.wait(f'loadingFrameWrites>{writes}')
             await tab.command("Emulation.setEmulatedMedia", {"features": [
                 {"name": "prefers-reduced-motion", "value": "reduce"},
             ]})
@@ -231,7 +235,7 @@ async def verify(host, root, chrome):
                                 'entry=>new URL(entry.name).origin!==location.origin)')
             assert not tab.errors, tab.errors
             result = {"responsive_chat_layouts": 8, "official_shape_order": True,
-                      "native_cadence_rotation_and_spring": True,
+                      "end4_cadence_rotation_zoom_and_morph": True,
                       "reduced_motion_app_and_system": True,
                       "hidden_and_removed_cleanup": True, "page_loader_ownership": True,
                       "operation_poll_identity_and_completion": True,

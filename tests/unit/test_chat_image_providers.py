@@ -230,7 +230,8 @@ def pixel_blocks(lab, packet):
     ]
 
 
-def test_real_image_request_and_catalog_metadata_survive_private_restore(image_lab):
+@pytest.mark.parametrize("image_count", [1, 4])
+def test_real_image_request_and_catalog_metadata_survive_private_restore(image_lab, image_count):
     cfg, connection, agent, source, calls, *_ = image_lab
     discovered = discover_connection(connection, "fixture-private-key")
     assert (
@@ -238,12 +239,17 @@ def test_real_image_request_and_catalog_metadata_survive_private_restore(image_l
     )
     assert next(m for m in discovered if m.model_id == "text").capabilities.supports_images is False
     assert models_from_records(model_records(discovered)) == discovered
-    value = compose(image_lab)
+    paths = []
+    for index in range(image_count):
+        path = source.with_name(f"image{index}.png")
+        path.write_bytes(png() + bytes([index]))
+        paths.append(path)
+    value = agent.image_context.compose("Describe the attachments", tuple(paths), "image-chat")
     assert all(path not in {"/v1/messages", "/v1/chat/completions"} for path, *_ in calls)
     events = list(agent.run(value))
     assert not [e for e in events if e.kind == "error"]
     packet = [p for _, p, _ in calls if "messages" in p][-1]
-    assert [base64.b64decode(x) for x in pixel_blocks(image_lab, packet)] == [png()]
+    assert [base64.b64decode(x) for x in pixel_blocks(image_lab, packet)] == [png()] * image_count
     assert "image_inputs" not in str(packet) and "image_content" not in str(packet)
     if connection.backend == "anthropic":
         assert packet["messages"][-1]["content"][0]["type"] == "image"
@@ -253,12 +259,14 @@ def test_real_image_request_and_catalog_metadata_survive_private_restore(image_l
         assert calls[-1][2]["Authorization"] == "Bearer fixture-private-key"
         assert "think" not in packet and "num_ctx" not in packet
     source.unlink()
+    for path in paths:
+        path.unlink()
     agent.restore_session([{"role": "user", "content": "Image question", "model_content": value}])
     events = list(agent.run("Describe it again"))
     assert not [e for e in events if e.kind == "error"]
     packet = [p for _, p, _ in calls if "messages" in p][-1]
     assert pixel_blocks(image_lab, packet)
-    assert agent.last_turn_capabilities["input_modalities"]["image_count"] == 1
+    assert agent.last_turn_capabilities["input_modalities"]["image_count"] == image_count
     assert not (cfg.data_dir / "sessions.db").exists()
 
 

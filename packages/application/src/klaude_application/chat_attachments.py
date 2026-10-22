@@ -44,9 +44,12 @@ class ChatAttachment:
         return hashlib.sha256(self.data).hexdigest()
 
     def public(self) -> dict[str, Any]:
-        return {"name": self.name, "size": len(self.data), "image": self.image,
+        result = {"name": self.name, "size": len(self.data), "image": self.image,
                 "truncated": self.truncated, "mime": self.mime,
                 "preview": bool(self.thumbnail)}
+        if self.artifact_id:
+            result["artifact_id"] = self.artifact_id
+        return result
 
 
 def extract_document(data: bytes, suffix: str, cancelled: Callable[[], bool]) -> tuple[str, bool]:
@@ -153,11 +156,11 @@ class ChatAttachmentInput:
     files: tuple[ChatAttachment, ...] = field(repr=False)
 
     def __post_init__(self) -> None:
-        if (not 1 <= len(self.files) <= MAX_FILES or sum(f.image for f in self.files) > 2
+        if (not 1 <= len(self.files) <= MAX_FILES
                 or sum(len(f.data) for f in self.files) > MAX_SOURCE_BYTES
                 or sum(len(f.text) for f in self.files) > MAX_TOTAL_TEXT):
             raise ValueError(
-                "Attach up to 4 files, including 2 images, "
+                "Attach up to 4 files, including images, "
                 "within 32 MiB and 64000 text characters"
             )
 

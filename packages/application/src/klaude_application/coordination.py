@@ -21,6 +21,7 @@ from klaude_core.session_runtime import decode
 from .activity import ActivityState
 from .chat_attachments import ChatAttachmentInput
 from .contracts import EventKind, PublicEvent
+from .inspection import clean_inspection, read_inspector
 
 
 class LeaseLost(RuntimeError):
@@ -359,11 +360,15 @@ class DurableTurns:
                     )
                 memory.db.execute(
                     "INSERT INTO turns(session_id, ts, role, content, model_content, "
-                    "attachments, attachment_previews) VALUES (?,?,?,?,NULL,?,?)",
+                    "attachments, attachment_previews, attachment_contents) "
+                    "VALUES (?,?,?,?,NULL,?,?,?)",
                     (session_id, now, "user", json.dumps(text, ensure_ascii=False),
                      json.dumps([file.public() for file in attachments.files])
                      if attachments else None,
                      json.dumps([base64.b64encode(file.thumbnail).decode("ascii")
+                                 for file in attachments.files]) if attachments else None,
+                     json.dumps([{"sha256": file.sha256,
+                                  "data": base64.b64encode(file.data).decode("ascii")}
                                  for file in attachments.files]) if attachments else None),
                 )
                 memory._store_session_runtime(session_id, runtime)
@@ -1080,6 +1085,7 @@ class DurableTurns:
             "executed": event.executed, "status": event.status,
             "activity": event.activity,
             "sequence": event.sequence,
+            "inspection": clean_inspection(event.inspection),
         }
         with self.memory._db_lock, self.memory.db:
             self._assert_fence(session_id, turn_id, worker_id, fence)
@@ -1209,6 +1215,9 @@ class DurableTurns:
                 activity_row = memory.db.execute(
                     "SELECT projection FROM application_activity WHERE session_id=?", (session_id,),
                 ).fetchone()
+                projection = (ActivityState(**json.loads(activity_row[0]))
+                              if activity_row else ActivityState())
+                inspector = read_inspector(memory.db, session_id, projection.turn_id)
                 memory.db.commit()
             except BaseException:
                 memory.db.rollback()
@@ -1222,7 +1231,7 @@ class DurableTurns:
                 if role == "user" and attachments:
                     messages[-1]["attachments"] = json.loads(attachments)
         return {
-            "session_id": session_id, "messages": messages,
+            "session_id": session_id, "messages": messages, "inspector": inspector,
             "activity": (ActivityState(**json.loads(activity_row[0])).public(timeline=True)
                          if activity_row else ActivityState().public(timeline=True)),
             "state": str(live[0]) if live else "idle",
@@ -1294,5 +1303,6 @@ class DurableTurns:
                 item["revision"] = max(0, int(payload["revision"]))
             if type(payload.get("executed")) is bool:
                 item["executed"] = payload["executed"]
+            item["inspection"] = clean_inspection(payload.get("inspection"))
             public.append(item)
         return public

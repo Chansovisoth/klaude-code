@@ -55,12 +55,14 @@ class InteractionBroker:
         emit: Callable[[str, str, str], None],
         *,
         timeout: float = 300,
+        approval_resolved: Callable[[str, str, str], None] | None = None,
     ) -> None:
         self.session_id = session_id
         self.turn_id = turn_id
         self.cancelled = cancelled
         self.emit = emit
         self.timeout = timeout
+        self.approval_resolved = approval_resolved
         self._lock = threading.Lock()
         self._pending: dict[str, _Waiter] = {}
         self._closed = False
@@ -90,7 +92,12 @@ class InteractionBroker:
             self._pending[public.id] = waiter
         self.emit("approval.required", public.id, tool)
         answer = self._await(waiter)
-        self.emit("approval.resolved", public.id, tool)
+        if self.approval_resolved:
+            status = ("accepted" if answer == "allow_once" else "denied" if answer is not None
+                      else "cancelled" if self.cancelled.is_set() else "expired")
+            self.approval_resolved(public.id, tool, status)
+        else:
+            self.emit("approval.resolved", public.id, tool)
         return "y" if answer == "allow_once" else "n"
 
     def request_input(

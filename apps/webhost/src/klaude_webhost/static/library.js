@@ -15,6 +15,7 @@ if (librarySection === "knowledge") {
 let fileKind = readNavigationChoice("file-kind", ["all", "document", "research", "media"], "all");
 let fileStatus = readNavigationChoice("file-status", ["saved", "archived"], "saved");
 let fileView = readNavigationChoice("file-view", ["list", "grid", "gallery"], "grid");
+let fileScope = readNavigationChoice("file-scope", ["current", "all"], "all");
 const fileSorts = ["newest", "oldest", "name", "name_desc", "largest", "smallest", "type"];
 const FILE_PAGE_SIZE = 24;
 let filePage = null;
@@ -25,6 +26,7 @@ let imageSequence = [];
 let imageSequenceOffset = 0;
 let imageSequenceTotal = 0;
 let previewOrigin = null;
+let contextPreviewOrigin = null;
 let previewOriginId = "";
 let previewScroll = 0;
 let previewNavigation = false;
@@ -73,8 +75,17 @@ let knowledgeLocationPage = null;
 let sourceLocationPage = null;
 let sourceOffset = 0;
 let skillsOffset = 0;
+let skillsState = "all";
 let skillsLocationPage = null;
 let knowledgeQuery = "";
+let knowledgeSource = "";
+const knowledgeSourceNames = new Map();
+let knowledgeChunkPage = null;
+let knowledgeChunkRead = null;
+let knowledgeReaderIndex = 0;
+let knowledgeDeletePending = null;
+let knowledgeActionNotice = "";
+let knowledgeOrigin = null;
 const LIBRARY_PAGE_SIZE = 20;
 const domainPageSizes = { library: 24, knowledge: 20, sources: 20, skills: 20 };
 const domainGrids = { library: "library-items", knowledge: "knowledge-items", sources: "source-items", skills: "skill-items" };
@@ -113,6 +124,7 @@ const integrationAddForms = {
 };
 const skillDialog = byId("skill-detail");
 let importGeneration = 0;
+let droppedImports = null;
 const legacyPageRoutes = new Set();
 const compactDomainPages = window.matchMedia("(max-width: 560px)");
 
@@ -139,9 +151,10 @@ function reconcileRows(container, rows) {
   });
   for (const row of [...container.children]) if (!keep.has(row)) row.remove();
 }
-function collectionEmpty(container, title, description, icon = "file") {
+function collectionEmpty(container, title, description, icon = "file", followup = "") {
   const empty = domainText("section", "", "collection-empty");
   empty.append(libraryIcon(icon), domainText("h2", title), domainText("p", description, "muted"));
+  if (followup) empty.append(domainText("p", followup, "muted"));
   container.replaceChildren(empty);
 }
 function collectionRow(key, title, metadata, icon, action, signature) {
@@ -216,6 +229,8 @@ async function domainPage(path, parameters, resolveTotal = true, options = {}) {
     data = await domainRequest(`${path}?${params}`, "GET", undefined, options);
   } catch (error) {
     if (error.authEpoch !== undefined && error.authEpoch !== authEpoch) throw error;
+    if (error.status === 400 && path === "/api/v1/integrations/skills" && parameters.state)
+      throw new Error("Restart Web UI and reload to filter Skills by status.");
     if (error.status !== 400 || legacyPageRoutes.has(path) ||
         !["/api/v1/library/knowledge", "/api/v1/integrations/skills"].includes(path)) throw error;
     legacyPageRoutes.add(path);
@@ -230,6 +245,8 @@ async function domainPage(path, parameters, resolveTotal = true, options = {}) {
       const needle = parameters.query.toLocaleLowerCase();
       items = items.filter((item) => `${item.name} ${item.description} ${item.library}`.toLocaleLowerCase().includes(needle));
     }
+    if (path === "/api/v1/integrations/skills" && parameters.state)
+      items = items.filter(item => item.enabled === (parameters.state === "enabled"));
     const offset = Number(parameters.offset || 0);
     const total = inventory ? items.length : data.total ??
       (!data.more && (items.length || offset === 0) ? offset + items.length : null);
@@ -239,6 +256,8 @@ async function domainPage(path, parameters, resolveTotal = true, options = {}) {
       more: items.length > LIBRARY_PAGE_SIZE || !inventory && Boolean(data.more),
       limited: inventory && Boolean(data.more), page_size: LIBRARY_PAGE_SIZE,
       total, known_total: knownTotal };
+  } else if (path === "/api/v1/integrations/skills" && parameters.state && data.state !== parameters.state) {
+    throw new Error("Restart Web UI and reload to filter Skills by status.");
   }
   // Older hosts expose lookahead rather than a count. Locate their terminal
   // batch with bounded exponential/binary probes, without restarting active work.
@@ -260,6 +279,7 @@ async function domainPage(path, parameters, resolveTotal = true, options = {}) {
 }
 function measureDomainPageSize(prefix) {
   if (prefix === "library") return FILE_PAGE_SIZE;
+  if (["knowledge", "sources"].includes(prefix)) return 20;
   let grid = byId(domainGrids[prefix]);
   // Sources share the Knowledge grid width, including while their section loads.
   if (!grid.getClientRects().length && prefix === "sources") grid = byId("knowledge-items");
@@ -309,6 +329,9 @@ function renderTabCounts(counts = {}) {
     const label = domainText("span", button.dataset.label);
     if (Number.isSafeInteger(total) && total >= 0) {
       const badge = domainText("span", `${total.toLocaleString()}${count.limited ? "+" : ""}`, "tab-count");
+      // Section badges describe the full inventory. A Current-scoped page uses
+      // its server-filtered pager total; never show a global total as scoped.
+      badge.hidden = fileScope === "current" && ["files", "outputs"].includes(button.dataset.countKey);
       button.replaceChildren(badge, document.createTextNode(" "), label);
     } else button.replaceChildren(label);
   }
@@ -374,7 +397,7 @@ function canPreviewImage(item) {
 function isLibraryImage(item) {
   return ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(item.mime);
 }
-function artifactImage(item, expanded = false) {
+function artifactImage(item, expanded = false, source = "") {
   const img = document.createElement("img");
   img.alt = item.name;
   img.loading = "lazy";
@@ -385,10 +408,10 @@ function artifactImage(item, expanded = false) {
     img.classList.remove("image-pending");
     img.setAttribute("aria-busy", "false");
   }, { once: true });
-  img.src = latest && latest.library_images !== true ? artifactUrl(item, true) :
+  img.src = source || (latest && latest.library_images !== true ? artifactUrl(item, true) :
     "/api/v1/library/image?" + new URLSearchParams({
     id: item.id, revision: item.revision, size: expanded ? "preview" : "thumbnail",
-  });
+  }));
   img.addEventListener("error", () => {
     const fallback = domainText("span", "Preview unavailable", "image-fallback");
     fallback.append(fileIcon(item));
@@ -542,12 +565,15 @@ function fileParameters(offset = libraryOffset) {
     archived: String(fileStatus === "archived"), offset,
     source: librarySection === "outputs" ? "output" : "input",
     query: byId("artifact-query").value, sort: byId("artifact-sort").value,
+    ...(fileScope === "current" ? { scope: "current", references: window.ChatAttachmentsUI?.artifactIds().join(",") || "" } : {}),
     ...(fileView === "gallery" ? { images: "1" } : {}) };
 }
 async function readFilePage(offset, signal) {
   if (latest && latest.library_artifact_sources !== true) throw new Error(
     "Restart Web UI after the active reply to separate your Uploads from Generated.");
-  const params = fileParameters(offset), key = JSON.stringify(params);
+  if (fileScope === "current" && latest?.context_panel !== true) throw new Error(
+    "Restart Web UI, then reload to filter files for this conversation.");
+  const params = fileParameters(offset), key = JSON.stringify([params, fileScope === "current" ? latest?.session_id : null]);
   const cached = filePages.get(key);
   if (cached && Date.now() - cached.time < 30000) return cached.data;
   const data = await gridPage("/api/v1/library/items", params, FILE_PAGE_SIZE, { signal });
@@ -562,6 +588,7 @@ function restoreLibraryLocation() {
   librarySection = query.get("library");
   if (librarySection === "files" && query.get("files-type") === "research") librarySection = "outputs";
   fileView = ["list", "grid", "gallery"].includes(query.get("files-view")) ? query.get("files-view") : fileView;
+  fileScope = query.get("files-scope") === "current" ? "current" : "all";
   fileKind = normalizeFileKind(query.get("files-type"));
   fileStatus = query.get("files-status") === "archived" ? "archived" : "saved";
   configureArtifactKinds();
@@ -581,6 +608,7 @@ function rememberLibraryLocation(replace = false) {
     if (["integrations", "settings", "sources-page"].includes(key) || key.startsWith("knowledge-") || key.startsWith("skills-")) url.searchParams.delete(key);
   url.searchParams.set("library", librarySection);
   const state = { "files-view": fileView, "files-type": fileKind, "files-status": fileStatus,
+    "files-scope": fileScope,
     "files-sort": byId("artifact-sort").value, "files-q": byId("artifact-query").value,
     "files-page": String(Math.floor(libraryOffset / FILE_PAGE_SIZE) + 1) };
   for (const [key, value] of Object.entries(state)) {
@@ -590,6 +618,7 @@ function rememberLibraryLocation(replace = false) {
   if (next !== location.pathname + location.search) history[replace ? "replaceState" : "pushState"](
     { ...history.state, klaudeLibrary: true }, "", next);
   saveNavigationChoice("file-view", fileView);
+  saveNavigationChoice("file-scope", fileScope);
   saveNavigationChoice("library-section", librarySection);
   const prefix = librarySection === "outputs" ? "output" : "file";
   saveNavigationChoice(`${prefix}-kind`, fileKind); saveNavigationChoice(`${prefix}-status`, fileStatus);
@@ -601,12 +630,14 @@ function restoreIntegrationLocation() {
   else return;
   if (integrationSection === "skills") {
     byId("skills-query").value = (query.get("skills-q") || "").slice(0, 200);
+    skillsState = ["enabled", "disabled"].includes(query.get("skills-state")) ? query.get("skills-state") : "all";
     const page = Number(query.get("skills-page") || 1);
     skillsLocationPage = Number.isSafeInteger(page) && page > 0 && page <= 50001 ? page : 1;
     return;
   }
   if (integrationSection !== "knowledge") return;
-  const library = (query.get("knowledge-library") || "").slice(0, 80);
+  const library = (query.get("knowledge-library") || "").slice(0, 160);
+  knowledgeSource = library ? (query.get("knowledge-source") || "").slice(0, 8192) : "";
   const select = byId("knowledge-library");
   if (library && ![...select.options].some(option => option.value === library)) {
     const option = domainText("option", library); option.value = library; select.append(option);
@@ -631,12 +662,14 @@ function rememberIntegrationLocation(replace = false) {
   url.searchParams.set("integrations", integrationSection);
   if (integrationSection === "knowledge") {
     const state = { "knowledge-library": byId("knowledge-library").value,
+      "knowledge-source": knowledgeSource,
       "knowledge-q": knowledgeQuery, "knowledge-page": String(knowledgeLocationPage ?? Math.floor(knowledgeOffset / domainPageSizes.knowledge) + 1),
       "sources-page": String(sourceLocationPage ?? Math.floor(sourceOffset / domainPageSizes.sources) + 1) };
     for (const [key, value] of Object.entries(state)) if (value) url.searchParams.set(key, value);
   } else if (integrationSection === "skills") {
     const query = byId("skills-query").value;
     if (query) url.searchParams.set("skills-q", query);
+    if (skillsState !== "all") url.searchParams.set("skills-state", skillsState);
     url.searchParams.set("skills-page", String(skillsLocationPage ?? Math.floor(skillsOffset / domainPageSizes.skills) + 1));
   }
   const next = url.pathname + url.search;
@@ -649,6 +682,11 @@ function renderIntegrationSection() {
   byId("connections-panel").hidden = integrationSection !== "connections";
   for (const button of byId("integration-sections").querySelectorAll("[data-integration]"))
     button.setAttribute("aria-pressed", String(button.dataset.integration === integrationSection));
+  renderSkillsFilter();
+}
+function renderSkillsFilter() {
+  for (const button of byId("skills-state-filter").children)
+    button.setAttribute("aria-pressed", String(button.dataset.skillState === skillsState));
 }
 function loadIntegrationSection() {
   renderIntegrationSection();
@@ -657,6 +695,8 @@ function loadIntegrationSection() {
 }
 function stopIntegrationReads() {
   knowledgeRead?.abort(); sourceRead?.abort(); skillsRead?.abort();
+  knowledgeChunkRead?.abort();
+  byId("knowledge-chunk-reader").close();
   knowledgeLoad += 1; sourcesLoad += 1; skillsLoad += 1;
   clearTimeout(skillsSearchTimer);
   clearTimeout(knowledgeSearchTimer);
@@ -703,6 +743,29 @@ function refreshLibraryCapabilities() {
   if (currentView === "library" &&
       (previous !== undefined || !libraryImageCapability || !librarySourceCapability)) loadLibrary();
 }
+function createFileTile(item, onOpen) {
+  const card = domainText("article", "", "library-card file-item");
+  card.dataset.fileId = item.id;
+  const open = domainButton("", () => onOpen(open), "file-open");
+  open.setAttribute("aria-label", `Open ${item.name}`);
+  open.title = item.name;
+  const art = domainText("span", "", "file-artwork");
+  art.setAttribute("aria-hidden", "true");
+  art.append(canPreviewImage(item) ? artifactImage(item) : fileIcon(item));
+  const [type, label] = fileType(item);
+  open.setAttribute("aria-description", `${label}, ${fileSize(item.size)}, added ${fileDate(item.created)}`);
+  card.dataset.fileType = type;
+  const detail = domainText("span", "", "file-name-group");
+  detail.append(domainText("span", item.name, "file-name"),
+    domainText("span", `${label} · ${fileSize(item.size)}`, "file-secondary"));
+  const date = domainText("time", fileDate(item.created), "file-added");
+  date.dateTime = new Date(item.created * 1000).toISOString();
+  date.title = `Added ${new Date(item.created * 1000).toLocaleString()}`;
+  open.append(art, detail, domainText("span", label, "file-type"),
+    domainText("span", fileSize(item.size), "file-size"), date);
+  card.append(open);
+  return { card, open };
+}
 function renderFileItems(data) {
   filePage = data;
   const grid = byId("library-items");
@@ -738,9 +801,7 @@ function renderFileItems(data) {
         nodes.push(heading); previousMonth = month;
       }
     }
-    const card = domainText("article", "", "library-card file-item");
-    card.dataset.fileId = item.id;
-    const open = domainButton("", () => {
+    const { card } = createFileTile(item, open => {
       imageSequence = data.items.filter(isLibraryImage);
       imageSequenceOffset = libraryOffset;
       imageSequenceTotal = fileView === "gallery" ? data.total : imageSequence.length;
@@ -748,23 +809,7 @@ function renderFileItems(data) {
       previewOriginId = item.id;
       previewScroll = byId("library-view").scrollTop;
       openArtifact(item.id).catch((error) => domainError(error));
-    }, "file-open");
-    open.setAttribute("aria-label", `Open ${item.name}`);
-    open.title = item.name;
-    const art = domainText("span", "", "file-artwork");
-    art.append(canPreviewImage(item) ? artifactImage(item) : fileIcon(item));
-    const name = domainText("span", item.name, "file-name");
-    const [type, label] = fileType(item);
-    open.setAttribute("aria-description", `${label}, ${fileSize(item.size)}, added ${fileDate(item.created)}`);
-    card.dataset.fileType = type;
-    const detail = domainText("span", "", "file-name-group");
-    detail.append(name, domainText("span", `${label} · ${fileSize(item.size)}`, "file-secondary"));
-    const date = domainText("time", fileDate(item.created), "file-added");
-    date.dateTime = new Date(item.created * 1000).toISOString();
-    date.title = `Added ${new Date(item.created * 1000).toLocaleString()}`;
-    open.append(art, detail, domainText("span", label, "file-type"),
-      domainText("span", fileSize(item.size), "file-size"), date);
-    card.append(open);
+    });
     nodes.push(card);
   }
   grid.replaceChildren(...nodes);
@@ -784,6 +829,9 @@ async function loadLibrary() {
   for (const button of document.querySelectorAll("#library-sections button")) {
     button.setAttribute("aria-pressed", String(button.dataset.section === librarySection));
   }
+  for (const button of document.querySelectorAll("[data-file-scope]"))
+    button.setAttribute("aria-pressed", String(button.dataset.fileScope === fileScope));
+  for (const badge of byId("library-sections").querySelectorAll(".tab-count")) badge.hidden = fileScope === "current";
   const load = ++libraryLoad;
   const section = librarySection;
   const offset = libraryOffset;
@@ -793,7 +841,8 @@ async function loadLibrary() {
   renderFileToolbar();
   byId("artifact-tools").hidden = false;
   const grid = byId("library-items");
-  const key = JSON.stringify([section, fileKind, fileStatus, offset,
+  const key = JSON.stringify([section, fileKind, fileStatus, fileScope,
+    fileScope === "current" ? latest?.session_id : null, offset,
     byId("artifact-query").value, byId("artifact-sort").value, fileView]);
   if (grid.dataset.contentKey !== key) byId("library-pages").hidden = true;
   const finish = beginLoading(grid, { kind: fileView === "list" ? "rows" : "cards", count: Math.min(6, pageSize),
@@ -834,96 +883,272 @@ async function loadLibrary() {
   finally { finish(); }
 }
 
+function knowledgeLocation(library, source = "", keepQuery = false) {
+  knowledgeRead?.abort(); sourceRead?.abort();
+  knowledgeLoad++; sourcesLoad++;
+  const select = byId("knowledge-library");
+  const sameLibrary = select.value === library;
+  if (library && ![...select.options].some(option => option.value === library)) {
+    const option = domainText("option", library); option.value = library; select.append(option);
+  }
+  select.value = library;
+  byId("learn-library").value = library;
+  knowledgeSource = source;
+  knowledgeActionNotice = "";
+  knowledgeOffset = 0;
+  if (!sameLibrary) sourceOffset = 0;
+  knowledgeLocationPage = sourceLocationPage = null;
+  if (!keepQuery) { knowledgeQuery = ""; byId("knowledge-query").value = ""; }
+  rememberIntegrationLocation();
+  loadKnowledge();
+  byId("knowledge-title").focus({ preventScroll: true });
+}
+const knowledgeWide = matchMedia("(min-width: 1000px)");
+byId("knowledge-sources").open = knowledgeWide.matches;
+knowledgeWide.addEventListener("change", () => { byId("knowledge-sources").open = knowledgeWide.matches; });
+function knowledgeHeading(summary = null) {
+  const library = byId("knowledge-library").value;
+  const crumbs = byId("knowledge-breadcrumbs");
+  crumbs.hidden = !library;
+  crumbs.replaceChildren();
+  if (library) {
+    crumbs.append(domainButton("All knowledge", () => knowledgeLocation(""), "quiet"),
+      domainText("span", "›", "muted"));
+    if (knowledgeSource) crumbs.append(domainButton(library, () => knowledgeLocation(library), "quiet"),
+      domainText("span", "›", "muted"), domainText("span", knowledgeSourceNames.get(knowledgeSource) || knowledgeSource, "knowledge-current"));
+    else crumbs.append(domainText("span", library, "knowledge-current"));
+    crumbs.lastChild.setAttribute("aria-current", "page");
+  }
+  byId("knowledge-title").textContent = library || (knowledgeQuery ? "Search results" : "Your knowledge");
+  byId("knowledge-query").placeholder = knowledgeSource ? "Search this source…" : library ? "Search this knowledge…" : "Search all knowledge…";
+  byId("knowledge-search-label").textContent = knowledgeSource ? "Search chunk text in this source" : library ?
+    "Search sources and chunk text in this knowledge" : "Search libraries, sources and chunk text";
+  byId("knowledge-delete").hidden = !library;
+  byId("knowledge-delete").disabled = Boolean(knowledgeDeletePending);
+  byId("knowledge-delete").textContent = knowledgeDeletePending?.unknown ? "Unconfirmed" : knowledgeDeletePending ? "Deleting…" : knowledgeSource ? "Delete source" : "Delete knowledge";
+  byId("knowledge-content-title").hidden = !library && !knowledgeQuery;
+  byId("knowledge-browser").classList.toggle("has-library", Boolean(library));
+  if (summary) byId("knowledge-summary").textContent = library ?
+    `${countLabel(summary.sources, "source")} · ${countLabel(summary.chunks, "chunk")}` :
+    knowledgeQuery ? "Matches in library names, sources and indexed text" : "Open a library to explore its sources and chunks.";
+}
+async function knowledgeRequest(path, parameters, options = {}) {
+  try { return await domainRequest(`${path}?${new URLSearchParams(parameters)}`, "GET", undefined, options); }
+  catch (error) {
+    if (error.status === 404) throw new Error("Use Refresh to try again.");
+    throw error;
+  }
+}
+function highlightKnowledge(node, text, query) {
+  if (!query) { node.textContent = text; return; }
+  // All indexed content stays inert, including HTML and FTS/regex syntax.
+  let start = 0, position;
+  const lower = text.toLocaleLowerCase(), needle = query.toLocaleLowerCase();
+  while ((position = lower.indexOf(needle, start)) >= 0) {
+    node.append(document.createTextNode(text.slice(start, position)), domainText("mark", text.slice(position, position + query.length)));
+    start = position + query.length;
+  }
+  node.append(document.createTextNode(text.slice(start)));
+}
+function knowledgeChunkCard(item, index) {
+  const row = domainText("article", "", "knowledge-chunk library-card");
+  const button = domainButton("", () => openKnowledgeChunk(index, button), "knowledge-chunk-open");
+  const meta = domainText("span", `${item.library} · ${countLabel(item.characters, "character")}`, "collection-metadata");
+  const name = domainText("span", item.source_name || item.source || "Indexed text", "knowledge-chunk-source");
+  const preview = domainText("span", "", "knowledge-chunk-preview");
+  highlightKnowledge(preview, item.text, knowledgeQuery);
+  const read = domainText("span", "Read chunk", "knowledge-read-label"); read.append(libraryIcon("next"));
+  button.setAttribute("aria-label", `Read chunk from ${item.source_name || item.source || item.library}`);
+  button.append(meta, name, preview, read);
+  row.append(button);
+  if (!byId("knowledge-library").value || !knowledgeSource) {
+    row.append(domainButton("View source", () => knowledgeLocation(item.library, item.source, true), "quiet knowledge-source-link"));
+  }
+  return row;
+}
 async function loadKnowledge() {
   if (!authenticated || currentView !== "integrations" || integrationSection !== "knowledge") return;
-  if (!byId("knowledge-items").getClientRects().length) { requestAnimationFrame(loadKnowledge); return; }
   knowledgeRead?.abort(); knowledgeRead = new AbortController();
-  const signal = knowledgeRead.signal;
-  const pageSize = syncDomainPageSize("knowledge");
-  if (knowledgeLocationPage !== null) {
-    knowledgeOffset = Math.min(knowledgeLocationPage - 1, Math.floor(1000000 / pageSize)) * pageSize;
-    knowledgeLocationPage = null;
+  const signal = knowledgeRead.signal, library = byId("knowledge-library").value;
+  if (knowledgeLocationPage !== null) { knowledgeOffset = (knowledgeLocationPage - 1) * 20; knowledgeLocationPage = null; }
+  const load = ++knowledgeLoad, offset = knowledgeOffset, grid = byId("knowledge-items");
+  const key = JSON.stringify([library, knowledgeSource, knowledgeQuery, offset]);
+  knowledgeHeading();
+  byId("knowledge-sources").hidden = !library;
+  sourceRead?.abort(); sourcesLoad++;
+  if (byId("source-items").dataset.library !== library) {
+    byId("source-items").replaceChildren();
+    byId("sources-pages").hidden = true;
   }
-  const load = ++knowledgeLoad, offset = knowledgeOffset;
-  const grid = byId("knowledge-items");
-  const key = JSON.stringify([byId("knowledge-library").value, knowledgeQuery, offset]);
   if (grid.dataset.contentKey !== key) byId("knowledge-pages").hidden = true;
-  if (byId("source-items").dataset.library !== byId("knowledge-library").value)
-    byId("knowledge-sources").hidden = true;
-  const finish = beginLoading(grid, { kind: "rows", count: Math.min(6, pageSize),
-    preserve: grid.dataset.contentKey === key, label: "Loading Knowledge…" });
-  byId("knowledge-status").textContent = "";
+  const finish = beginLoading(grid, { kind: "rows", count: 4, preserve: grid.dataset.contentKey === key, label: "Loading Knowledge…" });
+  byId("knowledge-status").textContent = knowledgeActionNotice;
   try {
-    if (knowledgeQuery) {
-      const data = await gridPage("/api/v1/library/knowledge", {
-        library: byId("knowledge-library").value, query: knowledgeQuery, offset }, pageSize, { signal });
-      if (load !== knowledgeLoad) return;
-      if (!data.hits.length && offset > 0) {
-        knowledgeOffset = Math.max(0, offset - pageSize);
-        return loadKnowledge();
-      }
-      byId("knowledge-items").replaceChildren(...data.hits.map((hit) => {
-        const card = domainText("article", "", "library-card knowledge-hit");
-        card.append(domainText("h3", hit.source), domainText("pre", hit.text));
-        return card;
-      }));
-      updateDomainPager("knowledge", offset, data);
-      byId("knowledge-status").textContent = data.hits.length ? "" : "No indexed text matches.";
-      grid.dataset.contentKey = key;
-      rememberIntegrationLocation(true);
-      finish();
-      await loadKnowledgeSources();
-      return;
-    }
-    const data = await gridPage("/api/v1/library/knowledge", { offset }, pageSize, { signal });
+    const data = await knowledgeRequest("/api/v1/library/knowledge/contents", {
+      library, source: knowledgeSource, query: knowledgeQuery, offset }, { signal });
     if (load !== knowledgeLoad) return;
     if (!data.items.length && offset > 0) {
-      knowledgeOffset = Math.max(0, offset - pageSize);
+      knowledgeOffset = Math.max(0, Math.ceil(data.total / 20) - 1) * 20;
       return loadKnowledge();
     }
-    const previous = byId("knowledge-library").value;
-    byId("knowledge-library").replaceChildren(domainText("option", "Choose a library"));
-    byId("knowledge-library").firstChild.value = "";
-    const nodes = [];
-    for (const item of data.items) {
-      const option = domainText("option", item.id);
-      option.value = item.id;
-      byId("knowledge-library").append(option);
-      const card = collectionRow(item.id, item.id,
-        `${countLabel(item.sources, "source")} · ${countLabel(item.chunks, "chunk")}`, "knowledge", () => {
-          byId("knowledge-library").value = item.id;
-          byId("learn-library").value = item.id;
-          byId("knowledge-query").focus();
-          sourceOffset = 0;
-          for (const row of grid.querySelectorAll(".collection-open")) row.setAttribute("aria-pressed", String(row === card.firstChild));
-          rememberIntegrationLocation();
-          loadKnowledgeSources().catch((error) => domainError(error));
-        }, JSON.stringify(item));
-      card.classList.add("knowledge-card");
-      card.firstChild.setAttribute("aria-label", `Explore library ${item.id}`);
-      card.firstChild.setAttribute("aria-pressed", String(previous === item.id));
-      card.dataset.rowSignature += ":" + String(previous === item.id);
-      nodes.push(card);
+    knowledgeHeading(data.summary);
+    knowledgeChunkPage = data.mode === "chunks" ? data : null;
+    if (data.available === false) {
+      collectionEmpty(grid, "Knowledge index needs an update", "Use the CLI to update this older index, then refresh Knowledge.", "knowledge");
+    } else if (!data.items.length) {
+      collectionEmpty(grid, knowledgeQuery ? "No matching text" : library ? "No indexed chunks" : "No knowledge yet",
+        knowledgeQuery ? "Try another word or clear the search to browse everything." : library ?
+          "This knowledge may have been deleted or replaced. Return to All knowledge or add a source." :
+          "Add a URL or text file to create a library you can browse and search.", "knowledge");
+      const action = library ? domainButton("All knowledge", () => knowledgeLocation(""), "secondary") :
+        domainButton("Add to Knowledge", () => byId("integration-add-knowledge").click(), "secondary");
+      if (!knowledgeQuery) grid.firstChild.append(action);
+    } else if (data.mode === "libraries") {
+      knowledgeChunkPage = null;
+      reconcileRows(grid, data.items.map(item => {
+        const card = collectionRow(item.id, item.id,
+          `${countLabel(item.sources, "source")} · ${countLabel(item.chunks, "chunk")}`, "knowledge",
+          () => knowledgeLocation(item.id), JSON.stringify(item));
+        card.classList.add("knowledge-card"); card.firstChild.setAttribute("aria-label", `Explore library ${item.id}`);
+        return card;
+      }));
+    } else {
+      knowledgeChunkPage = data;
+      grid.replaceChildren(...data.items.map(knowledgeChunkCard));
+      byId("knowledge-content-title").textContent = knowledgeQuery ? `${countLabel(data.total, "matching chunk")}` :
+        knowledgeSource ? `${countLabel(data.total, "chunk")} in this source` : "All chunks";
     }
-    if (previous && !data.items.some((item) => item.id === previous)) {
-      const option = domainText("option", previous);
-      option.value = previous;
-      byId("knowledge-library").append(option);
-    }
-    byId("knowledge-library").value = previous;
-    reconcileRows(grid, nodes);
     updateDomainPager("knowledge", offset, data);
-    byId("knowledge-status").textContent = data.items.length ?
-      data.limited ? "Inventory limited to 1,000." : "" :
-      "No knowledge yet. Learn a URL or text file to create your first library.";
-    if (!data.items.length) collectionEmpty(grid, "No knowledge yet", "Learn a URL or text file to create your first library.", "knowledge");
+    if (data.total <= 20) byId("knowledge-pages").hidden = true;
     grid.dataset.contentKey = key;
     rememberIntegrationLocation(true);
     finish();
-    await loadKnowledgeSources();
-  } catch (error) { if (load === knowledgeLoad) domainError(error, "knowledge-status"); }
-  finally { finish(); }
+    if (library) await loadKnowledgeSources();
+  } catch (error) {
+    if (load === knowledgeLoad && error.name !== "AbortError") {
+      domainError(error, "knowledge-status");
+      if (grid.dataset.contentKey !== key) collectionEmpty(grid, "Knowledge could not be loaded",
+        "Use Refresh to try again.", "knowledge",
+        "Restart Web UI after the active reply, then reload to browse knowledge chunks.");
+    }
+  } finally { finish(); }
 }
+async function openKnowledgeChunk(index, origin = null, page = knowledgeChunkPage) {
+  if (!page?.items[index]) return;
+  const dialog = byId("knowledge-chunk-reader"), item = page.items[index];
+  knowledgeChunkRead?.abort(); knowledgeChunkRead = new AbortController();
+  const signal = knowledgeChunkRead.signal;
+  knowledgeReaderIndex = index;
+  if (origin) knowledgeOrigin = origin;
+  dialog.knowledgePage = page;
+  byId("knowledge-chunk-title").textContent = `Chunk ${page.offset + index + 1}`;
+  byId("knowledge-chunk-source").textContent = `${item.library} · ${item.source_name || item.source}`;
+  byId("knowledge-chunk-status").textContent = "Loading chunk…";
+  byId("knowledge-chunk-text").replaceChildren();
+  byId("knowledge-chunk-copy").disabled = true;
+  byId("knowledge-chunk-previous").disabled = page.offset + index === 0;
+  byId("knowledge-chunk-next").disabled = page.offset + index + 1 >= page.total;
+  byId("knowledge-chunk-position").textContent = `${page.offset + index + 1} of ${page.total}`;
+  if (!dialog.open) {
+    dialog.showModal();
+    byId("knowledge-chunk-title").focus({ preventScroll: true });
+  }
+  try {
+    const data = await knowledgeRequest("/api/v1/library/knowledge/contents", {
+      library: item.library, source: item.source, chunk: item.id }, { signal });
+    if (signal.aborted || !dialog.open || !authenticated) return;
+    highlightKnowledge(byId("knowledge-chunk-text"), data.item.text, knowledgeQuery);
+    byId("knowledge-chunk-text").scrollTop = 0;
+    byId("knowledge-chunk-copy").disabled = false;
+    byId("knowledge-chunk-status").textContent = data.item.truncated ? "Showing the first 65,536 characters of this oversized chunk." :
+      countLabel(data.item.characters, "character");
+  } catch (error) { if (!signal.aborted && dialog.open) domainError(error, "knowledge-chunk-status"); }
+}
+async function stepKnowledgeChunk(direction) {
+  const dialog = byId("knowledge-chunk-reader"), page = dialog.knowledgePage;
+  if (!page) return;
+  let index = knowledgeReaderIndex + direction;
+  if (index >= 0 && index < page.items.length) return openKnowledgeChunk(index, null, page);
+  knowledgeChunkRead?.abort(); knowledgeChunkRead = new AbortController();
+  const signal = knowledgeChunkRead.signal;
+  byId("knowledge-chunk-previous").disabled = byId("knowledge-chunk-next").disabled = true;
+  byId("knowledge-chunk-status").textContent = "Loading chunk…";
+  try {
+    const data = await knowledgeRequest("/api/v1/library/knowledge/contents", {
+      library: byId("knowledge-library").value, source: knowledgeSource, query: knowledgeQuery,
+      offset: page.offset + direction * 20 }, { signal });
+    if (signal.aborted || !dialog.open || !authenticated) return;
+    if (!data.items.length) throw new Error("Knowledge changed; close this reader and refresh.");
+    await openKnowledgeChunk(direction > 0 ? 0 : data.items.length - 1, null, data);
+    if (!dialog.open || !authenticated) return;
+    const control = byId(direction > 0 ? "knowledge-chunk-next" : "knowledge-chunk-previous");
+    (control.disabled ? byId("knowledge-chunk-title") : control).focus({ preventScroll: true });
+  } catch (error) { if (!signal.aborted && dialog.open) domainError(error, "knowledge-chunk-status"); }
+}
+byId("knowledge-chunk-copy").addEventListener("click", async () => {
+  const copied = await window.ChatMarkdown?.copyText(byId("knowledge-chunk-text").textContent, byId("knowledge-chunk-reader"));
+  if (byId("knowledge-chunk-reader").open) byId("knowledge-chunk-status").textContent = copied ? "Chunk copied." : "Select the chunk text to copy it.";
+});
+byId("knowledge-chunk-close").append(libraryIcon("close"));
+byId("knowledge-chunk-close").addEventListener("click", () => byId("knowledge-chunk-reader").close());
+byId("knowledge-chunk-previous").addEventListener("click", () => stepKnowledgeChunk(-1));
+byId("knowledge-chunk-next").addEventListener("click", () => stepKnowledgeChunk(1));
+byId("knowledge-chunk-reader").addEventListener("close", () => {
+  knowledgeChunkRead?.abort();
+  byId("knowledge-chunk-text").replaceChildren();
+  byId("knowledge-chunk-source").textContent = "";
+  byId("knowledge-chunk-reader").knowledgePage = null;
+  if (knowledgeOrigin?.isConnected && authenticated) knowledgeOrigin.focus({ preventScroll: true });
+  knowledgeOrigin = null;
+});
+byId("knowledge-delete").addEventListener("click", async () => {
+  if (knowledgeDeletePending || reviewDialog.open) return;
+  const library = byId("knowledge-library").value, source = knowledgeSource, epoch = authEpoch;
+  if (!library) return;
+  const pending = { library, source }; knowledgeDeletePending = pending; knowledgeActionNotice = ""; knowledgeHeading();
+  const current = () => authenticated && epoch === authEpoch && currentView === "integrations" &&
+    integrationSection === "knowledge" && library === byId("knowledge-library").value && source === knowledgeSource;
+  try {
+    await prepareChange({ operation: "knowledge-delete", library, source }, {
+      current,
+      onAccepted: operation => { pending.request_id = operation.request_id; pending.library = library; pending.source = source; },
+      onDiscard: review => {
+        if (review.uncertain) pending.request_id = review.request_id;
+        else if (knowledgeDeletePending === pending) knowledgeDeletePending = null;
+        knowledgeHeading();
+      },
+    });
+    if (!current() && !pending.request_id && knowledgeDeletePending === pending) knowledgeDeletePending = null;
+  } catch (error) {
+    if (knowledgeDeletePending === pending) knowledgeDeletePending = null;
+    if (current()) domainError(error, "knowledge-status");
+  } finally { knowledgeHeading(); }
+});
+document.addEventListener("klaude-operations", event => {
+  const pending = knowledgeDeletePending;
+  if (!pending?.request_id) return;
+  const operation = event.detail.find(item => item.request_id === pending.request_id);
+  if (!operation || !["completed", "failed", "unknown"].includes(operation.state)) return;
+  if (operation.state === "unknown") {
+    pending.unknown = true;
+    knowledgeActionNotice = "Deletion is unconfirmed. Check Activity before making another change.";
+    knowledgeHeading();
+    byId("knowledge-delete").disabled = true;
+    byId("knowledge-status").textContent = knowledgeActionNotice;
+    return;
+  }
+  knowledgeDeletePending = null;
+  if (!authenticated || currentView !== "integrations" || integrationSection !== "knowledge") return;
+  if (operation.state === "completed" && byId("knowledge-library").value === pending.library) {
+    knowledgeLocation(pending.source ? pending.library : "");
+  } else {
+    knowledgeHeading();
+    if (operation.state === "failed") {
+      knowledgeActionNotice = "Deletion was rejected. Refresh and review the current knowledge.";
+      byId("knowledge-status").textContent = knowledgeActionNotice;
+    }
+  }
+});
 
 function sourceLanguage(item) {
   const extension = item.filename.split(".").pop().toLowerCase();
@@ -998,6 +1223,7 @@ const artifactViewer = (() => {
     if (next !== null) { event.preventDefault(); selectInspector(tabs[next].dataset.inspector, true); }
   });
   document.addEventListener("klaude-auth-reset", () => {
+  knowledgeSource = ""; knowledgeChunkPage = null; knowledgeDeletePending = null; knowledgeOrigin = null;
     selectInspector("details"); inspectorArtifact = null;
     inspectorScrolls.details = inspectorScrolls["ai-review"] = 0;
   });
@@ -1095,7 +1321,8 @@ const artifactViewer = (() => {
     suggestedTags = result && item && result.artifact === item.id && result.revision === item.revision ? result.tags : [];
     renderTagSuggestions();
   });
-  document.addEventListener("klaude-auth-reset", () => { metadataChanges.clear(); suggestedTags = []; editingSource = false; });
+  document.addEventListener("klaude-auth-reset", () => {
+  knowledgeSource = ""; knowledgeChunkPage = null; knowledgeDeletePending = null; knowledgeOrigin = null; metadataChanges.clear(); suggestedTags = []; editingSource = false; });
   let scale = 1, panX = 0, panY = 0, gesture = null, pinch = null, lastTap = null;
   const pointers = new Map();
   const notice = text => { byId("preview-status").textContent = text; };
@@ -1329,6 +1556,7 @@ const artifactViewer = (() => {
     if (markdown && window.ChatMarkdown?.renderDocument) showMode("preview");
   }
   function render(data) {
+    const chat = data.chat_attachment === true;
     item = data.item; editingTags = allTags = editingSource = false; draftTags = [...item.tags];
     suggestedTags = []; editorStatus("tags"); editorStatus("source_link");
     const image = canPreviewImage(item);
@@ -1336,44 +1564,50 @@ const artifactViewer = (() => {
     byId("artifact-detail-title").textContent = item.name;
     byId("artifact-detail-title").title = item.name;
     const language = sourceLanguage(item);
-    byId("artifact-subtitle").textContent = `${librarySection === "outputs" ? "Generated" : "Uploads"} · ${image ? "Image" : language === "text" ? fileType(item)[1] : language.toUpperCase()} · ${fileSize(item.size)}`;
+    byId("artifact-subtitle").textContent = `${chat ? "Chat attachment" : librarySection === "outputs" ? "Generated" : "Uploads"} · ${image ? "Image" : language === "text" ? fileType(item)[1] : language.toUpperCase()} · ${fileSize(item.size)}`;
     const source = typeof data.source_text === "string" ? data.source_text : data.lines.join("\n");
     const readable = !image && !data.fallback && (typeof data.source_text === "string" || data.lines.length > 0);
-    const nodes = image ? [artifactImage(item, true)] : readable ? [numberedSource(source, language)] :
+    const nodes = image ? [artifactImage(item, true, data.preview_url)] : readable ? [numberedSource(source, language)] :
       [domainText("p", "Preview unavailable for this file type. Download the original file to open it.", "preview-unavailable")];
     preview.replaceChildren(...nodes);
     const truncated = data.source_truncated ?? data.truncated;
     byId("preview-truncation").textContent = !image && truncated ? "Preview truncated. Download for the complete file." : "";
-    byId("preview-source-note").textContent = !image && data.source_sanitized ? "Unsafe control characters or invalid text were replaced in this preview. Download preserves the original bytes." : "";
+    byId("preview-source-note").textContent = data.thumbnail_only ? "Only a thumbnail was retained for this older attachment." :
+      data.extracted ? "Extracted text preview. Download the original document for its layout." :
+        !image && data.source_sanitized ? "Unsafe control characters or invalid text were replaced in this preview. Download preserves the original bytes." : "";
     renderTextControls(readable ? nodes[0] : null, source, language === "markdown");
     preview.querySelector("img")?.addEventListener("load", transform, { once: true });
     resetZoom();
     const rows = [["Filename", item.filename], ["Type", fileType(item)[1]], ["MIME type", item.mime], ["Size", `${fileSize(item.size)} (${item.size.toLocaleString()} bytes)`],
       ...(item.width && item.height ? [["Dimensions", `${item.width.toLocaleString()} × ${item.height.toLocaleString()} px`]] : []),
-      ...(Number.isFinite(item.created) ? [["Added", new Date(item.created * 1000).toLocaleString()]] : []),
+      ...(Number.isFinite(item.created) ? [[chat ? "Sent" : "Added", new Date(item.created * 1000).toLocaleString()]] : []),
       ...(item.archived ? [["Status", "Archived"]] : [])];
     byId("artifact-metadata").replaceChildren(...rows.flatMap(([label, value]) => [domainText("dt", label), domainText("dd", value)]));
-    renderSource(); renderTags(); renderMenu();
-    byId("inspector-tab-ai-review").disabled = !image || item.archived;
+    panel.querySelector(".preview-source").hidden = chat;
+    panel.querySelector(".preview-tags-section").hidden = chat;
+    inspectorTabs.hidden = chat; more.hidden = chat;
+    if (!chat) { renderSource(); renderTags(); renderMenu(); }
+    else menu.replaceChildren();
+    byId("inspector-tab-ai-review").disabled = chat || !image || item.archived;
     byId("inspector-tab-ai-review").title = image && !item.archived ? "" : "AI Review is available for saved images.";
     if (inspectorArtifact !== item.id) {
       inspectorArtifact = item.id; inspectorScrolls.details = inspectorScrolls["ai-review"] = 0;
       inspectorScroll.scrollTop = 0;
     }
-    selectInspector(image && !item.archived ? inspectorTab : "details");
-    window.BrowserVision?.select(image && !item.archived ? item : null);
-    byId("artifact-learn").hidden = !latest?.profile_management || image || item.archived || item.size > 2 * 1024 * 1024;
+    selectInspector(!chat && image && !item.archived ? inspectorTab : "details");
+    window.BrowserVision?.select(!chat && image && !item.archived ? item : null);
+    byId("artifact-learn").hidden = chat || !latest?.profile_management || image || item.archived || item.size > 2 * 1024 * 1024;
     byId("artifact-learn-library").value = byId("knowledge-library").value || "";
-    byId("artifact-tags").hidden = false;
+    byId("artifact-tags").hidden = chat;
     byId("image-toolbar").hidden = false;
     for (const id of ["image-fit", "image-expand"]) byId(id).hidden = !image;
-    byId("artifact-download").hidden = false;
+    byId("artifact-download").hidden = chat && !data.download_url;
     artifactDialog.querySelector(".preview-zoom-controls").hidden = !image;
-    byId("artifact-download").href = artifactUrl(item);
+    byId("artifact-download").href = chat ? data.download_url || "" : artifactUrl(item);
     byId("artifact-download").download = item.filename;
     byId("artifact-actions").replaceChildren();
     preview.setAttribute("aria-label", image ? "Image preview" : language === "markdown" ? "Markdown preview" : "File source preview");
-    more.disabled = false; notice("");
+    more.disabled = chat; notice("");
   }
   function begin(image, opening) {
     window.BrowserVision?.select(null);
@@ -1536,10 +1770,12 @@ const artifactViewer = (() => {
     } };
 })();
 
-async function openArtifact(id) {
+async function openArtifact(id, { origin = null, item = null } = {}) {
+  delete artifactDialog.dataset.chatAttachment;
   artifactRead?.abort(); artifactRead = new AbortController();
   const load = ++artifactLoad, opening = !artifactDialog.open;
-  const known = imageSequence.find(item => item.id === id) || filePage?.items.find(item => item.id === id);
+  if (opening) contextPreviewOrigin = origin;
+  const known = item || imageSequence.find(item => item.id === id) || filePage?.items.find(item => item.id === id);
   for (const card of document.querySelectorAll(".file-item")) {
     card.classList.toggle("file-selected", card.dataset.fileId === id);
     const button = card.querySelector("button");
@@ -1567,6 +1803,48 @@ async function openArtifact(id) {
     if (error.status === 401) showLocalAccess();
   } finally { finish(); }
 }
+async function openChatAttachment({ session, message, file, descriptor, origin, created }) {
+  if (!authenticated || latest?.session_id !== session || !/^stored:[1-9]\d{0,18}$/.test(message)) return;
+  if (latest.attachment_content !== true && descriptor.artifact_id)
+    return openArtifact(descriptor.artifact_id, { origin });
+  artifactRead?.abort(); artifactRead = new AbortController();
+  const load = ++artifactLoad, opening = !artifactDialog.open;
+  contextPreviewOrigin = origin; artifactDialog.dataset.chatAttachment = session;
+  selectedArtifact = null;
+  artifactViewer.begin(descriptor.image, opening);
+  byId("artifact-detail-title").textContent = descriptor.name;
+  byId("artifact-detail-title").title = descriptor.name;
+  byId("artifact-actions").replaceChildren(); byId("artifact-tags").hidden = true;
+  byId("image-navigation").hidden = true;
+  const preview = byId("artifact-preview");
+  const finish = beginLoading(preview, { kind: "detail", count: 1, preserve: false, label: "Loading attachment…" });
+  if (opening) artifactDialog.showModal();
+  const url = view => "/api/v1/chat/attachments/content?" + new URLSearchParams({ session, message, file, view });
+  try {
+    let data;
+    if (latest.attachment_content === true) {
+      data = await domainRequest(url("info"), "GET", undefined, { signal: artifactRead.signal });
+      data.preview_url = descriptor.image ? url("image") : "";
+      data.download_url = data.thumbnail_only ? "" : url("download");
+    } else if (descriptor.image && descriptor.preview) {
+      data = { item: { ...descriptor, filename: descriptor.name, width: 128, height: 128 }, lines: [], thumbnail_only: true,
+        preview_url: "/api/v1/chat/attachments/preview?" + new URLSearchParams({ session, message, file }) };
+    } else throw new Error("Restart Web UI and reload to preview attached files.");
+    if (load !== artifactLoad || !artifactDialog.open || latest?.session_id !== session) return;
+    data.chat_attachment = true;
+    data.item = { ...data.item, id: `chat:${session}:${message}:${file}`, revision: 0,
+      name: descriptor.name, filename: descriptor.name, kind: descriptor.image ? "media" : "document",
+      tags: [], ai_tags: [], archived: false, created };
+    artifactViewer.render(data);
+  } catch (error) {
+    if (load !== artifactLoad || !artifactDialog.open || latest?.session_id !== session) return;
+    if (error.name !== "AbortError") preview.replaceChildren(domainText("p", error.message || "Could not load this attachment.", "preview-unavailable"));
+    if (error.status === 401) showLocalAccess();
+  } finally { finish(); }
+}
+document.addEventListener("klaude-chat-session-changed", () => {
+  if (artifactDialog.open && artifactDialog.dataset.chatAttachment) artifactDialog.close();
+});
 byId("artifact-close").addEventListener("click", () => artifactDialog.close());
 artifactDialog.addEventListener("close", () => {
   if (artifactDialog.open) return;
@@ -1577,14 +1855,20 @@ artifactDialog.addEventListener("close", () => {
   byId("image-expand").setAttribute("aria-label", "Expand image preview");
   cancelLoading(byId("artifact-preview")); byId("artifact-preview").replaceChildren();
   for (const card of document.querySelectorAll(".file-selected")) { card.classList.remove("file-selected"); card.querySelector("button")?.removeAttribute("aria-current"); }
-  byId("library-view").scrollTop = previewScroll;
-  if (authenticated && currentView === "library") {
+  const contextOrigin = contextPreviewOrigin; contextPreviewOrigin = null;
+  delete artifactDialog.dataset.chatAttachment;
+  if (contextOrigin && authenticated) {
+    (contextOrigin.isConnected && !contextOrigin.closest("[inert], [hidden]") ? contextOrigin :
+      contextOrigin.closest("#inspector") ? byId("inspector-toggle") : byId("prompt")).focus({ preventScroll: true });
+  } else if (authenticated && currentView === "library") {
+    byId("library-view").scrollTop = previewScroll;
     if (!previewOrigin?.isConnected) previewOrigin = [...document.querySelectorAll(".file-item")].find(card => card.dataset.fileId === previewOriginId)?.querySelector("button");
     (previewOrigin || byId("library-refresh")).focus({ preventScroll: true });
   }
 });
 
 function updateImageNavigation() {
+  if (contextPreviewOrigin) { byId("image-navigation").hidden = true; return; }
   const index = imageSequence.findIndex(item => item.id === selectedArtifact?.id);
   const image = selectedArtifact && isLibraryImage(selectedArtifact);
   byId("image-navigation").hidden = !image;
@@ -1597,6 +1881,7 @@ function updateImageNavigation() {
     index === imageSequence.length - 1 && (!paged || imageSequenceOffset + imageSequence.length >= imageSequenceTotal);
 }
 async function nextImage(direction) {
+  if (contextPreviewOrigin) return;
   if (previewNavigation || !selectedArtifact) return;
   const index = imageSequence.findIndex(item => item.id === selectedArtifact.id);
   if (index < 0) return;
@@ -1634,8 +1919,9 @@ byId("image-expand").addEventListener("click", () => {
   byId("image-expand").setAttribute("aria-label", expanded ? "Reduce image preview" : "Expand image preview");
 });
 artifactDialog.addEventListener("keydown", event => {
-  if (["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName) || event.altKey || event.ctrlKey || event.metaKey || byId("image-navigation").hidden) return;
+  if (["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName) || event.altKey || event.ctrlKey || event.metaKey) return;
   if (artifactViewer.key(event) || event.target.closest(".preview-information, #artifact-menu")) return;
+  if (byId("image-navigation").hidden) return;
   if (["ArrowLeft", "ArrowRight"].includes(event.key)) {
     const direction = event.key === "ArrowRight" ? "next" : "previous";
     if (!byId(`image-${direction}`).disabled) { event.preventDefault(); nextImage(direction === "next" ? 1 : -1); }
@@ -1644,86 +1930,60 @@ artifactDialog.addEventListener("keydown", event => {
 
 async function loadKnowledgeSources() {
   sourceRead?.abort(); sourceRead = new AbortController();
-  const pageSize = syncDomainPageSize("sources");
-  if (sourceLocationPage !== null) {
-    sourceOffset = Math.min(sourceLocationPage - 1, Math.floor(1000000 / pageSize)) * pageSize;
-    sourceLocationPage = null;
-  }
-  const library = byId("knowledge-library").value;
+  const signal = sourceRead.signal, library = byId("knowledge-library").value;
   const load = ++sourcesLoad;
-  const offset = sourceOffset;
-  if (!library) { cancelLoading(byId("source-items")); byId("knowledge-sources").hidden = true; return; }
-  const grid = byId("source-items");
-  const key = JSON.stringify([library, offset]);
-  if (grid.dataset.contentKey !== key) byId("sources-pages").hidden = true;
-  const finish = beginLoading(grid, { kind: "rows", count: 3,
-    preserve: grid.dataset.contentKey === key, label: "Loading sources…" });
+  if (!library) { byId("knowledge-sources").hidden = true; return; }
+  if (sourceLocationPage !== null) { sourceOffset = (sourceLocationPage - 1) * 20; sourceLocationPage = null; }
+  const offset = sourceOffset, grid = byId("source-items"), key = JSON.stringify([library, offset]);
+  const finish = beginLoading(grid, { kind: "rows", count: 3, preserve: grid.dataset.contentKey === key, label: "Loading sources…" });
   byId("knowledge-sources").hidden = false;
+  byId("knowledge-all-sources").setAttribute("aria-pressed", String(!knowledgeSource));
   try {
-    const data = await gridPage("/api/v1/library/sources", { library, offset }, pageSize, { signal: sourceRead.signal });
-    if (load !== sourcesLoad || currentView !== "integrations" || integrationSection !== "knowledge" || library !== byId("knowledge-library").value) return;
-    if (!data.items.length && offset > 0) {
-      sourceOffset = Math.max(0, offset - pageSize);
-      return loadKnowledgeSources();
-    }
-    const cards = data.items.map((source) => {
-      const card = domainText("article", "", "library-card collection-row source-row");
-      card.dataset.rowKey = source.id; card.dataset.rowSignature = JSON.stringify(source);
-      const text = domainText("div", "", "collection-content");
-      text.append(domainText("h3", source.id, "collection-title"), domainText("p", source.url, "collection-description"),
-        domainText("span", `${source.kind} · ${countLabel(source.files, "file")}`, "collection-metadata"));
-      const refresh = domainButton("", () => prepareChange({ operation: "knowledge-refresh",
-        library: source.library, source: source.id, source_identity: source.identity })
-        .catch((error) => domainError(error)), "icon-button quiet refresh-button");
-      const label = `Review refresh for source ${source.id}`;
-      refresh.setAttribute("aria-label", label); refresh.title = label;
-      refresh.append(libraryIcon("refresh"));
-      card.append(libraryIcon("text"), text, refresh);
+    const data = await knowledgeRequest("/api/v1/library/knowledge/sources", { library, offset }, { signal });
+    if (load !== sourcesLoad || !authenticated || currentView !== "integrations" || integrationSection !== "knowledge" || library !== byId("knowledge-library").value) return;
+    if (!data.items.length && offset > 0) { sourceOffset = Math.max(0, Math.ceil(data.total / 20) - 1) * 20; return loadKnowledgeSources(); }
+    reconcileRows(grid, data.items.map(source => {
+      knowledgeSourceNames.set(source.id, source.source_name || source.id);
+      while (knowledgeSourceNames.size > 100) knowledgeSourceNames.delete(knowledgeSourceNames.keys().next().value);
+      const card = collectionRow(source.id, source.source_name || source.id, countLabel(source.chunks, "chunk"), "text",
+        () => knowledgeLocation(library, source.id), JSON.stringify([source, source.id === knowledgeSource]));
+      card.classList.add("source-row");
+      card.firstChild.setAttribute("aria-pressed", String(source.id === knowledgeSource));
+      card.firstChild.title = source.id;
+      for (const managed of source.refresh || []) {
+        const refresh = domainButton("", () => prepareChange({ operation: "knowledge-refresh",
+          library, source: managed.id, source_identity: managed.identity }).catch(error => domainError(error, "knowledge-status")),
+        "icon-button quiet refresh-button");
+        const label = `Review refresh for ${managed.id}`;
+        refresh.setAttribute("aria-label", label); refresh.title = label; refresh.append(libraryIcon("refresh"));
+        card.append(refresh);
+      }
       return card;
-    });
-    reconcileRows(grid, cards);
-    byId("knowledge-sources-title").textContent = `Sources · ${library}`;
-    byId("knowledge-sources").hidden = !data.items.length;
+    }));
+    byId("knowledge-all-sources").textContent = `All sources · ${data.summary.chunks.toLocaleString()} chunks`;
     updateDomainPager("sources", offset, data);
-    grid.dataset.contentKey = key;
-    grid.dataset.library = library;
+    if (data.total <= 20) byId("sources-pages").hidden = true;
+    grid.dataset.contentKey = key; grid.dataset.library = library;
+    knowledgeHeading();
     rememberIntegrationLocation(true);
-  } catch (error) {
-    if (load === sourcesLoad) {
-      if (!grid.querySelector(".library-card")) byId("knowledge-sources").hidden = true;
-      throw error;
-    }
-  }
+  } catch (error) { if (load === sourcesLoad && error.name !== "AbortError") domainError(error, "knowledge-status"); }
   finally { finish(); }
 }
-byId("sources-next").addEventListener("click", () => { sourceOffset += domainPageSizes.sources; rememberIntegrationLocation(); loadKnowledgeSources().catch((error) => domainError(error)); });
-byId("sources-previous").addEventListener("click", () => { sourceOffset = Math.max(0, sourceOffset - domainPageSizes.sources); rememberIntegrationLocation(); loadKnowledgeSources().catch((error) => domainError(error)); });
-byId("knowledge-library").addEventListener("change", () => {
-  clearTimeout(knowledgeSearchTimer);
-  byId("learn-library").value = byId("knowledge-library").value;
-  sourceOffset = 0;
-  knowledgeQuery = "";
-  byId("knowledge-query").value = "";
-  knowledgeOffset = 0;
-  rememberIntegrationLocation(); loadKnowledge();
-});
+byId("knowledge-all-sources").addEventListener("click", () => knowledgeLocation(byId("knowledge-library").value));
+byId("sources-next").addEventListener("click", () => { sourceOffset += 20; rememberIntegrationLocation(); loadKnowledgeSources(); });
+byId("sources-previous").addEventListener("click", () => { sourceOffset = Math.max(0, sourceOffset - 20); rememberIntegrationLocation(); loadKnowledgeSources(); });
+byId("knowledge-library").addEventListener("change", () => knowledgeLocation(byId("knowledge-library").value));
 function searchKnowledge() {
   clearTimeout(knowledgeSearchTimer);
   if (!authenticated || currentView !== "integrations" || integrationSection !== "knowledge") return;
-  const library = byId("knowledge-library").value;
-  const query = byId("knowledge-query").value.trim();
-  if (query && !library) { byId("knowledge-status").textContent = "Choose a library first."; return; }
-  knowledgeQuery = query;
-  knowledgeOffset = 0;
-  knowledgeLocationPage = null;
+  knowledgeQuery = byId("knowledge-query").value.trim();
+  knowledgeOffset = 0; knowledgeLocationPage = null;
   rememberIntegrationLocation(); loadKnowledge();
 }
-byId("knowledge-search").addEventListener("submit", (event) => {
-  event.preventDefault(); searchKnowledge();
-});
+byId("knowledge-search").addEventListener("submit", event => { event.preventDefault(); searchKnowledge(); });
 byId("knowledge-query").addEventListener("input", () => {
-  clearTimeout(knowledgeSearchTimer);
-  knowledgeSearchTimer = setTimeout(searchKnowledge, 200);
+  clearTimeout(knowledgeSearchTimer); knowledgeRead?.abort(); knowledgeLoad++;
+  knowledgeSearchTimer = setTimeout(searchKnowledge, 250);
 });
 
 async function uploadForReview(file, limit = 32 * 1024 * 1024) {
@@ -1741,6 +2001,11 @@ async function uploadForReview(file, limit = 32 * 1024 * 1024) {
   }
   return data.id;
 }
+function discardStagedUpload(upload_id, epoch = authEpoch) {
+  // This existing owner-scoped route accepts a staged upload independently of a chat selection.
+  if (authenticated && epoch === authEpoch) jsonRequest("/api/v1/chat/attachments/discard", "POST",
+    { upload_id }).catch(() => {});
+}
 async function prepareChange(draft, { current = () => true, beforeOpen = () => {}, onAccepted, onDiscard, filename = "" } = {}) {
   const result = await domainRequest("/api/v1/library/review", "POST", { draft });
   if (!current()) {
@@ -1748,11 +2013,11 @@ async function prepareChange(draft, { current = () => true, beforeOpen = () => {
     return;
   }
   managementReview = { ...result, request_id: requestId(), onAccepted, onDiscard };
-  const destructive = ["delete", "skill-delete", "memory-delete", "mcp-remove", "session-delete"].includes(draft.operation);
+  const destructive = ["delete", "skill-delete", "memory-delete", "mcp-remove", "session-delete", "knowledge-delete"].includes(draft.operation);
   const ai = ["vision-analyze", "vision-tags"].includes(draft.operation), tags = draft.operation === "vision-tags";
   reviewDialog.classList.toggle("ai-confirmation", ai);
   byId("domain-review-title").textContent = ai ? tags ? "Suggest image tags?" : "Review image?" : destructive ?
-    draft.operation === "delete" ? "Delete file permanently?" : "Remove this item?" : "Review change";
+    draft.operation === "knowledge-delete" ? draft.source ? "Delete this source?" : "Delete this knowledge?" : draft.operation === "delete" ? "Delete file permanently?" : "Remove this item?" : "Review change";
   byId("domain-review-confirm").textContent = ai ? tags ? "Suggest tags" : "Review image" : destructive ? "Delete permanently" : "Confirm";
   byId("domain-review-confirm").classList.toggle("danger", destructive);
   byId("domain-review-summary").textContent = ai ? tags ? "Klaude will analyze this image and suggest tags for you to review." :
@@ -1853,9 +2118,10 @@ function bindUploadForm(id, action, statusId) {
     event.preventDefault();
     const button = byId(id).querySelector('button[type="submit"]');
     if (button.disabled) return;
-    const epoch = authEpoch, generation = integrationAddGeneration;
+    const epoch = authEpoch, generation = integrationAddGeneration, importVersion = importGeneration;
     const current = () => epoch === authEpoch && authenticated && (statusId !== "integration-add-status" ||
-      integrationAddDialog.open && generation === integrationAddGeneration);
+      integrationAddDialog.open && generation === integrationAddGeneration) &&
+      (id !== "artifact-import" || importVersion === importGeneration && importDialog.open);
     button.disabled = true;
     byId(statusId).textContent = "Preparing review…";
     try { await action(); if (current()) byId(statusId).textContent = "Ready for review."; }
@@ -1864,13 +2130,101 @@ function bindUploadForm(id, action, statusId) {
   });
 }
 bindUploadForm("artifact-import", async () => {
-  const generation = importGeneration;
-  const current = () => importDialog.open && generation === importGeneration;
+  const generation = importGeneration, epoch = authEpoch, batch = droppedImports;
+  const current = () => importDialog.open && generation === importGeneration &&
+    authenticated && epoch === authEpoch && currentView === "library" && librarySection === "files";
+  if (!current()) return;
   const upload_id = await uploadForReview(byId("artifact-file").files[0]);
+  if (!current()) { discardStagedUpload(upload_id, epoch); return; }
   if (current()) await prepareChange({ operation: "import", upload_id }, {
-    current, beforeOpen: () => importDialog.close(),
+    current, beforeOpen: () => {
+      if (batch) {
+        batch.reviewing = true;
+        byId("domain-review-status").textContent = `File ${batch.index + 1} of ${batch.files.length}. Each file is imported only after confirmation. Cancel stops the remaining files.`;
+      }
+      importDialog.close();
+    },
+    onAccepted: operation => {
+      if (batch) { batch.accepted = true; batch.receipt = operation; }
+    },
+    onDiscard: () => { if (droppedImports === batch) droppedImports = null; },
   });
 }, "artifact-import-status");
+
+function cancelDroppedImports() {
+  if (droppedImports?.waiting) {
+    byId("artifact-file").disabled = false;
+    byId("artifact-import").querySelector('button[type="submit"]').disabled = false;
+  }
+  droppedImports = null; importGeneration++;
+}
+function nextDroppedImport(batch) {
+  if (droppedImports !== batch || !authenticated || batch.epoch !== authEpoch ||
+      batch.generation !== importGeneration || currentView !== "library" || librarySection !== "files") return;
+  if (batch.index >= batch.files.length) { droppedImports = null; importDialog.close(); return; }
+  const transfer = new DataTransfer();
+  transfer.items.add(batch.files[batch.index]);
+  byId("artifact-file").files = transfer.files;
+  batch.reviewing = batch.accepted = false;
+  byId("artifact-import-status").textContent = "";
+  if (!importDialog.open) importDialog.showModal();
+  byId("artifact-import").requestSubmit();
+}
+function advanceDroppedImport(batch) {
+  if (droppedImports !== batch || !batch.waiting) return;
+  if (!importDialog.open) { cancelDroppedImports(); return; }
+  const state = batch.receipt?.state;
+  if (!["completed", "failed", "cancelled", "unknown"].includes(state)) return;
+  byId("artifact-file").disabled = false;
+  byId("artifact-import").querySelector('button[type="submit"]').disabled = false;
+  batch.waiting = false;
+  if (state === "completed") { batch.index++; nextDroppedImport(batch); }
+  else {
+    droppedImports = null;
+    byId("artifact-import-status").textContent = "Import did not complete. Remaining files were stopped. Check Activity before trying again.";
+  }
+}
+importDialog.addEventListener("close", () => {
+  if (!importDialog.open && droppedImports && !droppedImports.reviewing) cancelDroppedImports();
+});
+byId("artifact-file").addEventListener("change", cancelDroppedImports);
+reviewDialog.addEventListener("close", () => {
+  const batch = droppedImports;
+  if (!reviewDialog.open && batch?.reviewing && batch.accepted) {
+    batch.reviewing = false; batch.waiting = true;
+    // All imports share a backend resource. Wait for its terminal receipt before
+    // offering the next independent confirmation; admission alone does not release it.
+    byId("artifact-file").disabled = true;
+    byId("artifact-import").querySelector('button[type="submit"]').disabled = true;
+    byId("artifact-import-status").textContent = `Importing file ${batch.index + 1} of ${batch.files.length}… Close to stop the remaining files; this accepted import will continue.`;
+    if (!importDialog.open) importDialog.showModal();
+    advanceDroppedImport(batch);
+  }
+});
+document.addEventListener("klaude-operations", event => {
+  const batch = droppedImports;
+  if (!batch?.receipt) return;
+  const receipt = event.detail.find(item => item.request_id === batch.receipt.request_id);
+  if (receipt) { batch.receipt = receipt; advanceDroppedImport(batch); }
+});
+window.FileDropUI?.register({
+  active: () => currentView === "library" && librarySection === "files",
+  state: () => {
+    const allowed = !byId("artifact-import").querySelector('button[type="submit"]').disabled;
+    return { allowed, title: allowed ? "Drop files into Uploads" : "An import is being prepared",
+      detail: allowed ? "Keep documents and images in your private Library." : "Wait for the current file to finish preparing.",
+      note: "32 MiB per file · Review each import" };
+  },
+  receive: files => {
+    if (files.length > 20) throw new Error("Drop up to 20 files at a time.");
+    if (files.some(file => !file.size || file.size > 32 * 1024 * 1024))
+      throw new Error("Choose nonempty files up to 32 MiB each.");
+    const batch = { files, index: 0, epoch: authEpoch, generation: ++importGeneration };
+    droppedImports = batch;
+    nextDroppedImport(batch);
+  },
+  reject: message => { byId("library-status").textContent = message; },
+});
 bindUploadForm("knowledge-learn", async () => {
   const context = integrationAddContext("knowledge");
   if (!context.current()) return;
@@ -1902,14 +2256,15 @@ async function loadSkills() {
   const load = ++skillsLoad;
   const offset = skillsOffset;
   const query = byId("skills-query").value;
+  const state = skillsState;
   const grid = byId("skill-items");
-  const key = JSON.stringify([query, offset]);
+  const key = JSON.stringify([query, state, offset]);
   if (grid.dataset.contentKey !== key) byId("skills-pages").hidden = true;
   const finish = beginLoading(grid, { kind: "rows", count: Math.min(6, pageSize),
     preserve: grid.dataset.contentKey === key, label: "Loading Skills…" });
   byId("skills-status").textContent = "";
   try {
-    const data = await gridPage("/api/v1/integrations/skills", { query, offset }, pageSize, { signal: skillsRead.signal });
+    const data = await gridPage("/api/v1/integrations/skills", { query, offset, ...(state === "all" ? {} : { state }) }, pageSize, { signal: skillsRead.signal });
     if (load !== skillsLoad) return;
     if (!data.items.length && offset > 0) {
       skillsOffset = Math.max(0, offset - pageSize);
@@ -1920,11 +2275,13 @@ async function loadSkills() {
     grid.dataset.contentKey = key;
     updateDomainPager("skills", offset, data);
     rememberIntegrationLocation(true);
+    const noMatch = state === "all" ? "No Skills match this search" : `No ${state} Skills match this search`;
+    const noItems = state === "all" ? "No installed Skills" : `No ${state} Skills`;
     byId("skills-status").textContent = data.items.length ?
       data.limited ? "Inventory limited to 1,000." : "" :
-      query ? "No Skills match your search." : "No installed Skills. Import a package to get started.";
-    if (!data.items.length) collectionEmpty(grid, query ? "No Skills match this search" : "No installed Skills",
-      query ? "Try another name or description." : "Import a package to get started.", "skill");
+      query ? `${noMatch}.` : `${noItems}.`;
+    if (!data.items.length) collectionEmpty(grid, query ? noMatch : noItems,
+      query ? "Try another name or description." : state === "all" ? "Import a package to get started." : "Try All or another status filter.", "skill");
   } catch (error) { if (load === skillsLoad) domainError(error, "skills-status"); }
   finally { finish(); }
 }
@@ -2123,7 +2480,7 @@ integrationAddDialog.addEventListener("close", () => {
   byId("integration-add-status").textContent = "";
 });
 byId("file-add").addEventListener("click", () => {
-  importGeneration += 1;
+  cancelDroppedImports();
   byId("artifact-import-status").textContent = "";
   importDialog.showModal();
   byId("artifact-file").focus();
@@ -2158,6 +2515,12 @@ byId("skills-query").addEventListener("input", () => {
   clearTimeout(skillsSearchTimer);
   skillsSearchTimer = setTimeout(() => { rememberIntegrationLocation(); loadSkills(); }, 200);
 });
+for (const button of byId("skills-state-filter").children) button.addEventListener("click", () => {
+  if (skillsState === button.dataset.skillState) return;
+  skillsState = button.dataset.skillState;
+  skillsOffset = 0; skillsLocationPage = null;
+  renderSkillsFilter(); rememberIntegrationLocation(); loadSkills();
+});
 byId("skills-filter").addEventListener("submit", (event) => {
   event.preventDefault(); skillsOffset = 0; skillsLocationPage = null;
   rememberIntegrationLocation(); loadSkills();
@@ -2167,6 +2530,7 @@ byId("skills-next").addEventListener("click", () => { skillsOffset += domainPage
 for (const button of document.querySelectorAll("#library-sections button")) {
   button.addEventListener("click", () => {
     if (librarySection === button.dataset.section) return;
+    cancelDroppedImports(); importDialog.close(); window.FileDropUI?.reset();
     artifactLocations.set(librarySection, { kind: fileKind, status: fileStatus, view: fileView,
       query: byId("artifact-query").value, sort: byId("artifact-sort").value, offset: libraryOffset });
     if (librarySection !== button.dataset.section) byId("artifact-file").value = "";
@@ -2197,6 +2561,15 @@ byId("artifact-query").addEventListener("input", () => {
   fileSearchTimer = setTimeout(() => {
     libraryOffset = 0; rememberLibraryLocation(); loadLibrary();
   }, 200);
+});
+for (const button of document.querySelectorAll('[data-file-scope]')) button.addEventListener('click', () => {
+  if (fileScope === button.dataset.fileScope) return;
+  fileScope = button.dataset.fileScope; libraryOffset = 0;
+  rememberLibraryLocation(); loadLibrary();
+});
+document.addEventListener('klaude-chat-session-changed', () => {
+  filePages.clear();
+  if (fileScope === 'current') { libraryOffset = 0; if (currentView === 'library') loadLibrary(); }
 });
 byId("artifact-sort").addEventListener("change", () => { libraryOffset = 0; rememberLibraryLocation(); loadLibrary(); });
 for (const id of ["artifact-kind", "artifact-status"]) {
@@ -2255,6 +2628,7 @@ document.addEventListener("klaude-view", (event) => {
     if (new URLSearchParams(location.search).get("library") === "knowledge") { showView("integrations"); return; }
     restoreLibraryLocation(); rememberLibraryLocation(true); loadLibrary();
   } else {
+    cancelDroppedImports(); importDialog.close();
     clearTimeout(fileSearchTimer);
     fileRead?.abort();
     libraryLoad += 1; cancelLoading(byId("library-items"));
@@ -2271,6 +2645,10 @@ document.addEventListener("klaude-view", (event) => {
   if (["library", "integrations", "activity"].includes(event.detail)) loadOperations();
 });
 document.addEventListener("klaude-auth-reset", () => {
+  knowledgeSource = ""; knowledgeChunkPage = null; knowledgeDeletePending = null; knowledgeOrigin = null;
+  knowledgeSourceNames.clear();
+  knowledgeActionNotice = "";
+  cancelDroppedImports();
   integrationAddGeneration += 1; integrationAddDialog.close();
   clearTimeout(fileSearchTimer);
   for (const token of domainRefreshes.values()) {
@@ -2300,6 +2678,7 @@ document.addEventListener("klaude-auth-reset", () => {
   libraryOffset = knowledgeOffset = sourceOffset = skillsOffset = 0;
   knowledgeLocationPage = sourceLocationPage = null;
   skillsLocationPage = null;
+  skillsState = "all"; renderSkillsFilter();
   knowledgeQuery = "";
   clearTimeout(skillsSearchTimer);
   legacyPageRoutes.clear();
@@ -2338,6 +2717,13 @@ document.addEventListener("klaude-auth-reset", () => {
   byId("artifact-import-status").textContent = "";
   byId("knowledge-query").value = "";
   byId("knowledge-library").replaceChildren();
+  byId("knowledge-breadcrumbs").replaceChildren();
+  byId("knowledge-summary").textContent = "";
+  byId("knowledge-title").textContent = "Your knowledge";
+  byId("knowledge-content-title").textContent = "Chunks";
+  byId("knowledge-chunk-status").textContent = "";
+  byId("knowledge-chunk-title").textContent = "Chunk";
+  byId("knowledge-chunk-position").textContent = "";
   byId("learn-library").value = ""; byId("learn-url").value = "";
   byId("domain-review-summary").textContent = "";
   byId("domain-review-target").textContent = "";

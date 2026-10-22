@@ -1,4 +1,4 @@
-"""Isolated Chrome checks for Settings tabs, history, drafts and reviewed saves.
+"""Isolated Chrome checks for Settings tabs, history, drafts and staged saves.
 
 Run: .venv/bin/python scripts/webui_settings_smoke.py
 No external models or real-profile settings are used.
@@ -33,6 +33,126 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tests.unit.test_webhost import _app  # noqa: E402
 
 
+async def verify_chat_density(tab, output):
+    assert await tab.js("byId('settings-tab-theme').textContent.trim()==='Theme' && "
+                       "byId('theme-settings').querySelector('h2').textContent.trim()==='Theme'")
+    assert await tab.js("appearance.chatDensity==='compact' && "
+                       "document.documentElement.dataset.chatDensity==='compact'")
+    # Existing device preferences gain Compact unless a density was saved, without
+    # losing their selected palette, color mode or reduced-motion preference.
+    assert await tab.js("""(()=>{
+      const old={version:1,theme:'dark',palette:'sage',reduced:true};
+      const migrated=readAppearance(JSON.stringify(old));
+      const invalid=readAppearance(JSON.stringify({...old,chatDensity:'invalid'}));
+      const saved=readAppearance(JSON.stringify({...old,chatDensity:'comfortable'}));
+      return readAppearance(null).chatDensity==='compact' &&
+        migrated.chatDensity==='compact' && migrated.theme==='dark' &&
+        migrated.palette==='sage' && migrated.reduced && invalid.chatDensity==='compact' &&
+        saved.chatDensity==='comfortable';
+    })()""")
+    await tab.click('input[name="chat-density"][value="comfortable"]')
+    assert await tab.js("document.documentElement.dataset.chatDensity==='comfortable' && "
+                       "appearance.chatDensity==='compact' && !byId('theme-save-bar').hidden")
+    await tab.click('input[name="chat-density"][value="compact"]')
+    assert await tab.js("byId('theme-save-bar').hidden")
+    await tab.click('input[name="chat-density"][value="comfortable"]')
+    await tab.click("#theme-reset")
+    assert await tab.js("document.documentElement.dataset.chatDensity==='compact' && "
+                       "byId('theme-save-bar').hidden")
+    # Failed device storage keeps the saved baseline and leaves preview discardable.
+    await tab.js("""window.densityStorageSave=Storage.prototype.setItem;
+      Storage.prototype.setItem=function(key,value) {
+        if(key===preferenceKey) throw new Error('Fixture storage unavailable');
+        return densityStorageSave.call(this,key,value);
+      };""")
+    await tab.click('input[name="chat-density"][value="comfortable"]')
+    await tab.click("#theme-apply")
+    assert await tab.js("appearance.chatDensity==='compact' && "
+                       "byId('theme-status').textContent.includes('Could not save') && "
+                       "!byId('theme-save-bar').hidden")
+    await tab.js("Storage.prototype.setItem=densityStorageSave")
+    await tab.click("#theme-reset")
+    await tab.click('input[name="chat-density"][value="comfortable"]')
+    await tab.click("#theme-apply")
+    assert await tab.js("appearance.chatDensity==='comfortable' && "
+                       "JSON.parse(localStorage.getItem(preferenceKey))"
+                       ".chatDensity==='comfortable' && "
+                       "byId('theme-save-bar').hidden")
+    await tab.click("#settings-tab-agent")
+    await tab.click("#settings-tab-theme")
+    assert await tab.js("document.querySelector('input[name=\"chat-density\"]:checked')"
+                       ".value==='comfortable'")
+    # Render the actual chat components with local sample text, without inference.
+    paragraph = ("Keep the conversation easy to scan while leaving enough room for the details. "
+                 "Compact spacing should show more text while keeping the same readable "
+                 "font size. ")
+    text = ("## A readable conversation\n\n" + paragraph * 4 + "\n\n" + paragraph * 3
+            + "\n\n### Details\n\n- Keep clear headings.\n- Preserve readable text.\n"
+              "- Keep action buttons easy to use.\n\n```python\n"
+              "def describe_view(density):\n    return {\n        'density': density,\n"
+              "        'readable': True,\n"
+              "        'text': 'A long line stays inside its code block',\n"
+              "    }\n```\n\n| View | Spacing |\n| --- | --- |\n"
+              "| Comfortable | More room |\n| Compact | More text |\n")
+    # Rebuild the sample in each synchronous measurement: an automatic snapshot
+    # may otherwise restore the fixture host's empty conversation between cases.
+    await tab.js("showView('chat');window.renderDensityFixture=()=>{"
+                 "byId('welcome').hidden=true;messages.replaceChildren(ChatMarkdown.create('user',"
+                 "'Show the same conversation with less empty space.','density-user'),"
+                 "ChatMarkdown.create('assistant'," + json.dumps(text) + ", 'density-reply'));"
+                 "messages.scrollTop=0;};renderDensityFixture()")
+    cases = []
+    for theme in ("light", "dark"):
+        for width in (320, 390, 768, 1440):
+            await tab.command("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": 844, "deviceScaleFactor": 1, "mobile": width < 600,
+            })
+            measurements = {}
+            for density in ("comfortable", "compact"):
+                await tab.js("applyAppearance({...appearance,theme:" + json.dumps(theme)
+                             + ",chatDensity:" + json.dumps(density) + ",reduced:true},true);"
+                             "messages.scrollTop=0;document.fonts.ready")
+                await tab.js("new Promise(resolve=>requestAnimationFrame("
+                             "()=>requestAnimationFrame(resolve)))")
+                measurements[density] = await tab.js("""(()=>{
+                  renderDensityFixture();
+                  const articles=[...messages.querySelectorAll('.message')];
+                  const body=articles[1].querySelector('.message-body');
+                  return {height:articles[1].getBoundingClientRect().bottom-
+                    articles[0].getBoundingClientRect().top,
+                    font:parseFloat(getComputedStyle(body).fontSize),
+                    leading:parseFloat(getComputedStyle(body).lineHeight),
+                    codeFont:parseFloat(getComputedStyle(body.querySelector('pre')).fontSize),
+                    fits:messages.scrollWidth<=messages.clientWidth &&
+                      document.documentElement.scrollWidth<=innerWidth,
+                    targets:[...messages.querySelectorAll('button')].every(button=>
+                      button.getBoundingClientRect().height>=44)};
+                })()""")
+                if width in (390, 1440):
+                    capture = await tab.command("Page.captureScreenshot", {"format": "png"})
+                    (output / f"{theme}-{width}-{density}-chat.png").write_bytes(
+                        base64.b64decode(capture["data"])
+                    )
+            comfortable, compact = measurements["comfortable"], measurements["compact"]
+            assert compact["height"] < comfortable["height"] * .92, measurements
+            assert compact["font"] == comfortable["font"] == 15, measurements
+            assert compact["codeFont"] == comfortable["codeFont"], measurements
+            assert compact["leading"] < comfortable["leading"], measurements
+            assert all(item["fits"] and item["targets"] for item in measurements.values()), (
+                theme, width, measurements
+            )
+            cases.append({"theme": theme, "width": width, **measurements})
+    await tab.js("delete window.renderDensityFixture;applyAppearance(appearance,true);"
+                 "showView('settings',{section:'theme'})")
+    await tab.command("Page.reload")
+    await tab.wait("typeof authenticated!=='undefined' && authenticated && latest?.session_id && "
+                   "currentView==='settings' && settingsSection==='theme' && "
+                   "document.documentElement.dataset.chatDensity==='comfortable'")
+    assert await tab.js("document.querySelector('input[name=\"chat-density\"]:checked')"
+                       ".value==='comfortable'")
+    return cases
+
+
 async def verify(host, root, chrome, password):
     profile = root / "chrome"
     process = subprocess.Popen([
@@ -53,6 +173,13 @@ async def verify(host, root, chrome, password):
             tab = Tab(ws)
             await tab.command("Runtime.enable")
             await tab.command("Page.enable")
+            # New HTML can be served by a host whose fixed route allowlist
+            # predates the draft module. Also test without structuredClone.
+            await tab.command("Network.enable")
+            await tab.command("Network.setBlockedURLs", {"urls": ["*/settings.js"]})
+            await tab.command("Page.addScriptToEvaluateOnNewDocument", {
+                "source": "delete window.structuredClone;",
+            })
             await tab.command("Page.navigate", {
                 "url": host.origin if password else host.bootstrap_url,
             })
@@ -65,6 +192,9 @@ async def verify(host, root, chrome, password):
             await tab.js("showView('settings')")
             await tab.wait("Boolean(byId('default-value-chat')) && "
                            "Boolean(byId('agent-settings-fields').querySelector('form'))")
+            assert await tab.js("typeof structuredClone==='undefined' && "
+                               "!document.querySelector('script[src=\"/settings.js\"]') && "
+                               "typeof SettingsDrafts==='object'")
             await tab.js("document.fonts.ready")
             assert await tab.js("""[...document.querySelectorAll('[data-refresh-icon]')]
               .every(button=>button.textContent.trim()==='' && button.title &&
@@ -72,8 +202,30 @@ async def verify(host, root, chrome, password):
             """)
             assert await tab.js("byId('agent-group-runtime_options').open && "
                                "byId('agent-group-time_settings').open && "
-                               "!byId('agent-group-permissions').open && "
+                               "!byId('agent-group-tools_permissions').open && "
                                "!byId('model-fallbacks').open")
+            assert await tab.js("!byId('agent-group-permissions') && "
+                               "!byId('agent-group-tool_availability') && "
+                               "byId('agent-group-tools_permissions').querySelector('summary')"
+                               ".textContent.trim()==='Tools & Permissions'")
+            assert await tab.js("""[...document.querySelectorAll('[data-agent-tool]')]
+              .length===12 && [...document.querySelectorAll('[data-agent-tool]')].every(card=>{
+                const toggle=card.querySelector('.tool-availability-form input');
+                const policy=card.querySelector('.tool-policy-form');
+                const choices=[...policy.querySelectorAll('input[type=radio]')];
+                return toggle && policy && card.querySelector('.tool-permission-label svg') &&
+                  document.querySelector(`label[for="${toggle.id}"]`) &&
+                  policy.tagName==='FIELDSET' && policy.querySelector('legend').textContent &&
+                  choices.length===3 && choices.every(input=>
+                    document.querySelector(`label[for="${input.id}"]`)) &&
+                  choices.map(input=>input.value).join(',')==='allow,ask,deny' &&
+                  [...policy.querySelectorAll('label span')].map(span=>span.textContent)
+                    .join(',')==='Automatic,Ask first,Deny' &&
+                  choices.filter(input=>input.checked).length===1 &&
+                  !card.querySelector('select,.tool-toggle-state');
+              }) && !byId('setting-permissions-run_shell') &&
+              !byId('setting-tool_availability-write_file')
+            """)
             assert await tab.js("byId('setting-time_settings-timezone').value==='auto' && "
                                "Boolean(byId(byId('setting-time_settings-timezone')"
                                ".getAttribute('aria-describedby'))) && "
@@ -184,6 +336,37 @@ async def verify(host, root, chrome, password):
                             const r=toggle.getBoundingClientRect();
                             return r.height>=44 && r.width>=44;
                           });
+                          let toolSegments=true;
+                          if(panel.id==='agent-settings') {
+                            const contentWidth=panel.clientWidth-
+                              parseFloat(getComputedStyle(panel).paddingInlineStart)*2;
+                            const columns=innerWidth>768 && contentWidth>=496 ? 2 : 1;
+                            toolSegments=[...panel.querySelectorAll('.tool-permission-list')]
+                              .every(list=>{
+                                const policies=[...list.querySelectorAll('.tool-policy-form')];
+                                return getComputedStyle(list).gridTemplateColumns
+                                  .split(' ').length===columns &&
+                                  policies.every((policy,index)=>columns===1 || index%2===0 ||
+                                    Math.abs(policy.getBoundingClientRect().top-
+                                      policies[index-1].getBoundingClientRect().top)<1);
+                              }) &&
+                              [...panel.querySelectorAll('[data-agent-tool]')].every(card=>{
+                                const style=getComputedStyle(card);
+                                const name=card.querySelector('.tool-permission-label')
+                                  .getBoundingClientRect();
+                                const toggle=card.querySelector('.switch').getBoundingClientRect();
+                                return style.borderRadius==='0px' &&
+                                  style.backgroundColor==='rgba(0, 0, 0, 0)' &&
+                                  name.right<=toggle.left && name.top<toggle.bottom &&
+                                  name.bottom>toggle.top &&
+                                  [...card.querySelectorAll('.tool-policy-form label span')]
+                                    .every(segment=>{
+                                      const r=segment.getBoundingClientRect();
+                                      return r.width>=44 && r.height>=44 &&
+                                        segment.scrollWidth<=segment.clientWidth;
+                                    });
+                              });
+                          }
                           const cards=panel.matches('.theme-settings') ? [panel] :
                             [...panel.querySelectorAll('.theme-settings')];
                           const cardHeights=cards.map(card=>card.getBoundingClientRect().height);
@@ -223,16 +406,18 @@ async def verify(host, root, chrome, password):
                             const swatches=[...panel.querySelectorAll('.palette-swatch')]
                               .map(swatch=>swatch.getBoundingClientRect());
                             const rows=new Set(swatches.map(r=>Math.round(r.top))).size;
-                            compact=rows===(panel.clientWidth-parseFloat(getComputedStyle(panel)
-                              .paddingInlineStart)*2>=568 ? 1 : 2) &&
+                            const columns=panel.clientWidth-parseFloat(getComputedStyle(panel)
+                              .paddingInlineStart)*2>=568 ? 8 : 4;
+                            compact=rows===Math.ceil(swatches.length/columns) &&
                               swatches.every(r=>r.width===44 && r.height===44);
                           }
                           sections.forEach((section,index)=>section.open=open[index]);
                           return {failures,overflowing,switches,rowHeights,
                             defaultHeight,expandedHeight,cardHeights,panelWidth,
-                            controlled,roleIcons,compact};
+                            controlled,roleIcons,compact,toolSegments};
                         })()""")
                         assert (not density["failures"] and not density["overflowing"]
+                                and density["toolSegments"]
                                 and density["switches"] and density["controlled"]
                                 and density["compact"] and density["roleIcons"]), (
                             theme, width, section, density
@@ -265,10 +450,30 @@ async def verify(host, root, chrome, password):
                             (output / f"{theme}-{width}-{section}.png").write_bytes(
                                 base64.b64decode(capture["data"])
                             )
+                            if section == "agent" and width in (390, 1440):
+                                await tab.js("""(() => {
+                                  const view=byId('settings-view');
+                                  const tools=byId('agent-group-tools_permissions');
+                                  tools.open=true;
+                                  const inset=innerWidth<851 ?
+                                    byId('settings-sections').offsetHeight+12 : 8;
+                                  view.scrollTop+=tools.getBoundingClientRect().top-
+                                    view.getBoundingClientRect().top-inset;
+                                })()""")
+                                await asyncio.sleep(.1)
+                                capture = await tab.command("Page.captureScreenshot", {
+                                    "format": "png",
+                                })
+                                (output / f"{theme}-{width}-tools.png").write_bytes(
+                                    base64.b64decode(capture["data"])
+                                )
+                                await tab.js("byId('agent-group-tools_permissions').open=false;"
+                                             "byId('settings-view').scrollTop=0")
 
             # Keyboard direction follows the live orientation; resizing keeps
             # the active category, linked panel and unsaved draft.
-            await tab.js("byId('default-output-tokens').value='384'")
+            await tab.js("byId('default-output-tokens').value='384';"
+                         "byId('default-output-tokens').dispatchEvent(new Event('input'))")
             for width in (390, 1440):
                 await tab.command("Emulation.setDeviceMetricsOverride", {
                     "width": width, "height": 844, "deviceScaleFactor": 1,
@@ -304,13 +509,22 @@ async def verify(host, root, chrome, password):
               return visible;
             })()""")
             await tab.click("#settings-tab-theme")
+            assert await tab.js("byId('theme-save-bar').hidden")
             await tab.click('input[name="palette"][value="sage"]')
             assert await tab.js("byId('theme-status').textContent==='Preview · not saved'")
             await tab.click("#theme-reset")
             assert await tab.js("byId('theme-status').textContent==="
-                                "'Default preview · Apply to save'")
+                                "'Preview discarded' && byId('theme-save-bar').hidden")
+            await tab.click('input[name="palette"][value="sage"]')
+            assert await tab.js("!byId('theme-save-bar').hidden")
             await tab.click("#theme-apply")
-            assert await tab.js("byId('theme-status').textContent==='Saved on this device'")
+            assert await tab.js("byId('theme-status').textContent==='Saved on this device' && "
+                                "byId('theme-save-bar').hidden")
+            await tab.click('input[name="palette"][value="peach"]')
+            await tab.click("#theme-reset")
+            assert await tab.js("document.documentElement.dataset.palette==='sage' && "
+                               "appearance.palette==='sage'")
+            density_layouts = await verify_chat_density(tab, output)
             await tab.click("#settings-tab-memory")
             await tab.js("history.back()")
             await tab.wait("settingsSection==='theme'")
@@ -335,71 +549,87 @@ async def verify(host, root, chrome, password):
                            "!BrowserManagement.hasPending()")
             await tab.click("#settings-tab-agent")
             await tab.wait("Boolean(byId('setting-runtime_options-max_steps'))")
-            # Timezone drafts survive category changes; cancellation does not save.
-            await tab.js("byId('setting-time_settings-timezone').value='UTC'")
-            await tab.click("#settings-tab-models")
-            await tab.click("#settings-tab-agent")
-            assert await tab.js("byId('setting-time_settings-timezone').value==='UTC'")
+            # Timezone and execution drafts survive navigation and save together.
             await tab.js("byId('setting-time_settings-timezone').value='Asia/Phnom_Penh';"
-                         "byId('setting-time_settings-timezone').closest('form').requestSubmit()")
-            await tab.wait("reviewDialog.open")
-            await tab.click("#domain-review-cancel")
-            await tab.wait("!reviewDialog.open && "
-                           "!BrowserManagement.busy('setting:time_settings.timezone')")
-            unchanged = await tab.js("domainRequest('/api/v1/settings/agent','GET')")
-            assert next(field for field in unchanged["fields"]
-                        if field["id"] == "time_settings.timezone")["value"] == "auto"
-            await tab.js("byId('setting-time_settings-timezone').closest('form').requestSubmit()")
-            await tab.wait("reviewDialog.open")
-            await tab.click("#domain-review-confirm")
-            await tab.wait("!reviewDialog.open && !BrowserManagement.hasPending() && "
-                           "byId('setting-time_settings-timezone').value==='Asia/Phnom_Penh'")
-            saved_time = await tab.js("domainRequest('/api/v1/settings/agent','GET')")
-            assert next(field for field in saved_time["fields"]
-                        if field["id"] == "time_settings.timezone")["value"] == "Asia/Phnom_Penh"
-            await tab.js("byId('setting-runtime_options-max_steps').value='7'")
+                         "byId('setting-time_settings-timezone')"
+                         ".dispatchEvent(new Event('change'));"
+                         "byId('setting-runtime_options-max_steps').value='7';"
+                         "byId('setting-runtime_options-max_steps')"
+                         ".dispatchEvent(new Event('input'))")
             await tab.click("#settings-tab-models")
-            await tab.js("byId('image-service-url').value='http://127.0.0.1:1234'")
+            await tab.js("byId('image-service-url').value='http://127.0.0.1:1234';"
+                         "byId('image-service-url').dispatchEvent(new Event('input'))")
             await tab.click("#settings-tab-agent")
-            assert await tab.js("byId('setting-runtime_options-max_steps').value==='7'")
-            await tab.js("byId('setting-runtime_options-max_steps').closest('form')"
-                         ".requestSubmit()")
-            await tab.wait("reviewDialog.open")
-            await tab.click("#domain-review-confirm")
-            await tab.wait("!reviewDialog.open && !BrowserManagement.hasPending()")
+            assert await tab.js("byId('setting-time_settings-timezone')"
+                               ".value==='Asia/Phnom_Penh' && "
+                               "byId('setting-runtime_options-max_steps').value==='7' && "
+                               "byId('agent-unsaved-count').textContent==='2 unsaved changes'")
+            await tab.click("#agent-save")
+            await tab.wait("byId('agent-save-bar').hidden")
             saved = await tab.js("domainRequest('/api/v1/settings/agent','GET')")
             assert next(field for field in saved["fields"]
+                        if field["id"] == "time_settings.timezone")["value"] == "Asia/Phnom_Penh"
+            assert next(field for field in saved["fields"]
                         if field["id"] == "runtime_options.max_steps")["value"] == 7
-            # Native switches still retain their confirmed state until review.
-            await tab.js("byId('agent-group-tool_availability').querySelector('summary').focus()")
+            # Keyboard disclosure and independent staged availability/policy.
+            await tab.js("byId('agent-group-tools_permissions').querySelector('summary').focus()")
             for kind in ("keyDown", "keyUp"):
                 await tab.command("Input.dispatchKeyEvent", {
                     "type": kind, "key": "Enter", "code": "Enter",
                     "windowsVirtualKeyCode": 13,
                     **({"text": "\r"} if kind == "keyDown" else {}),
                 })
-            assert await tab.js("byId('agent-group-tool_availability').open")
-            before = await tab.js("byId('setting-tool_availability-read_file').checked")
+            assert await tab.js("byId('agent-group-tools_permissions').open")
+            await tab.click("#setting-permissions-read_file-deny")
+            await tab.click("#agent-save")
+            await tab.wait("byId('agent-save-bar').hidden")
             await tab.click("#setting-tool_availability-read_file")
-            await tab.wait("reviewDialog.open")
-            assert await tab.js("byId('setting-tool_availability-read_file').checked") == before
-            await tab.click("#domain-review-cancel")
-            await tab.wait("!reviewDialog.open")
-            assert await tab.js("byId('agent-group-tool_availability').open")
+            assert await tab.js("!byId('setting-tool_availability-read_file').checked && "
+                               "byId('setting-permissions-read_file').disabled && "
+                               "[...byId('setting-permissions-read_file').querySelectorAll('input')]"
+                               ".every(input=>input.matches(':disabled')) && "
+                               "!reviewDialog.open")
+            await tab.js("byId('setting-permissions-read_file-allow').click()")
+            assert await tab.js("byId('setting-permissions-read_file-deny').checked && "
+                               "SettingsDrafts.value('agent','permissions.read_file')==='deny'")
+            await tab.click("#agent-discard")
+            assert await tab.js("byId('setting-tool_availability-read_file').checked && "
+                               "byId('setting-permissions-read_file-deny').checked")
+            await tab.click("#setting-tool_availability-read_file")
+            await tab.click("#agent-save")
+            await tab.wait("byId('agent-save-bar').hidden")
+            await tab.click("#setting-tool_availability-read_file")
+            await tab.click("#agent-save")
+            await tab.wait("byId('settings-security')?.open")
+            await tab.click("#settings-security-confirm")
+            await tab.wait("byId('agent-save-bar').hidden")
+            assert await tab.js("byId('setting-permissions-read_file-deny').checked")
+            await tab.js("byId('agent-group-advanced_permissions').open=true")
+            await tab.click("#tool-workspace-settings")
+            assert await tab.js("currentView==='workspace'")
+            await tab.js("showView('settings',{section:'agent'})")
+            await tab.wait("byId('agent-group-tools_permissions').open")
+            await tab.click("#tool-mcp-settings")
+            assert await tab.js("currentView==='integrations' && "
+                                "integrationSection==='connections'")
+            await tab.js("showView('settings',{section:'agent'})")
+            await tab.wait("byId('agent-group-tools_permissions').open")
             await tab.click("#settings-tab-models")
             await tab.click("#model-fallbacks > summary")
-            await tab.js("byId('default-value-fallbacks-0').value=''")
+            await tab.js("byId('default-value-fallbacks-0').value='';"
+                         "byId('default-value-fallbacks-0').dispatchEvent(new Event('change'))")
             await tab.click("#settings-tab-agent")
-            assert await tab.js("byId('agent-group-tool_availability').open")
+            assert await tab.js("byId('agent-group-tools_permissions').open")
             await tab.click("#settings-tab-models")
-            assert await tab.js("byId('model-fallbacks').open && "
-                               "byId('default-value-fallbacks-0').value===''")
+            fallback_draft = await tab.js("({open:byId('model-fallbacks').open, "
+                                          "value:byId('default-value-fallbacks-0').value})")
+            assert fallback_draft == {"open": True, "value": ""}, fallback_draft
             await tab.click("#model-fallbacks > summary")
             await tab.js("byId('default-output-tokens').value='256';"
-                         "byId('default-output-tokens').closest('form').requestSubmit()")
-            await tab.wait("reviewDialog.open")
-            await tab.click("#domain-review-cancel")
-            await tab.wait("!reviewDialog.open")
+                         "byId('default-output-tokens').dispatchEvent(new Event('input'))")
+            assert await tab.js("!byId('models-save-bar').hidden && !reviewDialog.open")
+            await tab.click("#models-discard")
+            assert await tab.js("byId('models-save-bar').hidden")
 
             # A preparation finishing after a tab change must discard its review.
             await tab.click("#settings-tab-memory")
@@ -434,6 +664,7 @@ async def verify(host, root, chrome, password):
                                     ".get('settings')!=='images'")
 
             if password:
+                await tab.wait("document.documentElement.dataset.startup==='ready'")
                 await tab.click("#account-shortcut")
                 assert await tab.js("settingsSection==='account' && "
                                     "!byId('account-settings').hidden && "
@@ -453,17 +684,22 @@ async def verify(host, root, chrome, password):
             assert await tab.js("!byId('new-password').value")
             assert not tab.errors, tab.errors
             return {"auth": "password" if password else "bootstrap",
+                    "existing_asset_bootstrap_without_structuredClone": "passed",
                     "widths": [320, 390, 768, 850, 851, 1024, 1440, 1920, 2560],
                     "vertical_desktop_horizontal_mobile": "passed",
                     "responsive_keyboard_and_sticky_navigation": "passed",
                     "full_width_natural_heights_bounded_controls": "passed",
                     "execution_grid_palette_role_icons": "passed",
-                    "theme_preview_reset_apply": "passed",
+                    "theme_preview_discard_apply": "passed",
+                    "appearance_chat_density_preview_discard_apply_reload": "passed",
+                    "chat_density_layouts": density_layouts,
                     "expanded_rows_and_review_alignment": "passed",
+                    "unified_tools_staged_policy_and_availability": "passed",
+                    "advanced_permission_navigation": "passed",
                     "disclosures_switches_drafts": "passed",
                     "timezone_draft_cancel_save": "passed",
                     "layouts": layouts,
-                    "tabs": sections, "history_drafts_reviews": "passed", "console_errors": 0}
+                    "tabs": sections, "history_drafts_saves": "passed", "console_errors": 0}
     finally:
         process.terminate()
         process.wait(timeout=10)

@@ -240,19 +240,30 @@ class ArtifactStore:
         include_total: bool = False,
         images_only: bool = False,
         source: str = "all",
+        session: str = "",
+        identities: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         orders = {"newest": "created DESC", "oldest": "created ASC",
                   "name": "name COLLATE NOCASE", "name_desc": "name COLLATE NOCASE DESC",
                   "largest": "size DESC", "smallest": "size ASC",
                   "type": "mime COLLATE NOCASE, name COLLATE NOCASE"}
         if (kind not in (*KINDS, "all") or sort not in orders or type(images_only) is not bool
-                or source not in {"all", "input", "output"}):
+                or source not in {"all", "input", "output"}
+                or not isinstance(session, str) or len(session) > 160
+                or len(identities) > 512
+                or any(not isinstance(item, str) or not ID.fullmatch(item) for item in identities)):
             raise ValueError("Unknown artifact filter or order")
         regular_path(self.path)
         if not self.path.exists():
             return {"items": [], "more": False, **({"total": 0} if include_total else {})}
         where = "archived=?"
         values: list[Any] = [int(archived)]
+        if session:
+            where += " AND (session=?"
+            if identities:
+                where += " OR id IN (" + ",".join("?" for _ in identities) + ")"
+            where += ")"
+            values.extend((session, *identities))
         if kind != "all":
             where += " AND kind=?"
             values.append(kind)

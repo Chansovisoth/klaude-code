@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 EventKind = Literal[
     "turn.accepted", "turn.started", "message.delta", "message.completed", "tool.requested",
@@ -30,6 +30,7 @@ class PublicEvent:
     status: str = ""
     cursor: str = ""
     activity: str = ""
+    inspection: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

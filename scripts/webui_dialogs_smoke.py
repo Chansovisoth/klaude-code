@@ -140,6 +140,8 @@ async def verify(host, root, chrome):
                     for label in ("Share message", "Sources"):
                         await tab.click(f'[aria-label="{label}"]')
                         await tab.wait("Boolean(document.querySelector('.message-dialog[open]'))")
+                        await tab.js("Promise.all(document.querySelector('.message-dialog[open]')"
+                                     ".getAnimations().map(a=>a.finished.catch(()=>{})))")
                         points = await geometry(".message-dialog")
                         await tap(points["inside"], mode)
                         assert await tab.js("document.querySelector('.message-dialog').open")

@@ -123,7 +123,8 @@ def test_library_file_capture_rechecks_revision_archive_and_checksum(tmp_path):
         service.attachment(item["id"], item["revision"])
 
 
-def test_image_attachment_delivers_pixels_through_shared_fenced_worker(vision_lab):
+@pytest.mark.parametrize("image_count", [1, 4])
+def test_image_attachment_delivers_pixels_through_shared_fenced_worker(vision_lab, image_count):
     from klaude_application import HeadlessApplication
     from klaude_core.memory import Memory
 
@@ -135,21 +136,26 @@ def test_image_attachment_delivers_pixels_through_shared_fenced_worker(vision_la
     agent.tool_config = cfg
     memory = Memory(cfg.data_dir / "memory.md", cfg.data_dir / "sessions.db")
     app = HeadlessApplication(agent, memory, allow_approvals=False)
-    attachment = ChatAttachmentInput((prepare_attachment("colors.png", png(), preview=True),))
+    attachment = ChatAttachmentInput(tuple(
+        prepare_attachment(f"colors{index}.png", png() + bytes([index]), preview=True)
+        for index in range(image_count)
+    ))
 
     async def exercise():
         turn = app.submit("Describe the colors", attachments=attachment)
         result = await turn.result()
         assert result.state == "completed", turn.failure
         sent = next(data for path, data in calls if path == "/api/chat")
-        assert base64.b64decode(sent["messages"][-1]["images"][0]) == png()
+        assert [base64.b64decode(image) for image in sent["messages"][-1]["images"]] == (
+            [png()] * image_count
+        )
         assert any(path == "/api/show" for path, _ in calls)
         assert "image_inputs" not in json.dumps(app.snapshot())
         assert base64.b64encode(png()).decode() not in json.dumps(app.snapshot())
         assert memory.load_session(app.session_id)[0]["model_content"]["image_inputs"]
         message = app.snapshot()["messages"][0]
         row_id = int(message["id"].split(":")[1])
-        assert message["attachments"] == [attachment.files[0].public()]
+        assert message["attachments"] == [file.public() for file in attachment.files]
         # Thumbnail reads and public projections must work with private input unreadable.
         def deny_private(_action, table, column, *_args):
             return sqlite3.SQLITE_DENY if (table, column) == ("turns", "model_content") else (
@@ -340,7 +346,10 @@ def test_browser_library_images_reuse_original_without_creating_uploads(
             body={"artifact_id": original["id"], "revision": original["revision"]}, **auth,
         )
         assert status == 201 and selected["image"]
-        assert "artifact_id" not in selected
+        # Opaque original identity links the Context Library to this conversation.
+        # Descriptors still omit paths, bytes, private prompts and checksums.
+        assert selected["artifact_id"] == original["id"]
+        assert not {"sha256", "data", "origin", "model_content"} & selected.keys()
         for index in range(2):
             status, _, result = _request(
                 host, "POST", "/api/v1/turns",
@@ -353,6 +362,12 @@ def test_browser_library_images_reuse_original_without_creating_uploads(
                 time.sleep(.01)
             assert not app.active_turn_count()
             assert app.receipt(f"library-image-{index}").state == "completed", app.snapshot()
+            scope_status, _, scope = _request(
+                host, "GET", "/api/v1/library/items?kind=all&scope=current", **auth,
+            )
+            assert scope_status == 200 and scope["scope"] == "current"
+            assert scope["session_id"] == app.session_id
+            assert [item["id"] for item in scope["items"]] == [original["id"]]
             assert {source: library.listing(kind="all", source=source)
                     for source in inventory} == inventory
             sent = [data for path, data in calls if path == "/api/chat"][-1]

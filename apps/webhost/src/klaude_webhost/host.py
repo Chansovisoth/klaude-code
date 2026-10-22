@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import sqlite3
 import tempfile
@@ -37,6 +38,8 @@ from klaude_application.model_capabilities import read_capabilities
 from klaude_application.operation_journal import OperationConflict
 from klaude_application.workspace_reads import WorkspaceReadService
 from klaude_core.config import Config
+from klaude_core.image_preparation import prepare_image
+from klaude_core.library_artifacts import image_header
 from klaude_core.model_connections import (
     DEFAULT_IDS,
     ModelConnection,
@@ -112,6 +115,7 @@ class LocalWebHost:
         self.accounts = accounts
         self.library = library
         self._library_downloads = threading.BoundedSemaphore(2)
+        self._attachment_reads = threading.BoundedSemaphore(2)
         self.library_images = LibraryImages()
         self.login_limiter = LoginLimiter()
         self.transfers: BrowserTransfers | None = None
@@ -419,6 +423,7 @@ class LocalWebHost:
             "api_version": "1", "session_id": snapshot["session_id"],
             "message_actions": True,
             "attachments": True,
+            "attachment_content": True,
             "library_images": True,
             "library_source_links": True,
             "library_artifact_sources": True,
@@ -430,10 +435,13 @@ class LocalWebHost:
             "effort_levels": list(self.application.agent.model_info.capabilities.effort_levels),
             "messages": messages, "state": snapshot["state"],
             "activity": snapshot["activity"],
+            "inspector": snapshot.get("inspector"),
+            "context_panel": True,
             "partial": snapshot["partial"][:64_000],
             "cursor": snapshot["cursor"],
             "model": self.application.agent.model,
             "model_ref": self.application.agent.model_info.ref,
+            "provider": self.application.agent.model_info.backend,
             "mode": self.application.agent.reasoning_mode,
             "effort": (self.application.agent.reasoning_effort
                        if self.application.agent.reasoning_mode == "thinking" else None),
@@ -1062,6 +1070,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._download(auth[0], path)
         elif path == "/api/v1/chat/attachments/preview":
             self._attachment_preview(auth[0])
+        elif path == "/api/v1/chat/attachments/content":
+            self._attachment_content(auth[0])
         elif path.startswith("/api/v1/library/") or path in {
             "/api/v1/integrations/skills", "/api/v1/integrations/connections",
             "/api/v1/settings/memory",
@@ -1674,7 +1684,11 @@ class _Handler(BaseHTTPRequestHandler):
         result: dict[str, Any]
         try:
             offset = int(query.get("offset", "0"))
-            if not 0 <= offset <= 1_000_000 or any(len(value) > 256 for value in query.values()):
+            if not 0 <= offset <= 1_000_000 or any(
+                len(value) > (8192 if key == "source" and path.startswith(
+                    "/api/v1/library/knowledge/"
+                ) else 256) for key, value in query.items()
+            ):
                 raise ValueError("Invalid filter")
             if path == "/api/v1/library/vision":
                 if set(query) != {"artifact", "revision"}:
@@ -1689,12 +1703,28 @@ class _Handler(BaseHTTPRequestHandler):
                     raise ValueError("Unknown count filter")
                 result = service.tab_counts()
             elif path == "/api/v1/library/items":
-                if set(query) - {"kind", "archived", "query", "offset", "sort", "images", "source"}:
+                if set(query) - {"kind", "archived", "query", "offset", "sort", "images",
+                                 "source", "scope", "references"}:
                     raise ValueError("Unknown filter")
                 if query.get("archived", "false") not in {"true", "false"}:
                     raise ValueError("Invalid archive filter")
                 if query.get("images", "0") not in {"0", "1"}:
                     raise ValueError("Invalid image filter")
+                scope = query.get("scope", "all")
+                if scope not in {"current", "all"}:
+                    raise ValueError("Invalid Library scope")
+                references = tuple(filter(None, query.get("references", "").split(",")))
+                if len(references) > 4 or any(
+                    not re.fullmatch(r"(?:document|media|research):[a-f0-9]{32}", item)
+                    for item in references
+                ):
+                    raise ValueError("Invalid Library references")
+                session = self.owner.application.session_id
+                scope_limited = False
+                if scope == "current":
+                    saved = self.owner.application.sessions.artifact_references(session)
+                    references = tuple(set(references) | set(saved.identities))
+                    scope_limited = saved.limited
                 result = service.listing(
                     kind=query.get("kind", "document"),
                     archived=query.get("archived") == "true",
@@ -1703,7 +1733,10 @@ class _Handler(BaseHTTPRequestHandler):
                     sort=query.get("sort", "newest"),
                     images_only=query.get("images") == "1",
                     source=query.get("source", "all"),
+                    session=session if scope == "current" else "",
+                    identities=references if scope == "current" else (),
                 )
+                result.update(scope=scope, session_id=session, scope_limited=scope_limited)
             elif path == "/api/v1/library/item":
                 if set(query) != {"id"}:
                     raise ValueError("Choose an item")
@@ -1732,6 +1765,16 @@ class _Handler(BaseHTTPRequestHandler):
                         return
                     self.wfile.write(output[start:start + 65536])
                 return
+            elif path in {
+                "/api/v1/library/knowledge/contents", "/api/v1/library/knowledge/sources",
+            }:
+                if set(query) - {"library", "source", "query", "offset", "chunk"}:
+                    raise ValueError("Unknown Knowledge filter")
+                result = service.knowledge_contents(
+                    library=query.get("library", ""), source=query.get("source", ""),
+                    query=query.get("query", ""), offset=offset, chunk=query.get("chunk", ""),
+                    sources=path.endswith("/sources"),
+                )
             elif path == "/api/v1/library/knowledge":
                 if set(query) - {"library", "query", "offset"}:
                     raise ValueError("Unknown Knowledge filter")
@@ -1742,9 +1785,10 @@ class _Handler(BaseHTTPRequestHandler):
                     raise ValueError("Unknown source filter")
                 result = service.sources(query.get("library", ""), offset)
             elif path == "/api/v1/integrations/skills":
-                if set(query) - {"query", "offset"}:
+                if set(query) - {"query", "offset", "state"}:
                     raise ValueError("Unknown Skills filter")
-                result = service.skills(query=query.get("query", ""), offset=offset)
+                result = service.skills(query=query.get("query", ""), offset=offset,
+                                        state=query.get("state", "all"))
             elif path == "/api/v1/integrations/connections":
                 if query:
                     raise ValueError("Unknown connection filter")
@@ -1873,6 +1917,114 @@ class _Handler(BaseHTTPRequestHandler):
         except (OSError, sqlite3.Error):
             self._error(HTTPStatus.SERVICE_UNAVAILABLE, "storage_unavailable",
                         "Attachment preview temporarily unavailable")
+
+    def _attachment_content(self, identity: str) -> None:
+        query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+        if not self.owner._attachment_reads.acquire(blocking=False):
+            self._error(HTTPStatus.TOO_MANY_REQUESTS, "resource_busy",
+                        "Attachment previews busy; try again")
+            return
+        try:
+            if (set(query) != {"session", "message", "file", "view"}
+                    or any(len(values) != 1 for values in query.values())):
+                raise ValueError("Invalid attachment preview")
+            session, message, index, view = (
+                query[key][0] for key in ("session", "message", "file", "view")
+            )
+            if (not re.fullmatch(r"stored:[1-9][0-9]{0,18}", message)
+                    or int(message[7:]) > 9_223_372_036_854_775_807
+                    or index not in {"0", "1", "2", "3"}
+                    or view not in {"info", "image", "download"}):
+                raise ValueError("Invalid attachment preview")
+
+            def current() -> bool:
+                return (not self.owner._stopping and self.owner.session_active(identity)
+                        and self.owner.application.session_id == session)
+
+            thumbnail_only = False
+            with self.owner._lock:
+                if not current():
+                    raise ValueError("Chat changed; reopen the attachment")
+                try:
+                    descriptor, data = self.owner.application.sessions.attachment_content(
+                        session, int(message[7:]), int(index),
+                    )
+                except FileNotFoundError:
+                    saved = self.owner.application.sessions.public_message(
+                        session, int(message[7:]),
+                    )
+                    if saved is None or int(index) >= len(saved.attachments):
+                        raise ValueError("Attachment unavailable") from None
+                    descriptor = saved.attachments[int(index)]
+                    artifact = descriptor.get("artifact_id")
+                    if artifact and self.owner.library is not None:
+                        service = ArtifactService(self.owner.library.artifacts.root)
+                        item = service.get(artifact)
+                        name, data = service.attachment(artifact, item["revision"])
+                        if name != descriptor.get("name") or len(data) != descriptor.get("size"):
+                            raise ValueError("Original Library attachment changed") from None
+                    elif descriptor.get("image") and descriptor.get("preview"):
+                        data = self.owner.application.sessions.attachment_preview(
+                            session, int(message[7:]), int(index),
+                        )
+                        thumbnail_only = True
+                    else:
+                        raise FileNotFoundError(
+                            "Original file was not retained in this older message. "
+                            "Attach it again to preview it."
+                        ) from None
+            name = descriptor["name"]
+            if view == "download":
+                if thumbnail_only:
+                    raise ValueError("Only a thumbnail is available for this older attachment")
+                mime, output = "application/octet-stream", data
+            elif descriptor.get("image"):
+                if view == "image":
+                    if thumbnail_only:
+                        mime, output = "image/png", data
+                    else:
+                        metadata, output = prepare_image(
+                            data, detail="detailed", frame=0, cancelled=lambda: not current(),
+                        )
+                        mime = metadata["mime"]
+                else:
+                    _, width, height = image_header(data[:65536])
+                    result = {"item": {**descriptor, "filename": name,
+                                       "width": width, "height": height},
+                              "lines": [], "thumbnail_only": thumbnail_only}
+            elif view == "image":
+                raise ValueError("This attachment is not an image")
+            else:
+                prepared = prepare_attachment(name, data)
+                source = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "\ufffd", prepared.text)
+                result = {"item": {**descriptor, "filename": name}, "lines": [],
+                          "source_text": source, "source_truncated": prepared.truncated,
+                          "source_sanitized": source != prepared.text,
+                          "extracted": prepared.mime in {
+                              "application/pdf",
+                              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                          }}
+            with self.owner._lock:
+                if (not current() or self.owner.application.sessions.public_message(
+                        session, int(message[7:])) is None):
+                    raise ValueError("Chat changed; reopen the attachment")
+                if view == "info":
+                    self._json(HTTPStatus.OK, result)
+                    return
+                self._headers(HTTPStatus.OK, mime, len(output),
+                              attachment=display_filename(name) if view == "download" else "")
+            for offset in range(0, len(output), 65536):
+                if not current():
+                    self.close_connection = True
+                    return
+                self.wfile.write(output[offset:offset + 65536])
+        except (ValueError, FileNotFoundError) as error:
+            self._error(HTTPStatus.NOT_FOUND, "not_found", str(error)[:240])
+        except (OSError, sqlite3.Error):
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE, "storage_unavailable",
+                        "Attachment preview temporarily unavailable")
+        finally:
+            self.owner._attachment_reads.release()
 
     def _attachment_change(
         self, path: str, body: dict[str, Any], identity: str, viewer: str,

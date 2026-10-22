@@ -1,5 +1,16 @@
 # Official Material loading indicator
 
+## 2026-10-22 Klaude Expressive update
+
+The older Android-native timing below is historical. The shared loader now uses
+the audited end-4 800ms cadence, 90-degree/350ms InOutQuad leap, 12-second
+continuous rotation, 750ms standard zoom envelope and 200ms effects morph.
+Geometry remains the pinned Apache-licensed Google/AndroidX export. Nine named
+static shapes share that pipeline. The optional classic spinner and app/system
+reduced motion retain their behavior; held shapes no longer rewrite SVG paths
+every frame. Current source mapping and checks: `klaude-expressive-reference.md`
+and `klaude-expressive-validation.md`.
+
 ## Implementation plan
 
 Reviewed the official M3 overview/specs/guidelines data and its demonstration
@@ -70,6 +81,30 @@ pixel-identical rendering. Equilibrium is located at 1ms resolution; Android
 settles on an animation frame.
 
 ## Integration and lifecycle
+
+The floating jump-to-latest button now shows the same uncontained 24px Material
+indicator instead of its down arrow while the existing chat Send/activity status
+is working. It keeps its 44px target, native button/keyboard behavior, focus
+return and jump action. Its accessible name retains Go to latest and adds Klaude
+is working. The arrow returns on completion, failure, cancellation or Needs input;
+the button retains its existing visibility rules and remains hidden at the bottom.
+Repeated snapshots retain the visible indicator, while reaching the bottom,
+leaving Chat or signing out removes it. Shared reduced-motion behavior applies.
+
+Validation: `/tmp/klaude-chat-scroll-working-smoke.py` uses an isolated browser,
+saved fixture dialogue and actual streamed turn/SSE updates. It passed visibility,
+position, 44px targets, reading-position preservation and mouse/touch/keyboard
+jumps at 320/390/768/1440px, including a short 390×520 viewport. Working-state
+checks cover live SVG motion, reduced motion, stable identity across snapshots,
+light/dark mobile/desktop layouts, arrow restoration and stopped/input states,
+streaming during a jump, user interruption and sign-out cleanup. The existing
+composer smoke also passed immediate Send feedback, activity motion, legacy-host
+fallback, failed Send and logout, with zero browser exceptions. Evidence:
+`/tmp/klaude-chat-scroll-working-smoke.log`,
+`/tmp/klaude-chat-scroll-composer-regression.log`, and
+`/tmp/klaude-chat-scroll-working-{light,dark}-{390,1440}.png`. JavaScript syntax,
+indicator bundle consistency and whitespace checks passed. The running host
+served both updated assets with HTTP 200; only a page reload is needed.
 
 `MaterialLoading.create()` returns one reusable SVG element. Default sizing is
 48px with a 38px active shape; 24px and 32px variants preserve that proportion.

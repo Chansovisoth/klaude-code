@@ -14,7 +14,7 @@ import httpx
 
 from .compatible_runtime import CompatibleModelError, CompatibleRuntime
 from .http_model_transport import CancellableHTTPTransport
-from .image_content import image_parts
+from .image_content import MAX_IMAGES, image_parts
 from .image_profiles import GEMINI_ROOT, gemini_image_profile
 from .model_runtime import validated_chat_calls
 
@@ -172,8 +172,8 @@ class GeminiImages(CancellableHTTPTransport):
                 parts = []
                 pixels = image_parts(message)
                 count += len(pixels)
-                if count > 2:
-                    raise CompatibleModelError("Model requests accept at most two images")
+                if count > MAX_IMAGES:
+                    raise CompatibleModelError(f"Model requests accept at most {MAX_IMAGES} images")
                 parts.extend(
                     {"inlineData": {"mimeType": p["mime_type"], "data": p["data"]}} for p in pixels
                 )

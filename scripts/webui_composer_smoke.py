@@ -69,7 +69,8 @@ async def verify(host, root, chrome, runtime):
             ) + ';byId("account-login").requestSubmit()')
             await tab.wait('latest?.session_id && pollTimer!==null && MaterialLoading')
             assert await tab.js('enterSends()'), "Desktop input unavailable"
-            assert await tab.js('!document.querySelector("script[src*=loading-indicator]") && '
+            assert await tab.js('Boolean(document.querySelector("script[src*=loading-indicator]"))'
+                                ' && '
                                 '!document.querySelector("script[src*=material-loading-shapes]")')
 
             async def enter(shift=False):

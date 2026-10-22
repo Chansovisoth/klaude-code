@@ -1,27 +1,29 @@
 # WebUI v2 coverage
 
-Current browser implementation: **partial**. The planning specification describes
+Current browser implementation: **partial feature parity**. The existing browser
+surfaces now share Klaude Expressive; source mapping and acceptance evidence are
+in `klaude-expressive-reference.md` and `klaude-expressive-validation.md`. The planning specification describes
 the target, not completed functionality. This checklist supersedes the original
 inventory's historical statements that no host/browser API exists.
 
 | Surface | Available in the browser | Remaining |
 | --- | --- | --- |
 | Chat | CommonMark replies with tables/tasks, local code highlighting and copy, stable streaming, response actions, timestamp/Branch/Retry menu, shared Agent, conversation rename/archive/restore/delete and Markdown download, configured local/cloud model selection and supported effort controls, explicit startup defaults, tool reviews, questions, queue/control, device/Library text, PDF, DOCX and image attachments | In-place answer variants, model connection management, queued attachments and image frame/crop controls |
-| Workspaces | Bounded reads/search/Git views; opt-in local edits | Full workspace lifecycle and coding controls |
+| Workspaces | Bounded reads/search/Git views, navigable file rows/breadcrumbs, highlighted source preview/copy and colored diffs; opt-in local edits | Full workspace lifecycle and coding controls |
 | Library → Uploads | List/Grid/Gallery, image-only month-added groups, bounded cached thumbnails, adaptive image preview with zoom/touch controls, reviewed source links/tag chips, URL history, independent type/archive filters and sorting, reviewed imports with automatic image detection, text preview/download/tags/archive/restore/delete, reviewed saved-file Learn, image analysis and selected AI tags | Directory trees, original modification/capture dates, rich document rendering and bulk management |
 | Library → Generated | Separate inventory of saved reports/images, existing file views/actions, reviewed report Learn, Research queue/start/stop with configurable saved budgets and image-service generation/cancel/output recovery, image analysis and selected AI tags, separate saved Research model | Arbitrary generated workspace files and broader job history/control |
 | Integrations → Knowledge | Compact paged library/source rows, source/chunk counts, indexed-text search, reviewed public-URL/text-upload Learn, exact existing-source refresh and URL history; legacy Library Knowledge links migrate here | Hybrid/model queries, crawl/source creation and broader management |
 | Integrations → Skills | Compact paged rows/filter, direct confirmed-state enable/disable switches, native metadata/deletion details, reviewed local ZIP/Markdown import and deletion | Discovery, remote installation, update checks and updates |
 | Integrations → Connections | Compact MCP inventory with search/status filters, native add/details dialogs, reviewed remote connection creation (disabled) and removal, direct discovery/enable and disable switches, next-turn tool loading; password-authenticated owners can manage through local and LAN listeners; shared definition journal and CLI recovery | Registry discovery, custom stdio creation, secret entry, interactive OAuth and browser recovery; bootstrap-only LAN hosts remain read-only |
 | Activity | Public chat events and persisted Library, profile/settings and Generated operation states, shared Model Defaults/image-service recovery and owned Vision stop | General browser domain reconciliation/recovery and broader operation controls |
-| Settings | Browser appearance/password change, WebUI timezone selection, Memory inventory/filter/add/edit/forget and automatic memory, shared execution limits, read-tool availability/permissions including current_time, Search/Fetch routing/endpoints and Research budgets with conflict checks, Model Defaults/fallbacks/Vision activation, image-service setup and exact-state recovery | Remaining model/provider/runtime/domain settings, search fallback ordering and provider credentials, custom/image-derived colors and additional account controls |
+| Settings | Browser Theme with semantic Material colors, sixteen presets/nine variants, live preview, custom/local-image accents, transparency and loading choices; password change, WebUI timezone selection, Memory inventory/filter/add/edit/forget and automatic memory, shared execution limits, read-tool availability/permissions including current_time, Search/Fetch routing/endpoints and Research budgets with conflict checks, Model Defaults/fallbacks/Vision activation, image-service setup and exact-state recovery | Remaining model/provider/runtime/domain settings, search fallback ordering and provider credentials and additional account controls |
 | Models | Main navigation page with configured local/cloud connections, searchable 20-item catalog pages, exact current-chat model selection, Model Defaults shortcut; supported reasoning efforts and exact saved-runtime resume without generation or catalog contact, reviewed shared default-role changes | Model Manager, connection creation/credentials and serving/download/SSH operations |
 
 Initial Library/Skills actions cover parts of inventory F058–F060, F069–F070,
 F072–F073 and F080–F082. They do not establish whole-feature parity. Desktop and
 mobile reuse the existing Material 3 Expressive shell, tokens and reduced motion.
 Shared page loading uses Google's seven-shape Material indicator, with compiled
-official morph geometry and native spring/rotation constants. Chat activity,
+official morph geometry and audited end-4 cadence/rotation/zoom constants. Chat activity,
 refresh and pending operations use compact uncontained variants; pages use a
 contained variant beside real loading descriptions and static skeletons.
 System/app reduced motion and hidden content stop animation. Provenance,

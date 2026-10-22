@@ -25,6 +25,7 @@ from .chat_attachments import ChatAttachmentInput
 from .composition import open_local_session
 from .contracts import ApprovalRequest, EventKind, PublicEvent, TurnReceipt, UserInputRequest
 from .coordination import DurableTurns, LeaseLost, QueuedTurn
+from .inspection import tool_inspection
 from .interactions import InteractionBroker, user_input_tool
 from .lease import SessionLeaseKeeper
 from .local_runtime import local_runtime_matches, saved_local_choice
@@ -64,6 +65,7 @@ class TurnHandle:
     _pending_message_id: str = ""
     _final_message_id: str = ""
     _tool_activities: dict[str, str] = field(default_factory=dict, repr=False)
+    _tool_inspections: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     _last_flush: float = field(default_factory=time.monotonic, repr=False)
 
     def flush_delta(self) -> str:
@@ -886,6 +888,9 @@ class HeadlessApplication:
             lambda kind, identity, tool: handle.emit(
                 cast(EventKind, kind), interaction_id=identity, tool=tool
             ),
+            approval_resolved=lambda identity, tool, status: handle.emit(
+                "approval.resolved", interaction_id=identity, tool=tool, status=status,
+            ),
         )
         handle.broker = broker
         if self.allow_approvals:
@@ -1074,7 +1079,8 @@ class HeadlessApplication:
                     handle._tool_activities.pop(identity, None)
                     handle.emit("tool.finished", execution_id=identity,
                                 executed=metadata.get("executed") is True,
-                                status=tool_outcome(value, metadata))
+                                status=tool_outcome(value, metadata),
+                                inspection=handle._tool_inspections.pop(identity, {}))
                 message_id = f"{handle.turn_id}:{handle._message_index}"
                 if not (payload.get("metadata") or {}).get("streamed"):
                     for start in range(0, len(value), 65_536):
@@ -1092,9 +1098,14 @@ class HeadlessApplication:
                                          payload.get("metadata") or {})
             if identity:
                 handle._tool_activities[identity] = activity.value
+                handle._tool_inspections[identity] = tool_inspection(
+                    handle.agent, str(payload.get("tool", "")), payload.get("args") or {},
+                    payload.get("metadata") or {},
+                )
             handle.emit(
                 "tool.requested", tool=str(payload.get("tool", ""))[:128],
                 execution_id=identity, activity=activity.value,
+                inspection=handle._tool_inspections.get(identity, {}),
             )
         elif event.kind == "tool_result":
             handle.flush_delta()
@@ -1106,6 +1117,10 @@ class HeadlessApplication:
                 execution_id=str(metadata.get("execution_id", ""))[:64],
                 executed=executed,
                 status=tool_outcome(payload.get("result", ""), metadata),
+                inspection={**handle._tool_inspections.pop(
+                                str(metadata.get("execution_id", "")), {}),
+                            **tool_inspection(handle.agent, str(payload.get("tool", "")),
+                                              {}, metadata)},
             )
 
     def close_interactions(self) -> None:

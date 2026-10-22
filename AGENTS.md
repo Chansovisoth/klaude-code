@@ -156,6 +156,43 @@ Workspace layout:
   exact allow-once/deny review with content preview and hash. LAN cannot
   activate or approve edits, and an edit-enabled host cannot start LAN preview.
   Shell and Git mutations remain unavailable.
+  The right Context Panel has Agent Inspector and Library tabs. Its task summary
+  stays above Activity/Changes/Details. Activity rows share Settings' rounded
+  disclosure chevrons; lifecycle, tool identities, approval
+  outcomes and timestamps come from the existing public session journal, with
+  at most 320 recent events and an exact current-turn tool-call count. Verified
+  native edits publish only workspace-relative nonsensitive paths, numeric line
+  counts and allowlisted error classes; raw arguments, outputs and patches stay
+  private. Changes never treats generated artifacts or general Git status as
+  agent edits. Inspect reuses authorized workspace reads; Current workspace diff
+  is explicitly the current uncommitted diff, including other edits. Missing
+  token, plan-progress and subagent diagnostics remain unavailable. Pending
+  approvals retain their single chat decision path. The panel preserves the
+  user's open/closed choice across viewport changes and supports a phone drawer.
+  Docked panel space is adjustable from the chat surface's two edges, with
+  invisible resize zones and hover/focus grips instead of permanent dividers.
+  Widths are saved locally, constrained to keep chat at least 400px wide, and
+  temporarily clamped on smaller windows without losing saved sizes. Keyboard
+  arrows/Home/End adjust chat width; Enter/double-click resets an edge and Escape
+  cancels a drag. Drawer layouts keep their existing widths and hide chat resize
+  controls. The Context Panel has no extra close button; its navbar toggle remains
+  authoritative. Evidence: `docs/webui/chat-resize-validation.md`.
+  Its Library has Current/All scopes, independent List/Grid/Gallery preferences,
+  search, pagination and the existing authenticated preview. Current filters
+  stored session ownership plus original Library IDs in up to 500 recent public
+  attachment records and current unsent selections before counts/paging. Older
+  descriptors without those IDs cannot establish a historical association.
+  The scope's explanatory sentences are omitted. Current/All tabs divide their
+  full row equally; search and view controls share the compact row below, without
+  a refresh button. Failed reads can be retried by selecting Library again.
+  File rows and tiles offer only Preview, without individual Attach buttons.
+  The composer's Library picker remains available for keyboard/touch attachment.
+  Gallery shares Library's file tile renderer, square thumbnails, compact spacing,
+  filename overlays and month grouping. Native Library drags and the composer
+  picker reuse exact artifact IDs/revisions
+  through the existing unsent attachment pipeline without imports or submission.
+  Context previews restore focus to their originating row. Evidence:
+  `docs/webui/context-panel-validation.md`.
   The authenticated Library has two destinations: Uploads and Generated.
   Uploads contains imported Documents and Media. Generated contains
   saved Research reports and generated images. Both tabs use All types, Documents
@@ -197,8 +234,20 @@ Workspace layout:
   survive page refresh within the tab.
   Saving owner-scoped uploads to Library needs an explicit import review;
   previews/downloads never launch a host desktop opener. Tags, archive/restore
-  and deletion use artifact revisions. Knowledge supports inventories/text
-  search, reviewed URL/text-upload Learn and exact existing-source refresh.
+  and deletion use artifact revisions. Knowledge opens libraries into their actual
+  active indexed sources and paginated chunks, including learned URLs, uploads,
+  Library files and legacy FTS content. Sources sit beside chunks on desktop and
+  in a compact disclosure on phones. Global and scoped literal text search match
+  library/source identities and full chunk text without inference. An inert
+  native reader preserves chunk whitespace, supports Copy and cross-page
+  Previous/Next, and explicitly marks its 65,536-character display bound.
+  Original upload/Library filenames label sources without changing their identity.
+  Source and whole-library deletion require Cancel-focused reviews with exact
+  counts, durable request IDs and a snapshot rechecked under SQLite's write lock;
+  original files and installed Skills are retained. Late reads cannot restore
+  obsolete content, and sign-out clears private views. Existing reviewed
+  URL/text-upload Learn and exact managed-source refresh remain available.
+  Evidence: `docs/webui/knowledge-browser-validation.md`.
   Uploads image previews recognize lossy VP8, lossless VP8L and extended VP8X WebP
   headers. Existing images missing stored dimensions derive them from at most
   64 KiB of private headers on read, without decoding pixels, rewriting the
@@ -309,7 +358,8 @@ Workspace layout:
   local and LAN listeners. Bootstrap-only embedded hosts retain local-only MCP
   management. Both review preparation and submission enforce this rule; cookie,
   Origin/CSRF, idle-turn, fingerprint and journal checks remain in force.
-  All/Enabled/Disabled filters combine with the name/description search. Compact
+  All/Enabled/Disabled filters combine with the name/description search and use
+  16px horizontal padding with 44px minimum-height targets. Compact
   rows omit absent descriptions and show confirmed status, transport and tool
   count. Add/details dialogs use bounded compact layouts; successful updates
   remain visible after inventory reload. Filters and notices clear on sign-out.
@@ -364,14 +414,31 @@ Workspace layout:
   downloads, serving and Model Manager remain terminal operations.
   Evidence: `docs/webui/models-page-validation.md`.
   Settings uses a compact heading, full-width cards and shared label/control
-  rows with 10px vertical padding. Controls and their explicit Review action stay
-  on the same line; narrow cards put the label above that pair. Native container
+  rows with 10px vertical padding. Controls use bounded widths; narrow cards put
+  the label above the control. Native container
   queries respond to the available card width, including desktop sidebars.
   At desktop widths (851px and above), Settings categories form a sticky vertical
   list on the left of the active panel. Smaller layouts retain the horizontal
   categories. The same tab controls preserve drafts, URLs/history and linked
   panels; their ARIA orientation and arrow-key direction update on resize.
   Desktop uses Up/Down, smaller layouts Left/Right, with Home/End in both.
+  Settings navigation has its own container, separate from theme chips. Through
+  850px it remains a single horizontally scrolling sticky row with an opaque
+  Material surface and opaque selected tonal tab. At these widths, dirty Agent,
+  Models and Theme actions move to an application-level dock outside the cards'
+  container/scroll contexts. Phones span the viewport immediately above the
+  measured bottom navigation; tablet docks span the main application area.
+  ResizeObserver measures the dock and navigation, and visualViewport changes
+  account for keyboard overlays and focused-field clearance. Measured padding
+  keeps the last settings accessible; safe-area padding and bounded long status
+  messages retain usable actions. Clean bars and bars outside the active
+  category/page are hidden. Theme shows Discard/Apply only when its preview differs
+  from the saved appearance at every viewport size, hiding again after Apply,
+  Discard or returning each control to its saved value. Failed saves keep the row
+  available. Desktop bars return to their original card positions. The Theme footer paints
+  across the card padding and compensates for the Settings scroll region's bottom
+  inset, so content cannot show through beside or below Apply/Discard. Evidence:
+  `docs/webui/mobile-settings-layout-validation.md`.
   The Settings columns fill the available main area, with 24px outer padding
   (16px on phones), a compact 160px category list and the remaining width for
   content. Settings no longer caps or centers its content column. Cards and the
@@ -380,14 +447,29 @@ Workspace layout:
   actual card width; control pairs remain bounded to 32rem and number inputs
   retain their smaller limit. Models separates available models, model roles,
   Utility/Vision options, fallbacks and image service setup without changing
-  their individual reviews. Short model-role labels stay beside their controls
+  their backend save contracts. Short model-role labels stay beside their controls
   on narrow cards. Startup chat, Utility, Research and Vision labels have
   decorative 18px chat, wrench, search and eye icons from the local SVG helper,
   using the muted theme color and retaining their native input associations.
   Theme palettes use four compact columns, or eight when the
   card has room, retaining the existing swatches, theme tokens and Apply flow.
   Agent groups use native expandable sections, with Date and time and Execution
-  initially open. Browser-native disclosure markers are replaced by decorative
+  initially open. Tools & Permissions pairs each supported browser read tool's
+  availability switch with separate Auto/Ask first/Deny segmented radio controls.
+  The first row shows the icon, name and switch; a muted description and native
+  policy segments follow. Subtle dividers replace individual cards. Groups use
+  two columns when the desktop content has room and one column on mobile or
+  narrow cards, retaining 44px targets. Each radio group has a tool-specific
+  accessible legend and native arrow/Space keyboard selection. Both changes retain
+  independent field-level persistence. Disabled tools keep their
+  draft/saved policy while approval controls are unavailable, and use the shared
+  Discard / Save changes workflow. Auto retains the existing `allow` value,
+  Ask first uses `ask` and Deny uses `deny`. Auto skips the tool
+  prompt, not workspace/network protections. MCP availability stays in Connections
+  and configured calls retain review; advanced rules link to existing workspace
+  edit controls and explain mandatory edit review, LAN restrictions and unavailable
+  shell/Git mutations. No edit, shell or MCP allow policy is added by this layout.
+  Browser-native disclosure markers are replaced by decorative
   rounded SVG triangles that rotate with the native open state and use the muted
   theme color; click, touch and keyboard behavior remain native. Date and time
   offers an IANA timezone selector with Automatic
@@ -404,8 +486,9 @@ Workspace layout:
   Optional Utility/Vision fallbacks start collapsed below the primary model
   controls; their headings reuse the muted 18px wrench and eye role icons.
   Disclosure state and ordinary input drafts survive tab changes in the
-  current page; sign-out resets disclosure state. Confirmed-state switches reuse
-  the existing Material track without changing their reviewed save behavior.
+  current page; sign-out resets disclosure state. Agent and Models switches stage
+  drafts using the existing Material track. Integrations switches retain their
+  existing immediate, exact-snapshot save behavior.
   Source/model values remain complete; long model labels truncate only visually
   and disclose their selected label in a tooltip. Existing token semantics,
   settings revisions and recovery remain unchanged.
@@ -416,8 +499,8 @@ Workspace layout:
   bounded `/api/show` batches to separate completion, tool and image support;
   embedding-only models are excluded. Chat/Research require tools, while Vision
   does not. Utility, Research and Vision exclude known mandatory-Thinking models
-  and unsupported adapters; unknown capabilities are labeled Verify on review.
-  Exact existing review checks remain authoritative. Utility/Vision fallbacks
+  and unsupported adapters; unknown capabilities are verified when saving.
+  Exact existing backend checks remain authoritative. Utility/Vision fallbacks
   share their primary role's choices. Saved references and unsaved drafts survive
   catalog changes; failed refreshes retain loaded models. No inference or default
   save runs automatically. Evidence: `docs/webui/model-defaults-validation.md`.
@@ -425,6 +508,42 @@ Workspace layout:
   Models, closing Create and preserving chat and generation drafts.
   Settings tabs, category headings and Agent section headings use decorative
   local outline icons while retaining their visible text labels.
+  Agent and Models keep separate in-memory drafts across category and page
+  navigation until Discard, confirmed save or sign-out. A category action bar
+  shows unsaved changes and Discard/Save changes, replacing individual Review
+  actions. Saves use the existing exact snapshot and durable operation APIs,
+  sequentially; independent fields are not an atomic transaction. A terminal
+  success and confirming settings read are required before clearing each draft.
+  Settled Settings preparation tokens are released through the existing discard
+  endpoint so a batch can exceed 16 changes without increasing the snapshot cap;
+  durable receipts and running/unknown fences remain intact.
+  Partial failures retain remaining drafts. Concurrent edits require Use saved
+  value or Keep my change before another save. Lost acknowledgements keep the
+  exact snapshot/request ID and expose Check save status; unknown outcomes remain
+  fenced. Models retains exact saved-state recovery without replay or model work.
+  Ordinary saves have no dialog; granting tool access, relaxing approval and
+  enabling image service/Vision routing require a setting-specific confirmation.
+  Availability and authorization remain separate backend checks. Theme keeps
+  live preview with Discard restoring its last applied appearance and Apply saving
+  on this device. Account and Memory retain operation-specific behavior.
+  The draft module loads inside the existing `management.js` asset, before its
+  Agent consumer and `media.js`. Do not add a new required script route: a
+  long-running host can serve new HTML before its Python route allowlist updates.
+  Draft copies use their JSON values without requiring structuredClone.
+  Theme retains the existing `theme` navigation key/URLs and now includes
+  Comfortable/Compact chat views. Comfortable preserves the existing transcript;
+  Compact tightens message, paragraph, list, code and table spacing while keeping
+  text sizes and 44px actions. The device-local appearance v1 preference adds
+  optional `chatDensity`, defaulting missing/invalid values to Compact while
+  preserving explicitly saved Comfortable and color/motion settings.
+  Live preview, Discard and Apply include density;
+  reload and cross-tab preference updates restore the saved choice. Density styles
+  apply only inside Chat, preserving Library previews and the surrounding shell.
+  Active Cancel turn and Steer controls float above the composer's right edge as
+  accessible 44px icon buttons alongside the centered Go to latest control.
+  They reserve no toolbar row; scroll-end spacing keeps final messages/queued
+  content readable beneath the buttons. Existing turn/control actions are unchanged.
+  Evidence: `docs/webui/settings-save-workflow-validation.md`.
   Settings has
   bounded Memory inventory/filter/add/edit/forget and automatic memory controls,
   plus reviewed shared execution limits, read-tool availability and permissions,
@@ -554,14 +673,27 @@ Workspace layout:
   phone layout at 560px; From Library uses the Library navigation icon.
   Its Library picker reuses Library file-type icons, concise type/size labels and
   authenticated image thumbnails in compact rows.
-  A message accepts four files, including two images, within 32 MiB total.
+  A message accepts four files or images within 32 MiB total.
   Selected and sent attachments use tonal file cards with filename, type and size;
   PDFs have a PDF badge and images show a decoded, metadata-free 128px thumbnail.
+  Library descriptors include the opaque original artifact ID for conversation
+  scope association, without origin paths, checksums or private content.
   New attachment descriptors and thumbnails persist with their dialogue row,
   survive reloads and forks, and share session deletion. Preview requests require
   owner authentication and the exact current chat; unsent previews also check the
   selecting tab. Public snapshots expose only descriptors, never thumbnail bytes
   or private model input. Text-only legacy records keep their literal transcript.
+  Sent attachment cards open the existing file/image viewer with keyboard and
+  pointer activation. Newly admitted messages retain checksummed originals in a
+  separate private dialogue column (32 MiB total input, base64 storage overhead);
+  forks copy them and session deletion removes them. Exact owner/session/message
+  reads offer metadata-free bounded image previews, safe text/Markdown and
+  extracted PDF/DOCX text, plus original downloads. These reads never select
+  model_content or create Library imports. Older messages use their available
+  Library original or retained image thumbnail; missing device originals need
+  reattaching. Chat previews hide Library metadata management and file navigation.
+  Library List/Grid/Gallery controls use separate 12px-radius buttons with small
+  gaps in both the main Library and Context panel; only the selected view is filled.
   UTF-8 text/code and bounded PDF/DOCX extraction become private model input;
   public dialogue contains the prompt and filenames only. PDF/DOCX parsers run
   in disposable resource-limited processes. Images use the existing enabled
@@ -574,6 +706,21 @@ Workspace layout:
   after 30 minutes; logout and shutdown revoke them, while accepted turns retain
   their captured bytes. Text and image input hashes participate in durable request
   deduplication.
+  Chat and Library Uploads accept device file drops over the main content panel.
+  A shared theme-aware drop overlay uses local image/document artwork with an
+  add badge, reduced-motion styling and destination/limit hints, without covering
+  the surrounding panels.
+  Only file drags are intercepted; text/link drags retain native behavior.
+  The overlay clears on leave, drop, Escape, blur, navigation/session/auth changes
+  and drag inactivity. Open dialogs and unrelated destinations do not accept drops.
+  Chat drops use the same picker preparation and 4-file/32-MiB limits (all four may be images),
+  preserve unsent text and never submit a message or import into Library.
+  Uploads reviews each dropped file separately, up to 20 files per drop and
+  32 MiB per file. Cancelling a review stops remaining files; accepted imports
+  continue independently. Folder drops are rejected without traversal. Dropped
+  batches are cancelled on navigation/sign-out; stale preparations cannot reopen
+  reviews. This uses existing assets and APIs without requiring a new host route.
+  Evidence: `docs/webui/file-drop-validation.md`.
   Attachments can be prepared during a reply; sending them waits for an idle turn.
   Sending does not Learn/index text or enable Vision. If the attachment script
   or server capability is missing, the paperclip is disabled with an explicit
@@ -662,6 +809,74 @@ a separate explicitly authorized operation.
 
 ## User-Facing Terms
 
+The WebUI now shares **Klaude Expressive**, independently adapted from the audited
+end-4 reference at `2f2a376fdb2ad738bf55f693dd0b474b64bb0ab8`. Semantic Google
+Material Color Utilities 0.4.0 roles drive all sixteen presets, light/dark/system,
+nine palette variants, custom accents and local image-derived palettes. Theme
+retains versioned appearance preferences, live preview and Discard / Apply changes;
+image pixels never leave the browser and only the extracted accent is saved.
+Surface transparency is bounded to 0–20%; original files are not persisted as
+wallpaper. The shared shell background uses a subtle 10% theme tint at the bottom
+edge, fading to 4% within the bottom quarter so the lighter glow stays localized.
+Phone section-navigation rows in Library and Integrations fill the available
+width; buttons share each row's space and wrap when needed.
+Shared grouped buttons and segmented radios retain expressive corners:
+unselected row ends use 23px external corners (`--segment-outer-radius`, from
+`--round-lg`), with 9px inner corners derived from `--round-xs`/`--round-sm`.
+Selected segments are pills at every position. A shared layout observer marks
+visible row ends after resize, visibility/content changes and font loading;
+single-item rows get both outer ends. The pill radius uses actual half-height
+for smooth 350ms shape transitions, alongside tonal selection and scale press
+feedback. Small gaps (`--segment-gap`, 5px), reduced motion, native radio keyboard
+behavior and multi-row palette wrapping remain. Account/Theme/Agent/
+Models/Memory remain the Settings categories. Tools & Permissions keeps its
+separate enable switch, Automatic / Ask first / Deny policy and staged save flow.
+Generic button feedback retains component corners on hover and press; state
+layers, ripples, focus rings and press scaling remain. Generic hover rules must not
+interpolate a 9999px pill through the spatial spring: it can overshoot to zero
+on exit and flash square. Selected session/tag corners use finite theme radii;
+segmented selection retains its measured pill animation. Evidence:
+`docs/webui/hover-corners-validation.md`.
+Shared collection rows (Models, Skills, Knowledge libraries/sources and Connections)
+keep their 12px inner and 23px outer corners through hover, focus and press.
+Their full-row buttons, where present, inherit that geometry without pill morphing
+or scaling, retaining tonal feedback, ripple and visible keyboard focus. This prevents
+conflicting generic card/button transitions from changing the pointer hit area.
+Evidence: `docs/webui/collection-shapes-validation.md`.
+Models reuses the collection list's surfaces, icon tiles, spacing and row-end
+corners, with a tonal current-model row and the existing explicit Use model
+action. Catalog references, provider grouping and actual Thinking effort labels
+retain their existing data and runtime-selection contracts.
+Skills also shares Connections' All / Enabled / Disabled status controls and
+keyboard navigation. Skills status and search filter the bounded inventory before
+counts/pagination through the existing read route (`state=enabled|disabled`);
+changing status resets the page. Allowlisted `skills-state` URLs restore the
+selection alongside search/page history. Older hosts that cannot filter status
+show restart guidance rather than an unfiltered page under a selected filter.
+Enable/disable/import/delete still use their existing confirmed-state workflows.
+Evidence: `docs/webui/skills-status-filters-validation.md`.
+The Context Panel is closed by default and retains an explicitly saved choice.
+Its Library and the main Library both offer Current / All scope; main Library
+adds `files-scope` to its existing URL history and uses the same scoped inventory.
+Context Library rows and tiles open Preview without separate Attach buttons;
+drag-to-chat and the composer's Library picker retain attachment access.
+The shared Gallery uses 8px gaps and 23px corners in both destinations.
+The command button and Ctrl/Cmd+K open searchable existing actions and resumable
+sessions; Ctrl/Cmd+Shift+/ shows searchable shortcuts and Ctrl/Cmd+, opens Settings.
+No command bypasses the existing runtime, session, review or permission handlers.
+Workspaces renders the existing bounded d/f directory response as navigable rows,
+retaining raw text for ambiguous listings and the server jail for every read.
+Diff colors derive from actual diff prefixes. No host file writes were added.
+The loader retains the Apache-licensed matched Google geometry with end-4's
+800ms cadence, 12-second continuous rotation, 90-degree/350ms leaps, 750ms zoom
+and 200ms smooth morphs. Settings also offers a classic spinner; system/app
+reduced motion stops both. New shared runtime/colors are bundled into `app.js`,
+and shared CSS into `style.css`, using the existing static routes. After edits,
+run `scripts/bundle_webui_loading.py` and `scripts/bundle_webui_expressive.py`.
+Source, licensing, deviations and evidence: `docs/webui/klaude-expressive-reference.md`,
+`docs/webui/klaude-expressive-validation.md`, `docs/webui/klaude-expressive-progress.md`.
+
+
 WebUI dialog close controls use the shared local SVG cross with accessible
 names and icon-button styling, including conversation, attachment, message and
 file-preview dialogs. Labeled Download and Archive/Restore actions place their
@@ -678,15 +893,41 @@ Preserve stable streaming/code reading, immediate approval/cancel actions and
 reduced-motion support. The v2 planning spec owns the detailed design direction;
 the initial Expressive shell now provides Chat/Workspaces, a tab-local Activity
 view, responsive conversation drawer and activity panel, and browser-only
-Settings → Theme → Themes & Colors. System/Light/Dark and eight palettes
-(Slate, Lavender, Sage, Peach, Ocean, Rose, Teal, Amber) preview before Apply
+Settings → Theme. System/Light/Dark and sixteen palettes
+(Slate, Lavender, Sage, Peach, Ocean, Rose, Teal, Amber, Crimson, Coral, Violet,
+Indigo, Emerald, Lime, Sky, Cocoa) preview before Apply
 and persist under a versioned localStorage key with same-origin tab updates.
 Slate uses neutral white/charcoal surfaces, accents, text and outlines. The
-palette picker keeps four columns in two rows on desktop and phone layouts.
+palette picker uses four columns, or eight when the settings card has room,
+with 44px swatches and coordinated light/dark roles for every preset.
 Validation: `docs/webui/theme-palettes-validation.md`. Roboto and JetBrains Mono
 plus their OFL licenses ship in the webhost wheel and are served locally.
+The public loading asset restores validated appearance preferences synchronously
+before the stylesheet and is also bundled into the deferred app. Startup keeps
+the shell hidden/inert behind Klaude's logo and the shared 48px Material shape
+loader until authentication and initial session/navigation reads settle. The
+existing public loading asset includes the pinned geometry, initializes once
+before the app downloads and mounts as the parser provides the splash slot.
+The deferred app retains that renderer; startup completion removes its indicator.
+The saved classic spinner and app/system reduced motion also apply here.
+Signed-out HTML starts with the chat layout hidden; failure reveals the existing
+sign-in/retry state. The cover fades out in 160ms, respects reduced motion, and
+offers Reload on a missing app asset or after 15 seconds without readiness.
+Shared-message keyboard focus waits until the shell becomes available.
+Validation: `docs/webui/startup-loading-validation.md`.
 Assistant chat replies render CommonMark Markdown with tables, task lists and
 strikethrough through a pinned local parser; user messages stay literal text.
+User bubbles fit their content and align right, capped at the smaller of 85% of
+the chat content width or 720px; viewports up to 600px use a 90% limit. Existing
+tonal colors, corner shapes and Comfortable/Compact padding remain. Line breaks,
+literal Markdown/code, long URLs and attachment cards stay within the bubble;
+assistant replies keep their existing full-width layout. The chat scroll region
+keeps an 8px gap before its thin, theme-colored scrollbar. All WebUI scrollbars
+share this thin outline-colored thumb and transparent track through the shared
+Expressive CSS; forced colors use native scrollbar colors. Intentionally hidden
+mobile tab scrollbars retain their existing behavior. Validation:
+`docs/webui/user-message-bubbles-validation.md` and
+`docs/webui/shared-scrollbars-validation.md`.
 Locally bundled Prism grammars highlight bounded code blocks, with code and raw
 response Copy controls. Code headers keep an icon-only Copy control pinned
 within their block during conversation scrolling, with checkmark feedback and
@@ -751,11 +992,16 @@ cannot remove a newer loader. Workspace/session/model reads reject stale auth
 results. Page loading uses the official Material seven-shape indicator beside
 meaningful status text and static content skeletons. Its matched cubic morphs are
 exported from pinned Google Material/AndroidX sources; a small SVG adaptation
-retains the native 650ms cadence, 200/.6 spring and 50°/90° rotation. Contained
+uses the audited end-4 800ms cadence, 200ms morph, 90°/350ms leap,
+12-second rotation and 750ms zoom. Contained
 48px page indicators and uncontained 24/32px chat, refresh and operation indicators
 use existing primary/container theme roles. One animation scheduler stops for
 hidden content and system/app reduced motion; removed nodes release their state.
 Chat retains real activity labels and static completion/error/input states.
+When scrolled above the latest messages, the jump-to-latest button replaces its
+down arrow with the same 24px Material indicator while chat is sending or working.
+It remains a clickable 44px navigation button, restores the arrow when idle or
+input is needed, and removes hidden indicators on reaching the bottom/sign-out.
 Operation polls preserve active indicator identity. Static settings and live
 work progress retain their real controls/status. Indicator geometry and runtime
 are bundled into the existing external `app.js` asset so older running hosts
@@ -794,7 +1040,7 @@ viewport sizing and safe areas; the browser owns focused-input keyboard scrollin
 They retain 44px primary touch targets, grow the composer within a bound, and
 scroll reviews separately from the composer. Do not resize the shell from
 visualViewport events or add an extra focused-input scroll adjustment.
-Custom seed/image palettes and the remaining domain controls are deferred;
+Custom seed/image palettes are browser-local; unsupported domain controls remain deferred;
 disabled navigation marks unsupported
 screens. Browser smoke checks cover layout and interactions, not final product
 or complete accessibility acceptance.
@@ -952,7 +1198,7 @@ Top-level commands currently include:
   Chat uses its own Runtime budget, with no model/fallback switch. It privately
   saves immutable Media snapshots associated with the session and stores bounded
   references in owner-only model_content, never base64 in public history/search/
-  export. Source/preparation bounds match Media analysis; at most two distinct images are
+  export. Source/preparation bounds match Media analysis; at most four distinct images are
   supplied per request. Restore/follow-ups retain pixels after source deletion;
   tags/archive preserve bytes, deletion/corruption removes availability. Endpoint/
   credential changes require reattachment; unsupported providers omit old pixels
@@ -4269,6 +4515,8 @@ Search behavior is relevance-first:
 - classify query intent and ambiguity;
 - treat broad/category searches as source discovery, returning relevant SERP leads without
   requiring each result to prove a final claim;
+- preserve complete short proper names in provider queries; ordinary person and
+  organization names are not rewritten into first-word acronym definitions;
 - keep exact single-entity lookups on the stricter entity-evidence path;
 - apply runtime location as a soft signal only when appropriate;
 - use lower thresholds for broad candidate discovery;
@@ -4289,6 +4537,14 @@ Search behavior is relevance-first:
   temporary zero-result responses cannot poison later queries;
 - preserve the underlying academic, research, or documentation intent when
   freshness words or years are also present.
+
+The WebUI formats search leads within an 11,000-character model-input budget,
+reserving source IDs, complete URLs, provider labels and available publication
+dates before allocating snippet excerpts. Provider scoring/debug metadata stays
+in structured execution data. Failed searches give the model bounded, redacted
+provider attempts, actual queries and warnings so outages and filtered results
+can be distinguished from missing information. Existing public-event privacy
+rules remain in force. Evidence: `docs/webui/web-search-reliability-validation.md`.
 
 Ordinary chat web research is a bounded, model-directed loop in
 `packages/core/src/klaude_core/agent.py`: the model chooses concise searches,

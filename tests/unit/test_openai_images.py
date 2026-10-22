@@ -238,7 +238,8 @@ def test_inventory_distinguishes_documentation_from_catalog(lab):
 
 
 @pytest.mark.parametrize("streaming", [True, False])
-def test_native_pixels_budget_and_private_continuation(lab, streaming):
+@pytest.mark.parametrize("image_count", [1, 4])
+def test_native_pixels_budget_and_private_continuation(lab, streaming, image_count):
     compose(lab)
     runtime = lab.agent.runtime
     messages = [
@@ -251,7 +252,7 @@ def test_native_pixels_budget_and_private_continuation(lab, streaming):
                     "mime_type": "image/png",
                     "data": __import__("base64").b64encode(lab.source.read_bytes()).decode(),
                 }
-            ],
+            ] * image_count,
         }
     ]
     if streaming:
@@ -261,6 +262,8 @@ def test_native_pixels_budget_and_private_continuation(lab, streaming):
     packet = lab.calls[-1][1]
     assert packet["max_output_tokens"] == 128 and packet["store"] is False
     assert packet["input"][0]["content"][0]["type"] == "input_image"
+    pixels = [part for part in packet["input"][0]["content"] if part["type"] == "input_image"]
+    assert len(pixels) == image_count
     assert result["openai_response_items"][0]["type"] == "message"
     assert runtime.last_chat_metadata["usage"]["input_tokens_details"]["cached_tokens"] == 5
 

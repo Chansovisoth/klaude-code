@@ -22,7 +22,7 @@ from typing import Any
 
 from .ai_defaults import read_defaults
 from .chat_image_support import active_binding, inspect_support
-from .image_content import IMAGE_BACKENDS, image_token_estimate
+from .image_content import IMAGE_BACKENDS, MAX_IMAGES, image_token_estimate
 from .image_preparation import (
     DETAILS,
     MAX_SOURCE_BYTES,
@@ -35,13 +35,12 @@ from .library_artifacts import ID, ArtifactStore, image_header, plain
 from .model_connections import normalize_model_url
 from .vision import checked_capabilities
 
-MAX_IMAGES = 2
 INPUT_KIND = "chat_image_input"
 
 
 def references(value: object) -> list[dict[str, Any]]:
     if not isinstance(value, list) or len(value) > MAX_IMAGES:
-        raise ValueError("Chat accepts at most two image attachments per turn")
+        raise ValueError(f"Chat accepts at most {MAX_IMAGES} image attachments per turn")
     result = []
     for item in value:
         if (
@@ -509,7 +508,7 @@ class ChatImages:
         )
         pictures = [p for p in paths if is_image(p)]
         if len(pictures) > MAX_IMAGES:
-            raise ValueError("Attach at most two images per message")
+            raise ValueError(f"Attach at most {MAX_IMAGES} images per message")
         if pictures:
             self.verify()
         context = text_attachments(paths)

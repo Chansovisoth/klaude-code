@@ -143,6 +143,57 @@ async def verify_races(tab):
     })()""")
 
 
+async def verify_floating_controls(tab):
+    """Real active controls keep the viewport and scroll end usable at phone sizes."""
+    for theme in ("light", "dark"):
+        await tab.js("document.documentElement.dataset.theme=" + json.dumps(theme))
+        for width, height in ((320, 844), (390, 844), (768, 844), (1440, 900), (390, 420)):
+            await tab.command("Emulation.setDeviceMetricsOverride", {
+                "width": width, "height": height, "deviceScaleFactor": 1,
+                "mobile": width < 600,
+            })
+            await tab.js("new Promise(resolve=>requestAnimationFrame("
+                         "()=>requestAnimationFrame(resolve)))")
+            state = await tab.js("""(()=>{
+              const cancel=byId('cancel'),steer=byId('steer'),latest=byId('scroll-to-latest');
+              const nodes=[...messages.childNodes],scroll=messages.scrollTop,hidden=latest.hidden;
+              try {
+                const article=ChatMarkdown.create('assistant',
+                  'A readable message.\\n\\n'.repeat(80)+'Last visible line.','floating-fixture');
+                messages.replaceChildren(article);messages.scrollTop=0;latest.hidden=false;
+                const before=messages.getBoundingClientRect();
+                cancel.hidden=steer.hidden=true;
+                const idle=messages.getBoundingClientRect();
+                cancel.hidden=steer.hidden=false;
+                const rects=[latest,steer,cancel].map(button=>button.getBoundingClientRect());
+                const hits=[latest,steer,cancel].every((button,i)=>button.contains(
+                  document.elementFromPoint(rects[i].left+22,rects[i].top+22)));
+                const composer=byId('composer').getBoundingClientRect();
+                const [jump,direction,stop]=rects;
+                const gapTarget=document.elementFromPoint((jump.right+direction.left)/2,
+                  direction.top+22);
+                messages.scrollTop=messages.scrollHeight;
+                const last=article.querySelector('.message-body').getBoundingClientRect();
+                return {noRow:before.top===idle.top && before.height===idle.height &&
+                    document.querySelector('.chat-scroll-control').getBoundingClientRect().height===0,
+                  fits:document.documentElement.scrollWidth<=innerWidth && rects.every(r=>
+                    r.width>=44 && r.height>=44 && r.left>=0 && r.right<=innerWidth &&
+                    r.top>=0 && r.bottom<=composer.top),
+                  separate:jump.right+8<=direction.left && direction.right+8<=stop.left,
+                  hits,clearGap:!gapTarget?.closest('.turn-actions,.chat-scroll-control'),
+                  readableEnd:last.bottom<=direction.top,
+                  names:cancel.getAttribute('aria-label')==='Cancel turn' &&
+                    steer.getAttribute('aria-label')==='Steer'};
+              } finally {
+                cancel.hidden=steer.hidden=false;latest.hidden=hidden;
+                messages.replaceChildren(...nodes);messages.scrollTop=scroll;
+              }
+            })()""")
+            assert all(state.values()), (theme, width, height, state)
+    await tab.command("Emulation.clearDeviceMetricsOverride")
+    await tab.js("applyAppearance(appearance,true);snapshot()")
+
+
 async def verify(host, controller, fixture, profile, chrome):
     process = subprocess.Popen([
         chrome, "--no-sandbox", "--disable-gpu", "--remote-debugging-port=0",
@@ -183,6 +234,9 @@ async def verify(host, controller, fixture, profile, chrome):
             await second.wait('typeof latest !== "undefined" && latest?.session_id')
             assert await first.js("clientId") != await second.js("clientId")
             assert not await second.js("latest.has_control")
+            assert await second.js('byId("cancel").hidden && byId("steer").hidden && '
+                                   'getComputedStyle(document.querySelector(".turn-actions"))'
+                                   '.display === "none"')
             current = host.application.control()
             await second.command("Page.bringToFront")
             await second.js("snapshot();refreshSessions()")
@@ -224,6 +278,7 @@ async def verify(host, controller, fixture, profile, chrome):
             await first.wait('latest.active_turn_id && !pending')
             await second.js("snapshot()")
             assert await second.js('!byId("cancel").hidden && !byId("steer").hidden')
+            await verify_floating_controls(second)
             await second.click("#cancel")
             await second.wait('!pending && latest.has_control')
             assert host.application._active.cancelled.is_set()
@@ -288,6 +343,7 @@ async def verify(host, controller, fixture, profile, chrome):
             print("PASS: two tabs share reviews, questions, Cancel/Steer, Library and navigation;")
             print("watching preserves control; terminal review/cancel acquire automatically;")
             print("competing claims, lost acknowledgements and auth/session races stay bounded.")
+            print("PASS: floating controls in 10 light/dark responsive layouts.")
     finally:
         process.terminate()
         try:

@@ -317,15 +317,18 @@ def test_lazy_catalog_keeps_client_alive_and_closes_after_iteration(monkeypatch,
 
 
 @pytest.mark.parametrize("streaming", [True, False])
-def test_native_pixels_thinking_and_usage_budgets(lab, streaming):
+@pytest.mark.parametrize("image_count", [1, 4])
+def test_native_pixels_thinking_and_usage_budgets(lab, streaming, image_count):
     compose(lab)
     runtime = lab.agent.runtime
+    inputs = messages(lab)
+    inputs[-1]["image_content"] *= image_count
     if streaming:
         result = list(
-            runtime.chat_stream(MODEL, messages(lab), options={"num_predict": 128}, think=False)
+            runtime.chat_stream(MODEL, inputs, options={"num_predict": 128}, think=False)
         )[-1]
     else:
-        result = runtime.chat(MODEL, messages(lab), options={"num_predict": 128}, think="low")
+        result = runtime.chat(MODEL, inputs, options={"num_predict": 128}, think="low")
     path, packet, headers = lab.calls[-1]
     assert path.endswith(":streamGenerateContent?alt=sse")
     assert headers["x-goog-api-key"] == "fixture-private-key" and "Authorization" not in headers
@@ -337,6 +340,7 @@ def test_native_pixels_thinking_and_usage_budgets(lab, streaming):
         "thinkingConfig": {"thinkingBudget": 0 if streaming else 1024},
     }
     raw = packet["contents"][0]["parts"][0]["inlineData"]
+    assert sum("inlineData" in part for part in packet["contents"][0]["parts"]) == image_count
     assert raw["mimeType"] == "image/png" and base64.b64decode(raw["data"]) == png()
     assert result["gemini_continuation"]["parts"][0]["thoughtSignature"] == SIGNATURE
     assert runtime.last_chat_metadata["usage"]["output_tokens"] == 10

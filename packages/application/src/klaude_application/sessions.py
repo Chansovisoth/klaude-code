@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -41,6 +43,12 @@ class PublicSessionMessage:
     content: str
     created_at: float
     attachments: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True)
+class SessionArtifactReferences:
+    identities: tuple[str, ...]
+    limited: bool
 
 
 @dataclass(frozen=True)
@@ -159,6 +167,25 @@ class SessionDirectory:
             attachments=tuple(json.loads(row[3])) if row[0] == "user" and row[3] else (),
         )
 
+    def artifact_references(self, session_id: str) -> SessionArtifactReferences:
+        """Bounded original Library IDs from public attachment descriptors only."""
+        with self.memory._db_lock:
+            rows = self.memory.db.execute(
+                "SELECT attachments FROM turns WHERE session_id=? AND role='user' "
+                "AND attachments IS NOT NULL AND attachments NOT IN ('','[]') "
+                "ORDER BY rowid DESC LIMIT 501", (session_id,),
+            ).fetchall()
+        identities: set[str] = set()
+        for (raw,) in rows[:500]:
+            for item in json.loads(raw or "[]")[:4]:
+                identity = item.get("artifact_id") if isinstance(item, dict) else None
+                if (isinstance(identity, str)
+                        and re.fullmatch(r"(?:document|media|research):[a-f0-9]{32}", identity)):
+                    identities.add(identity)
+                if len(identities) >= 508:
+                    return SessionArtifactReferences(tuple(sorted(identities)), True)
+        return SessionArtifactReferences(tuple(sorted(identities)), len(rows) > 500)
+
     def attachment_preview(self, session_id: str, row_id: int, index: int) -> bytes:
         """Read only the small, decoded thumbnail; never load private model input."""
         if (type(row_id) is not int or not 0 < row_id <= 9_223_372_036_854_775_807
@@ -176,6 +203,54 @@ class SessionDirectory:
         if not data.startswith(b"\x89PNG\r\n\x1a\n") or len(data) > 65536:
             raise ValueError("Preview unavailable")
         return data
+
+    def attachment_content(
+        self, session_id: str, row_id: int, index: int,
+    ) -> tuple[dict[str, Any], bytes]:
+        """Read one captured original, independently of private model input.
+
+        Originals share the dialogue row's fork/deletion lifetime and the input's
+        32 MiB bound. Public snapshots/export never select this private column.
+        """
+        if (type(row_id) is not int or not 0 < row_id <= 9_223_372_036_854_775_807
+                or type(index) is not int or not 0 <= index < 4):
+            raise ValueError("Invalid attachment")
+        message = self.public_message(session_id, row_id)
+        if message is None or message.role != "user" or index >= len(message.attachments):
+            raise ValueError("Attachment unavailable")
+        maximum = 32 * 1024 * 1024
+        encoded_maximum = (maximum + 2) // 3 * 4 + 1024
+        with self.memory._db_lock:
+            size = self.memory.db.execute(
+                "SELECT length(attachment_contents) FROM turns "
+                "WHERE session_id=? AND rowid=? AND role='user'", (session_id, row_id),
+            ).fetchone()
+            if size is None:
+                raise ValueError("Attachment unavailable")
+            if not size[0]:
+                raise FileNotFoundError(
+                    "Original attachment was not retained in this older message"
+                )
+            if size[0] > encoded_maximum:
+                raise ValueError("Attachment exceeds its storage bound")
+            row = self.memory.db.execute(
+                "SELECT substr(json_extract(attachment_contents,?),1,?) FROM turns "
+                "WHERE session_id=? AND rowid=? AND role='user'",
+                (f"$[{index}]", encoded_maximum + 1, session_id, row_id),
+            ).fetchone()
+        if row is None or not row[0]:
+            raise ValueError("Attachment unavailable")
+        record = json.loads(row[0])
+        if (not isinstance(record, dict) or set(record) != {"data", "sha256"}
+                or not isinstance(record["data"], str)
+                or not isinstance(record["sha256"], str)):
+            raise ValueError("Invalid stored attachment")
+        data = base64.b64decode(record["data"], validate=True)
+        descriptor = message.attachments[index]
+        if (not data or len(data) > maximum or len(data) != descriptor.get("size")
+                or hashlib.sha256(data).hexdigest() != record["sha256"]):
+            raise ValueError("Attachment checksum failed")
+        return dict(descriptor), data
 
     def change_archive(self, change: SessionArchiveChange) -> SessionArchiveReceipt:
         """Apply a reviewed archive action through Memory's transactional lease checks."""

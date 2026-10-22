@@ -230,7 +230,9 @@ class Memory:
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             turn_columns = {row[1] for row in self.db.execute("PRAGMA table_info(turns)")}
-            for column in ("model_content", "attachments", "attachment_previews"):
+            for column in (
+                "model_content", "attachments", "attachment_previews", "attachment_contents",
+            ):
                 if column not in turn_columns:
                     self.db.execute(f"ALTER TABLE turns ADD COLUMN {column} TEXT")
         self.db.execute(
@@ -1493,8 +1495,9 @@ class Memory:
                 raise ValueError("Target session ID was deleted")
             self.db.execute(
                 "INSERT INTO turns (session_id, ts, role, content, model_content, "
-                "attachments, attachment_previews) "
-                "SELECT ?, ts, role, content, model_content, attachments, attachment_previews "
+                "attachments, attachment_previews, attachment_contents) "
+                "SELECT ?, ts, role, content, model_content, attachments, attachment_previews, "
+                "attachment_contents "
                 "FROM turns "
                 "WHERE session_id=? AND (? IS NULL OR rowid<=?) ORDER BY ts, rowid",
                 (target, source, cutoff, cutoff),

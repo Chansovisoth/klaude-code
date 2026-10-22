@@ -1,0 +1,5 @@
+Google Material Color Utilities 0.4.0
+Copyright 2021 Google LLC. Apache License 2.0.
+Source: https://github.com/material-foundation/material-color-utilities
+Adaptation: selected public exports bundled and minified with esbuild 0.28.2.
+No color algorithm modifications. See material-colors-manifest.json.

@@ -34,6 +34,7 @@ from .background_jobs import OwnedBackgroundJobs
 from .background_worker import execute
 from .browser_jobs import OPERATIONS as GENERATED_OPERATIONS
 from .browser_jobs import operation_timeout, prepare_generated_operation, run_generated_operation
+from .browser_knowledge import browse_knowledge, prepare_delete
 from .browser_management import OPERATIONS as PROFILE_OPERATIONS
 from .browser_management import prepare_profile_operation, run_profile_operation
 from .browser_media_settings import OPERATIONS as MEDIA_SETTINGS_OPERATIONS
@@ -133,11 +134,14 @@ class LibraryManagement:
         sort: str = "newest",
         images_only: bool = False,
         source: str = "all",
+        session: str = "",
+        identities: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         result = self.artifacts.listing(
             kind, archived=archived, query=query, offset=offset, sort=sort, include_total=True,
             images_only=images_only,
             source=source,
+            session=session, identities=identities,
         )
         return self._page({**result, "items": [self.public_artifact(item)
                                                for item in result["items"]]}, offset)
@@ -187,6 +191,35 @@ class LibraryManagement:
         return self._page(source_inventory(self.data / "docs-sources", library,
                                             offset=offset), offset)
 
+    def knowledge_contents(self, **filters: Any) -> dict[str, Any]:
+        result = browse_knowledge(self.data / "knowledge.lance", **filters)
+        rows = result.get("items", []) if "items" in result else [result["item"]]
+        for item in rows:
+            source = item.get("source", item["id"] if result.get("mode") == "sources" else "")
+            label = source
+            if source.startswith("upload:"):
+                label = re.sub(r"^[a-f0-9]{64}:", "", source[7:])
+            elif source.startswith("artifact:"):
+                try:
+                    label = self.artifacts.get(source[9:])["name"]
+                except (OSError, ValueError, sqlite3.Error):
+                    pass
+            if source:
+                item["source_name"] = label
+        if result.get("mode") == "sources":
+            from .library_knowledge import manifest
+
+            for item in result["items"]:
+                item["refresh"] = []
+                for name in item.pop("managed_names", []):
+                    try:
+                        current, identity = manifest(self.data / "docs-sources", name)
+                        if current.get("library") == filters.get("library"):
+                            item["refresh"].append({"id": name, "identity": identity})
+                    except (OSError, ValueError):
+                        pass
+        return result
+
     def _installed_skills(self) -> dict[str, Any]:
         result = execute(
             {
@@ -199,11 +232,16 @@ class LibraryManagement:
             raise ValueError("Skills unavailable")
         return {"items": result["skills"], "more": result["truncated"]}
 
-    def skills(self, *, query: str = "", offset: int = 0) -> dict[str, Any]:
+    def skills(self, *, query: str = "", offset: int = 0,
+               state: str = "all") -> dict[str, Any]:
+        if state not in {"all", "enabled", "disabled"}:
+            raise ValueError("Unknown Skills status")
         result = self._installed_skills()
         needle = query[:200].casefold()
         result["items"] = [item for item in result["items"] if needle in
-                           f"{item['name']} {item['description']} {item['library']}".casefold()]
+                           f"{item['name']} {item['description']} {item['library']}".casefold()
+                           and (state == "all" or item["enabled"] == (state == "enabled"))]
+        result["state"] = state
         return self._inventory_page(result, offset)
 
     def tab_counts(self) -> dict[str, dict[str, int | bool | None]]:
@@ -256,9 +294,20 @@ class LibraryManagement:
     def discard(self, owner: str, token: str) -> None:
         with self._lock:
             review = self._reviews.get(token)
-            if review is not None and review.owner == owner and not review.submitted:
-                review.expires_at = 0
-                self._purge()
+            if review is None or review.owner != owner:
+                return
+            if review.submitted:
+                # Settings batches acknowledge settled snapshots individually.
+                # Free their bounded preparation slots without deleting durable
+                # receipts, cancelling accepted work or releasing unknown fences.
+                if (review.operation not in {"setting-save", *MEDIA_SETTINGS_OPERATIONS}
+                        or review.request_id in self._active):
+                    return
+                receipt = self.journal.status(review.request_id, OWNER)
+                if receipt is None or receipt.state not in {"completed", "failed", "cancelled"}:
+                    return
+            review.expires_at = 0
+            self._purge()
 
     def prepare(
         self, owner: str, draft: dict[str, Any], *, upload: tuple[str, BinaryIO] | None = None
@@ -436,6 +485,8 @@ class LibraryManagement:
                             f"Delete Skill {skill['name']} and its indexed knowledge. "
                             "Original source files are retained. This cannot be undone."
                         )
+                elif operation == "knowledge-delete":
+                    fields, resource, summary = prepare_delete(self.data / "knowledge.lance", draft)
                 elif operation in {"knowledge-url", "knowledge-refresh"}:
                     action_fields = {
                         **draft,
@@ -559,7 +610,7 @@ class LibraryManagement:
                     "operation": review.operation,
                     **review.fields,
                 }
-                if review.operation.startswith("knowledge-"):
+                if review.operation in {"knowledge-url", "knowledge-refresh", "knowledge-upload"}:
                     action = KnowledgeAction.from_draft(
                         {
                             "operation": "refresh"
@@ -774,6 +825,14 @@ def run_management_operation(request: dict[str, Any]) -> dict[str, Any]:
                 library=request["library"],
                 overwrite=False,
             )
+    elif operation == "knowledge-delete":
+        from .browser_knowledge import delete_knowledge
+
+        try:
+            delete_knowledge(data / "knowledge.lance", request["library"], request["source"],
+                             request["fingerprint"])
+        except ValueError:
+            return {"rejected": True}
     elif operation.startswith("knowledge-"):
         from .library_knowledge import run_operation
 

@@ -40,19 +40,28 @@ window.BrowserModelsUI = (() => {
     const currentModel = latest.model_providers ? latest.model_ref : latest.model;
     const rows = items.slice((page - 1) * pageSize, page * pageSize).map(item => {
       const current = currentModel === item.id && !latest.requires_model_selection;
-      const node = domainText("article", "", "models-model");
+      const node = domainText("article", "", "models-model library-card collection-row");
       node.dataset.rowKey = item.id;
+      node.dataset.current = String(current);
       node.dataset.rowSignature = JSON.stringify([item, current, choosing, runtimeChoiceInFlight, Boolean(latest.active_turn_id), Boolean(latest.queue?.length)]);
       const content = domainText("div", "", "models-model-content");
+      const artwork = domainText("span", "", "collection-icon");
+      artwork.append(libraryIcon("models"));
       const name = domainText("h3", item.name); name.title = item.name;
       const reference = domainText("p", item.id, "muted models-model-ref"); reference.title = item.id;
       content.append(name, reference);
       const efforts = (item.effort_levels || []).filter(level => level !== "off");
-      if (efforts.length) content.append(domainText("p", `Thinking: ${efforts.join(", ")}`, "muted"));
+      if (efforts.length) {
+        const capabilities = domainText("div", "", "model-capabilities");
+        capabilities.setAttribute("aria-label", "Available Thinking efforts");
+        capabilities.append(domainText("span", "Thinking", "muted"));
+        for (const effort of efforts) capabilities.append(domainText("span", effort, "model-capability"));
+        content.append(capabilities);
+      }
       const use = domainButton(choosing === item.id ? "Changing…" : current ? "Current" : "Use model", () => useModel(item), current ? "quiet" : "secondary");
       use.setAttribute("aria-label", current ? `${item.name}, current chat model` : `Use ${item.name} for this conversation`);
       use.disabled = current || runtimeChoiceInFlight || Boolean(choosing) || Boolean(latest.active_turn_id) || Boolean(latest.queue?.length);
-      node.append(content, use);
+      node.append(artwork, content, use);
       return node;
     });
     const target = byId("models-items");
@@ -81,7 +90,6 @@ window.BrowserModelsUI = (() => {
     const loadId = ++generation, epoch = authEpoch;
     reading?.abort(); reading = new AbortController();
     loading = true;
-    byId("models-status").textContent = "Loading models…";
     // Changing connections must never show the previous connection's catalog.
     if (selected !== catalogConnection) { catalog = []; catalogConnection = ""; byId("models-items").replaceChildren(); }
     render();
@@ -143,42 +151,55 @@ window.BrowserModelsUI = (() => {
 
 window.BrowserMedia = (() => {
   let settings = null, models = [], reading = null, catalogReading = null, generation = 0, catalogGeneration = 0;
-  let catalogConnection = "", catalogLoaded = false, renderedValues = new Map();
+  let catalogConnection = "", catalogLoaded = false;
   let ready, loadingCatalog = false;
   let fallbacksOpen = false;
   const active = () => authenticated && currentView === "settings";
   const manager = () => window.BrowserManagement;
-  const busy = kind => !settings || Boolean(settings.pending[kind]) || manager().busy(`media-${kind}`);
+  const busy = kind => !settings || SettingsDrafts.locked("models") || Boolean(settings.pending[kind]) || manager().busy(`media-${kind}`);
+  const labels = { chat: "Startup chat", utility: "Utility", research: "Research", vision: "Vision",
+    fallbacks: "Utility fallbacks", vision_fallbacks: "Vision fallbacks", output_tokens: "Utility output tokens", vision_enabled: "Vision image input", image_service: "Image generation service" };
+  SettingsDrafts.register("models", {
+    panel: "models-settings", status: "media-settings-status", render: renderSettings, changed: renderBusy,
+    refresh: () => load(false, true), blocked: () => !settings || Object.keys(settings.pending).length > 0,
+    operation: entry => entry.base.id === "image_service" ?
+      { operation: "image-settings-save", ...entry.value, revision: entry.base.version } :
+      { operation: "defaults-save", field: entry.base.id, value: entry.value, expected: entry.base.value },
+    order: entry => entry.base.id === "vision_enabled" ? entry.value ? 2 : -2 : entry.base.id === "image_service" ? 3 : 0,
+    count: entry => entry.base.id === "image_service" ? ["endpoint", "enabled"].filter(key => entry.value[key] !== entry.base.value[key]).length : 1,
+    normalized: normalizedDraft,
+    validate: entries => entries.every(entry => {
+      const inputs = entry.base.id === "image_service" ? [byId("image-service-url")] :
+        [...byId("default-model-fields").querySelectorAll(`[data-draft-field="${entry.base.id}"]`)];
+      return inputs.every(SettingsDrafts.validateInput);
+    }),
+    warning: entry => entry.base.id === "vision_enabled" && entry.value && !entry.base.value ?
+      "Enable Vision image input: images can be sent to your configured Vision model and fallbacks when you request analysis." :
+      entry.base.id === "image_service" && entry.value.enabled && (!entry.base.value.enabled || entry.value.endpoint !== entry.base.value.endpoint) ?
+        `Image generation: enable requests to ${entry.value.endpoint}. Generation prompts will be sent to this server.` : null,
+  });
+  function normalizedDraft(entry) {
+    if (entry.base.id !== "image_service") return entry.value;
+    let endpoint = SettingsDrafts.normalizedEndpoint(entry.value.endpoint);
+    const sdcpp = endpoint.endsWith("/sdcpp/v1");
+    endpoint = endpoint.replace(/\/(?:api|v1)$/, "");
+    if (sdcpp) endpoint = endpoint.slice(0, -"/sdcpp".length);
+    return { ...entry.value, endpoint };
+  }
   function option(value, label) { const node = domainText("option", label); node.value = value; return node; }
   function modelSelect(id, value, role) {
     const select = document.createElement("select"); select.id = id;
     const choices = catalogConnection === byId("default-model-connection").value ?
       models.filter(item => item.roles[role] !== false) : [];
     select.append(option("", loadingCatalog ? "Loading models…" : catalogLoaded && !choices.length ? "No compatible models · Unset" : "Unset"),
-      ...choices.map(item => option(item.id, `${item.name}${item.roles[role] === null ? " · Verify on review" : ""}`)));
+      ...choices.map(item => option(item.id, `${item.name}${item.roles[role] === null ? " · Verified when saving" : ""}`)));
     if (value && !choices.some(item => item.id === value)) select.append(option(value, `Saved · ${value}`));
     select.value = value || "";
     const describe = () => { select.title = select.selectedOptions[0]?.textContent || ""; };
     select.addEventListener("change", describe); describe();
     return select;
   }
-  function values() {
-    return [...document.querySelectorAll("#default-model-fields input, #default-model-fields select, #image-service-save input")]
-      .map(input => ({ id: input.id, value: input.value, checked: input.checked }));
-  }
-  function restoreDrafts(drafts) {
-    for (const draft of drafts) {
-      const input = byId(draft.id);
-      if (!input) continue;
-      if (input.tagName === "SELECT" && draft.value && ![...input.options].some(item => item.value === draft.value)) input.append(option(draft.value, draft.value));
-      input.value = draft.value;
-      if (input.type === "checkbox") input.checked = draft.checked;
-      if (input.tagName === "SELECT") input.title = input.selectedOptions[0]?.textContent || "";
-    }
-  }
-  function save(field, value) {
-    manager().review({ operation: "defaults-save", field, value, expected: settings.defaults[field] }, "media-defaults", "media");
-  }
+  const stage = (field, value) => SettingsDrafts.set("models", field, value);
   function recovery(kind) {
     const container = byId(kind === "defaults" ? "defaults-recovery" : "image-settings-recovery");
     const pending = settings.pending[kind];
@@ -186,12 +207,11 @@ window.BrowserMedia = (() => {
     if (!pending) return;
     container.append(domainText("p", pending.state === "unknown" ? "The last save is unconfirmed. Check its saved state before making another change." : "A shared save is in progress.", "muted"));
     if (pending.state === "unknown") {
-      const button = domainButton("Review saved-state check", () => manager().review({
+      const button = domainButton("Check saved state", () => SettingsDrafts.recover("models", {
         operation: kind === "defaults" ? "defaults-recover" : "image-settings-recover", target: pending.request_id,
-      }, `media-recovery-${kind}`, "media", {
-        statusId: kind === "defaults" ? "media-settings-status" : "image-settings-status",
       }));
-      button.disabled = manager().busy(`media-recovery-${kind}`); container.append(button);
+      const state = SettingsDrafts.category("models");
+      button.disabled = state.saving || Boolean(state.drafts.entries.get("recovery")?.pending); container.append(button);
     }
   }
   function renderBusy() {
@@ -200,8 +220,12 @@ window.BrowserMedia = (() => {
     byId("default-model-catalog").querySelector("button").disabled = !settings || loadingCatalog;
   }
   function renderSettings() {
-    const drafts = values().filter(value => renderedValues.has(value.id) && JSON.stringify(value) !== renderedValues.get(value.id));
-    const defaults = settings.defaults, fields = [];
+    if (!settings) return;
+    // A catalog/settings read can finish before the native toggle event fires.
+    // Capture the live disclosure before replacing its DOM, including fast tabs.
+    const currentFallbacks = byId("model-fallbacks");
+    if (currentFallbacks) fallbacksOpen = currentFallbacks.open;
+    const defaults = Object.fromEntries(Object.keys(settings.defaults).map(key => [key, SettingsDrafts.value("models", key)])), fields = [];
     const section = (id, title) => {
       const group = domainText("section", "", "settings-section");
       const heading = domainText("h3", title); heading.id = id;
@@ -214,10 +238,11 @@ window.BrowserMedia = (() => {
       const title = domainText("label", "", "model-role-label"); title.htmlFor = `default-value-${field}`;
       title.append(libraryIcon(icon), domainText("span", label));
       const select = modelSelect(title.htmlFor, defaults[field], field);
+      select.dataset.draftField = field;
       const controls = domainText("div", "", "settings-controls");
-      const button = domainButton("Review", () => form.requestSubmit()); button.setAttribute("aria-label", `Review ${label} model`);
-      controls.append(select, button);
-      form.append(title, controls); form.addEventListener("submit", event => { event.preventDefault(); save(field, select.value || null); });
+      controls.append(select);
+      select.addEventListener("change", () => stage(field, select.value || null));
+      form.append(title, controls); form.addEventListener("submit", event => { event.preventDefault(); stage(field, select.value || null); });
       roleFields.append(form);
     }
     fields.push(roles);
@@ -234,23 +259,26 @@ window.BrowserMedia = (() => {
         const row = domainText("div", "", "setting-row");
         const label = domainText("label", `Fallback ${index + 1}`);
         const select = modelSelect(`default-value-${field}-${index}`, defaults[field][index], field === "fallbacks" ? "utility" : "vision");
+        select.dataset.draftField = field;
         label.htmlFor = select.id;
         const controls = domainText("div", "", "settings-controls"); controls.append(select);
         row.append(label, controls); form.append(row); return select;
       });
-      const button = domainButton("Review fallbacks", () => form.requestSubmit()); button.setAttribute("aria-label", `Review ${label}`);
-      const actions = domainText("div", "", "settings-form-actions"); actions.append(button); form.append(actions);
-      form.addEventListener("submit", event => { event.preventDefault(); save(field, selects.map(select => select.value).filter(Boolean)); });
+      const changed = () => stage(field, selects.map(select => select.value).filter(Boolean));
+      selects.forEach(select => select.addEventListener("change", changed));
+      form.addEventListener("submit", event => { event.preventDefault(); changed(); });
       fallbacks.append(form);
     }
     const output = domainText("form", "", "setting-row");
     const outputLabel = domainText("label", "Utility output tokens"); outputLabel.htmlFor = "default-output-tokens";
     const number = document.createElement("input"); number.type = "number"; number.min = 128; number.max = 2048; number.required = true;
     number.id = outputLabel.htmlFor; number.value = defaults.output_tokens;
+    number.dataset.draftField = "output_tokens";
     const controls = domainText("div", "", "settings-controls settings-number");
-    const button = domainButton("Review", () => output.requestSubmit()); button.setAttribute("aria-label", "Review Utility output tokens");
-    controls.append(number, button); output.append(outputLabel, controls);
-    output.addEventListener("submit", event => { event.preventDefault(); save("output_tokens", Number(number.value)); });
+    controls.append(number); output.append(outputLabel, controls);
+    const changeOutput = () => stage("output_tokens", number.value === "" ? "" : Number(number.value));
+    number.addEventListener("input", changeOutput);
+    output.addEventListener("submit", event => { event.preventDefault(); changeOutput(); });
     const options = section("model-options-heading", "Utility and Vision options");
     const optionFields = domainText("div", "", "settings-form-grid");
     optionFields.append(output); options.append(optionFields);
@@ -260,43 +288,54 @@ window.BrowserMedia = (() => {
     const toggleLabel = domainText("label", "", "switch");
     const toggle = document.createElement("input"); toggle.type = "checkbox"; toggle.id = "default-vision-enabled"; toggle.checked = defaults.vision_enabled;
     toggle.setAttribute("role", "switch");
-    toggle.addEventListener("change", () => { toggle.checked = defaults.vision_enabled; save("vision_enabled", !defaults.vision_enabled); });
+    toggle.dataset.draftField = "vision_enabled";
+    toggle.addEventListener("change", () => stage("vision_enabled", toggle.checked));
     const track = domainText("span", ""); track.setAttribute("aria-hidden", "true");
     toggleLabel.append(toggle, track); enabledControls.append(toggleLabel);
     enabled.append(enabledLabel, enabledControls); optionFields.append(enabled);
     fields.push(options, fallbacks);
     byId("default-model-fields").replaceChildren(...fields);
-    byId("image-service-url").value = settings.image_service.endpoint;
-    byId("image-service-enabled").checked = settings.image_service.enabled;
+    const image = SettingsDrafts.value("models", "image_service");
+    byId("image-service-url").value = image.endpoint;
+    byId("image-service-enabled").checked = image.enabled;
     byId("image-service-model").textContent = settings.image_service.model ? `Saved model: ${settings.image_service.model}` : "No image model configured.";
-    renderedValues = new Map(values().map(value => [value.id, JSON.stringify(value)]));
-    restoreDrafts(drafts);
     recovery("defaults"); recovery("image_service"); renderBusy();
   }
-  async function load(refreshCatalog = false) {
-    if (!active()) return;
+  async function load(refreshCatalog = false, force = false) {
+    if (!force && !active()) return;
     if (!latest?.media_management) {
       byId("media-settings-status").textContent = "Restart the Web UI host and reload to configure model defaults and image services.";
       byId("image-settings-status").textContent = byId("media-settings-status").textContent;
-      renderBusy(); return;
+      renderBusy();
+      if (force) throw new Error(byId("media-settings-status").textContent);
+      return;
     }
     const current = ++generation, epoch = authEpoch;
     reading?.abort(); reading = new AbortController();
     try {
       const result = await domainRequest("/api/v1/settings/models", "GET", undefined, { signal: reading.signal });
-      if (!active() || epoch !== authEpoch || current !== generation) return;
+      if ((!force && !active()) || epoch !== authEpoch || current !== generation) {
+        if (force) throw new Error("Saved values are refreshing. Check save status to confirm them.");
+        return;
+      }
       settings = result;
+      SettingsDrafts.ingest("models", [
+        ...Object.entries(settings.defaults).map(([id, value]) => ({ id, value, version: value, label: labels[id] })),
+        { id: "image_service", value: { endpoint: settings.image_service.endpoint, enabled: settings.image_service.enabled },
+          version: settings.image_service.revision, label: labels.image_service },
+      ]);
       const selected = byId("default-model-connection").value;
       byId("default-model-connection").replaceChildren(...settings.connections.filter(item => item.enabled).map(item => option(item.id, `${item.name} · ${item.backend}`)));
       if (settings.connections.some(item => item.id === selected && item.enabled)) byId("default-model-connection").value = selected;
       renderSettings();
       byId("media-settings-status").textContent = byId("image-settings-status").textContent = "";
-      if (refreshCatalog || !loadingCatalog && !catalogLoaded || catalogConnection !== byId("default-model-connection").value) loadCatalog();
+      if (active() && (refreshCatalog || !loadingCatalog && !catalogLoaded || catalogConnection !== byId("default-model-connection").value)) loadCatalog();
     } catch (error) {
       if (active() && current === generation) {
         domainError(error, "media-settings-status");
         byId("image-settings-status").textContent = byId("media-settings-status").textContent;
       }
+      if (force) throw error;
     }
   }
   async function loadCatalog() {
@@ -317,7 +356,7 @@ window.BrowserMedia = (() => {
         throw new Error("Restart the Web UI host and reload to check model capabilities.");
       catalogLoaded = true; loadingCatalog = false;
       models = result.models; renderSettings();
-      byId("media-settings-status").textContent = models.length ? "Compatible models are listed for each role. Choose a model, then review its default." : "This connection returned no models.";
+      byId("media-settings-status").textContent = models.length ? "Compatible models are listed for each role. Choose models, then Save changes." : "This connection returned no models.";
     } catch (error) {
       if (active() && epoch === authEpoch && current === catalogGeneration && error.name !== "AbortError") {
         domainError(error, "media-settings-status");
@@ -338,17 +377,18 @@ window.BrowserMedia = (() => {
   byId("default-model-catalog").addEventListener("submit", event => {
     event.preventDefault(); loadCatalog();
   });
-  byId("image-service-save").addEventListener("submit", event => {
-    event.preventDefault();
-    if (!settings) return;
-    manager().review({ operation: "image-settings-save", endpoint: byId("image-service-url").value.trim(),
-      enabled: byId("image-service-enabled").checked, revision: settings.image_service.revision }, "media-image_service", "media", { statusId: "image-settings-status" });
-  });
+  const changeImage = () => {
+    if (settings) stage("image_service", { endpoint: byId("image-service-url").value.trim(), enabled: byId("image-service-enabled").checked });
+  };
+  byId("image-service-url").addEventListener("input", changeImage);
+  byId("image-service-enabled").addEventListener("change", changeImage);
+  byId("image-service-save").addEventListener("submit", event => { event.preventDefault(); changeImage(); });
   document.addEventListener("klaude-view", () => {
     if (active()) load();
     else { generation += 1; reading?.abort(); catalogReading?.abort(); catalogGeneration += 1; loadingCatalog = false; }
   });
   document.addEventListener("klaude-operations", event => {
+    if (SettingsDrafts.category("models").saving) return;
     if (active() && event.detail.some(item => ["defaults-save", "image-settings-save", "defaults-recover", "image-settings-recover"].includes(item.kind) && ["completed", "failed", "unknown"].includes(item.state))) {
       // Reload only when an operation changes, preserving unsaved form edits.
       const revision = JSON.stringify(event.detail.filter(item => item.kind.startsWith("defaults-") || item.kind.startsWith("image-settings-")).map(item => [item.request_id, item.state]));
@@ -359,7 +399,7 @@ window.BrowserMedia = (() => {
   document.addEventListener("klaude-auth-reset", () => {
     generation += 1; catalogGeneration += 1; reading?.abort(); catalogReading?.abort(); loadingCatalog = false;
     settings = null; models = []; ready = undefined; lastOperations = "";
-    catalogConnection = ""; catalogLoaded = false; renderedValues.clear();
+    catalogConnection = ""; catalogLoaded = false;
     for (const id of ["default-model-fields", "default-model-connection", "defaults-recovery", "image-settings-recovery", "media-settings-status", "image-service-model", "image-settings-status"]) byId(id).replaceChildren();
     fallbacksOpen = false; byId("image-service-save").reset(); renderBusy();
   });

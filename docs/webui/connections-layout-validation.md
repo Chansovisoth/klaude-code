@@ -1,5 +1,14 @@
 # Connections layout validation
 
+Filter spacing follow-up (2026-10-22): All/Enabled/Disabled now have 16px horizontal
+padding per side, up from 12px, while retaining their existing height, selected
+states and filtering behavior. A focused real Chrome fixture passed all three
+states across light/dark at 320/390/768/1440px: eight layouts, 24 filter states,
+one-row fit, no horizontal overflow and zero JavaScript errors. Evidence:
+`/tmp/klaude-connections-padding.{json,log}`. The CSS bundle and whitespace checks
+passed. This CSS-only adjustment does not change backend behavior; refresh the
+page to load it.
+
 Validated on 2026-10-21.
 
 Connections now shares Skills' compact collection rows, descriptions, confirmed-state

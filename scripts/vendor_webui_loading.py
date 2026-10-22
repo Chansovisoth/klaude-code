@@ -118,11 +118,14 @@ def generate(cache: Path, check: bool) -> None:
         result = subprocess.run(["java", "-cp", f"{base}:{classpath}", "Export"],
                                 capture_output=True, text=True, check=True)
         morphs = json.loads(result.stdout)
+        shapes = json.loads(subprocess.run(
+            ["java", "-cp", f"{base}:{classpath}", "Export", "shapes"],
+            capture_output=True, text=True, check=True).stdout)
     assert len(morphs) == 7
     for morph in morphs:
         assert len(morph["start"]) == len(morph["end"])
         assert len(morph["start"]) % 6 == 2
-    data = {"names": NAMES, "morphs": morphs}
+    data = {"names": NAMES, "morphs": morphs, "shapes": shapes}
     script = (
         "/* Generated from Google Material / AndroidX; Apache-2.0.\n"
         " * Copyright 2024 The Android Open Source Project.\n"

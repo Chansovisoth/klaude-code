@@ -11,7 +11,14 @@ import httpx
 import pytest
 from klaude_cli.main import _export_session, _render, _select_tool_names
 from klaude_core import Agent, PermissionGate, Tool
-from klaude_core.chat_images import ChatImages, image_cost, inline_paths, references, unpack_input
+from klaude_core.chat_images import (
+    MAX_IMAGES,
+    ChatImages,
+    image_cost,
+    inline_paths,
+    references,
+    unpack_input,
+)
 from klaude_core.memory import Memory
 from klaude_core.model_runtime import ModelInfo, OllamaRuntime
 from klaude_core.ollama import Ollama, OllamaError, _native_messages
@@ -206,7 +213,7 @@ def test_invalid_new_images_never_generate_or_create_media(vision_lab, failure):
         elif failure == "provider":
             agent.model_info = replace(agent.model_info, backend="anthropic")
         elif failure == "count":
-            paths = tuple(agent.workdir / f"over{n}.png" for n in range(3))
+            paths = tuple(agent.workdir / f"over{n}.png" for n in range(MAX_IMAGES + 1))
             for source in paths:
                 source.write_bytes(png())
         else:
@@ -348,7 +355,7 @@ def test_image_metadata_does_not_route_tools_and_coding_intent_retains_tools(vis
         agent.runtime.close()
 
 
-def test_latest_two_distinct_snapshots_and_duplicate_inputs_have_a_fixed_bound(vision_lab):
+def test_latest_distinct_snapshots_and_duplicate_inputs_have_a_fixed_bound(vision_lab):
     agent = agent_for(vision_lab)
     try:
         first = envelope(vision_lab, agent)
@@ -357,7 +364,7 @@ def test_latest_two_distinct_snapshots_and_duplicate_inputs_have_a_fixed_bound(v
         )
         assert len(duplicate["image_inputs"]) == 1
         messages = []
-        for n in range(3):
+        for n in range(MAX_IMAGES + 1):
             source = agent.workdir / f"different{n}.png"
             source.write_bytes(png() + bytes([n]))
             value = agent.image_context.compose("Picture", (source,), "chat")
@@ -365,8 +372,8 @@ def test_latest_two_distinct_snapshots_and_duplicate_inputs_have_a_fixed_bound(v
                 {"role": "user", "content": "Picture", "image_inputs": value["image_inputs"]}
             )
         projected, count = agent.image_context.project(messages)
-        assert count == 2 and "image_content" not in projected[0]
-        assert all(m["image_content"] for m in projected[-2:])
+        assert count == MAX_IMAGES and "image_content" not in projected[0]
+        assert all(m["image_content"] for m in projected[-MAX_IMAGES:])
         same = {"role": "user", "content": "Picture", "image_inputs": first["image_inputs"] * 2}
         assert agent.image_context.project([same])[1] == 1
     finally:

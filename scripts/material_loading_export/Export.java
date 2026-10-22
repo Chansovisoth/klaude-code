@@ -20,6 +20,20 @@ public class Export {
     System.out.print("]");
   }
   public static void main(String[] args) {
+    if (args.length > 0 && args[0].equals("shapes")) {
+      String[] names = {"circle", "pill", "oval", "diamond", "cookie", "burst", "sunny", "flower", "soft-burst"};
+      RoundedPolygon[] all = {MaterialShapes.CIRCLE, MaterialShapes.PILL, MaterialShapes.OVAL,
+        MaterialShapes.DIAMOND, MaterialShapes.COOKIE_9, MaterialShapes.BURST, MaterialShapes.SUNNY,
+        MaterialShapes.FLOWER, MaterialShapes.SOFT_BURST};
+      System.out.print("{");
+      for (int i = 0; i < all.length; i++) {
+        if (i > 0) System.out.print(",");
+        System.out.print("\"" + names[i] + "\":");
+        path(MaterialShapes.normalize(all[i], true, new RectF(-1,-1,1,1)).getCubics());
+      }
+      System.out.println("}");
+      return;
+    }
     RoundedPolygon[] shapes = {
       MaterialShapes.SOFT_BURST, MaterialShapes.COOKIE_9, MaterialShapes.PENTAGON,
       MaterialShapes.PILL, MaterialShapes.SUNNY, MaterialShapes.COOKIE_4, MaterialShapes.OVAL

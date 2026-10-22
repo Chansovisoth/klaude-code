@@ -69,6 +69,39 @@ async def verify(host, root, chrome, fixture):
             ) + ';byId("account-login").requestSubmit()')
             await tab.wait('latest?.attachments && !byId("attach-file").disabled')
             await tab.wait('document.querySelector(".message-attachments img")?.naturalWidth > 0')
+            await tab.wait('document.documentElement.dataset.startup==="ready"')
+            image_card = '.message-attachments button[aria-label="Preview HU7hXeGbsAAYPuz.jpg"]'
+            await tab.js('window.sentImageCard=document.querySelector(' + json.dumps(image_card)
+                         + ');sentImageCard.focus()')
+            await tab.command("Input.dispatchKeyEvent", {
+                "type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13,
+                "text": "\r", "unmodifiedText": "\r",
+            })
+            await tab.command("Input.dispatchKeyEvent", {
+                "type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13,
+            })
+            await tab.wait('byId("artifact-detail").open && '
+                           'byId("artifact-preview").querySelector("img")?.naturalWidth===320')
+            assert await tab.js('byId("artifact-more").hidden && byId("inspector-tabs").hidden && '
+                                'byId("image-navigation").hidden && '
+                                '!byId("artifact-download").hidden')
+            await tab.js('byId("artifact-preview").focus();byId("artifact-preview").dispatchEvent('
+                         'new KeyboardEvent("keydown",{key:"+",bubbles:true}))')
+            assert await tab.js('byId("artifact-preview").dataset.zoom') == "1.5"
+            for width, height in [(1440, 900), (390, 640), (320, 480)]:
+                await tab.command("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False,
+                })
+                await asyncio.sleep(.2)
+                assert await tab.js('document.documentElement.scrollWidth<=innerWidth && '
+                                    'byId("artifact-detail").scrollWidth<=byId("artifact-detail").clientWidth')
+                shot = await tab.command("Page.captureScreenshot", {"format": "png"})
+                (output / f"sent-image-{width}.png").write_bytes(base64.b64decode(shot["data"]))
+            await tab.click("#artifact-close")
+            await tab.wait('document.activeElement===sentImageCard')
+            await tab.command("Emulation.setDeviceMetricsOverride", {
+                "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False,
+            })
             assert await tab.js('document.querySelector(".message-prompt").textContent === '
                                 '"Tell me what you see"')
             assert await tab.js('!document.querySelector(".message-body").textContent'
@@ -214,8 +247,13 @@ async def verify(host, root, chrome, fixture):
                 image = await tab.command("Page.captureScreenshot", {"format": "png"})
                 (output / f"attach-{width}.png").write_bytes(base64.b64decode(image["data"]))
                 await tab.click("#attach-close")
-                assert await tab.js('Array.from(document.querySelectorAll(".attachment-card"))'
-                                    '.every(card => card.scrollWidth <= card.clientWidth)')
+                overflowing = await tab.js(
+                    'Array.from(document.querySelectorAll(".attachment-card"))'
+                    '.filter(card=>card.scrollWidth>card.clientWidth).map(card=>'
+                    '({class:card.className,width:card.clientWidth,scroll:card.scrollWidth,'
+                    'parent:card.parentElement.clientWidth,text:card.textContent}))'
+                )
+                assert not overflowing, {"viewport": width, "cards": overflowing}
                 image = await tab.command("Page.captureScreenshot", {"format": "png"})
                 (output / f"cards-{width}.png").write_bytes(base64.b64decode(image["data"]))
                 sizes.append(layout)
@@ -240,6 +278,61 @@ async def verify(host, root, chrome, fixture):
                                 '.length === 1')
             assert await tab.js('Array.from(document.querySelectorAll(".message-prompt"))'
                                 '.every(node => !node.textContent.includes("[Attached files:"))')
+            for filename, expected in [("device.txt", "device-private-47"),
+                                       ("saved.md", "library-private-82"),
+                                       ("report.pdf", "pdf-private-93")]:
+                selector = f'.message-attachments button[aria-label="Preview {filename}"]'
+                await tab.click(selector)
+                await tab.wait('byId("artifact-preview").textContent.includes('
+                               + json.dumps(expected) + ')')
+                assert await tab.js('!byId("artifact-preview").querySelector("script,img") && '
+                                    '!window.sentAttachmentUnsafe && !byId("artifact-copy").hidden')
+                download = await tab.js(
+                    'fetch(byId("artifact-download").href).then(async response=>'
+                    '({status:response.status,size:(await response.arrayBuffer()).byteLength,'
+                    'disposition:response.headers.get("Content-Disposition")}))'
+                )
+                assert download["status"] == 200
+                assert download["disposition"].startswith("attachment;")
+                if filename == "report.pdf":
+                    assert download["size"] == (root / filename).stat().st_size
+                    assert await tab.js('byId("preview-source-note").textContent'
+                                        '.includes("Extracted text")')
+                await tab.click("#artifact-close")
+                await tab.wait('document.activeElement===document.querySelector('
+                               + json.dumps(selector) + ')')
+            # Reusing the viewer for chat must not hide the next Library file's actions.
+            await tab.js(
+                'window.libraryOrigin=document.querySelector('
+                '\'.message-attachments button[aria-label="Preview saved.md"]\');'
+                'openArtifact(latest.messages.flatMap(message=>message.attachments||[])'
+                '.find(file=>file.name==="saved.md").artifact_id,{origin:libraryOrigin})'
+            )
+            await tab.wait('selectedArtifact?.name==="saved.md" && '
+                           '!byId("artifact-more").disabled')
+            assert await tab.js(
+                '!byId("artifact-more").hidden && !byId("inspector-tabs").hidden && '
+                '!document.querySelector(".preview-source").hidden && '
+                '!document.querySelector(".preview-tags-section").hidden'
+            )
+            await tab.click("#artifact-close")
+            await tab.wait('document.activeElement===libraryOrigin')
+            # Closing a pending preview must discard its late response.
+            await tab.js(
+                'window.previewFetch=fetch;window.previewRelease=null;'
+                'window.fetch=(input,options)=>String(input).includes("attachments/content?") && '
+                'String(input).includes("view=info") ? '
+                'new Promise(resolve=>{previewRelease=()=>'
+                'resolve(previewFetch(input,options));}) : '
+                'previewFetch(input,options)'
+            )
+            await tab.click('.message-attachments button[aria-label="Preview device.txt"]')
+            await tab.wait('Boolean(previewRelease)')
+            await tab.click("#artifact-close")
+            await tab.js('previewRelease();fetch=previewFetch')
+            await asyncio.sleep(.2)
+            assert await tab.js('!byId("artifact-detail").open && '
+                                '!byId("artifact-preview").children.length')
             # Preparing another file during a reply leaves Cancel available and
             # waits for an idle turn rather than losing attachments in the queue.
             await tab.send("Wait")
@@ -268,6 +361,9 @@ async def verify(host, root, chrome, fixture):
                               "library_picker_artwork": True,
                               "responsive_source_icons": True,
                               "sent_cards_reload": True,
+                              "sent_attachment_previews": True, "sent_downloads": True,
+                              "preview_keyboard_and_focus": True,
+                              "closed_preview_discards_late_response": True,
                               "active_reply": True, "logout_cleanup": True,
                               "console_errors": len(tab.errors), "viewports": sizes,
                               "screenshots": str(output)}, indent=2))
@@ -303,7 +399,11 @@ def main():
         for index in range(22):
             name = f"other-{index}.py" if index == 21 else f"other-{index}.md"
             library.artifacts.import_bytes(b"Other file", "document", name)
-        library.artifacts.import_bytes(b"library-private-82", "document", "saved.md")
+        library.artifacts.import_bytes(
+            b"# File review\n\n**library-private-82**\n"
+            b"<script>window.sentAttachmentUnsafe=true</script>",
+            "document", "saved.md",
+        )
         (root / "device.txt").write_text("device-private-47")
         (root / "unsupported.exe").write_bytes(b"MZ\0bad")
         from PIL import Image, ImageDraw

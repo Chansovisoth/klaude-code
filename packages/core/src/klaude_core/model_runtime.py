@@ -650,7 +650,7 @@ class OpenAIRuntime(_CancelableResponseRuntime):
     def _input(
         cls, messages: list[dict[str, Any]], *, include_images: bool = False,
     ) -> list[dict[str, Any]]:
-        from .image_content import image_parts
+        from .image_content import MAX_IMAGES, image_parts
 
         count = 0
         # Responses function calls are a protocol pair. History compaction,
@@ -673,8 +673,8 @@ class OpenAIRuntime(_CancelableResponseRuntime):
         for message in messages:
             parts = image_parts(message) if include_images else []
             count += len(parts)
-            if count > 2:
-                raise ValueError("Model requests accept at most two images")
+            if count > MAX_IMAGES:
+                raise ValueError(f"Model requests accept at most {MAX_IMAGES} images")
             role = message.get("role")
             provider_items = cls._provider_input_items(message)
             has_provider_assistant_items = any(
@@ -1068,7 +1068,7 @@ def chat_completion_messages(
     deepseek_scope: tuple[str, str] | None = None,
     include_images: bool = False,
 ) -> list[dict[str, Any]]:
-    from .image_content import image_parts
+    from .image_content import MAX_IMAGES, image_parts
 
     image_count = 0
     call_ids = {
@@ -1088,8 +1088,8 @@ def chat_completion_messages(
     for message in messages:
         parts = image_parts(message) if include_images else []
         image_count += len(parts)
-        if image_count > 2:
-            raise ValueError("Model requests accept at most two images")
+        if image_count > MAX_IMAGES:
+            raise ValueError(f"Model requests accept at most {MAX_IMAGES} images")
         role = str(message.get("role", ""))
         if role == "tool":
             call_id = str(message.get("tool_call_id", ""))

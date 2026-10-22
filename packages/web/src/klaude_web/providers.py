@@ -1129,7 +1129,7 @@ def classify_ambiguity(query: str) -> AmbiguityClassification:
     ):
         return AmbiguityClassification(
             AmbiguityType.SHORT_ENTITY_NAME,
-            subject=subject,
+            subject=cleaned if relationship == "definition" else subject,
             local_intent=local_intent,
             relationship=relationship,
         )
@@ -1522,7 +1522,7 @@ def search_cache_key(cfg: Config, query: SearchQuery) -> str:
         "exclude_domains": sorted(query.exclude_domains),
         "limit": query.result_limit,
     }
-    return "search_v8::" + json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return "search_v9::" + json.dumps(payload, sort_keys=True, ensure_ascii=False)
 
 
 def _retry_after_seconds(value: str | None, now: Callable[[], datetime]) -> float | None:
@@ -3205,6 +3205,16 @@ def provider_query_variants(query: SearchQuery, max_queries: int = 6) -> list[st
         add('"Rhett McLaughlin" "Link Neal"')
         add("site:mythical.com Rhett Link about")
         add("site:youtube.com/@rhettandlink Rhett Link")
+        return variants[: min(max_queries, max(1, limit))]
+    ambiguity = classify_ambiguity(semantic_text)
+    if (
+        query.ambiguity_type == AmbiguityType.SHORT_ENTITY_NAME
+        and ambiguity.relationship == "definition"
+    ):
+        # A short proper name is not an acronym. Keep the complete subject;
+        # acronym rewrites otherwise spend the bounded provider attempts on
+        # the meaning of the first word instead of the requested entity.
+        add(query.text)
         return variants[: min(max_queries, max(1, limit))]
     if query.intent == SearchIntent.EXACT_ENTITY and query.location_country_name:
         entity = clean_search_query(semantic_text)

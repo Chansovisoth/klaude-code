@@ -24,7 +24,11 @@ Attachment queueing and steering are not implemented in this slice.
 
 Supported inputs and bounds:
 
-- Four files per message, including at most two images, within 32 MiB total.
+- Four files per message, all of which may be images, within 32 MiB total.
+  The shared private-reference, request-projection and provider serializers also
+  accept up to four images, including restored/follow-up requests. This replaces
+  the original two-image cap; existing image preparation and provider byte/token
+  budgets remain enforced. Running Python hosts must restart to load the change.
 - UTF-8 text/code: at most 1 MiB of source bytes, 32,000 extracted characters per
   file and 64,000 across the message. Truncation is visible in the picker and in
   model context. Binary and empty inputs receive an actionable rejection.
@@ -217,3 +221,71 @@ exceptions. Existing device/Library attachment, thumbnail, reload and cleanup
 checks also passed. JavaScript syntax, scoped Ruff and `git diff --check` passed.
 Screenshots: `/tmp/klaude-attachments-preview/library-picker-{1440,390,320}.png`.
 Refresh the page to load these static asset changes.
+
+## Sent attachment previews
+
+Added 2026-10-22. Sent file cards are keyboard-accessible buttons that open the
+existing Library image/file preview dialog. Image zoom, fit, mobile details,
+safe Markdown/source rendering and Copy reuse the current viewer. Chat previews
+show Sent metadata and original Download, with Library editing and previous/next
+file navigation hidden. Closing restores focus to the attachment card; session
+changes close the preview, and late responses cannot reopen it.
+
+Admission now atomically captures original attachment bytes and SHA-256 checksums
+in the private `attachment_contents` dialogue column, separately from
+`model_content`. The existing four-file/32 MiB aggregate bound applies; base64
+encoding adds storage overhead. Forks retain originals, and session deletion
+removes them with the dialogue. Public snapshots, exports, replay and search
+continue to expose descriptors rather than private bytes. Library selections
+retain their original artifact identity and do not create another Library import.
+This copy supports preview/download after the Library original is removed; model
+image follow-up references retain their existing Library availability semantics.
+
+The authenticated `/api/v1/chat/attachments/content` read validates the exact
+current session, stored user message and attachment index. Two concurrent reads
+are allowed. It checks stored size before loading, verifies checksums, returns
+no-store responses, and rechecks authority before delivery. Image presentation
+uses the existing disposable, metadata-free bounded decoder. PDF/DOCX use the
+existing bounded extraction subprocess; the preview explains that downloading
+preserves the document layout. Downloads preserve original bytes and use an
+attachment disposition. Uploaded HTML executes neither scripts nor remote images.
+
+Older messages did not retain all originals. Available Library files can still
+be read; old device images can show their retained thumbnail with a clear notice.
+Other older device files explain that the original must be attached again.
+
+Validation:
+
+- `tests/unit/test_sent_attachment_previews.py`: **4 passed**, covering real
+  image/text/DOCX previews and exact downloads, metadata removal, no public content
+  leakage, denied `model_content` access, exact scope/authentication, legacy
+  fallback, corrupted checksums, reopen/fork/deletion, and logout or message
+  deletion during image decoding.
+- Final attachment, Memory and sent-preview regressions: **52 passed in 38.24s**,
+  including the four preview tests above. This is a focused suite.
+- The real Chrome attachment smoke passed sent image/text/Markdown/PDF previews,
+  original downloads, safe rendering, keyboard activation, zoom, focus restoration,
+  reload, stale-response dismissal, restoration of Library editing controls after
+  chat previews, and existing device/Library send behavior.
+  Previews fit at 1440, 390 and 320px; the existing attachment flow also covers
+  768px. No JavaScript exceptions occurred. Screenshots are in
+  `/tmp/klaude-attachments-preview/`.
+- The full Context panel smoke passed its existing Library preview, drag/attach,
+  session isolation and 24 responsive layouts with zero JavaScript exceptions.
+- A separate real Chrome check exercised List/Grid/Gallery controls in the main
+  Library and Context panel across light/dark themes and 1440/768/390/320px:
+  **48 layouts passed**, with visible gaps, consistent 12px radii, one selected
+  view and no horizontal overflow. Screenshots are in
+  `/tmp/klaude-view-controls-preview/`.
+- Focused Ruff, four-file production mypy, JavaScript syntax, both static asset
+  bundle checks and `git diff --check` passed.
+
+This does not certify physical mobile devices, live-model behavior or the full
+repository suite. A running Python host must reload to advertise
+`attachment_content`; the UI explains missing backend support on older hosts.
+
+The idle managed host was gracefully reloaded with its exact selected session,
+model, workspace and listeners. Public dialogue and account/preference files were
+compared across reload and remained unchanged. The live snapshot now advertises
+`attachment_content`. Reload the page; signing in again may be necessary because
+the managed shutdown revokes browser cookies.

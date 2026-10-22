@@ -366,8 +366,8 @@ def test_search_cache_key_changes_when_exa_configuration_changes(monkeypatch):
     first = search_cache_key(without_exa, build_search_query("what is AIS", without_exa, 12))
     second = search_cache_key(with_exa, build_search_query("what is AIS", with_exa, 12))
 
-    assert first.startswith("search_v8::")
-    assert second.startswith("search_v8::")
+    assert first.startswith("search_v9::")
+    assert second.startswith("search_v9::")
     assert first != second
     assert "secret-exa-key" not in second
 
@@ -648,6 +648,20 @@ def test_ambiguous_query_variants_are_bounded_and_location_aware():
         "AIS Cambodia",
         "AIS school Cambodia",
     ]
+
+
+@pytest.mark.parametrize("name", ["Ada Lane Wu", "Jordan Lee", "Asteron Labs", "Mira"])
+@pytest.mark.parametrize("local_context", [False, True])
+def test_named_entity_search_does_not_rewrite_names_as_acronyms(name, local_context):
+    cfg = _cfg_with_cambodia_location() if local_context else Config()
+    query = build_search_query(name, cfg, 8)
+    plan = build_search_plan(name, cfg, 8)
+
+    assert query.intent == SearchIntent.EXACT_ENTITY
+    assert provider_query_variants(query, max_queries=1) == [name]
+    assert plan.primary_query == name
+    assert plan.target_entity == name
+    assert not any("stand for" in variant for variant in plan.related_queries)
 
 
 def test_local_school_plan_uses_bounded_location_enriched_queries():

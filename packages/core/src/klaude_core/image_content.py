@@ -6,6 +6,7 @@ import base64
 from typing import Any
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_IMAGES = 4
 ANTHROPIC_IMAGE_BYTES = 7_500_000  # At most 10 MB after base64 encoding.
 IMAGE_BACKENDS = frozenset({
     "ollama", "openai_compatible", "anthropic", "openrouter", "openai_api", "gemini_api",
@@ -32,8 +33,8 @@ def image_parts(message: dict[str, Any], *, max_bytes: int = MAX_IMAGE_BYTES) ->
     value = message.get("image_content")
     if value is None:
         return []
-    if not isinstance(value, list) or len(value) > 2 or message.get("role") != "user":
-        raise ValueError("Image input requires a user message with at most two images")
+    if not isinstance(value, list) or len(value) > MAX_IMAGES or message.get("role") != "user":
+        raise ValueError(f"Image input requires a user message with at most {MAX_IMAGES} images")
     result = []
     for part in value:
         if (

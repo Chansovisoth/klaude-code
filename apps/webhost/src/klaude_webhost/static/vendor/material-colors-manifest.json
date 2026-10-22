@@ -1,0 +1,13 @@
+{
+  "package": "@material/material-color-utilities",
+  "version": "0.4.0",
+  "license": "Apache-2.0",
+  "source": "https://github.com/material-foundation/material-color-utilities",
+  "npm_integrity": "sha512-dlq6VExJReb8dhjj3a/yTigr3ncNwoFmL5Iy2ENtbDX03EmNeOEdZ+vsaGrj7RTuO+mB7L58II4LCsl4NpM8uw==",
+  "bundler": "esbuild 0.28.2",
+  "entry": "scripts/material_color_entry.js",
+  "assets": {
+    "material-colors.js": "978645859bf9454994034fe73ef29f9a4a7c11a43cb15beec3e271aa7f61c213",
+    "material-colors-LICENSE.txt": "8ded460ad5bd3ab9082eaa2f7502cc9bb621eaff87cecc55d823f21758707cea"
+  }
+}

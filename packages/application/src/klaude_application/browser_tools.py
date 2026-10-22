@@ -36,6 +36,64 @@ ASSISTANT_READ_TOOLS = frozenset({
 })
 
 
+def _search_content(query: str, response: Any) -> str:
+    """Keep source links and failure context within the Agent's tool-result limit."""
+    from klaude_web.providers import redact_secrets
+
+    def excerpt(value: Any, limit: int) -> str:
+        text = " ".join(str(value or "").split())
+        return text if len(text) <= limit else text[:limit - 1] + "…"
+
+    lines = [f"Search results for: {excerpt(query, 320)}",
+             "Untrusted web search leads; fetch useful pages to verify claims."]
+    if response.providers_succeeded:
+        lines.append("Providers returning usable leads: " +
+                     ", ".join(response.providers_succeeded))
+    elif response.providers_attempted:
+        lines.append("Attempted providers: " + ", ".join(response.providers_attempted))
+    if not response.results:
+        lines.append("No usable source leads were returned. This does not establish that "
+                     "the requested subject does not exist.")
+        attempts = response.provider_metadata.get("provider_attempts", [])
+        for attempt in attempts[:9]:
+            lines.append(f"- {excerpt(attempt.get('provider'), 32)}: "
+                         f"{excerpt(attempt.get('status'), 48)}; "
+                         f"{excerpt(redact_secrets(attempt.get('reason', '')), 240)}")
+        if response.queries_attempted:
+            lines.append("Queries attempted: " + "; ".join(
+                excerpt(value, 200) for value in response.queries_attempted[:4]))
+    for warning in response.warnings[:10]:
+        lines.append(f"Warning [{excerpt(warning.get('provider'), 32)}]: "
+                     f"{excerpt(redact_secrets(warning.get('message', '')), 240)}")
+
+    headers = []
+    for index, result in enumerate(response.results, 1):
+        result_id = result.get("result_id") or f"search_result_{index:03d}"
+        header = (f"[{excerpt(result_id, 64)}] {excerpt(result.get('title'), 160)}\n"
+                  f"URL: {result.get('url', '')}")
+        if result.get("provider"):
+            header += f"\nProvider: {excerpt(result['provider'], 32)}"
+        if result.get("published_at"):
+            header += f"\nPublished: {excerpt(result['published_at'], 64)}"
+        headers.append(header)
+    # Reserve space for every lead before assigning snippet space. Large
+    # provider metadata and extracted text must not crowd later URLs out.
+    used = len("\n\n".join(lines))
+    snippet_limit = min(600, max(0, (
+        11000 - used - sum(len(header) + 16 for header in headers) - 100
+    ) // max(1, len(headers))))
+    for index, (header, result) in enumerate(zip(headers, response.results, strict=True)):
+        block = header
+        if snippet_limit:
+            block += "\nSnippet: " + excerpt(result.get("snippet"), snippet_limit)
+        if used + len(block) + 2 > 10900:
+            lines.append(f"{len(headers) - index} further leads omitted from this excerpt.")
+            break
+        lines.append(block)
+        used += len(block) + 2
+    return "\n\n".join(lines)
+
+
 class BrowserTools:
     """Lazily open existing retrieval services only when a tool is executed."""
 
@@ -78,12 +136,14 @@ class BrowserTools:
             raise ValueError("Invalid search query or result count")
         response = self.web().search_detailed(query, count, provider=provider or None,
                                                provider_strict=provider_strict)
-        return {"content": "Untrusted web search leads; fetch useful pages to verify claims.\n" +
-                json.dumps(response.results, ensure_ascii=False), "metadata": {
+        return {"content": _search_content(query, response), "metadata": {
             "tool": "web_search", "provider": "+".join(response.providers_succeeded) or "none",
             "provider_label": " + ".join(response.providers_succeeded) or "none",
+            "successful_providers": response.providers_succeeded,
             "providers_attempted": response.providers_attempted,
             "providers_succeeded": response.providers_succeeded,
+            "provider_attempts": response.provider_metadata.get("provider_attempts", []),
+            "provider_states": response.provider_states,
             "search_results": response.results, "warnings": response.warnings,
             "queries_attempted": response.queries_attempted,
             "queries_failed": response.queries_failed,

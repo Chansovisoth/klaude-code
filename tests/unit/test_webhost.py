@@ -2955,13 +2955,31 @@ def test_webhost_markdown_assets_are_local_pinned_and_keep_csp(tmp_path):
         assert source.strip() in app_source
         assert (STATIC / "loading-indicator.js").read_text().strip() in app_source
         html = (STATIC / "index.html").read_text()
-        assert 'src="/loading-indicator.js"' not in html
+        # The early appearance/startup bootstrap deliberately uses the fixed
+        # loading route; geometry and Expressive dependencies stay in app.js.
+        assert html.index('src="/loading-indicator.js"') < html.index('href="/style.css"')
         assert 'src="/vendor/material-loading-shapes.js"' not in html
+        # Settings must initialize through the longstanding management route
+        # even when an older running host cannot serve a new standalone asset.
+        assert 'src="/settings.js"' not in html
+        management = (STATIC / "management.js").read_text()
+        assert management.index("window.SettingsDrafts =") < management.index(
+            "window.BrowserManagement ="
+        )
         shapes = json.loads(source.split("Object.freeze(", 1)[1].rsplit(");", 1)[0])
         assert shapes["names"] == [
             "soft-burst", "cookie-9", "pentagon", "pill", "sunny", "cookie-4", "oval",
         ]
         assert len(shapes["morphs"]) == 7
+        assert set(shapes["shapes"]) == {
+            "circle", "pill", "oval", "diamond", "cookie", "burst", "sunny", "flower", "soft-burst",
+        }
+        colors = json.loads((STATIC / "vendor/material-colors-manifest.json").read_text())
+        assert colors["license"] == "Apache-2.0"
+        for name, digest in colors["assets"].items():
+            assert hashlib.sha256((STATIC / "vendor" / name).read_bytes()).hexdigest() == digest
+        assert (STATIC / "vendor/material-colors.js").read_text().strip() in app_source
+        assert (STATIC / "expressive.js").read_text().strip() in app_source
         for morph in shapes["morphs"]:
             assert len(morph["start"]) == len(morph["end"])
             assert len(morph["start"]) % 6 == 2

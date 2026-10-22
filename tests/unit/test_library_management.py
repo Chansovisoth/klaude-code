@@ -68,6 +68,30 @@ def test_metadata_reads_do_not_start_workers_or_initialize_stores(manager, monke
     assert list(manager.data.iterdir()) == []
 
 
+def test_context_scope_filters_before_paging_and_keeps_original_identity(manager):
+    selected = manager.artifacts.import_bytes(b"Shared text", "document", "selected.txt")
+    unrelated = manager.artifacts.import_bytes(b"Other text", "document", "other.txt")
+    linked = [manager.artifacts.import_bytes(b"Context", "document", f"linked-{i:02}.txt")
+              for i in range(26)]
+    with manager.artifacts.database(write=True) as db:
+        db.executemany("UPDATE artifacts SET session=? WHERE id=?",
+                       [("current", item["id"]) for item in linked])
+    before = manager.listing(kind="all")["total"]
+    pages = [manager.listing(kind="all", session="current", identities=(selected["id"],),
+                             sort="name", offset=offset) for offset in (0, 20)]
+    assert [len(page["items"]) for page in pages] == [20, 7]
+    assert all(page["total"] == 27 for page in pages)
+    ids = {item["id"] for page in pages for item in page["items"]}
+    assert selected["id"] in ids and unrelated["id"] not in ids
+    assert manager.listing(kind="all", session="current", query="other")["total"] == 0
+    assert manager.listing(kind="all", session="current", images_only=True)["total"] == 0
+    assert manager.listing(kind="all")["total"] == before
+    assert manager.artifacts.get(selected["id"]) == selected
+    for identity in ("not-an-id", 3):
+        with pytest.raises(ValueError):
+            manager.listing(kind="all", session="current", identities=(identity,))
+
+
 @pytest.mark.parametrize("count", [45, 125])
 def test_artifact_browser_pages_are_twenty_and_keep_filters_and_cli_batches(manager, count):
     for index in range(count):
@@ -117,6 +141,30 @@ def test_skill_filtering_precedes_paging_and_later_pages_remain_manageable(manag
         key: last[key] for key in ("name", "identity")}, "enabled": False,
         "expected_enabled": True})
     assert "skill-44" in review["summary"]
+
+
+def test_skill_status_and_search_filter_before_counts_and_pagination(manager, monkeypatch):
+    items = [{"name": f"skill-{index:02}", "identity": str(index), "enabled": index % 3 != 0,
+              "description": "review" if index % 2 else "coding", "library": "skills"}
+             for index in range(90)]
+    monkeypatch.setattr(manager, "_installed_skills", lambda: {"items": items, "more": False})
+    for state in ("all", "enabled", "disabled"):
+        for query in ("", "REVIEW"):
+            expected = [item for item in items
+                        if (state == "all" or item["enabled"] == (state == "enabled"))
+                        and (not query or item["description"] == "review")]
+            pages = [manager.skills(query=query, state=state, offset=offset)
+                     for offset in range(0, len(expected), 20)]
+            assert [item for page in pages for item in page["items"]] == expected
+            assert all(page["total"] == page["known_total"] == len(expected) for page in pages)
+            assert all(page["state"] == state for page in pages)
+            assert all(page["more"] for page in pages[:-1]) and not pages[-1]["more"]
+    assert manager.skills(state="disabled", query="missing")["total"] == 0
+    assert manager.skills(state="enabled", offset=100)["items"] == []
+    with pytest.raises(ValueError, match="Skills status"):
+        manager.skills(state="unexpected")
+    # Status filtering is a read projection; confirmed enable state is unchanged.
+    assert sum(item["enabled"] for item in items) == 60
 
 
 def test_knowledge_and_source_inventories_page_twenty_with_exact_last_page(manager):
@@ -283,6 +331,47 @@ def test_reviews_expire_are_owner_bound_and_release_private_snapshots(manager):
     manager.revoke("browser")
     assert not manager._reviews
     assert manager.listing()["items"] == []
+
+
+def test_settled_settings_snapshots_release_capacity_without_deleting_receipts(manager):
+    from klaude_application.browser_settings import read_browser_settings
+    from klaude_core.settings_store import read_settings
+
+    for value in range(1, 19):
+        field = next(item for item in read_browser_settings(manager.cfg)["fields"]
+                     if item["id"] == "runtime_options.max_steps")
+        review = manager.prepare("browser", {"operation": "setting-save", "id": field["id"],
+                                            "value": value, "revision": field["revision"]})
+        token, identity = review["review_id"], uuid.uuid4().hex
+        manager.submit("browser", token, identity)
+        assert _wait(manager, identity)["state"] == "completed"
+        manager.discard("another-browser", token)
+        assert token in manager._reviews
+        manager.discard("browser", token)
+        assert token not in manager._reviews
+        assert manager.status(identity)["state"] == "completed"
+    saved = read_settings(manager.data / "chat-preferences.json")
+    assert saved["runtime_options"]["max_steps"] == 18
+
+
+def test_settings_discard_cannot_cancel_pending_work_or_clear_unknown_fences(manager, monkeypatch):
+    from klaude_application.browser_settings import read_browser_settings
+
+    # Hold the process boundary; the real operation journal still owns admission,
+    # state transitions and the resource fence.
+    monkeypatch.setattr(manager._jobs, "submit", lambda *_args, **_kwargs: None)
+    field = read_browser_settings(manager.cfg)["fields"][0]
+    review = manager.prepare("browser", {"operation": "setting-save", "id": field["id"],
+                                        "value": "UTC", "revision": field["revision"]})
+    token, identity = review["review_id"], uuid.uuid4().hex
+    manager.submit("browser", token, identity)
+    manager.discard("browser", token)
+    assert token in manager._reviews and manager.status(identity)["state"] == "running"
+    with manager._lock:
+        manager._finish(identity, False)
+    manager.discard("browser", token)
+    assert token in manager._reviews and manager.status(identity)["state"] == "unknown"
+    assert manager.journal.fenced_operation(f"setting:{field['id']}") is not None
 
 
 @pytest.mark.parametrize("draft", [

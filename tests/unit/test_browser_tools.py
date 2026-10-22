@@ -9,8 +9,151 @@ import pytest
 from klaude_application.browser_tools import ASSISTANT_READ_TOOLS, BrowserTools
 from klaude_core.config import Config
 from klaude_core.memory import Memory
+from klaude_web.search import SearchResponse
 
 from .test_application_bridge import ScriptedRuntime, _collect, _tool_call
+
+
+@pytest.fixture
+def search_tools(tmp_path, monkeypatch):
+    from klaude_core import config
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    cfg = Config()
+    memory = Memory(cfg.memory_file, cfg.sessions_db)
+    try:
+        yield BrowserTools(cfg, memory)
+    finally:
+        memory.db.close()
+
+
+def test_browser_search_keeps_all_links_when_provider_payloads_are_large(search_tools):
+    results = [{
+        "result_id": f"search_result_{index:03d}", "title": f"Amber widgets {index}",
+        "url": f"https://example.test/widgets/{index}", "provider": "exa",
+        "published_at": "2040-05-06", "snippet": "Useful evidence. " * 4000,
+        "metadata": {"provider_debug": "private-provider-metadata" * 2000},
+    } for index in range(1, 13)]
+    response = SearchResponse(results=results, providers_attempted=["brave", "exa"],
+                              providers_succeeded=["exa"])
+    calls = []
+
+    def search(query, count, **kwargs):
+        calls.append((query, count, kwargs))
+        return response
+
+    search_tools.cfg.web_search.default_results = 12
+    search_tools._web = SimpleNamespace(search_detailed=search)
+    result = search_tools.search("Amber widgets", provider="exa", provider_strict=True)
+
+    assert calls == [("Amber widgets", 12, {"provider": "exa", "provider_strict": True})]
+    assert len(result["content"]) < 11000
+    assert "private-provider-metadata" not in result["content"]
+    assert "fetch useful pages to verify claims" in result["content"]
+    assert "Published: 2040-05-06" in result["content"]
+    for item in results:
+        assert item["result_id"] in result["content"]
+        assert item["url"] in result["content"]
+    assert result["metadata"]["search_results"] is results
+    assert result["metadata"]["successful_providers"] == ["exa"]
+
+
+def test_browser_search_explains_provider_and_filter_failures(search_tools):
+    attempts = [
+        {"provider": "brave", "status": "degraded", "reason": "Provider unavailable"},
+        {"provider": "ddgs", "status": "no_candidate_results",
+         "reason": "returned 8 results; none passed candidate discovery"},
+    ]
+    response = SearchResponse(
+        results=[], providers_attempted=["brave", "ddgs"],
+        queries_attempted=["Ada Lane Wu"],
+        provider_metadata={"provider_attempts": attempts},
+        warnings=[{"provider": "search", "message": "No usable results"}],
+    )
+    search_tools._web = SimpleNamespace(search_detailed=lambda *args, **kwargs: response)
+
+    result = search_tools.search("Ada Lane Wu")
+
+    assert "Provider unavailable" in result["content"]
+    assert "returned 8 results; none passed candidate discovery" in result["content"]
+    assert "Queries attempted: Ada Lane Wu" in result["content"]
+    assert "Warning [search]: No usable results" in result["content"]
+    assert "does not establish" in result["content"]
+    assert result["metadata"]["status"] == "failed"
+    assert result["metadata"]["provider_attempts"] == attempts
+
+
+def test_browser_search_handles_no_available_provider(search_tools):
+    response = SearchResponse(results=[], warnings=[{
+        "provider": "registry", "error_type": "NoAvailableProvider",
+        "message": "no configured, healthy search provider is available",
+    }])
+    search_tools._web = SimpleNamespace(search_detailed=lambda *args, **kwargs: response)
+
+    result = search_tools.search("Amber widgets")
+
+    assert "no configured, healthy search provider is available" in result["content"]
+    assert result["metadata"]["status"] == "failed"
+
+
+def test_browser_agent_can_fetch_a_later_lead_from_large_search_results(tmp_path, monkeypatch):
+    from klaude_core import config
+    from klaude_webhost import main
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "config")
+    cfg = Config(models={"coder": "fixture"})
+    cfg.permissions.update(web_search="allow", fetch_url="allow")
+    url = "https://example.test/widgets/8"
+    response = SearchResponse(results=[{
+        "result_id": f"search_result_{index:03d}", "title": f"Amber widgets {index}",
+        "url": f"https://example.test/widgets/{index}", "provider": "ddgs",
+        "snippet": "Amber widgets source lead. " * 1000,
+    } for index in range(1, 9)], providers_attempted=["ddgs"], providers_succeeded=["ddgs"])
+
+    class Runtime(ScriptedRuntime):
+        def chat(self, model, messages, tools=None, options=None, think=None):
+            if self.calls == 1:
+                content = next(message["content"] for message in reversed(messages)
+                               if message.get("tool_name") == "web_search")
+                assert url in content
+                assert "search_result_008" in content
+                assert "...[truncated]" not in content
+                assert "returned results through ddgs" in content
+            return super().chat(model, messages, tools, options, think)
+
+    runtime = Runtime([
+        _tool_call("web_search", query="Amber widgets"), _tool_call("fetch_url", url=url),
+        {"role": "assistant", "content": f"Amber widgets use exact revisions. Source: {url}"},
+    ])
+    monkeypatch.setattr(main, "load_config", lambda: cfg)
+    monkeypatch.setattr(main, "OllamaRuntime", lambda _: runtime)
+    app = main.create_application(tmp_path)
+    fetched = []
+
+    def fetch(url):
+        fetched.append(url)
+        return {"status": "succeeded", "source_id": "src_001", "final_url": url,
+                "title": "Amber widgets", "content": "Amber widgets use exact revisions."}
+
+    app.agent.browser_tools._web = SimpleNamespace(
+        search_detailed=lambda *args, **kwargs: response, fetch_detailed=fetch,
+        cache=SimpleNamespace(db=None),
+    )
+
+    async def exercise():
+        try:
+            handle = app.submit("Search the web for Amber widgets and read a useful source.")
+            events = await asyncio.wait_for(_collect(handle), timeout=10)
+            assert (await handle.result()).state == "completed"
+            assert fetched == [url]
+            assert [event.tool for event in events if event.kind == "tool.finished"
+                    and event.executed] == ["web_search", "fetch_url"]
+            assert "Amber widgets use exact revisions" in app.agent.messages[-1]["content"]
+        finally:
+            await app.close()
+
+    asyncio.run(exercise())
 
 
 def test_browser_has_fresh_clock_tool_and_refreshes_timezone_each_turn(tmp_path, monkeypatch):
