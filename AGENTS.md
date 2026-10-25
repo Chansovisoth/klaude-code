@@ -128,6 +128,38 @@ Workspace layout:
 - `apps/cli`: Typer commands, Rich terminal rendering, deterministic command
   reference/help, chat loop wiring, tool display formatting, docs/session/memory
   CLI commands.
+- Settings > Agents > Web search provides question-mark help buttons for Search
+  provider, Tavily search depth and SearXNG URL; click, touch or keyboard
+  activation opens the existing help in a native dialog with a single OK button.
+  Escape dismisses the dialog and focus returns to its Help button. The same
+  help is available for all Web pages and Research budgets settings, plus
+  Execution limits. Search results
+  has no help button.
+- WebUI bundles Noto Sans Khmer locally as the Khmer fallback for UI, chat,
+  readers and code, retaining the existing Latin fonts and offline font delivery.
+- Assistant Markdown supports inline/display LaTeX with `$…$`, `$$…$$`,
+  `\(…\)` and `\[…\]`, using bundled KaTeX 0.19.1 and native MathML.
+  Code fences offer Copy and Download with language-derived extensions and optional
+  `filename=…` names; HTML/SVG fences also offer Preview. The native viewer loads
+  an owner-authenticated, short-lived passive document in an opaque sandbox with
+  scripts, navigation and external resources blocked. Original downloads retain
+  the exact displayed source. Markdown images offer Preview/Download; local and
+  embedded raster images have inline thumbnails, while external images load only
+  on explicit preview/download. Browser downloads are bounded and respect CORS;
+  blocked sources retain their original link with visible save guidance. Common
+  file links have Download and supported image/HTML/SVG Preview actions. Valid
+  base64 raster fences download decoded image bytes. Preview/download work never
+  claims chat control or imports Library files. Sign-out/session changes discard
+  late results and clear private viewers. See `docs/webui/chat-output-validation.md`.
+- Chat code coloring bundles Prism 1.30.0 with over 75 language grammars, including
+  C/C++, C#, Python, GDScript, Java, HTML/XML/SVG, CSS, JavaScript/TypeScript and
+  JSX/TSX. Common extension aliases, filename fences, case-insensitive names and
+  `language-`/`lang-` prefixes are recognized. `jar` is a Java-source fence alias;
+  binary JAR archives are not treated as text. JSX/PHP tokenize hooks restore
+  embedded-language tokens before the existing bounded DOM-only span renderer.
+  Vendor refresh resolves required, selected optional and modified grammar order
+  from Prism's pinned metadata; its local manifest records all 80 components and
+  bundle hashes. Unknown languages and oversized blocks retain literal source.
 - `apps/webhost`: experimental `klaude-webui` loopback launcher, persistent local
   admin account, owner cookie/CSRF/Origin checks, public snapshot/SSE replay and a
   minimal chat and workspace page. Its shared Agent begins with only
@@ -149,7 +181,76 @@ Workspace layout:
   adapter efforts; native boolean Thinking retains medium. Configured local/cloud
   choices share typed revisioned runtime controls, and exact saved-runtime resume
   checks definition/credential revisions without catalog or generation calls.
-  Model definitions/default roles and Model Manager remain separate work.
+  Model selection remains separate from connection definitions and default roles.
+  Browser snapshots declare Model Store, live catalog, Model settings and Image studio capabilities. Updated
+  assets served by an older host show restart/reload guidance, keep Connections
+  available and avoid unsupported endpoint polling or endless loading states.
+  Models now includes a Model Store with Discover, Categories, Installed,
+  Downloads and retained configured Connections. Discovery defaults to a dated,
+  bundled three-family/four-variant collection with official sources. An explicit
+  Hugging Face GGUF source uses bounded public Hub APIs, real repository download
+  counts/recent updates and exact single-file GGUF variants supported by Ollama.
+  Charts describes Hub downloads, never Ollama usage. Metadata has a one-hour,
+  timestamped private cache with visible stale/offline fallback. Split/projector
+  files are excluded; unknown capabilities, size, license and device fit stay
+  unknown. No model weights are fetched while browsing. Installed inventory uses
+  the existing native Ollama manager and a revision-scoped, timestamped private
+  offline cache. Installed uses the shared numbered pagination and chevrons.
+  Signed-in administrators on local or LAN browsers can review exact native-endpoint pulls
+  and protected deletion through the existing operation journal and owned worker.
+  Downloads retain real file progress, durable targets and uncertain outcomes;
+  Check outcome verifies the exact endpoint and private target witness without
+  resubmitting. Cancellation stops the owned request and keeps an unconfirmed
+  fence until the requested inventory is witnessed. Model mutations are gated
+  against hosted conversations and browser profile operations. Account role,
+  rather than listener address, authorizes model management. Downloads never
+  select a chat/default model.
+  Generated's Create image tab now contains a roomy Image studio with an explicit
+  saved-service capability check, supported aspect-ratio presets, pixel dimensions
+  and a native Advanced disclosure for width, height, steps and seed. It retains
+  the existing generation review, receipts, cancellation, output recovery and
+  Library storage. Generate again reuses at most twenty in-memory browser drafts;
+  after reload, Generate another starts from the current draft without exposing
+  historical private prompts. Sign-out clears these drafts. Ollama image output
+  remains unavailable; the verified consumer is stable-diffusion.cpp.
+  Settings → Models keeps staged Apply/Discard for default roles and fallbacks,
+  using a searchable native model picker with role-capability labels and shared
+  numbered pagination. Enabled Vision requires a primary model. Image service
+  Test reads capabilities independently of saving or generation and retains the
+  result through background settings refreshes.
+  Signed-in administrators can add disabled connections, edit routing/name/URL,
+  explicitly choose saved-key authentication, test, enable/disable, remove and
+  replace/remove write-only credentials. New local Ollama connections need no key
+  unless authentication is selected. Interactive Codex login and arbitrary env
+  variables remain terminal-only. Existing current-connection/shared-key and
+  default-role protections apply. Connection changes use the shared definition
+  service and fixed worker, with exact review revisions and witnessed journal
+  effects. Unknown acknowledgements remain fenced until Check saved state
+  compares exact local configuration/credential state without provider requests
+  or replay. Secrets never enter public responses or plaintext journal records.
+  Evidence: `docs/webui/model_store/implementation-validation.md` and
+  `docs/webui/model_store/completion-validation.md`.
+  AI creator/model/platform icons use a centralized JSON registry in
+  static/icons/ai/registry.json, bundled by scripts/bundle_ai_icons.py into
+  ai-icons.js. LobeHub, Simple Icons and pinned first-party vectors are sanitized,
+  licensed and hashed in the packaged manifest. Family icons precede creator
+  icons; unknown or conflicting identities use the generic model icon. Runtime
+  and API identity never substitutes for a model creator: Ollama/OpenRouter
+  appear separately in the picker and Models catalog. Chat and AI Review use
+  theme-colored masks; catalog marks use verified color variants when available.
+  Native options remain text-only. The manifest explicitly allowlists served
+  SVG names; unrelated files in static/icons are not published. Provider/family
+  additions change registry data rather than selector rendering. Verified icon
+  gaps and extension instructions live in docs/webui/ai-model-icons.md.
+  Chat Model and Thinking use filled XS split controls with 32px faces and
+  extended 44px hit areas. Either Model half opens the existing model picker;
+  Thinking's main action toggles its mode and its trailing selector owns effort.
+  Thinking is hidden when the current runtime declares no non-off effort.
+  Plan also uses an XS 32px face. Thinking and Plan share a tonal off state
+  and filled primary on state, including both halves of Thinking.
+  These controls preserve idle/queue fencing, revision checks and private model
+  selection. Their top-layer selectors escape chat/sidebar clipping, track the
+  visual viewport and support outside dismissal and Escape focus return.
   Loopback clients may explicitly
   activate file edits only after the
   existing clean-worktree/branch check; `write_file` and `edit_file` then use
@@ -208,9 +309,17 @@ Workspace layout:
   when switching; Library URLs remain authoritative for reload/back/forward.
   Generated empty states render in the content area below its toolbar, with an
   accessible status message and no empty list column header.
-  Generated shares Uploads' Type, Status and Sort controls: inline above the
-  existing 650px content breakpoint, expandable below it. Its 48px plus button
-  sits to the right of the toolbar controls and opens
+  Page-level collection empty states fill the remaining vertical content area
+  and center their icon/text group. Shared flex/grid rules account for controls
+  and footnotes without fixed heights; populated inventories retain their normal
+  layouts, and short viewports can scroll rather than clip the empty message.
+  Generated shares Uploads' always-visible Type, Status and Sort dropdown chips
+  below Search; there is no expandable Filters button. The shared adapter uses
+  the existing filter-chip face and native popover menus, with radio-menu choices,
+  selected checks, arrow/Home/End/typeahead navigation, Escape focus restoration
+  and outside dismissal. Native selects remain the internal value/change seam
+  and the visible fallback if popovers are unavailable. Its 48px plus button
+  sits to the right of Search and opens
   a native Create dialog with Image and Research tabs. Each tab contains its
   existing form and job history below it, preserving drafts when switching tabs
   and retaining explicit generation/Research reviews. Tabs support arrow and
@@ -226,7 +335,8 @@ Workspace layout:
   native dialog style, with no type selector. The existing import review remains
   required; closing an in-flight import discards its late review. Compact Uploads
   toolbars use 48px search/action/view controls, with type/status/all sort directions
-  in the expandable Filters and sort panel. Below the existing 650px content
+  in a single horizontally scrolling row of dropdown chips underneath Search,
+  with its scrollbar hidden. Below the existing 650px content
   breakpoint, list column headers disappear and two-line file rows are 70px tall;
   desktop keeps sortable columns. List loading uses matching row placeholders.
   Explicit document/media API drafts remain compatible. Old saved tab
@@ -256,10 +366,13 @@ Workspace layout:
   responses retain their 8 MiB, 4-megapixel and 4096px-side limits. Evidence:
   `docs/webui/webp-preview-validation.md`.
   Uploads now offers List, Grid and Gallery with compact shared type icons and
-  image thumbnails. Gallery filters supported PNG/JPEG/WebP/GIF before paging;
+  image thumbnails. Library images disable native image dragging to prevent
+  accidental reimports; Context Panel rows retain their explicit attachment drag.
+  Gallery filters supported PNG/JPEG/WebP/GIF before paging;
   date sorts group by month added. The store has no directory tree, modification
-  times or capture dates: breadcrumbs show Library → Uploads or Library → Generated,
-  with type/status controlled separately, and dates are labeled Added.
+  times or capture dates; type/status are controlled separately and dates are
+  labeled Added. List/Grid/Gallery controls share the heading action row directly
+  before Refresh; the redundant Library breadcrumb is omitted.
   These are application sections, independent of the selected workspace's folders.
   View choice uses the existing sessionStorage
   navigation seam; allowlisted Library URL state owns filters/search/sort/page
@@ -269,33 +382,71 @@ Workspace layout:
   and collapsible details sidebar, or a fullscreen phone/tablet stage with a
   closed/partial/full details sheet. Existing tonal roles, Roboto, local SVG icons,
   expressive radii and motion remain authoritative. Image and file previews have
-  one Close cross at the top right; File options lives beside the Details title,
-  with no duplicate details Close button. Compact controls offer
+  one Close cross at the top right; the inspector header places its sidebar
+  toggle immediately before File options. Hiding the inspector expands the image;
+  sidebar actions stay in the inspector; a Details button below the picture
+  reopens it when collapsed.
+  There is no separate Expand image preview button or duplicate details Close button. Compact controls offer
   download, fit and 1–8x zoom relative to fit; the derivative remains bounded to
   2048px. Pointer pinch/pan, double-tap and fit-only swipe navigation complement
   keyboard zoom/pan/previous/next. Details gestures never navigate the image.
   Escape dismisses a menu/sheet before the viewer; closing restores Uploads focus
   and scroll. Metadata reports only filename, MIME, size, dimensions and Added.
+  Inspector Details/AI Review use md3.io primary-tabs CSS and the upstream
+  animated indicator, bridged to existing theme roles and native tab state.
+  Tabs have 48px targets, 14px labels and a rounded 3px label-width indicator;
+  keyboard selection, disabled AI Review and tab-local drafts/scroll persist.
+  AI Review has a centered
+  introduction, ghost tag action and a filled split Review button. Its three-dot
+  action opens a native context/output-token dialog. Its empty
+  question field retains the existing default prompt on submission.
+  Beneath the introduction, a live summary shows the selected model and requested
+  context/output token limits. Review settings can use the global Vision role or
+  an explicit model for the current conversation only. Temporary choices stay in
+  browser memory by session ID, survive switching image previews, and clear on
+  sign-out/reload; global model defaults are never written. The catalog marks
+  unknown image capabilities, and the worker still checks fresh capabilities,
+  enabled Vision, exact model/connection/credential revisions and image identity.
+  A temporary model has no implicit global fallback chain; selecting the Settings
+  default restores that role's configured model and ordered fallbacks.
+  Review settings has Reset default on the bottom left, alongside Done on the
+  right. Reset clears the conversation's temporary model and restores the
+  4096-context/512-output token defaults without writing global settings.
   The inspector has Details and AI Review tabs, with keyboard arrows/Home/End,
   separate remembered scroll positions and preserved form drafts. Details owns
   compact metadata (separate file type and MIME rows), source links, tags and
   existing Learn controls. AI Review is available for current saved images and
   shows the latest analysis, exact model-reference disclosure, creation/expiry
   metadata, Copy/Expand actions, latest tag suggestions and the question form.
-  Context/output token controls live in collapsed Advanced; budgets and prompts
+  Context/output token controls live in the Review settings dialog; budgets and prompts
   retain their existing semantics. Analysis uses the shared allowlisted Markdown
   renderer, including literal HTML and safe links, without additional truncation.
   Expand opens a native full-review reader; Copy preserves the complete stored
   Markdown through the existing secure/HTTP clipboard paths. AI Review has an
   expressive empty state, full-width Review image action and an explicitly named
-  Generate tag suggestions action. Actual suggestions use wrapping multi-select
-  filter chips with selected counts, Clear selection and Save N tags. Existing
+  Generate tag suggestions action. While reviewing, the empty-state layout shows
+  the configured generating indicator and Generating review; the primary action
+  becomes Cancel review through the existing cancellation endpoint.
+  Fetching saved AI Review data reuses that centered layout with Loading AI
+  Review… and the normal 48px circular loading indicator. The old inline loading
+  row is omitted, and review inputs remain busy until the read succeeds or fails.
+  Tag generation uses the same introduction with Generating tag suggestions
+  and a Cancel tag suggestions action. Suggested chips appear immediately below
+  Generate new tag suggestions and share Details' 32px height, padding and gaps;
+  result metadata follows the tag-selection controls.
+  Previous results remain stored for failure/cancellation. Clear beside Copy/Read full
+  review removes local analysis results through the exact displayed review,
+  retaining newer work, tag suggestions and the image itself. Clearing is an
+  authenticated, Origin/CSRF-protected, idempotent private-result operation.
+  Actual suggestions use wrapping multi-select
+  filter chips and right-aligned Clear/Save actions. Clear deselects draft
+  suggestions; Save retains selected-tag counts in its accessible label. Existing
   manual/AI tags are excluded case-insensitively; choices stay in memory through
-  cancelled/rejected saves and require a separate reviewed save. Review image
-  and Suggest image tags confirmations use action-specific text titles, filename,
-  visible provider/cost notices and collapsed Technical details containing the
-  exact server-reviewed model order, budgets, capability checks and continuation
-  behavior. Suggestions are never automatically stored. Pending/failed requests keep the previous
+  cancelled/rejected saves and require a separate reviewed save. Generate tag
+  suggestions and Review image start directly on click without a confirmation
+  dialog. Both retain the validated model snapshot, budgets, capability checks,
+  continuation behavior and durable request tracking. Suggestions are never
+  automatically stored. Pending/failed requests keep the previous
   review available until expiry; the open inspector/tab returns after reviews.
   The UI retains only the current image's cached results in memory, checks the
   existing 24-hour retention and clears private content on sign-out. There is no
@@ -313,17 +464,38 @@ Workspace layout:
   and complete-file Download. Legacy terminal lines keep their existing limits;
   older hosts retain that normalized fallback until restart. Empty files preview
   without error. Evidence: `docs/webui/file-preview-refinement.md`.
-  Manual/AI tags use wrapping chips and Show more. Details offers an inline
+  Manual/AI tags use wrapping Material input chips and Show more. They reuse the
+  shared 32px chip face, 8px corners and 14px labels; removable manual chips keep
+  a 48px-high native close target in edit mode. AI and manual tags use identical
+  colors and chip styling while retaining their stored provenance. AI Review's
+  selectable tags and suggested-tag actions use the shared filter-chip button;
+  selected AI Review chips use the shared secondary-container roles.
+  Edit tags offers the same remove control for manual and AI chips. AI removals
+  remain local drafts until Save tags submits directly without a confirmation dialog; Cancel restores
+  them. The tags operation accepts a bounded, exact `remove_ai_tags` list alongside
+  manual values and applies both in one revision-checked transaction, pruning
+  only the removed tags' provenance. Remaining AI tags retain their origin and
+  provenance. Old hosts without `library_ai_tag_edit` keep the draft and show
+  explicit restart guidance rather than saving an incomplete change.
+  Escape cancels tag editing, restores the saved tags and focuses Edit tags
+  while keeping the preview and details sheet open, matching source editing.
+  Details offers an inline
   manual-tag draft with removable chips, Enter/+ additions, case-insensitive
   duplicates and whitespace normalization, retaining its 20-tag/40-character
-  bounds and explicit reviewed Save tags. Opening it never runs inference;
+  bounds and explicit Save tags with no confirmation dialog. Opening it never runs inference;
   available backend suggestions add only to the draft. Source has compact
   Add/Edit/Remove actions, safe external links with visual URL truncation and an
-  inline HTTP(S) editor. Both editors preserve drafts on failure, restore saved
-  values on Cancel and update stored values only after confirmed backend success.
-  Optional links use an additive private
-  artifact_links table, HTTP(S)-only validation and the existing fixed reviewed,
-  revision-checked worker. Old stores stay read-only on browse; links are never
+  inline text editor for source notes or URLs. Add/Edit opens the source text in place; input
+  saves on blur or Ctrl/Cmd+Enter without Save/Cancel controls, status copy or a review
+  dialog. Enter adds a line; Escape restores the prior value. Notes and multiple
+  safe HTTP(S) sources can share the text, and a committed blur save continues
+  if the viewer closes.
+  Source text uses the existing private artifact_links table, a 2048-character bound, control-character
+  validation and the existing fixed, revision-checked worker. Shared Library
+  inventory search also matches source notes and links as literal substrings,
+  before pagination/counting, including the Context Panel's existing scope.
+  Old stores stay
+  read-only on browse; links are never
   fetched and private origin paths remain excluded. Archive/Restore and Delete
   live in the Details heading's native popover using the chat menu's styling/keyboard
   convention. Saved and archived files both offer a Cancel-focused permanent
@@ -334,12 +506,29 @@ Workspace layout:
   Library image derivatives use only authenticated typed IDs and exact revisions,
   bounded checksummed SQLite blob reads and the existing disposable decoder.
   Thumbnails fit 320px; expanded previews fit 2048px and existing delivery bounds.
-  Animated sources show frame zero. Originals remain unchanged. The private
+  Image search sits immediately before Download. Clicking it activates optional
+  cropping directly on the preview image, with the full image selected and an
+  icon-plus-Search button at bottom center. Drag to select, move inside a crop
+  or drag its corners to resize. Arrow/Shift-arrow keys move/resize; Home selects
+  all, Enter searches, and submitting Search exits crop mode and restores focus
+  to the image-search button. Escape cancels crop mode before closing the preview.
+  No extra dialog, mode tabs or screen-capture permission is needed. Only Search
+  submits the image or exact crop directly to Google's Lens upload form in a new
+  tab, with no backend upload or public artifact URL. Preview pixels are bounded
+  to a 2048px side and prepared PNGs to 8 MiB; crop preparation is debounced.
+  Temporary pixels clear on cancellation, navigation, closure, session change
+  or sign-out. A custom theme-colored image-search SVG and provenance live in
+  static/icons. Evidence: docs/webui/google-lens-validation.md.
+  Animated sources show frame zero. Browser derivatives and new attachment
+  thumbnails preserve alpha instead of compositing onto white, and image stages
+  use the surrounding surface without an extra backdrop. Model preparation keeps
+  its existing RGB compositing default. Originals remain unchanged. The private
   15-minute LRU cache caps 128 entries/32 MiB with two decoders; owner/revision
   checks remain active for cached results. HTTP responses stay no-store.
   Implementation and evidence: `docs/webui/library-browser-validation.md`.
   Viewer implementation and evidence: `docs/webui/image-preview-validation.md`.
-  Integrations contains Skills, Knowledge and Connections. Connections now
+  Integrations navigation orders MCPs, Skills, then Knowledge while
+  retaining saved or URL-selected sections. Connections now
   lists configured MCP servers and offers owner-reviewed remote add-disabled,
   discovery/enable, disable and removal. Its keyed compact rows share the Skills
   layout and confirmed-state switches. Clicking a row opens native details for
@@ -350,17 +539,27 @@ Workspace layout:
   the click, without a confirmation dialog. Details switches behave the same way
   and keep their dialog open. Only these state changes use the direct path;
   add/import/removal and other actions keep their existing confirmation.
+  While a toggle is pending, its row status reads Updating in place of
+  Enabled/Disabled, without a second status line. Failures and unconfirmed
+  outcomes retain their separate actionable notices.
+  Successful Library/Integrations changes do not leave routine Saved banners
+  beneath navigation tabs; errors, pending states and inventory limits remain visible.
   The direct path still prepares an exact backend snapshot and submits one durable
   request ID, preserving stale-write checks, pending locks and receipt polling.
   Lost acknowledgements retain their original ID and lock until resolved; they
   are never resubmitted automatically.
-  Password-authenticated owner sessions can use these actions on both the
+  Password-authenticated admin sessions can use these actions on both the
   local and LAN listeners. Bootstrap-only embedded hosts retain local-only MCP
   management. Both review preparation and submission enforce this rule; cookie,
   Origin/CSRF, idle-turn, fingerprint and journal checks remain in force.
   All/Enabled/Disabled filters combine with the name/description search and use
-  16px horizontal padding with 44px minimum-height targets. Compact
-  rows omit absent descriptions and show confirmed status, transport and tool
+  shared md3.io-inspired filter chips: 32px outlined or selected tonal faces
+  inside 48px native button targets, 8px corners, selected checkmarks and
+  wrapping rows. MCP and Skills chips show All/Enabled/Disabled inventory counts,
+  with `+` when their bounded inventories are truncated. No unconfigured-server catalog
+  is exposed by the browser API. Only one filter is selected at a time. Empty Skills guidance
+  appears in the list content, without a duplicate line below the navigation.
+  Compact rows omit absent descriptions and show confirmed status, transport and tool
   count. Add/details dialogs use bounded compact layouts; successful updates
   remain visible after inventory reload. Filters and notices clear on sign-out.
   Evidence: `docs/webui/connections-layout-validation.md`.
@@ -410,8 +609,10 @@ Workspace layout:
   Model Defaults opens Settings for new-chat defaults. Duplicate submissions are
   blocked while preserving the selected thinking effort. Failed refreshes retain
   loaded models; aborted/obsolete reads cannot restore data after sign-out.
-  Legacy local-only hosts retain their catalog path. Connection/credential setup,
-  downloads, serving and Model Manager remain terminal operations.
+  Legacy local-only hosts retain their catalog path. The subsequent Model Store
+  adds reviewed downloads/deletion and Settings connection/credential management
+  for admin accounts on local and LAN listeners. Serving and SSH remain terminal
+  operations.
   Evidence: `docs/webui/models-page-validation.md`.
   Settings uses a compact heading, full-width cards and shared label/control
   rows with 10px vertical padding. Controls use bounded widths; narrow cards put
@@ -432,7 +633,11 @@ Workspace layout:
   account for keyboard overlays and focused-field clearance. Measured padding
   keeps the last settings accessible; safe-area padding and bounded long status
   messages retain usable actions. Clean bars and bars outside the active
-  category/page are hidden. Theme shows Discard/Apply only when its preview differs
+  category/page are hidden. Agent and Models share Theme's footer class, tonal
+  divider surface, quiet Discard and filled Apply changes actions, including
+  desktop card-edge coverage and the existing mobile dock. Unsaved counts,
+  conflicts and Check save status remain available through their existing
+  transaction handling. Theme shows Discard/Apply only when its preview differs
   from the saved appearance at every viewport size, hiding again after Apply,
   Discard or returning each control to its saved value. Failed saves keep the row
   available. Desktop bars return to their original card positions. The Theme footer paints
@@ -642,8 +847,53 @@ Workspace layout:
   responses after sign-out. Foreground startup prints the credential-file path,
   never the initial password; local reveal toggles back to hidden. Account
   password changes revoke sessions, and sign-out returns to the sign-in form.
-  Account files are protected from workspace tools/reads/search/diff. This is one
-  local owner account, not multi-user workspace ACLs; 2FA is deferred.
+  The actual sign-in screen follows the supplied end-4 lockscreen: warm supplied
+  blurred wallpaper, a live 230px cookie clock with date bubbles, a short quote and
+  three bottom toolbar islands. All UI colors inherit Theme Settings' generated
+  Material roles, including light/dark/system, preset/custom/image accents and
+  palette variants, restored before sign-in by the existing appearance bootstrap.
+  The wallpaper keeps its source image with a themed tint; text containers are
+  opaque and floating toolbar opacity is bounded for readable contrast.
+  Phone layouts put the full-width password on the
+  bottom row below secondary controls. Through 768px, a two-row grid centers the
+  complete clock/quote/status group in the space left above the natural-height
+  footer, including any login notices. Safe-area padding and the existing
+  visualViewport measurements keep controls above the keyboard. Compact regions
+  hide decorations before the password; long feedback scrolls inside its own
+  bounded area. Username and password remain visible in separate rows with the
+  keyboard open, including compact layout-viewport resizing; hiding a focused
+  credential must never dismiss the keyboard. Desktop positioning and clock sizes
+  remain unchanged. Quotes
+  rotate only on actual screen openings through a shuffled
+  bag, persisted as public IDs locally when storage is available. The bundled
+  collection has 19 source-verified English proverbs from the requested 30-row
+  PositiveQuotation snapshot plus 50 clearly separate local Easter eggs (25 pop
+  culture riffs and 25 memes), with accessible attribution and retained provenance;
+  the visible English Proverb label is omitted.
+  No quote request uses the network at runtime; missing data uses original Klaude
+  copy. Source/license/curation and verification: `docs/webui/lockscreen-quotes.md`.
+  The native password field retains autocomplete, editing and selection under a
+  decorative seven-shape Material mask. Only lengths/offsets reach that layer;
+  failures and timeouts clear the input. Missing vectors and forced colors use native masking.
+  Pending submissions deduplicate and time out after 15s. Expiry returns to the
+  locked screen, closes app overlays and keeps the protected shell hidden/inert,
+  including through asynchronous splash completion. This is a login/reauth screen,
+  not a local-only lock or a replacement authentication mechanism. Fixed public
+  wallpaper/font asset routes are the only host additions. Reference/license,
+  source mapping, browser evidence and platform limits:
+  `docs/webui/lockscreen-validation.md`.
+  Account files are protected from workspace tools/reads/search/diff. The generated
+  first account stores role `admin`; legacy version-1 singleton admin files remain
+  compatible without password reset. Authenticated sessions bind the server-owned
+  username, role and credential revision and revalidate all three; role changes
+  revoke stale sessions. Model Store writes/cancel/reconciliation, connection and
+  credential management, Model Defaults/image-service saves/recovery/tests and
+  MCP definition management require the current admin role on either listener.
+  Non-admin accounts may browse models; they cannot gain management permission
+  through loopback access or request-supplied role fields. Bootstrap-only embedded
+  hosts retain existing loopback authority and cannot manage over LAN. This adds
+  the role boundary, not multi-user creation or workspace ACLs; 2FA is deferred.
+  Evidence: `docs/webui/model_store/admin-role-validation.md`.
   TUI settings display host/session/turn status.
   HTTP rejects duplicate authority/framing headers and caps concurrent request
   handlers. Authenticated browser uploads stage bounded private files with a
@@ -656,8 +906,28 @@ Workspace layout:
   request/resource admission opens a new chat before the owned archive worker
   starts. Replayed requests do not open another chat; failure to start a new chat
   rejects the archive without starting its worker. Active replies and queued
-  messages retain their existing guards. Current-conversation deletion remains
-  unavailable. Archived history and attachments remain restorable.
+  messages retain their existing guards. Reviewed deletion also works for saved
+  conversations without archiving first; deleting the current idle conversation
+  opens a fresh chat through the same admission path. The effect transaction
+  rechecks the reviewed archive state, workspace and history, and refuses active,
+  unresolved or queued work. Archived history and attachments remain restorable.
+  The compact Conversation dialog saves names with Enter through the existing
+  reviewed backend snapshot and durable receipt, without a second confirmation.
+  Inline status reports pending/errors. A divider separates the name from compact
+  Download .md, Archive/Restore and Delete actions share one evenly spaced row
+  with identical quiet text-button styling; only Delete's foreground is red.
+  Actions wrap on narrow screens; permanent deletion retains explicit review.
+  Production hosts can keep up to four independent conversation applications
+  running. Switching retains background Agents, runtimes, interaction brokers,
+  queues and leases; idle instances are evicted before allocating another slot.
+  The host's selected conversation remains shared across owner clients. Running
+  rows have a reduced-motion-aware status icon, refreshed while work is active.
+  New conversations preserve configured defaults or the source runtime choice
+  using separate runtime objects. In-flight edit permissions remain with their
+  original conversation, and LAN activation checks every retained application.
+  Logout closes that client's interactions across applications; shutdown drains
+  every application. Embedded hosts without a factory retain idle-only switching.
+  Evidence: `docs/webui/conversation-dialog-validation.md`.
   The conversation panel also uses an Archive toggle for saved/archived lists;
   its drawer closes on outside tap or Escape,
   with no separate close button or status dropdown.
@@ -666,8 +936,9 @@ Workspace layout:
   Session lists use compact 36px rows with 2px gaps, a 36px search field and
   reduced vertical spacing around the drawer controls.
   Remaining model/domain settings and coding
-  controls still need browser contracts. Switching sessions clears browser file-edit
-  activation and requires explicit activation again.
+  controls still need browser contracts. Switching idle sessions clears browser
+  file-edit activation and requires explicit activation again; a background worker
+  retains only its own existing activation and exact per-edit approval gates.
   The chat paperclip offers device uploads and revision-checked Library files.
   From device has a leading laptop icon, switching to a smartphone in the existing
   phone layout at 560px; From Library uses the Library navigation icon.
@@ -856,8 +1127,9 @@ show restart guidance rather than an unfiltered page under a selected filter.
 Enable/disable/import/delete still use their existing confirmed-state workflows.
 Evidence: `docs/webui/skills-status-filters-validation.md`.
 The Context Panel is closed by default and retains an explicitly saved choice.
-Its Library and the main Library both offer Current / All scope; main Library
-adds `files-scope` to its existing URL history and uses the same scoped inventory.
+Its Library retains Current / All scope. The main Library's Uploads and Generated
+always span conversations and have no scope controls; legacy `file-scope`
+preferences are ignored and `files-scope` URLs normalize to the full inventory.
 Context Library rows and tiles open Preview without separate Attach buttons;
 drag-to-chat and the composer's Library picker retain attachment access.
 The shared Gallery uses 8px gaps and 23px corners in both destinations.
@@ -897,8 +1169,60 @@ Settings → Theme. System/Light/Dark and sixteen palettes
 (Slate, Lavender, Sage, Peach, Ocean, Rose, Teal, Amber, Crimson, Coral, Violet,
 Indigo, Emerald, Lime, Sky, Cocoa) preview before Apply
 and persist under a versioned localStorage key with same-origin tab updates.
-Slate uses neutral white/charcoal surfaces, accents, text and outlines. The
-palette picker uses four columns, or eight when the settings card has room,
+Fresh or invalid browser preferences use Fidelity, Dark and Cocoa. Existing
+saved selections remain authoritative. Material shapes and animated Material
+wavy are the Generating indicator and Loading bar defaults. Theme's bottom Reset default action
+previews all appearance defaults through the existing Apply changes / Discard
+workflow, clearing any obsolete image preparation without changing other settings.
+The Generating indicator selector has a live, themed preview using the shared
+renderer for Material shapes and Classic spinner. It follows draft selections,
+Discard/Reset/Apply and reduced motion; leaving Theme removes the preview so it
+does not retain an active renderer in hidden settings.
+The separate Loading bar selector uses the same progress component as the splash
+screen, switching between thin and thick variants of Classic wavy static, Classic
+linear, Material wavy static, and the vendored `material` 3.2.4 animated Wavy
+preset. Weight is part of the selected reusable style variant rather than a
+separate setting; Theme stacks both live samples and highlights the selected
+weight. Existing saved thickness values migrate to the matching thick style.
+The Material static bar uses the vendor geometry with a fixed wave phase,
+resizing only when its container changes. The animated Material preset cycles
+and stops under reduced motion. The splash uses the selected bar style at Thick
+weight regardless of the saved style variant's weight; normal app loading uses
+the selected Thin/Thick variant. The first Theme
+preview also reflects Comfortable/Compact chat spacing as the choice changes.
+Loading circle independently selects a 48px thin Material wavy static, Classic, or vendored
+`material` Wavy circular progress arc. The static option uses the Material
+progress arc geometry without animation; the animated option uses the bundled
+factory. Both expose an accessible determinate component API and a decorative
+51% preview. Fresh/reset and missing-field defaults use animated Material wavy;
+explicitly saved choices, including the older static setting, remain unchanged.
+The shared Loading circle renderer powers non-AI page loading feedback, including
+Models, Libraries, Settings reads and operations. It follows the selected circle
+style and rotates as an indeterminate indicator. The morphing Generating
+indicator is reserved for AI work such as chat responses, image reviews and tag
+generation.
+The MIT-licensed progress factory and stylesheet are bundled locally into the
+existing app assets with their license; no runtime network request is needed.
+Theme Settings groups the chat and loading-bar previews in the left column; the
+Generating indicator and Loading circle previews share a row. All controls are in the
+right, with Reset default at the bottom of that column and Apply/Discard below
+the studio. Generating indicator spans the controls row above the side-by-side
+Loading circle and Loading bar selectors; Surface transparency follows below.
+Color mode's System icon shows a monitor on wider layouts and the same phone
+glyph as From device through the shared 560px phone breakpoint.
+The custom accent swatch/value and Choose an image action stay on one row in
+narrow Theme controls; the button label may wrap inside the button, while the
+swatch remains aligned with the first preset palette column.
+Narrow cards stack previews above controls. Palette density follows
+the controls' own width, so a wide Settings card cannot squeeze eight swatches
+into a narrow control column.
+Slate uses neutral white/charcoal surfaces, accents, text and outlines. Cocoa
+uses the original lockscreen's soft brown/beige family: its default
+Tonal spot variant derives coordinated primary, secondary, tertiary and neutral
+palettes from those reference colors while Material utilities assign role tones
+and contrast. Other variants transform the warm brown seed normally. The saved
+`cocoa` ID is unchanged; the swatch, app and lockscreen share the revised palette.
+The palette picker uses four columns, or eight when the settings card has room,
 with 44px swatches and coordinated light/dark roles for every preset.
 Validation: `docs/webui/theme-palettes-validation.md`. Roboto and JetBrains Mono
 plus their OFL licenses ship in the webhost wheel and are served locally.
@@ -907,11 +1231,15 @@ before the stylesheet and is also bundled into the deferred app. Startup keeps
 the shell hidden/inert behind Klaude's logo and the shared 48px Material shape
 loader until authentication and initial session/navigation reads settle. The
 existing public loading asset includes the pinned geometry, initializes once
-before the app downloads and mounts as the parser provides the splash slot.
-The deferred app retains that renderer; startup completion removes its indicator.
-The saved classic spinner and app/system reduced motion also apply here.
+before the app downloads and mounts as the parser provides the splash slot. Its
+thick progress bar advances to 90% over 800ms, holds there while startup is
+pending, and completes only when startup is ready. The deferred app retains that
+renderer; startup completion removes its indicator. App/system reduced motion
+also applies here. Roboto is preloaded and splash copy stays hidden until the
+font is loaded, preventing a fallback-font swap on screen.
 Signed-out HTML starts with the chat layout hidden; failure reveals the existing
-sign-in/retry state. The cover fades out in 160ms, respects reduced motion, and
+sign-in/retry state. The splash stays visible at least 500ms so its progress is
+visible before the cover fades out in 160ms; it respects reduced motion and
 offers Reload on a missing app asset or after 15 seconds without readiness.
 Shared-message keyboard focus waits until the shell becomes available.
 Validation: `docs/webui/startup-loading-validation.md`.
@@ -969,13 +1297,19 @@ messages; it never reads provider/model content. Missing targets report an
 unavailable message. Explicit session changes clear the old message target.
 More opens an anchored, keyboard-operable
 menu with the saved message's local timestamp, Branch in new chat and Retry.
-Branch copies the conversation only through the selected saved reply. Retry
-creates a separate continuation before that reply's original prompt and submits
-the prompt once, preserving the original conversation. The app session service
-and transactional Memory fork own the exact row boundary; HTTP requires session,
-CSRF, browser control and an idle queue. These actions clear browser file-edit
-activation. The original model/runtime, workspace and plan settings are retained.
-This is a preserved separate retry conversation, not an in-place variant selector.
+Branch copies the conversation only through the selected saved reply and clears
+browser file-edit activation. Retry stays in the same conversation, resubmits the
+selected reply's original input through the normal fenced worker, and keeps
+earlier responses in collapsed, keyboard-accessible Previous response disclosures
+above the new streamed/saved answer. Durable response-group metadata hides the
+repeat prompt in browser history, survives reload/reconnect, preserves prepared
+private attachment input, and deduplicates uncertain request acknowledgements.
+Retry retains current model/runtime, workspace, plan and file-edit settings and
+the existing review gates. Both actions require cookie/CSRF/Origin, exact source
+session, browser control and idle work/queue checks. Old hosts without the
+in-place Retry capability show restart guidance instead of forking. Forks remap
+response groups and reviewed deletion removes their metadata. Evidence:
+`docs/webui/message-menu-validation.md`.
 Sources lists deduplicated HTTP/HTTPS references linked in
 the reply, with an explicit empty state; it does not claim verified tool-source
 provenance. Actions wait for streaming to finish; unsupported speech stays
@@ -1009,7 +1343,9 @@ need only a browser reload. Send displays an immediate uncontained Sending
 indicator inside the conversation output; chat activity uses a readable 32px
 indicator below the user message and above the assistant response, retaining
 its animation through snapshots. The composer contains no loading row.
-Completed execution details remain beside that response. Hosts without typed
+Completed execution details remain beside that response. Their container has a
+480px maximum width and shrinks to the available chat width, open or collapsed.
+Hosts without typed
 activity retain a Generating response indicator until idle or input is required. Failed sends
 keep the draft and clear the pending indicator. Auth/session changes reject
 stale send cleanup. Regenerate the bundle with

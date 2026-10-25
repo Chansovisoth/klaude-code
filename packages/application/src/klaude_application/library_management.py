@@ -25,11 +25,13 @@ from klaude_core.config import Config
 from klaude_core.library_artifacts import (
     MAX_BYTES,
     ArtifactStore,
+    ai_tag_removals,
     image_header,
     manual_tags,
     source_link,
 )
 
+from . import browser_model_settings, model_store
 from .background_jobs import OwnedBackgroundJobs
 from .background_worker import execute
 from .browser_jobs import OPERATIONS as GENERATED_OPERATIONS
@@ -109,6 +111,7 @@ class LibraryManagement:
         self._active: dict[str, tuple[int, ManagementReview]] = {}
         self._journal: OperationJournal | None = None
         self._jobs = OwnedBackgroundJobs(self._event)
+        self._model_progress: dict[str, dict[str, Any]] = {}
         self._closed = False
         self._stop = threading.Event()
         self._keeper: threading.Thread | None = None
@@ -237,6 +240,14 @@ class LibraryManagement:
         if state not in {"all", "enabled", "disabled"}:
             raise ValueError("Unknown Skills status")
         result = self._installed_skills()
+        all_items = result["items"]
+        enabled = sum(bool(item["enabled"]) for item in all_items)
+        result["counts"] = {
+            "all": len(all_items),
+            "enabled": enabled,
+            "disabled": len(all_items) - enabled,
+            "limited": bool(result.get("more", False)),
+        }
         needle = query[:200].casefold()
         result["items"] = [item for item in result["items"] if needle in
                            f"{item['name']} {item['description']} {item['library']}".casefold()
@@ -418,7 +429,10 @@ class LibraryManagement:
                 elif operation in {
                     "tags", "archive", "restore", "delete", "clear_ai_tags", "source_link"
                 }:
-                    if set(draft) - {"operation", "target", "revision", "value"}:
+                    allowed = {"operation", "target", "revision", "value"}
+                    if operation == "tags":
+                        allowed.add("remove_ai_tags")
+                    if set(draft) - allowed:
                         raise ValueError("Unexpected artifact field")
                     item = self.artifacts.get(draft.get("target", ""))
                     if (
@@ -432,17 +446,25 @@ class LibraryManagement:
                             raise ValueError("Enter comma-separated tags")
                         manual_tags(draft["value"])
                         fields["value"] = draft["value"]
+                        if "remove_ai_tags" in draft:
+                            removals = ai_tag_removals(draft["remove_ai_tags"])
+                            if not set(removals).issubset(item["ai_tags"]):
+                                raise ValueError("AI tags changed; reload before reviewing")
+                            fields["remove_ai_tags"] = removals
                     if operation == "source_link":
                         if not isinstance(draft.get("value"), str):
-                            raise ValueError("Enter a source link")
+                            raise ValueError("Enter source text")
                         fields["value"] = source_link(draft["value"])
                     resource = f"artifact:{item['id']}"
                     summary = f"{operation.replace('_', ' ').capitalize()}: {item['name']}."
                     if operation == "tags":
                         summary += f" Set manual tags to: {fields['value'] or '(none)'}."
+                        if fields.get("remove_ai_tags"):
+                            summary += (" Remove AI tags: " +
+                                        ", ".join(fields["remove_ai_tags"]) + ".")
                     if operation == "source_link":
                         summary += (
-                            f" Set link to: {fields['value'] or '(none)'}. No URL is fetched."
+                            f" Set source to: {fields['value'] or '(none)'}. No URL is fetched."
                         )
                     if operation == "delete":
                         summary += (
@@ -522,6 +544,10 @@ class LibraryManagement:
                         f"{verb} {action.source} into {action.library}. "
                         "Fetches public URLs and uses the configured embedding model."
                     )
+                elif operation in browser_model_settings.OPERATIONS:
+                    fields, resource, summary = browser_model_settings.prepare(self.cfg, draft)
+                elif operation in model_store.OPERATIONS:
+                    fields, resource, summary = model_store.prepare(self.cfg, draft)
                 elif operation in GENERATED_OPERATIONS:
                     fields, resource, summary = prepare_generated_operation(self.cfg, draft)
                 elif operation in MEDIA_SETTINGS_OPERATIONS:
@@ -551,6 +577,55 @@ class LibraryManagement:
             return bool(review is not None and review.owner == owner
                         and review.operation.startswith("mcp-"))
 
+    def model_review(self, owner: str, token: str) -> bool:
+        with self._lock:
+            review = self._reviews.get(token)
+            return bool(review and review.owner == owner
+                        and (review.operation in model_store.OPERATIONS
+                             or review.operation in browser_model_settings.OPERATIONS))
+
+    def admin_model_review(self, owner: str, token: str) -> bool:
+        with self._lock:
+            review = self._reviews.get(token)
+            return bool(review and review.owner == owner
+                        and (review.operation in model_store.OPERATIONS
+                             or review.operation in browser_model_settings.OPERATIONS
+                             or review.operation in MEDIA_SETTINGS_OPERATIONS))
+
+    def model_busy(self) -> bool:
+        if self._journal is None and not (self.data / "operations.db").exists():
+            return False
+        return self.journal.resource_busy(model_store.RESOURCE)
+
+    def model_jobs(self) -> dict[str, Any]:
+        result = model_store.jobs(self.cfg, self.journal)
+        with self._lock:
+            for item in result["items"]:
+                item["progress"] = self._model_progress.get(item["request_id"], {})
+                item["cancellable"] = item["request_id"] in self._active
+        return result
+
+    def cancel_model(self, identity: str) -> dict[str, Any]:
+        with self._lock:
+            receipt = self.status(identity)
+            if receipt["kind"] != "model-pull":
+                raise ValueError("Only a model download can be cancelled")
+            if receipt["state"] in {"completed", "failed", "cancelled"}:
+                return receipt
+            if identity not in self._active:
+                raise OperationConflict("Download unconfirmed; check its inventory")
+            self.journal.request_cancel(identity, OWNER)
+            self._jobs.cancel(identity)
+            return self.status(identity)
+
+    def reviewed_connection(self, owner: str, token: str) -> dict[str, Any] | None:
+        with self._lock:
+            review = self._reviews.get(token)
+            if (review and review.owner == owner
+                    and review.operation in browser_model_settings.WRITES):
+                return review.fields.get("expected")
+            return None
+
     def reviewed_session_action(self, owner: str, token: str, session_id: str) -> str:
         with self._lock:
             review = self._reviews.get(token)
@@ -578,6 +653,13 @@ class LibraryManagement:
                 raise OperationConflict("Review already accepted; check its operation status")
             if len(self._active) >= 4 and request_id not in self._active:
                 raise OperationConflict("Library operations busy; retry when one finishes")
+            model_operation = review.operation in model_store.OPERATIONS
+            model_definition = review.operation in browser_model_settings.WRITES
+            if ((model_operation or model_definition)
+                    and any(key != request_id for key in self._active)):
+                raise OperationConflict("Finish active operations before managing model weights")
+            if not model_operation and self.model_busy():
+                raise OperationConflict("Model work is active or unconfirmed; check Downloads")
             intent = {key: value for key, value in review.fields.items() if key != "source"}
             if review.operation in {"knowledge-url", "knowledge-refresh"}:
                 intent["source"] = review.fields["source"]
@@ -587,6 +669,8 @@ class LibraryManagement:
                 kind=review.operation,
                 resource=review.resource,
                 payload={"review": review.id, **intent},
+                conflicts_with=() if model_operation else (model_store.RESOURCE,),
+                exclusive=model_operation or model_definition,
             )
             if receipt.created:
                 review.submitted = True
@@ -600,6 +684,14 @@ class LibraryManagement:
                         self.journal.finish(request_id, OWNER, receipt.fence,
                                             state="failed", outcome="failed")
                         raise
+                if model_operation:
+                    model_store.save_target(self.cfg, request_id, review.fields)
+                    final_installed = review.operation == "model-pull"
+                    self.journal.record_witness(
+                        request_id, OWNER, receipt.fence,
+                        before=model_store.witness(review.fields, not final_installed),
+                        after=model_store.witness(review.fields, final_installed),
+                    )
                 request = {
                     "kind": "library_management_operation",
                     "config_dir": str(self.cfg.config_dir),
@@ -636,12 +728,15 @@ class LibraryManagement:
                             review.fields["sha256"] + ":" + review.fields["filename"]
                         )
                 if (not review.operation.startswith("mcp-")
-                        and review.operation not in WITNESSED):
+                        and review.operation not in WITNESSED
+                        and review.operation not in browser_model_settings.WRITES):
                     self.journal.start(request_id, OWNER, receipt.fence)
                 self._active[request_id] = (receipt.fence, review)
-                timeout = operation_timeout(review.operation, review.fields)
+                timeout = (1830 if model_operation else
+                           operation_timeout(review.operation, review.fields))
                 self._jobs.submit(request_id, request, timeout=timeout,
-                                  notify_cancel=review.operation in VISION_READ_OPERATIONS)
+                                  notify_cancel=(model_operation or
+                                                 review.operation in VISION_READ_OPERATIONS))
                 if self._keeper is None:
                     self._keeper = threading.Thread(
                         target=self._keep_leases, name="klaude-library-leases", daemon=True
@@ -660,10 +755,23 @@ class LibraryManagement:
                         self._finish(identity, False)
 
     def _event(self, kind: str, value: object) -> None:
+        if kind == "background_progress" and isinstance(value, tuple):
+            identity, _, progress = value
+            with self._lock:
+                active = self._active.get(identity)
+                if active and active[1].operation in model_store.OPERATIONS:
+                    self._model_progress[identity] = {
+                        key: progress[key] for key in ("stage", "completed", "total")
+                        if key in progress
+                    }
+            return
         if kind == "background_stopped" and isinstance(value, tuple):
             identity = value[0]
             with self._lock:
                 active = self._active.get(identity)
+                if active is not None and active[1].operation in model_store.OPERATIONS:
+                    self._finish(identity, False)
+                    return
                 if active is not None and active[1].operation in VISION_READ_OPERATIONS:
                     self._active.pop(identity)
                     try:
@@ -676,6 +784,14 @@ class LibraryManagement:
             return
         identity, _, result, error = value
         with self._lock:
+            active = self._active.get(identity)
+            if active and active[1].operation in model_store.OPERATIONS:
+                message = result.get("message", "") if isinstance(result, dict) else ""
+                if isinstance(message, str) and len(message) <= 300 and message.isprintable():
+                    try:
+                        model_store.save_message(self.cfg, identity, message)
+                    except (OSError, ValueError):
+                        pass
             self._finish(
                 identity,
                 not error and isinstance(result, dict) and result.get("ok") is True,
@@ -742,6 +858,13 @@ class LibraryManagement:
                 view["pending"]["cancellable"] = view["pending"]["request_id"] in self._active
         return view
 
+    def clear_vision_review(self, identity: str, revision: int, result: str) -> None:
+        from .browser_results import BrowserResults
+        from .browser_vision import _current
+
+        _current(self.cfg, identity, revision)
+        BrowserResults(self.cfg.data_dir).clear_analysis(identity, revision, result)
+
     def close(self) -> None:
         with self._lock:
             self._closed = True
@@ -758,7 +881,7 @@ class LibraryManagement:
             self._reviews.clear()
 
 
-def run_management_operation(request: dict[str, Any]) -> dict[str, Any]:
+def run_management_operation(request: dict[str, Any], progress=None) -> dict[str, Any]:
     """Fixed private worker entry; no browser-supplied roots, commands or imports."""
     from klaude_core.config import load_config
 
@@ -768,7 +891,8 @@ def run_management_operation(request: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Operation root changed")
     journal = OperationJournal(data / "operations.db")
     operation = request["operation"]
-    if operation.startswith("mcp-") or operation in WITNESSED:
+    if (operation.startswith("mcp-") or operation in WITNESSED
+            or operation in browser_model_settings.WRITES):
         # The shared definition writer records its witness while admission is
         # still accepted, then starts and checks the effect inside the file lock.
         journal.renew(request["request_id"], OWNER, request["fence"])
@@ -792,7 +916,9 @@ def run_management_operation(request: dict[str, Any]) -> dict[str, Any]:
     elif operation in {"tags", "archive", "restore", "delete", "clear_ai_tags", "source_link"}:
         try:
             store.change(
-                request["target"], request["revision"], operation, request.get("value", "")
+                request["target"], request["revision"], operation, request.get("value", ""),
+                **({"remove_ai_tags": request["remove_ai_tags"]}
+                   if "remove_ai_tags" in request else {}),
             )
         except ValueError:
             return {"rejected": True}
@@ -841,6 +967,10 @@ def run_management_operation(request: dict[str, Any]) -> dict[str, Any]:
             return {"rejected": True}
         if result.get("status") not in {"learned", "unchanged", "refreshed"}:
             return {"ok": False}
+    elif operation in browser_model_settings.OPERATIONS:
+        return browser_model_settings.run(cfg, request)
+    elif operation in model_store.OPERATIONS:
+        return model_store.run(cfg, request, progress)
     elif operation in GENERATED_OPERATIONS:
         try:
             return run_generated_operation(cfg, request)

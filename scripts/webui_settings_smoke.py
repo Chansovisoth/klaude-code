@@ -185,7 +185,7 @@ async def verify(host, root, chrome, password):
             })
             if password:
                 await tab.wait("typeof byId !== 'undefined' && !byId('local-access').hidden")
-                await tab.js('byId("login-password").value=' + json.dumps(
+                await tab.js('byId("login-username").value="admin";byId("login-password").value=' + json.dumps(
                     host.accounts.initial_password()
                 ) + ';byId("account-login").requestSubmit()')
             await tab.wait("typeof latest !== 'undefined' && latest?.session_id && authenticated")
@@ -406,8 +406,8 @@ async def verify(host, root, chrome, password):
                             const swatches=[...panel.querySelectorAll('.palette-swatch')]
                               .map(swatch=>swatch.getBoundingClientRect());
                             const rows=new Set(swatches.map(r=>Math.round(r.top))).size;
-                            const columns=panel.clientWidth-parseFloat(getComputedStyle(panel)
-                              .paddingInlineStart)*2>=568 ? 8 : 4;
+                            const columns=panel.querySelector('.theme-studio-controls')
+                              .clientWidth>=568 ? 8 : 4;
                             compact=rows===Math.ceil(swatches.length/columns) &&
                               swatches.every(r=>r.width===44 && r.height===44);
                           }

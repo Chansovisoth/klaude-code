@@ -299,7 +299,10 @@ def invalidate(cfg: Any, connection: Any) -> bool:
         return ok
 
 
-def execute_manager(cfg: Any, request: dict, emit: Callable[[dict], None] = lambda _: None) -> dict:
+def execute_manager(
+    cfg: Any, request: dict, emit: Callable[[dict], None] = lambda _: None, *,
+    before_effect: Callable[[], None] | None = None,
+) -> dict:
     """Fixed operations shared by CLI and TUI owned workers."""
     operation = request.get("operation")
     try:
@@ -433,9 +436,13 @@ def execute_manager(cfg: Any, request: dict, emit: Callable[[dict], None] = lamb
                             raise ManagerError(
                                 "bound", "Model is still selected: " + ", ".join(affected)
                             )
+                        if before_effect is not None:
+                            before_effect()
                         attempted = True
                         client.read("DELETE", "/api/delete", {"model": name}, empty=True)
                     else:
+                        if before_effect is not None:
+                            before_effect()
                         attempted = True
                         client.pull(name, emit)
                     after = client.models()

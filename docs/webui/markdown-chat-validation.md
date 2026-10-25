@@ -152,13 +152,18 @@ and [utterance lifecycle](https://developer.mozilla.org/en-US/docs/Web/API/Speec
 `static/markdown.js` builds an explicit set of DOM elements from markdown-it
 tokens; model output is never inserted as HTML. Raw HTML is disabled. Links allow
 absolute HTTP, HTTPS and mailto destinations with isolated new tabs. Relative and
-unsafe destinations are inert. Images become explicit links and are never fetched
-automatically. Prism tokens also become text nodes and spans, without its HTML
-renderer. The existing same-origin CSP remains in force.
+unsafe destinations are inert. External images retain explicit preview/download
+actions; only embedded raster and allowlisted authenticated image paths have
+automatic thumbnails. Prism tokens become text nodes and spans, without its HTML
+renderer. Scripts remain restricted to local assets; user-requested HTTP(S) image
+previews and browser CORS downloads have explicit CSP allowances.
 
 Markdown parsing is bounded at 128,000 characters and 10,000 tokens. Code
 highlighting is bounded at 12,000 characters per block. Oversized text or an absent
-parser uses literal text. Math, Mermaid and embedded HTML are not rendered.
+parser uses literal text. LaTeX now renders through local KaTeX/native MathML;
+HTML and SVG code fences have isolated static previews. Mermaid remains code.
+See [chat output support](chat-output-validation.md) for the newer controls,
+security boundary, limits and browser coverage.
 
 Pinned browser bundles are markdown-it 15.0.2 and Prism 1.30.0, including their
 licenses and bundled dependency notices. `static/vendor/manifest.json` records

@@ -28,15 +28,51 @@ def image_browser(profile_browser, vision_lab):
 
 
 def _draft(item, operation="vision-analyze"):
-    return {"operation": operation, "target": item["id"], "revision": item["revision"],
-            "context": 4096, "output_tokens": 512,
-            **({"question": "Describe the visible shapes"}
-               if operation == "vision-analyze" else {})}
+    return {
+        "operation": operation,
+        "target": item["id"],
+        "revision": item["revision"],
+        "context": 4096,
+        "output_tokens": 512,
+        **({"question": "Describe the visible shapes"} if operation == "vision-analyze" else {}),
+    }
 
 
 def _results(host, auth, item):
-    return _request(host, "GET", f"/api/v1/library/vision?artifact={item['id']}"
-                                 f"&revision={item['revision']}", **auth)
+    return _request(
+        host,
+        "GET",
+        f"/api/v1/library/vision?artifact={item['id']}&revision={item['revision']}",
+        **auth,
+    )
+
+
+def test_clear_review_is_authenticated_exact_and_retains_tags_and_newer_work(image_browser):
+    host, service, auth, store, item, *_ = image_browser
+    results = BrowserResults(service.cfg.data_dir)
+    older_id = uuid.uuid4().hex
+    results.put(older_id, item["id"], item["revision"], {"kind": "analysis", "text": "Older"})
+    review = _review(host, auth, _draft(item))
+    receipt, _ = _submit(host, service, auth, review)
+    identity = receipt["request_id"]
+    tags_id, newer_id = uuid.uuid4().hex, uuid.uuid4().hex
+    results.put(tags_id, item["id"], item["revision"], {"kind": "tags", "tags": ["art"]})
+    results.put(newer_id, item["id"], item["revision"], {"kind": "analysis", "text": "Newer"})
+    route = "/api/v1/library/vision/clear"
+    body = {"artifact": item["id"], "revision": item["revision"], "result": identity}
+    assert _request(host, "POST", route, body=body)[0] == 403
+    assert _request(host, "POST", route, body=body, fetch_site="cross-site", **auth)[0] == 403
+    assert _request(host, "POST", route, body={**body, "revision": 999}, **auth)[0] == 400
+    assert _request(host, "POST", route, body={**body, "result": tags_id}, **auth)[0] == 400
+    before = store.get(item["id"])
+    assert _request(host, "POST", route, body=body, **auth)[0] == 200
+    assert identity not in results.listing(item["id"], item["revision"])
+    assert older_id not in results.listing(item["id"], item["revision"])
+    assert results.get(tags_id)["payload"]["tags"] == ["art"]
+    assert results.get(newer_id)["payload"]["text"] == "Newer"
+    assert _request(host, "POST", route, body=body, **auth)[0] == 200
+    assert results.get(newer_id)["payload"]["text"] == "Newer"
+    assert store.get(item["id"]) == before
 
 
 def test_browser_analysis_sends_pixels_only_after_review_and_keeps_results_private(image_browser):
@@ -78,11 +114,31 @@ def test_tag_suggestions_are_unselected_and_only_reviewed_offers_are_saved(image
     assert "selected" not in proposal and "proposal" not in proposal
     assert store.get(item["id"])["ai_tags"] == []
     for selected in ([], ["invented"]):
-        assert _request(host, "POST", "/api/v1/library/review", body={"draft": {
-            "operation": "vision-tags-apply", "result": proposal["id"], "selected": selected,
-        }}, **auth)[0] == 400
-    review = _review(host, auth, {"operation": "vision-tags-apply", "result": proposal["id"],
-                                 "selected": ["amber", "manual"]})
+        assert (
+            _request(
+                host,
+                "POST",
+                "/api/v1/library/review",
+                body={
+                    "draft": {
+                        "operation": "vision-tags-apply",
+                        "result": proposal["id"],
+                        "selected": selected,
+                    }
+                },
+                **auth,
+            )[0]
+            == 400
+        )
+    review = _review(
+        host,
+        auth,
+        {
+            "operation": "vision-tags-apply",
+            "result": proposal["id"],
+            "selected": ["amber", "manual"],
+        },
+    )
     assert _submit(host, service, auth, review)[0]["state"] == "completed"
     current = store.get(item["id"])
     assert current["tags"] == ["manual"] and current["ai_tags"] == ["amber"]
@@ -110,23 +166,49 @@ def test_cancel_waits_for_owned_worker_stop_before_releasing_vision_resource(ima
     mode["value"] = "slow"
     review = _review(host, auth, _draft(item))
     identity = uuid.uuid4().hex
-    status, _, receipt = _request(host, "POST", "/api/v1/library/submit", body={
-        "review_id": review["review_id"], "request_id": identity, "control_epoch": 0,
-    }, **auth)
+    status, _, receipt = _request(
+        host,
+        "POST",
+        "/api/v1/library/submit",
+        body={
+            "review_id": review["review_id"],
+            "request_id": identity,
+            "control_epoch": 0,
+        },
+        **auth,
+    )
     assert status == 202 and arrived.wait(8)
     assert _results(host, auth, item)[2]["pending"]["cancellable"]
-    status, _, cancelled = _request(host, "POST", "/api/v1/library/cancel", body={
-        "request_id": identity,
-    }, **auth)
+    status, _, cancelled = _request(
+        host,
+        "POST",
+        "/api/v1/library/cancel",
+        body={
+            "request_id": identity,
+        },
+        **auth,
+    )
     assert status == 200 and cancelled["state"] in {"cancelling", "cancelled"}
     assert _wait(service, identity)["state"] == "cancelled"
     assert not service.journal.resource_busy("vision:" + item["id"])
-    assert _results(host, auth, item)[2] == {
-        "items": [], "pending": None, "available_hours": 24,
+    view = _results(host, auth, item)[2]
+    assert {key: view[key] for key in ("items", "pending", "available_hours")} == {
+        "items": [],
+        "pending": None,
+        "available_hours": 24,
     }
-    assert _request(host, "POST", "/api/v1/library/cancel", body={
-        "request_id": identity,
-    }, **auth)[2]["state"] == "cancelled"
+    assert (
+        _request(
+            host,
+            "POST",
+            "/api/v1/library/cancel",
+            body={
+                "request_id": identity,
+            },
+            **auth,
+        )[2]["state"]
+        == "cancelled"
+    )
 
 
 def test_result_store_is_bounded_and_expired_results_cannot_be_read(tmp_path, monkeypatch):
@@ -144,3 +226,61 @@ def test_result_store_is_bounded_and_expired_results_cannot_be_read(tmp_path, mo
     monkeypatch.setattr(results_module.time, "time", lambda: time.time_ns() / 1e9 + 90_000)
     with pytest.raises(ValueError):
         store.get(identities[-1])
+
+
+@pytest.mark.parametrize("operation", ["vision-analyze", "vision-tags"])
+def test_session_model_override_uses_exact_model_without_changing_defaults(
+    image_browser, operation
+):
+    from klaude_core.ai_defaults import read_defaults
+
+    host, service, auth, _, item, calls, mode, _ = image_browser
+    if operation == "vision-tags":
+        mode["text"] = '["diagram", "illustration"]'
+    defaults = read_defaults(service.cfg)
+    status, _, view = _results(host, auth, item)
+    assert status == 200 and view["settings"]["reference"] == defaults.vision
+    assert view["settings"]["session_model"] is True
+    reference = defaults.vision.rsplit("/", 1)[0] + "/other"
+    draft = {
+        **_draft(item, operation),
+        "reference": reference,
+        "context": 8192,
+        "output_tokens": 1024,
+    }
+    receipt, _ = _submit(host, service, auth, _review(host, auth, draft))
+    assert receipt["state"] == "completed"
+    sent = [body for path, body in calls if path == "/api/chat"]
+    assert len(sent) == 1 and sent[0]["model"] == "other"
+    assert sent[0]["options"] == {"num_ctx": 8192, "num_predict": 1024}
+    assert _results(host, auth, item)[2]["items"][0]["model"] == reference
+    assert read_defaults(service.cfg) == defaults
+
+
+@pytest.mark.parametrize("reference", [None, "", 123, "ollama@missing/vision"])
+def test_invalid_session_model_override_is_rejected(image_browser, reference):
+    host, _, auth, _, item, calls, _, _ = image_browser
+    assert (
+        _request(
+            host,
+            "POST",
+            "/api/v1/library/review",
+            body={
+                "draft": {**_draft(item), "reference": reference},
+            },
+            **auth,
+        )[0]
+        == 400
+    )
+    assert not calls
+
+
+def test_session_override_still_requires_fresh_image_capability(image_browser):
+    from klaude_core.ai_defaults import read_defaults
+
+    host, service, auth, _, item, calls, _, _ = image_browser
+    reference = read_defaults(service.cfg).vision.rsplit("/", 1)[0] + "/text"
+    draft = {**_draft(item), "reference": reference}
+    receipt, _ = _submit(host, service, auth, _review(host, auth, draft))
+    assert receipt["state"] == "failed"
+    assert not any(path == "/api/chat" for path, _ in calls)

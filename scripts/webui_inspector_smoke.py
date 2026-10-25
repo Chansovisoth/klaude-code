@@ -73,10 +73,14 @@ async def verify(host, service, root, chrome, image, mode, calls, set_default):
             })
             await tab.command("Page.navigate", {"url": host.origin})
             await tab.wait("typeof byId!=='undefined' && !byId('local-access').hidden")
-            await tab.js('byId("login-password").value=' + json.dumps(
+            await tab.wait("document.documentElement.dataset.startup==='ready'")
+            await tab.js('byId("login-username").value="admin";'
+                        'byId("login-password").value=' + json.dumps(
                 host.accounts.initial_password()
             ) + ';byId("account-login").requestSubmit()')
             await tab.wait("latest?.session_id && authenticated")
+            await tab.wait("document.documentElement.dataset.startup==='ready' && "
+                           "!document.querySelector('.shell').inert")
             await tab.js("document.documentElement.dataset.motion='reduced'")
 
             async def wait(expression):
@@ -209,37 +213,87 @@ async def verify(host, service, root, chrome, image, mode, calls, set_default):
                 "!byId('artifact-vision').closest('#inspector-details')")
             await click("#inspector-tab-ai-review")
             await tab.wait("!byId('vision-empty').hidden && !byId('vision-submit').disabled")
-            assert await tab.js("!byId('vision-advanced').open && "
-                               "byId('vision-question').value==='Describe this image.'")
+            assert await tab.js("!byId('vision-settings').open && "
+                               "byId('vision-question').value==='' && byId('vision-question').placeholder==='Describe this image.'")
             for width, height in ((320, 568), (1440, 900)):
                 await tab.command("Emulation.setDeviceMetricsOverride", {
                     "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False,
                 })
                 if await tab.js("artifactDialog.dataset.details==='closed'"):
                     await click("#image-details")
+                assert await tab.js(r"""(() => {
+                    const panel=byId('inspector-ai-review'), tab=byId('inspector-tab-ai-review');
+                    const css=getComputedStyle(tab);
+                    const rgb=c=>(c.match(/[\d.]+/g)||[]).slice(0,3).map(Number);
+                    const lum=c=>rgb(c).map(v=>{v/=255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4})
+                        .reduce((n,v,i)=>n+v*[.2126,.7152,.0722][i],0);
+                    const contrast=el=>{
+                        let bg=el;
+                        while(bg && getComputedStyle(bg).backgroundColor==='rgba(0, 0, 0, 0)') bg=bg.parentElement;
+                        const a=lum(getComputedStyle(el).color), b=lum(getComputedStyle(bg).backgroundColor);
+                        return (Math.max(a,b)+.05)/(Math.min(a,b)+.05);
+                    };
+                    if(contrast(tab)<4.5 || contrast(byId('vision-retention'))<4.5 ||
+                        contrast(byId('vision-suggest'))<4.5 || contrast(byId('vision-submit'))<4.5) return false;
+
+                    return panel.scrollWidth<=panel.clientWidth &&
+                        css.backgroundColor==='rgba(0, 0, 0, 0)' &&
+                        getComputedStyle(byId('inspector-tabs').querySelector('.mtrl-tabs__indicator')).height==='3px' &&
+                        !!byId('vision-suggest-icon').querySelector('svg') &&
+                        !!byId('vision-retention-icon').querySelector('svg');
+                })()""")
+                for control in ("vision-submit", "vision-options"):
+                    await tab.js(f"byId('{control}').scrollIntoView({{block:'center'}})")
+                    await tab.command("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 0, "y": 0})
+                    await asyncio.sleep(.3)
+                    normal = await tab.js(f"getComputedStyle(byId('{control}')).backgroundColor")
+                    point = await tab.js(f"""(() => {{
+                        const r=byId('{control}').getBoundingClientRect();
+                        return {{x:r.x+r.width/2,y:r.y+r.height/2}};
+                    }})()""")
+                    await tab.command("Input.dispatchMouseEvent", {"type": "mouseMoved", **point})
+                    await asyncio.sleep(.3)
+                    assert await tab.js(f"getComputedStyle(byId('{control}')).backgroundColor") != normal
+                    assert await tab.js(f"""(() => {{
+                        const s=getComputedStyle(byId('{control}'));
+                        return parseFloat(s.borderTopLeftRadius)>=6 && parseFloat(s.borderTopRightRadius)>=6;
+                    }})()""")
+                await tab.command("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 0, "y": 0})
+                await tab.js("byId('vision-options').focus()")
+                await key("Enter")
+                assert await tab.js("byId('vision-settings').open && "
+                    "getComputedStyle(document.activeElement).outlineStyle!=='none'")
+                assert await tab.js("""(() => {
+                    const d=byId('vision-settings'), r=d.getBoundingClientRect();
+                    return r.left>=0 && r.right<=innerWidth && d.scrollWidth<=d.clientWidth &&
+                        getComputedStyle(byId('vision-options').querySelector('.icon')).width==='16px';
+                })()""")
+                await screenshot(f"review-settings-{width}.png")
+                await key("Escape")
+                assert await tab.js("!byId('vision-settings').open && document.activeElement===byId('vision-options')")
                 await screenshot(f"empty-ai-review-{width}.png")
                 await click("#inspector-tab-details")
                 await screenshot(f"details-{width}.png")
                 await click("#inspector-tab-ai-review")
-            await click("#vision-advanced summary")
+            await click("#vision-options")
             await tab.js("byId('vision-context').value=6144;byId('vision-output').value=768;"
                          "byId('vision-question').value='Describe visible shapes carefully.'")
+            await click("#vision-settings-done")
             await click("#inspector-tab-details")
             await click("#inspector-tab-ai-review")
-            assert await tab.js("byId('vision-advanced').open && "
+            assert await tab.js("!byId('vision-settings').open && "
                 "byId('vision-context').value==='6144' && byId('vision-output').value==='768' && "
                 "byId('vision-question').value==='Describe visible shapes carefully.'")
-            await click("#vision-advanced summary")
             await tab.js("byId('vision-context').value=1024")
             await click("#vision-submit")
-            assert await tab.js("byId('vision-advanced').open && !reviewDialog.open")
+            assert await tab.js("byId('vision-settings').open && !reviewDialog.open")
             await tab.js("byId('vision-context').value=6144")
-            await click("#vision-advanced summary")
+            await click("#vision-settings-done")
             mode["text"] = REVIEW
             mode["value"] = "slow"
             await analyze()
-            await tab.wait("byId('vision-status').dataset.state==='loading' && "
-                           "!!byId('vision-status').querySelector('.material-loading')")
+            await tab.wait("byId('vision-empty').querySelector('h3').textContent==='Generating review' && "
+                           "!!byId('vision-empty-icon').querySelector('.material-loading')")
             await tab.wait("byId('vision-answer').textContent.includes('END OF FULL REVIEW')")
             await tab.wait("!byId('vision-submit').disabled")
             assert await tab.js("!byId('inspector-ai-review').hidden && "
@@ -360,7 +414,7 @@ async def verify(host, service, root, chrome, image, mode, calls, set_default):
             await click(".tag-filter-chip[data-tag=diagram]")
             assert await tab.js(
                 "document.querySelector('.vision-tag-count').textContent==='2 selected' && "
-                "document.querySelector('.vision-tags-save').textContent==='Save 2 tags' && "
+                "document.querySelector('.vision-tags-save').textContent==='Save' && "
                 "[...document.querySelectorAll('.tag-filter-chip[aria-pressed=true] .icon')]"
                 ".every(icon=>getComputedStyle(icon).display!=='none')")
             for theme in ("light", "dark"):
@@ -380,8 +434,10 @@ async def verify(host, service, root, chrome, image, mode, calls, set_default):
                         .querySelector('.preview-information-scroll');
                       return group.scrollWidth<=group.clientWidth &&
                         panel.scrollWidth<=panel.clientWidth &&
-                        [...group.children].every(b=>b.getBoundingClientRect().height>=44 &&
-                          b.getBoundingClientRect().width<=group.clientWidth) &&
+                        [...group.children].every(b=>b.getBoundingClientRect().height>=48 &&
+                          b.getBoundingClientRect().width<=group.clientWidth &&
+                          getComputedStyle(b.querySelector('.filter-chip-face'))
+                            .borderTopLeftRadius==='8px') &&
                         document.querySelector('.vision-tag-count').textContent==='2 selected';
                     })()""")
                     await screenshot(f"tag-chips-{theme}-{width}.png")
@@ -453,6 +509,52 @@ async def verify(host, service, root, chrome, image, mode, calls, set_default):
             await tab.wait("selectedArtifact?.ai_tags.includes('amber')")
             await tab.wait("byId('vision-status').textContent==='Tags saved.'")
             assert service.artifacts.get(image["id"])["ai_tags"] == ["amber", "Original tag"]
+            await click("#inspector-tab-details")
+            await tab.wait("!!byId('artifact-tag-list').querySelector('.input-chip.tag-generated')")
+            assert await tab.js("""(() => {
+              const tags=byId('artifact-tag-list');
+              const manual=getComputedStyle(tags.querySelector(
+                '.input-chip:not(.tag-generated) .filter-chip-face'));
+              const ai=getComputedStyle(tags.querySelector('.tag-generated .filter-chip-face'));
+              return ['backgroundColor','borderRadius','fontSize','fontWeight','lineHeight',
+                'color','outlineColor'].every(key=>manual[key]===ai[key]);
+            })()""")
+            # AI chips use the same draft/remove/cancel/review workflow as manual tags.
+            saved_tags = service.artifacts.get(image["id"])
+            provenance = service.artifacts.tagging_info(image["id"])
+            await click("#artifact-tags-edit")
+            await click('[aria-label="Remove tag amber"]')
+            assert service.artifacts.get(image["id"]) == saved_tags
+            assert await tab.js("!byId('artifact-tags-save').disabled")
+            await click("#artifact-tags-cancel")
+            assert await tab.js("byId('artifact-tag-list').textContent.includes('amber')")
+            await click("#artifact-tags-edit")
+            await click('[aria-label="Remove tag amber"]')
+            await tab.js("latest.library_ai_tag_edit=false")
+            await click("#artifact-tags-save")
+            assert await tab.js("!reviewDialog.open && byId('artifact-tags-status')"
+                                ".textContent.includes('Restart the Web UI host')")
+            assert service.artifacts.get(image["id"]) == saved_tags
+            await tab.js("latest.library_ai_tag_edit=true")
+            await click("#artifact-tags-save")
+            await tab.wait("reviewDialog.open")
+            assert await tab.js("byId('domain-review-summary').textContent"
+                                ".includes('Remove AI tags: amber')")
+            await click("#domain-review-cancel")
+            assert service.artifacts.get(image["id"]) == saved_tags
+            await tab.wait("!byId('artifact-tags-save').disabled")
+            assert await tab.js("!byId('artifact-tags-save').disabled && "
+                                "!byId('artifact-tag-list').textContent.includes('amber')")
+            await click("#artifact-tags-save")
+            await tab.wait("reviewDialog.open")
+            await click("#domain-review-confirm")
+            await tab.wait("byId('artifact-tags-status').textContent==='Saved.'")
+            saved = service.artifacts.get(image["id"])
+            assert saved["ai_tags"] == ["Original tag"] and saved["tags"] == saved_tags["tags"]
+            assert service.artifacts.tagging_info(image["id"]) == {
+                "Original tag": provenance["Original tag"],
+            }
+            await click("#inspector-tab-ai-review")
 
             # Use a real new-revision review, then age it in the private fixture store.
             mode["text"] = REVIEW

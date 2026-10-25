@@ -172,7 +172,8 @@ async def verify(host, root, chrome):
             })
             await tab.command("Page.navigate", {"url": host.origin})
             await tab.wait('typeof byId !== "undefined" && !byId("local-access").hidden')
-            await tab.js('byId("login-password").value=' + json.dumps(
+            await tab.js('byId("login-username").value="admin";'
+                        'byId("login-password").value=' + json.dumps(
                 host.accounts.initial_password()
             ) + ';byId("account-login").requestSubmit()')
             await tab.wait('latest?.session_id && pollTimer !== null')
@@ -187,6 +188,17 @@ async def verify(host, root, chrome):
             assert await tab.js('filePage.total===1058 && fileView==="grid"')
             assert await tab.js('filePage.items.every(item=>item.kind!=="research") && '
                                 '![...byId("artifact-kind").options].some(o=>o.value==="research")')
+            # Retired main-Library scope must not survive in hidden preferences
+            # or old links. Context Library has its own independent scope state.
+            await tab.js('saveNavigationChoice("file-scope","current");'
+                         'history.replaceState(null,"","?library=files&files-scope=current");')
+            await tab.command("Page.reload")
+            await tab.wait('typeof filePage!=="undefined" && filePage?.total===1058 && '
+                           '!byId("library-items").classList.contains("is-loading")')
+            assert await tab.js('!byId("library-view").querySelector("[data-file-scope]") && '
+                                '!new URL(location.href).searchParams.has("files-scope") && '
+                                '!("scope" in fileParameters()) && '
+                                '!("references" in fileParameters())')
             await tab.js('window.uploadTypeChoices=[...byId("artifact-kind").options]'
                          '.map(option=>[option.value,option.textContent])')
             await activate('[data-section="outputs"]')
@@ -194,6 +206,13 @@ async def verify(host, root, chrome):
                            '!byId("library-items").classList.contains("is-loading")')
             assert await tab.js('byId("file-add").hidden && fileParameters().source==="output" && '
                                 'byId("artifact-query").value===""')
+            await tab.js('history.pushState(null,"","?library=outputs&files-scope=current");'
+                         'dispatchEvent(new PopStateEvent("popstate"))')
+            await tab.wait('filePage?.total===6 && '
+                           '!new URL(location.href).searchParams.has("files-scope")')
+            assert await tab.js('!byId("library-view").querySelector("[data-file-scope]") && '
+                                '!("scope" in fileParameters()) && '
+                                '[...byId("library-sections").querySelectorAll(".tab-count")].every(b=>!b.hidden)')
             assert await tab.js('JSON.stringify([...byId("artifact-kind").options]'
                                 '.map(option=>[option.value,option.textContent]))'
                                 '===JSON.stringify(uploadTypeChoices)')
@@ -206,13 +225,9 @@ async def verify(host, root, chrome):
                         "mobile": width < 600,
                     })
                     await asyncio.sleep(.2)
-                    compact = await tab.js(
-                        "byId('file-options-toggle').getClientRects().length>0"
-                    )
-                    if compact:
-                        await activate("#file-options-toggle")
                     assert await tab.js('''['artifact-kind','artifact-status','artifact-sort']
-                      .every(id=>byId(id).getClientRects().length>0 && !byId(id).disabled)''')
+                      .every(id=>byId(id+"-chip").getClientRects().length>0 &&
+                        !byId(id+"-chip").disabled)''')
                     for kind, expected in (("document", "research"), ("media", "media")):
                         await tab.js(f"byId('artifact-kind').value='{kind}';"
                                      "byId('artifact-kind').dispatchEvent(new Event('change'))")
@@ -232,8 +247,6 @@ async def verify(host, root, chrome):
                     capture = await tab.command("Page.captureScreenshot", {"format": "png"})
                     (output / f"generated-filters-{width}.png").write_bytes(
                         base64.b64decode(capture["data"]))
-                    if compact:
-                        await activate("#file-options-toggle")
                 assert not tab.errors, tab.errors
                 print(json.dumps({"generated_filters": "visibility/types/sort passed",
                                   "widths": [320, 390, 768, 1440], "browser_exceptions": 0}))
@@ -317,8 +330,8 @@ async def verify(host, root, chrome):
                            '!previewNavigation')
             await tab.command("Input.dispatchKeyEvent", {"type": "keyDown", "key": "ArrowLeft"})
             await tab.wait(f'selectedArtifact?.id==={json.dumps(first)} && !previewNavigation')
-            await tab.click("#image-expand")
-            assert await tab.js('byId("artifact-detail").classList.contains("image-expanded")')
+            await tab.click("#preview-sidebar-toggle")
+            assert await tab.js('byId("artifact-detail").dataset.details === "closed"')
             for event_type in ("keyDown", "keyUp"):
                 await tab.command("Input.dispatchKeyEvent", {
                     "type": event_type, "key": "Escape", "code": "Escape",
@@ -358,7 +371,8 @@ async def verify(host, root, chrome):
             await tab.wait('typeof latest!=="undefined" && latest?.session_id')
             assert await tab.js('currentView==="chat"')
             await tab.click("#nav-library")
-            await tab.click("#file-breadcrumbs button")
+            await tab.js('byId("artifact-query").value="";'
+                         'byId("artifact-filter").requestSubmit()')
             await tab.wait('filePage?.total===50')
             await tab.js('byId("artifact-sort").value="newest";'
                          'byId("artifact-sort").dispatchEvent(new Event("change"))')
@@ -370,7 +384,8 @@ async def verify(host, root, chrome):
               byId('artifact-query').value='image-49';
               byId('artifact-filter').requestSubmit();''')
             await tab.wait('filePage?.total===1 && filePage.items[0].name==="image-49.webp"')
-            await tab.click("#file-breadcrumbs button")
+            await tab.js('byId("artifact-query").value="";'
+                         'byId("artifact-filter").requestSubmit()')
             await tab.wait('filePage?.total===50')
 
             layouts = []
@@ -419,12 +434,12 @@ async def verify(host, root, chrome):
                                 assert state["headerHeight"] == 0, state
                                 assert 64 <= state["rowHeight"] <= 72, state
                                 assert 0 <= state["firstGap"] <= 6, state
-                                assert state["toolbarHeight"] == 48, state
+                                assert state["toolbarHeight"] >= 96, state
                             else:
                                 assert state["headerHeight"] >= 44, state
                         layouts.append(state)
                         if state["compact"]:
-                            await activate("#file-options-toggle")
+                            await activate("#artifact-sort-chip")
                             assert await tab.js('byId("file-option-fields")'
                                                 '.getClientRects().length>0')
                             assert await tab.js('document.documentElement.scrollWidth<=innerWidth')
@@ -433,8 +448,8 @@ async def verify(host, root, chrome):
                                 "windowsVirtualKeyCode": 27,
                             })
                             assert await tab.js(
-                                'byId("file-options-toggle").ariaExpanded==="false" && '
-                                'document.activeElement===byId("file-options-toggle")'
+                                'byId("artifact-sort-chip").ariaExpanded==="false" && '
+                                'document.activeElement===byId("artifact-sort-chip")'
                             )
                         shot = await tab.command("Page.captureScreenshot", {"format": "png"})
                         (output / f"{mode}-{theme}-{width}.png").write_bytes(
@@ -442,7 +457,7 @@ async def verify(host, root, chrome):
                     await tab.click(".file-item button")
                     await tab.wait('selectedArtifact && '
                                    'byId("artifact-preview").querySelector("img")?.naturalWidth>0')
-                    await tab.click("#image-expand")
+                    await tab.js("byId(artifactDialog.dataset.details==='closed' ? 'image-details' : 'preview-sidebar-toggle').click()")
                     assert await tab.js('''(() => {
                       const dialog=byId('artifact-detail'), rect=dialog.getBoundingClientRect();
                       return rect.left>=0 && rect.right<=innerWidth &&
@@ -465,15 +480,17 @@ async def verify(host, root, chrome):
                     "width": width, "height": 760, "deviceScaleFactor": 1, "mobile": False,
                 })
                 await activate('[data-section="outputs"]')
-                await activate("#file-breadcrumbs button")
+                await tab.js('byId("artifact-query").value="";'
+                             'byId("artifact-kind").value="all";'
+                             'byId("artifact-kind").dispatchEvent(new Event("change"));'
+                             'byId("artifact-status").value="saved";'
+                             'byId("artifact-status").dispatchEvent(new Event("change"));'
+                             'byId("artifact-filter").requestSubmit()')
                 await activate('[data-file-view="list"]')
                 await tab.wait('filePage?.total===6 && fileView==="list"')
-                compact = await tab.js("byId('file-options-toggle').getClientRects().length>0")
-                if compact:
-                    await activate("#file-options-toggle")
                 assert await tab.js('''['artifact-kind','artifact-status','artifact-sort']
-                  .every(id=>byId(id).getClientRects().length>0 &&
-                    byId(id).getBoundingClientRect().height>=48)''')
+                  .every(id=>byId(id+"-chip").getClientRects().length>0 &&
+                    byId(id+"-chip").getBoundingClientRect().height>=48)''')
                 await tab.js('byId("artifact-sort").value="name_desc";'
                              'byId("artifact-sort").dispatchEvent(new Event("change"))')
                 await tab.wait('filePage?.total===6 && '
@@ -482,8 +499,6 @@ async def verify(host, root, chrome):
                                '.reverse().join("|")')
                 await tab.js('byId("artifact-sort").value="newest";'
                              'byId("artifact-sort").dispatchEvent(new Event("change"))')
-                if compact:
-                    await activate("#file-options-toggle")
                 for mode, total in (("list", 6), ("grid", 6), ("gallery", 3)):
                     await activate(f'[data-file-view="{mode}"]')
                     await tab.wait(f'filePage?.total==={total} && '
@@ -504,7 +519,6 @@ async def verify(host, root, chrome):
             await tab.click('[data-file-view="list"]')
             await tab.wait('fileView==="list"')
             # The compact control exposes every existing order and direction.
-            await activate("#file-options-toggle")
             for sort in ("name", "name_desc", "largest", "smallest", "oldest", "type", "newest"):
                 await tab.js('byId("artifact-sort").value=' + json.dumps(sort) + ';'
                              'byId("artifact-sort").dispatchEvent(new Event("change"))')
@@ -515,7 +529,6 @@ async def verify(host, root, chrome):
                 )
                 assert await tab.js('new URL(location.href).searchParams.get("files-sort")==='
                                     + json.dumps(sort))
-            await activate("#file-options-toggle")
             await verify_code_preview(tab, activate, output)
             await tab.js('byId("artifact-query").value="notes.txt";'
                          'byId("artifact-filter").requestSubmit()')
@@ -527,10 +540,8 @@ async def verify(host, root, chrome):
             await tab.click("#artifact-tags-edit")
             await tab.js('byId("artifact-tag-new").value="smoke, reference";'
                          'byId("artifact-tags").requestSubmit()')
-            await tab.wait('byId("domain-review").open')
-            await tab.click("#domain-review-confirm")
-            await tab.wait('!byId("domain-review").open')
             await tab.wait('filePage?.items[0].tags.includes("smoke")')
+            assert await tab.js('!byId("domain-review").open')
             await activate("#artifact-close")
             # Import from an unrelated search/type scope without choosing storage.
             await tab.js('byId("artifact-kind").value="document";'

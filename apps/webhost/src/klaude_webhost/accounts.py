@@ -27,6 +27,7 @@ from klaude_core.settings_store import atomic_write_private, settings_lock
 class AccountIdentity:
     username: str
     revision: int
+    role: str = "user"
 
 
 def _private_read(path: Path) -> str:
@@ -59,11 +60,15 @@ class AccountStore:
             record = json.loads(_private_read(self.path))
             if (not isinstance(record, dict) or record.get('version') != 1
                     or record.get('username') != 'admin' or record.get('algorithm') != 'scrypt'
+                    or record.get('role', 'admin') not in {'admin', 'user'}
                     or record.get('parameters') != {'n': 32768, 'r': 8, 'p': 3}
                     or type(record.get('revision')) is not int or record['revision'] < 1
                     or len(bytes.fromhex(record['salt'])) != 16
                     or len(bytes.fromhex(record['hash'])) != 32):
                 raise ValueError
+            # Only the original v1 singleton record can omit its role. Its
+            # generated administrator remains compatible without a credential reset.
+            record.setdefault('role', 'admin')
             return record
         except (ValueError, KeyError, TypeError, UnicodeError):
             raise ValueError('Web UI account file is invalid; use local account recovery') from None
@@ -82,11 +87,11 @@ class AccountStore:
             except FileNotFoundError:
                 password = secrets.token_urlsafe(24)
                 atomic_write_private(self.initial_password_path, password + '\n')
-            self._save(password, 1)
+            self._save(password, 1, role="admin")
 
-    def _save(self, password: str, revision: int) -> None:
+    def _save(self, password: str, revision: int, *, role: str) -> None:
         salt = secrets.token_bytes(16)
-        record = {'version': 1, 'username': 'admin', 'revision': revision,
+        record = {'version': 1, 'username': 'admin', 'role': role, 'revision': revision,
                   'algorithm': 'scrypt', 'parameters': {'n': 32768, 'r': 8, 'p': 3},
                   'salt': salt.hex(), 'hash': _derive(password, salt).hex()}
         atomic_write_private(self.path, json.dumps(record, indent=2) + '\n')
@@ -109,7 +114,14 @@ class AccountStore:
         valid = self._matches(record, password)
         if not valid or username != record['username']:
             return None
-        return AccountIdentity(record['username'], record['revision'])
+        return AccountIdentity(record['username'], record['revision'], record['role'])
+
+    def identity(self, username: str) -> AccountIdentity | None:
+        """Revalidate the server-owned principal, including role changes."""
+        record = self._record()
+        if username != record['username']:
+            return None
+        return AccountIdentity(record['username'], record['revision'], record['role'])
 
     def revision(self) -> int:
         return int(self._record()['revision'])
@@ -127,7 +139,7 @@ class AccountStore:
             record = self._record()
             if record['revision'] != revision or not self._matches(record, current):
                 return False
-            self._save(replacement, revision + 1)
+            self._save(replacement, revision + 1, role=record['role'])
             self.initial_password_path.unlink(missing_ok=True)
             return True
 
@@ -137,7 +149,7 @@ class AccountStore:
             record = self._record()
             password = secrets.token_urlsafe(24)
             atomic_write_private(self.initial_password_path, password + '\n')
-            self._save(password, record['revision'] + 1)
+            self._save(password, record['revision'] + 1, role=record['role'])
             return password
 
 

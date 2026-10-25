@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="340" height="340" viewBox="0 0 340 340">
+<title>Cat face with crossed eyes</title>
+<g fill="none" stroke="#000" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+<path d="M170 76 C154 76 139 79 126 85 L88 53 C82 48 73 49 70 58 C65 76 64 108 71 130 C62 149 58 169 58 188 C58 244 100 270 170 270 C240 270 282 244 282 188 C282 169 278 149 269 130 C276 108 275 76 270 58 C267 49 258 48 252 53 L214 85 C201 79 186 76 170 76 Z"/>
+<path d="M44 175 L88 188 M44 224 L88 211 M296 175 L252 188 M296 224 L252 211"/>
+<path stroke-width="12" d="M112 183 L134 205 M134 183 L112 205 M206 183 L228 205 M228 183 L206 205"/>
+<path d="M152 245 L170 236 L188 245"/>
+</g>
+<path fill="#000" d="M157 208 C157 204 183 204 183 208 C183 215 177 220 170 220 C163 220 157 215 157 208 Z"/>
+</svg>

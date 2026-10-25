@@ -58,19 +58,19 @@ window.SettingsDrafts = (() => {
   function category(id) { return categories.get(id); }
   function register(id, adapter) {
     const state = { id, adapter, drafts: new window.SettingsDraftState(), saving: false, message: "" };
-    const bar = domainText("div", "", "settings-save-bar"); bar.id = `${id}-save-bar`; bar.hidden = true;
+    const bar = domainText("div", "", "settings-save-bar theme-actions"); bar.id = `${id}-save-bar`; bar.hidden = true;
     const summary = domainText("div", "", "settings-save-summary");
     const count = domainText("strong", ""); count.id = `${id}-unsaved-count`;
     count.setAttribute("role", "status"); count.setAttribute("aria-atomic", "true");
     const status = domainText("span", "", "muted"); status.id = `${id}-save-status`; status.setAttribute("role", "status");
     summary.append(count, status);
     const actions = domainText("div", "", "settings-save-actions");
-    const check = domainButton("Check save status", () => checkPending(state)); check.id = `${id}-save-check`;
+    const check = domainButton("Check save status", () => checkPending(state), "quiet"); check.id = `${id}-save-check`;
     const discard = domainButton("Discard", () => {
       if (state.saving || pending(state).length) return;
       state.drafts.discard(); state.message = ""; adapter.render(); render(state);
-    }); discard.id = `${id}-discard`;
-    const save = domainButton("Save changes", () => saveCategory(state), ""); save.id = `${id}-save`;
+    }, "quiet"); discard.id = `${id}-discard`;
+    const save = domainButton("Apply changes", () => saveCategory(state), ""); save.id = `${id}-save`;
     actions.append(check, discard, save);
     const conflicts = domainText("div", "", "settings-conflicts");
     bar.append(summary, actions, conflicts);
@@ -365,7 +365,6 @@ window.BrowserManagement = (() => {
   const connectionFailures = new Map();
   let detailConnection = null;
   let connectionFilter = "all";
-  let connectionNotice = "";
   const connectionDialog = byId("connection-detail");
   let selectedSession = null;
   const sessionDialog = byId("session-management");
@@ -377,6 +376,58 @@ window.BrowserManagement = (() => {
   const generationTabs = byId("generation-tabs");
   let generationType = "image";
   let generationPreparation = 0;
+  let studioCapabilities = null, studioCheck = 0;
+  const studioDrafts = new Map();
+  function imageDimensions() {
+    byId("image-dimensions").textContent = `${byId("image-width").value} × ${byId("image-height").value} pixels`;
+  }
+  function restoreImageDraft(draft) {
+    for (const key of ['prompt', 'width', 'height', 'steps', 'seed']) byId(`image-${key}`).value = draft[key];
+    const ratio = `${draft.width},${draft.height}`;
+    byId('image-ratio').value = [...byId('image-ratio').options].some(o => o.value === ratio) ? ratio : 'custom';
+    imageDimensions();
+  }
+  async function checkImageService() {
+    if (latest?.image_studio !== true) {
+      studioCapabilities = null;
+      byId('image-capabilities-status').textContent = 'Restart the WebUI host, then reload this page to use Image studio.';
+      render(); return;
+    }
+    const id = ++studioCheck, epoch = authEpoch;
+    studioCapabilities = null; render();
+    byId('image-capabilities-status').textContent = 'Checking image service…';
+    try {
+      const result = await domainRequest('/api/v1/library/image-capabilities');
+      if (id !== studioCheck || epoch !== authEpoch || !active('jobs')) return;
+      studioCapabilities = result;
+      byId('image-generator').replaceChildren(new Option(`${result.backend} · ${result.model || 'Not configured'}`));
+      byId('image-capabilities-status').textContent = result.available ?
+        result.cancel_generating ? 'Service ready. Cancellation targets this job only.' : 'Service ready. Only queued jobs can be cancelled; running jobs may finish remotely.' : result.message;
+      if (result.available) {
+        for (const axis of ['width', 'height']) {
+          byId(`image-${axis}`).min = Math.ceil(Math.max(256, result.limits[`min_${axis}`]) / 64) * 64;
+          byId(`image-${axis}`).max = Math.floor(Math.min(1024, result.limits[`max_${axis}`]) / 64) * 64;
+        }
+        for (const option of byId('image-ratio').options) {
+          if (option.value === 'custom') continue;
+          const [w,h] = option.value.split(',').map(Number);
+          option.disabled = w < Number(byId('image-width').min) || w > Number(byId('image-width').max) || h < Number(byId('image-height').min) || h > Number(byId('image-height').max);
+        }
+      }
+    } catch (error) { if (id === studioCheck && epoch === authEpoch) byId('image-capabilities-status').textContent = error.message; }
+    if (id === studioCheck && epoch === authEpoch) render();
+  }
+  byId('image-check-service').addEventListener('click', checkImageService);
+  byId('image-ratio').addEventListener('change', () => {
+    if (byId('image-ratio').value === 'custom') { byId('image-advanced').open = true; byId('image-width').focus(); return; }
+    const [width, height] = byId('image-ratio').value.split(',');
+    byId('image-width').value = width; byId('image-height').value = height; imageDimensions();
+  });
+  for (const axis of ['width', 'height']) byId(`image-${axis}`).addEventListener('input', () => { byId('image-ratio').value = 'custom'; imageDimensions(); });
+  byId('image-reset-options').addEventListener('click', () => {
+    const recommended = axis => Math.max(Number(byId(`image-${axis}`).min), Math.min(512, Number(byId(`image-${axis}`).max)));
+    restoreImageDraft({prompt: byId('image-prompt').value, width: recommended('width'), height: recommended('height'), steps:20, seed:-1});
+  });
 
   function active(kind) {
     if (kind === "image") return authenticated && currentView === "library";
@@ -394,13 +445,13 @@ window.BrowserManagement = (() => {
   }
   async function review(draft, resource, kind, options = {}) {
     if (busy(resource)) return;
-    const direct = ["mcp-enable", "mcp-disable"].includes(draft.operation);
-    const state = { phase: direct ? "preparing" : "review", target: draft.name }, epoch = authEpoch;
+    const direct = ["mcp-enable", "mcp-disable", "session-rename", "vision-tags", "vision-analyze"].includes(draft.operation);
+    const state = { phase: direct ? "preparing" : "review", target: draft.name, operation: draft.operation }, epoch = authEpoch;
     const settingsGeneration = ["settings", "memory", "media"].includes(kind) ? settingsSectionGeneration : null;
     changes.set(resource, state);
     render();
     try {
-      const opened = await (direct ? submitToggleChange : prepareChange)(draft, {
+      const opened = await (direct ? submitDirectChange : prepareChange)(draft, {
         filename: options.filename,
         current: () => active(kind) && epoch === authEpoch &&
           (settingsGeneration === null || settingsGeneration === settingsSectionGeneration) && (options.current?.() ?? true),
@@ -415,7 +466,10 @@ window.BrowserManagement = (() => {
           if (draft.operation === "memory-add") byId("memory-add").reset();
           if (draft.operation === "mcp-add") byId("connection-add").reset();
           if (draft.operation === "research-create") byId("research-create").reset();
-          if (draft.operation === "image-generate") byId("image-prompt").value = "";
+          if (draft.operation === "image-generate") {
+            studioDrafts.set(operation.resource?.replace(/^image:/, ""), {...draft});
+            while (studioDrafts.size > 20) studioDrafts.delete(studioDrafts.keys().next().value);
+          }
           options.onAccepted?.(operation);
           render();
         },
@@ -477,7 +531,15 @@ window.BrowserManagement = (() => {
     byId("connection-add").querySelector("button").disabled = !allowed || busy("browser-mcp");
     byId("integration-add-connections").disabled = !allowed || busy("browser-mcp");
     const query = byId("connections-query").value.trim().toLowerCase();
-    byId("connections-summary").textContent = `${connections.servers.length}${connections.truncated ? "+" : ""} configured · ${connections.servers.filter(item => item.enabled).length} enabled`;
+    const enabledCount = connections.servers.filter(item => item.enabled).length;
+    const counts = { all: connections.servers.length, enabled: enabledCount, disabled: connections.servers.length - enabledCount };
+    for (const [state, count] of Object.entries(counts)) {
+      const node = byId("connections-state-filter").querySelector(`[data-connection-count="${state}"]`);
+      node.textContent = `${count}${connections.truncated ? "+" : ""}`;
+      const button = node.closest("button");
+      const label = node.parentElement.querySelector(".filter-chip-label").textContent;
+      button.setAttribute("aria-label", `${label} MCP servers, ${count}${connections.truncated ? " or more" : ""}`);
+    }
     const items = connections.servers.filter(item => `${item.name} ${item.description}`.toLowerCase().includes(query) &&
       (connectionFilter === "all" || item.enabled === (connectionFilter === "enabled")));
     const nodes = items.map(item => {
@@ -503,13 +565,20 @@ window.BrowserManagement = (() => {
     for (const node of byId("connection-items").querySelectorAll(".connection-card")) {
       const item = catalog.get(node.dataset.rowKey), toggle = node.querySelector(".connection-toggle");
       const pending = changes.get("browser-mcp");
+      const updating = connectionToggleUpdating(item);
+      const metadata = [updating ? "Updating…" : item.enabled ? "Enabled" : "Disabled",
+        item.transport === "stdio" ? "Local program" : "HTTP", countLabel(item.tool_count, "tool")].join(" · ");
+      const metadataNode = node.querySelector(".collection-metadata");
+      metadataNode.setAttribute("aria-live", "polite");
+      metadataNode.textContent = metadata;
+      node.firstChild.setAttribute("aria-description", `${item.description || "No description provided."} ${metadata}.`);
       toggle.setAttribute("aria-checked", String(item.enabled));
       toggle.setAttribute("aria-busy", String(pending?.target === item.name));
       toggle.disabled = !allowed || Boolean(pending) || !item.enabled && item.oauth;
       toggle.title = !allowed ? "Manage connections from the local Web UI" : !item.enabled && item.oauth ?
         "Sign in through the CLI to enable this OAuth connection" : `${item.enabled ? "Disable" : "Enable"} ${item.name}`;
       const status = node.querySelector(".integration-row-status");
-      status.textContent = connectionStatus(item);
+      status.textContent = updating ? "" : connectionStatus(item);
       status.setAttribute("role", "status");
     }
     if (!items.length) collectionEmpty(byId("connection-items"), query || connectionFilter !== "all" ? "No matching MCP connections" : "No MCP connections",
@@ -520,11 +589,15 @@ window.BrowserManagement = (() => {
       else { connectionDialog.close(); detailConnection = null; }
     }
   }
+  function connectionToggleUpdating(item) {
+    const pending = changes.get("browser-mcp");
+    return pending?.target === item.name && ["mcp-enable", "mcp-disable"].includes(pending.operation) && pending.phase !== "unknown";
+  }
   function connectionStatus(item) {
     const pending = changes.get("browser-mcp");
     if (pending?.target === item.name) return pending.phase === "review" ? "Awaiting review" :
       pending.phase === "unknown" ? "Unconfirmed · check Activity before retrying" : "Updating…";
-    return connectionFailures.get(item.name) || (!connections.management_allowed ? "Manage from the local Web UI." :
+    return connectionFailures.get(item.name) || (!connections.management_allowed ? "Management requires an admin account." :
       !item.enabled && item.oauth ? "Sign in through the CLI to enable this OAuth connection." : "");
   }
   function renderConnectionDetails() {
@@ -534,12 +607,12 @@ window.BrowserManagement = (() => {
     byId("connection-detail-description").textContent = item.description || "No description provided.";
     const metadata = byId("connection-detail-metadata");
     metadata.replaceChildren();
-    for (const [label, value] of [["Status", item.enabled ? "Enabled" : "Disabled"],
+    for (const [label, value] of [["Status", connectionToggleUpdating(item) ? "Updating…" : item.enabled ? "Enabled" : "Disabled"],
       ["Connection", item.transport === "stdio" ? "Local program" : "HTTP"],
       ["Tools", item.tool_count], ["Source", item.source_label], ["OAuth", item.oauth ? "Configured" : "Not configured"]]) {
       if (value !== undefined && value !== null) metadata.append(domainText("dt", label), domainText("dd", String(value)));
     }
-    byId("connection-detail-status").textContent = connectionStatus(item);
+    byId("connection-detail-status").textContent = connectionToggleUpdating(item) ? "" : connectionStatus(item);
     const unavailable = !connections.management_allowed || busy("browser-mcp");
     byId("connection-detail-change").textContent = item.enabled ? "Disable" : "Enable";
     byId("connection-detail-change").disabled = unavailable || !item.enabled && item.oauth;
@@ -552,7 +625,6 @@ window.BrowserManagement = (() => {
     if (!item || !connections?.management_allowed || busy("browser-mcp") || reviewDialog.open ||
       operation === "mcp-enable" && item.oauth) return;
     connectionFailures.delete(item.name);
-    connectionNotice = "";
     review({ operation, name: item.name, fingerprint: item.fingerprint }, "browser-mcp", "connections", {
       current: () => connections?.servers.some(current => current.name === item.name && current.fingerprint === item.fingerprint),
       beforeOpen: () => connectionDialog.close(),
@@ -567,7 +639,7 @@ window.BrowserManagement = (() => {
       generationAdd.title = latest?.profile_management ? generationTabs ? "Create an image or research" : "Generate an image" : restartHint;
     }
     byId("image-generate").querySelector("button").disabled =
-      !latest?.profile_management || !jobs?.image_settings.enabled || busy("image-generate");
+      !latest?.profile_management || !jobs?.image_settings.enabled || !studioCapabilities?.available || busy("image-generate");
     byId("research-create").querySelector("button").disabled =
       !latest?.profile_management || !jobs || busy("research-create");
     for (const form of byId("agent-settings-fields").querySelectorAll("[data-setting]")) {
@@ -610,7 +682,7 @@ window.BrowserManagement = (() => {
       if (!result.research_model) byId("research-model-source").value = "chat";
       byId("research-model-label").textContent = result.research_model ? `Research default: ${result.research_model}. Current chat: ${latest.model}. Queue a question, then start it after review.` : `Uses your current chat model, ${latest.model}, and saved Research budgets. Choose a Research default in Settings to use a separate model.`;
       const imageStatus = byId("image-service-status");
-      if (result.image_settings.enabled) imageStatus.textContent = `Image model: ${result.image_settings.model}`;
+      if (result.image_settings.enabled) imageStatus.textContent = `Configured image model: ${result.image_settings.model}`;
       else {
         const link = domainText("a", "Model Defaults");
         link.href = "?view=settings&settings=models";
@@ -638,7 +710,24 @@ window.BrowserManagement = (() => {
             actions.append(domainButton("Cancel job", () => reviewJob({ operation: "image-cancel", target: identity }, `image-control:${identity}`, kind)));
           }
           const artifact = kind === "research" ? item.report : item.artifact;
-          if (artifact) actions.append(domainButton("Open output", () => openArtifact(artifact).catch(domainError)));
+          if (artifact) {
+            actions.append(domainButton("Open output", () => openArtifact(artifact).catch(domainError)));
+            if (kind === 'image') {
+              const download = domainButton('Download', async () => {
+                const epoch = authEpoch;
+                try {
+                  const data = await domainRequest(`/api/v1/library/item?id=${encodeURIComponent(artifact)}`);
+                  if (epoch !== authEpoch || !active('jobs')) return;
+                  const a = document.createElement('a'); a.href = artifactUrl(data.item); a.download = data.item.filename; a.click();
+                } catch (error) { if (epoch === authEpoch && active('jobs')) domainError(error, generationStatusId); }
+              }, 'quiet');
+              actions.append(download);
+              actions.append(domainButton(studioDrafts.has(identity) ? 'Generate again' : 'Generate another', () => {
+                if (studioDrafts.has(identity)) restoreImageDraft(studioDrafts.get(identity));
+                byId('image-prompt').focus(); byId('image-prompt').select();
+              }));
+            }
+          }
           for (const button of actions.children) button.disabled = busy(`${kind}:${identity}`) && button.textContent === "Start";
           return node;
         });
@@ -704,6 +793,7 @@ window.BrowserManagement = (() => {
     generationPreparation += 1;
     byId(generationStatusId).textContent = "";
     generationDialog.showModal();
+    checkImageService();
     byId(generationType === "research" ? "research-question" : "image-prompt").focus();
   });
   byId("image-generate-close")?.append(libraryIcon("close"));
@@ -719,7 +809,7 @@ window.BrowserManagement = (() => {
     if (byId("image-generate").querySelector("button").disabled) return;
     reviewJob({ operation: "image-generate", prompt: byId("image-prompt").value,
       width: Number(byId("image-width").value), height: Number(byId("image-height").value),
-      steps: Number(byId("image-steps").value) }, "image-generate", "image");
+      steps: Number(byId("image-steps").value), seed: Number(byId("image-seed").value) }, "image-generate", "image");
   });
   // Presentation metadata for the browser's audited read-tool allowlist. A
   // control is created only when the settings response supplies its field.
@@ -747,6 +837,49 @@ window.BrowserManagement = (() => {
     heading.prepend(libraryIcon(icon)); summary.append(heading);
     section.append(decorateDisclosure(summary));
     return section;
+  }
+  const agentSettingHelp = {
+    "search_settings.provider": "Choose the service used for web searches. Auto lets Klaude choose from available providers. Providers that require an API key must be configured before use.",
+    "search_settings.tavily_depth": "Applies when Tavily handles a search. Basic favors speed; Advanced performs a deeper search and may take longer or use more provider credits.",
+    "search_settings.searxng_url": "Base HTTP(S) address of your SearXNG instance, reachable from the Klaude host. Used when SearXNG handles a search. Do not include credentials, a query string or a fragment.",
+    "fetch_settings.provider": "Choose how page content is read. Local uses direct fetching and extraction, with Crawl4AI when enabled and configured. Exa sends the public URL to Exa and requires an API key and the Exa page reader switch.",
+    "fetch_settings.exa_fallback": "Allow Exa to try when local reading produces no usable text or an unsupported content type. Requires the Exa page reader switch and an API key. This does not bypass URL safety checks or retry every fetch failure.",
+    "fetch_settings.crawl4ai_enabled": "Allow the configured Crawl4AI service to help read pages in Local mode. Turning this off keeps direct fetching available. A reachable Crawl4AI URL is needed to use the service.",
+    "fetch_settings.exa_enabled": "Allow Exa to read page content, either as the selected page reader or as a local-reading fallback. Requires an Exa API key. Turning this off blocks both uses.",
+    "fetch_settings.crawl4ai_url": "Base HTTP(S) address of the Crawl4AI service, reachable from the Klaude host. Leave blank to use direct local fetching without this service. Do not include credentials, a query string or a fragment.",
+    "research.provider": "Search provider for Research jobs. Auto uses the normal search routing; an explicit provider restricts Research searches to that provider. Required API keys or service URLs must already be configured.",
+    "research.parallel": "Maximum number of source pages read at the same time (1\u20133). Higher values can shorten research time but increase simultaneous network and service load.",
+    "research.extract_timeout": "Time limit for reading an individual source page, in seconds. Slow sources may fail when the limit is reached. The overall job timeout still applies.",
+    "research.timeout": "Overall Research job time limit, in seconds. More time allows slower searches, source reads and report generation; it does not increase the other budgets.",
+    "research.rounds": "Maximum research planning and search rounds. Research can finish earlier when enough evidence is available or another budget is reached.",
+    "research.queries": "Maximum number of search queries across a Research job. Higher budgets allow broader investigation but can take longer and use more provider requests.",
+    "research.sources": "Maximum number of source pages collected for a Research job. These are limits, not a guaranteed count; unavailable or unreadable pages may reduce the evidence collected.",
+    "research.context_tokens": "Requested model context window for Research planning and report generation. Larger values allow more evidence but require more memory and model support. Report output must fit within half this budget.",
+    "research.output_tokens": "Maximum requested model output for report generation. Higher values allow longer reports but can take more time. Must be no more than half the Research context token budget.",
+    "runtime_options.max_steps": "Maximum agent steps per turn. Each step lets the model respond or request tools. A higher limit allows longer tasks but can increase runtime and resource use.",
+    "runtime_options.max_tool_calls": "Maximum tool calls per turn. Set 0 to use the automatic limit. Higher limits allow more tool work but may increase runtime and service usage.",
+    "runtime_options.max_total_tokens": "Total token budget for a turn. Set 0 for no explicit cap. A larger budget allows more model work but can increase runtime and provider usage.",
+  };
+  let agentHelpDialog;
+  function showAgentSettingHelp(button, title, message) {
+    if (!agentHelpDialog) {
+      agentHelpDialog = domainText("dialog", "", "domain-dialog settings-help-dialog");
+      agentHelpDialog.id = "agent-help-dialog";
+      agentHelpDialog.setAttribute("aria-labelledby", "agent-help-title");
+      agentHelpDialog.setAttribute("aria-describedby", "agent-help-text");
+      const heading = domainText("h2", ""); heading.id = "agent-help-title";
+      const text = domainText("p", ""); text.id = "agent-help-text";
+      const actions = domainText("div", "", "dialog-actions");
+      const ok = domainButton("OK", () => agentHelpDialog.close()); ok.autofocus = true;
+      actions.append(ok); agentHelpDialog.append(heading, text, actions);
+      document.body.append(agentHelpDialog);
+    }
+    byId("agent-help-title").textContent = title;
+    byId("agent-help-text").textContent = message;
+    agentHelpDialog.addEventListener("close", () => {
+      if (button.isConnected && !button.closest("[hidden], [inert]")) button.focus({ preventScroll: true });
+    }, { once: true });
+    agentHelpDialog.showModal();
   }
   function settingForm(field, { labelText = field.label, description = field.description, icon = null } = {}) {
     field = { ...field, value: SettingsDrafts.value("agent", field.id) };
@@ -782,7 +915,23 @@ window.BrowserManagement = (() => {
     };
     input.addEventListener(field.type === "boolean" || input.tagName === "SELECT" ? "change" : "input", submit);
     form.addEventListener("submit", event => { event.preventDefault(); submit(); });
-    if (description) {
+    const settingHelp = agentSettingHelp[field.id];
+    if (settingHelp) {
+      const text = domainText("div", "", "settings-label");
+      const heading = domainText("div", "", "settings-help-heading");
+      const help = domainText("p", settingHelp, "muted");
+      help.id = `${id}-help`; help.hidden = true;
+      const button = domainButton("", () => showAgentSettingHelp(button, labelText, settingHelp), "icon-button settings-help-button");
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("aria-hidden", "true");
+      const path = document.createElementNS(svg.namespaceURI, "path");
+      path.setAttribute("d", "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM9 9a3 3 0 1 1 4 3c-1 0-1 1-1 2M12 17h.01");
+      svg.append(path); button.append(svg);
+      button.setAttribute("aria-label", `Help for ${labelText}`);
+      button.setAttribute("aria-haspopup", "dialog"); button.setAttribute("aria-controls", "agent-help-dialog");
+      input.setAttribute("aria-describedby", help.id);
+      heading.append(label, button); text.append(heading, help); form.append(text, controls);
+    } else if (description) {
       const text = domainText("div", "", "settings-label");
       const help = domainText("p", description, "muted"); help.id = `${id}-help`;
       input.setAttribute("aria-describedby", help.id);
@@ -857,7 +1006,7 @@ window.BrowserManagement = (() => {
     const connections = domainButton("Manage connections", () => {
       byId("integration-sections").querySelector('[data-integration="connections"]').click(); showView("integrations");
     }, "quiet"); connections.id = "tool-mcp-settings";
-    mcp.append(mcpHeading, domainText("p", "Manage MCP tool availability per server in Connections. Configured MCP calls require review unless denied.", "muted"), connections); section.append(mcp);
+    mcp.append(mcpHeading, domainText("p", "Manage MCP tool availability per server in MCPs. Configured MCP calls require review unless denied.", "muted"), connections); section.append(mcp);
     const advanced = settingsDisclosure("advanced_permissions", "Advanced permission rules", "shield");
     const body = domainText("div", "", "settings-advanced-body");
     body.append(domainText("h4", "Workspace protections"), domainText("p", "Workspace boundaries, protected files and network restrictions apply independently of approval preferences.", "muted"),
@@ -917,13 +1066,17 @@ window.BrowserManagement = (() => {
   function renderSessionControls() {
     if (!selectedSession) return;
     const current = !selectedSession.archived && selectedSession.session_id === latest?.session_id;
-    const working = current && (latest?.active_turn_id || latest?.queue?.length);
-    byId("session-archive").disabled = Boolean(working) || busy(`session:${selectedSession.session_id}`);
-    const description = byId("session-management-description");
-    description.textContent = working ?
-      "Wait for the reply and queued messages to finish before archiving." : current ?
-        "Archiving this conversation opens a new chat." : "";
-    description.hidden = !description.textContent;
+    const working = current ? latest?.active_turn_id || latest?.queue?.length :
+      sessions.find(item => item.session_id === selectedSession.session_id)?.active;
+    const pending = changes.get(`session:${selectedSession.session_id}`);
+    byId("session-archive").disabled = Boolean(working) || Boolean(pending);
+    byId("session-archive").title = working ? "Wait for the reply and queued messages to finish" : "";
+    byId("session-delete").disabled = Boolean(working) || Boolean(pending);
+    byId("session-delete").title = working ? "Wait for this conversation to finish before deleting" : "";
+    byId("session-name").disabled = Boolean(pending);
+    byId("session-rename").setAttribute("aria-busy", String(Boolean(pending)));
+    if (pending?.operation === "session-rename") byId("session-management-status").textContent =
+      pending.phase === "unknown" ? "Save unconfirmed. Check Activity." : "Saving…";
   }
   function sessionRow(item, button) {
     if (!latest?.profile_management) return button;
@@ -936,7 +1089,7 @@ window.BrowserManagement = (() => {
       byId("session-archive").replaceChildren(libraryIcon("archive"),
         domainText("span", item.archived ? "Restore" : "Archive"));
       renderSessionControls();
-      byId("session-delete").hidden = !item.archived;
+      byId("session-delete").hidden = false;
       sessionDialog.showModal();
       byId("session-management-close").focus();
     });
@@ -950,11 +1103,17 @@ window.BrowserManagement = (() => {
   }
   byId("session-management-close").append(libraryIcon("close"));
   byId("session-export").prepend(libraryIcon("download"));
+  byId("session-delete").prepend(libraryIcon("trash"));
   byId("session-management-close").addEventListener("click", () => sessionDialog.close());
   byId("session-rename").addEventListener("submit", event => {
     event.preventDefault();
-    if (selectedSession) review({ operation: "session-rename", target: selectedSession.session_id,
-      name: byId("session-name").value }, `session:${selectedSession.session_id}`, "sessions");
+    const item = selectedSession, name = byId("session-name").value.trim().replace(/\s+/g, " ");
+    if (!item || !name || name === (item.title || "")) return;
+    byId("session-management-status").textContent = "";
+    review({ operation: "session-rename", target: item.session_id, name },
+      `session:${item.session_id}`, "sessions", {
+        current: () => sessionDialog.open && selectedSession === item,
+      });
   });
   for (const action of ["archive", "delete"]) byId(`session-${action}`).addEventListener("click", () => {
     if (selectedSession) review({ operation: `session-${action === "archive" && selectedSession.archived ? "restore" : action}`,
@@ -982,7 +1141,7 @@ window.BrowserManagement = (() => {
   async function loadConnections() {
     if (!active("connections")) return;
     if (!latest?.profile_management) {
-      byId("connections-status").textContent = restartHint;
+      byId("connections-status").textContent = "";
       byId("connection-add").querySelector("button").disabled = true;
       byId("integration-add-connections").disabled = true;
       return;
@@ -994,7 +1153,7 @@ window.BrowserManagement = (() => {
       const result = await domainRequest("/api/v1/integrations/connections", "GET", undefined, { signal: connectionsRead.signal });
       if (generation !== connectionsLoad || !active("connections")) return;
       connections = result;
-      byId("connections-status").textContent = [connectionNotice, !result.management_allowed ? "Manage connections from the local Web UI on the Klaude server." : result.truncated ? "Connection inventory limit reached." : ""].filter(Boolean).join(" ");
+      byId("connections-status").textContent = "";
       renderConnections();
     } catch (error) { if (generation === connectionsLoad) domainError(error, "connections-status"); }
     finally { finish(); }
@@ -1028,7 +1187,6 @@ window.BrowserManagement = (() => {
     event.preventDefault();
     const context = integrationAddContext("connections");
     if (!context.current()) return;
-    connectionNotice = "";
     byId("integration-add-status").textContent = "Preparing review…";
     review({ operation: "mcp-add", name: byId("connection-name").value.trim(), url: byId("connection-url").value.trim() }, "browser-mcp", "connections", {
       ...context, statusId: "integration-add-status",
@@ -1047,12 +1205,18 @@ window.BrowserManagement = (() => {
       if (!operation || !["completed", "failed", "unknown", "cancelled"].includes(operation.state)) continue;
       if (operation.state === "unknown") { state.phase = "unknown"; continue; }
       changes.delete(resource); settled = true;
+      if (state.operation === "session-rename" && operation.state === "completed" &&
+          resource === `session:${selectedSession?.session_id}`) {
+        selectedSession.title = state.target;
+        byId("session-name").value = state.target;
+      }
       if (resource === "browser-mcp" && state.target && operation.state !== "completed")
         connectionFailures.set(state.target, "Change rejected. Refresh and review the current connection.");
       const status = resource.startsWith("vision") ? "vision-status" : resource.startsWith("media-") ? "media-settings-status" : resource.startsWith("research") || resource.startsWith("image") ? "generated-jobs-status" : resource.startsWith("setting:") ? "agent-settings-status" : resource.startsWith("session:") ? "session-management-status" : resource.startsWith("memory-") ? "memory-status" : "connections-status";
       const imageSettings = ["media-image_service", "media-recovery-image_service"].includes(resource);
-      byId(imageSettings ? "image-settings-status" : status).textContent = operation.state === "completed" ? "Saved." : "Change rejected. Refresh and review the current item.";
-      if (resource === "browser-mcp") connectionNotice = byId("connections-status").textContent;
+      const pageNotice = ["connections-status", "skills-status", "knowledge-status", "library-status"].includes(status);
+      byId(imageSettings ? "image-settings-status" : status).textContent = pageNotice ? "" :
+        operation.state === "completed" ? "Saved." : "Change rejected. Refresh and review the current item.";
     }
     if (settled) { if (active("memory")) { loadMemory(); loadSettings(); } if (active("connections")) loadConnections(); refreshSessions().catch(showError); }
     if (active("jobs")) loadJobs();
@@ -1062,8 +1226,8 @@ window.BrowserManagement = (() => {
     settingsGroups.clear();
     memoryRead?.abort(); connectionsRead?.abort(); memoryLoad += 1; connectionsLoad += 1;
     memory = connections = null; changes.clear();
-    connectionNotice = ""; connectionFilter = "all";
-    byId("connections-summary").textContent = "";
+    connectionFilter = "all";
+    for (const node of byId("connections-state-filter").querySelectorAll("[data-connection-count]")) node.textContent = "0";
     for (const button of byId("connections-state-filter").children) button.setAttribute("aria-pressed", String(button.dataset.connectionState === "all"));
     connectionFailures.clear(); detailConnection = null; connectionDialog.close();
     for (const id of ["connection-detail-title", "connection-detail-description", "connection-detail-metadata", "connection-detail-status"]) byId(id).replaceChildren();
@@ -1076,6 +1240,8 @@ window.BrowserManagement = (() => {
     byId("image-generate").querySelector("button").disabled = true;
     byId(generationStatusId).textContent = "";
     byId("research-create").reset(); byId("image-generate").reset();
+    studioCheck++; studioCapabilities = null; studioDrafts.clear();
+    byId('image-capabilities-status').textContent = ''; imageDimensions();
     for (const id of ["research-jobs", "image-jobs", "generated-jobs-status", "research-model-label", "image-service-status"]) byId(id).replaceChildren();
     byId("agent-settings-fields").replaceChildren(); byId("agent-settings-status").textContent = "";
     selectedSession = null; sessionDialog.close();

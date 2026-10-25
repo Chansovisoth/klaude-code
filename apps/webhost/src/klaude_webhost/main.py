@@ -29,7 +29,11 @@ WEB_CHAT_FORMATTING = (
     "Browser replies support CommonMark Markdown, tables, strikethrough and task lists. "
     "Use concise paragraphs by default, headings and lists when helpful, inline backticks "
     "for code identifiers, and fenced code blocks with language names for code. "
-    "Do not wrap an entire normal reply in a code fence or emit raw HTML. "
+    "Math supports $inline$ and $$display$$ LaTeX, and \\(inline\\) and \\[display\\] delimiters. "
+    "Code blocks have Copy and Download actions. Use html or svg fences for drawings or pages; "
+    "users can preview these as static documents (scripts and external resources are blocked). "
+    "Use Markdown images for image output. Never invent a file URL or image URL. "
+    "Do not wrap an entire normal reply in a code fence. Put HTML/SVG in labeled code fences. "
     "Respect the user's requested output format, including plain text or structured data."
 )
 
@@ -128,6 +132,7 @@ def main() -> None:
             app, port=args.port, staging_dir=load_config().data_dir / "webui-staging",
             accounts=accounts,
             library=LibraryManagement(load_config(), args.workspace),
+            application_factory=lambda: create_application(args.workspace),
         )
     except BaseException:
         asyncio.run(app.close())

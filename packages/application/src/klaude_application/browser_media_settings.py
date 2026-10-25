@@ -166,6 +166,8 @@ def prepare_media_setting(
     candidate = defaults_from_preferences(cfg, {"ai_defaults": {
         **current.public(), field: draft["value"],
     }})
+    if candidate.vision_enabled and candidate.vision is None:
+        raise ValueError("Disable Vision before clearing its primary model")
     value = getattr(candidate, field)
     role = "utility" if field == "fallbacks" else "vision" if field.startswith("vision") else field
     references = (value if field in {"fallbacks", "vision_fallbacks"} else

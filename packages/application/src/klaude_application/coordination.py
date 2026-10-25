@@ -110,6 +110,16 @@ class DurableTurns:
                 "ON application_turns(session_id, accepted_at)"
             )
             memory.db.execute(
+                "CREATE TABLE IF NOT EXISTS application_message_retries ("
+                "request_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, "
+                "turn_id TEXT NOT NULL UNIQUE, source_row_id INTEGER NOT NULL, "
+                "user_row_id INTEGER NOT NULL UNIQUE, assistant_row_id INTEGER UNIQUE)"
+            )
+            memory.db.execute(
+                "CREATE INDEX IF NOT EXISTS application_message_retries_session "
+                "ON application_message_retries(session_id,user_row_id)"
+            )
+            memory.db.execute(
                 "CREATE TABLE IF NOT EXISTS application_streams ("
                 "session_id TEXT PRIMARY KEY, epoch TEXT NOT NULL, "
                 "minimum_id INTEGER NOT NULL DEFAULT 0, high_water INTEGER NOT NULL DEFAULT 0)"
@@ -271,12 +281,44 @@ class DurableTurns:
             memory.session_snapshot(session_id)
         return legacy
 
+    def retry_input(
+        self, session_id: str, row_id: int,
+    ) -> tuple[str, dict[str, Any] | None, int]:
+        """Read the exact original input and passive response-group identity."""
+        if type(row_id) is not int or not 0 < row_id <= 2**63 - 1:
+            raise ValueError("Choose a saved assistant reply")
+        with self.memory._db_lock:
+            if self.memory.db.execute(
+                "SELECT role FROM turns WHERE session_id=? AND rowid=?", (session_id, row_id),
+            ).fetchone() != ("assistant",):
+                raise ValueError("Saved assistant reply unavailable")
+            user = self.memory.db.execute(
+                "SELECT content,model_content FROM turns WHERE session_id=? AND role='user' "
+                "AND rowid<? ORDER BY rowid DESC LIMIT 1", (session_id, row_id),
+            ).fetchone()
+            root = self.memory.db.execute(
+                "SELECT source_row_id FROM application_message_retries "
+                "WHERE session_id=? AND assistant_row_id=?", (session_id, row_id),
+            ).fetchone()
+        if user is None:
+            raise ValueError("Original prompt unavailable")
+        text = json.loads(user[0])
+        if not isinstance(text, str) or not text.strip() or len(text) > 65_536:
+            raise ValueError("Original prompt unavailable")
+        model_input = json.loads(user[1]) if user[1] else None
+        if (not isinstance(model_input, dict) or model_input.get("kind") != "chat_image_input"
+                or model_input.get("version") != 1):
+            model_input = None
+        return text, model_input, int(root[0]) if root else row_id
+
     def admit(
         self, *, request_id: str, session_id: str, turn_id: str,
         worker_id: str, text: str, scope: str, runtime: dict,
         controller_id: str | None = None,
         input_key: str = "",
         attachments: ChatAttachmentInput | None = None,
+        retry_source_row_id: int | None = None,
+        expected_control_epoch: int | None = None,
     ) -> Admission:
         if decode(runtime) is None:
             raise ValueError("explicit model/runtime selection required")
@@ -328,6 +370,21 @@ class DurableTurns:
                     )
                 if live and live[0] and float(live[1]) > now:
                     raise RuntimeError("session already has an active worker")
+                retry_root = None
+                if retry_source_row_id is not None:
+                    if expected_control_epoch is not None and memory.db.execute(
+                        "SELECT controller_id,epoch FROM application_control WHERE session_id=?",
+                        (session_id,),
+                    ).fetchone() not in (None, (controller_id, expected_control_epoch)):
+                        raise ValueError("Session control changed")
+                    original, _, retry_root = self.retry_input(session_id, retry_source_row_id)
+                    if original != text or attachments:
+                        raise ValueError("Original prompt changed")
+                    if memory.db.execute(
+                        "SELECT 1 FROM application_queue WHERE session_id=? "
+                        "AND state NOT IN ('removed','submitted') LIMIT 1", (session_id,),
+                    ).fetchone():
+                        raise RuntimeError("queued work must finish before retrying")
                 fence = int(live[2]) + 1 if live else 1
                 memory.db.execute(
                     "INSERT INTO session_live "
@@ -358,7 +415,7 @@ class DurableTurns:
                         "updated_at=excluded.updated_at",
                         (session_id, controller_id, now),
                     )
-                memory.db.execute(
+                user_cursor = memory.db.execute(
                     "INSERT INTO turns(session_id, ts, role, content, model_content, "
                     "attachments, attachment_previews, attachment_contents) "
                     "VALUES (?,?,?,?,NULL,?,?,?)",
@@ -371,6 +428,13 @@ class DurableTurns:
                                   "data": base64.b64encode(file.data).decode("ascii")}
                                  for file in attachments.files]) if attachments else None),
                 )
+                if retry_root is not None:
+                    memory.db.execute(
+                        "INSERT INTO application_message_retries "
+                        "(request_id,session_id,turn_id,source_row_id,user_row_id) "
+                        "VALUES (?,?,?,?,?)",
+                        (request_id, session_id, turn_id, retry_root, user_cursor.lastrowid),
+                    )
                 memory._store_session_runtime(session_id, runtime)
                 event_id = self._append(session_id, turn_id, worker_id, "turn.accepted", {})
                 epoch = memory.db.execute(
@@ -999,10 +1063,15 @@ class DurableTurns:
         ).fetchall()
         for (turn_id,) in rows:
             if turn_id == live_turn_id and partial:
-                memory.db.execute(
+                saved = memory.db.execute(
                     "INSERT INTO turns(session_id,ts,role,content,model_content) "
                     "VALUES (?,?,?,?,NULL)",
                     (session_id, now, "assistant", json.dumps(partial, ensure_ascii=False)),
+                )
+                memory.db.execute(
+                    "UPDATE application_message_retries SET assistant_row_id=? "
+                    "WHERE session_id=? AND turn_id=?",
+                    (saved.lastrowid, session_id, turn_id),
                 )
             memory.db.execute(
                 "UPDATE application_turns SET state='interrupted', completed_at=? "
@@ -1119,12 +1188,17 @@ class DurableTurns:
                 [(assistant, model_content)] if assistant is not None else []
             )
             for content, private in messages:
-                memory.db.execute(
+                saved = memory.db.execute(
                     "INSERT INTO turns(session_id,ts,role,content,model_content) "
                     "VALUES (?,?,?,?,?)",
                     (session_id, time.time(), "assistant",
                      json.dumps(content, ensure_ascii=False),
                      json.dumps(private, ensure_ascii=False) if private is not None else None),
+                )
+                memory.db.execute(
+                    "UPDATE application_message_retries SET assistant_row_id=? "
+                    "WHERE session_id=? AND turn_id=?",
+                    (saved.lastrowid, session_id, turn_id),
                 )
             memory.db.execute(
                 "UPDATE application_turns SET state=?, completed_at=? "
@@ -1210,7 +1284,15 @@ class DurableTurns:
                 rows = memory.db.execute(
                     "SELECT rowid,role,content,ts,attachments FROM turns "
                     "WHERE session_id=? AND role IN "
-                    "('user','assistant') ORDER BY rowid DESC LIMIT 500", (session_id,),
+                    "('user','assistant') AND NOT EXISTS ("
+                    "SELECT 1 FROM application_message_retries r WHERE "
+                    "r.session_id=turns.session_id AND r.user_row_id=turns.rowid) "
+                    "ORDER BY rowid DESC LIMIT 500", (session_id,),
+                ).fetchall()
+                retries = memory.db.execute(
+                    "SELECT source_row_id,assistant_row_id,turn_id "
+                    "FROM application_message_retries "
+                    "WHERE session_id=? ORDER BY user_row_id DESC LIMIT 500", (session_id,),
                 ).fetchall()
                 activity_row = memory.db.execute(
                     "SELECT projection FROM application_activity WHERE session_id=?", (session_id,),
@@ -1223,11 +1305,20 @@ class DurableTurns:
                 memory.db.rollback()
                 raise
         messages = []
+        roots = {row[0] for row in retries}
+        variants = {row[1]: row[0] for row in retries if row[1] is not None}
+        newest: dict[int, int | None] = {}
+        for root, answer, _ in retries:
+            newest.setdefault(root, answer)
         for row_id, role, raw, timestamp, attachments in reversed(rows):
             value = json.loads(raw)
             if isinstance(value, str):
                 messages.append({"id": f"stored:{row_id}", "role": role, "content": value,
                                  "created_at": timestamp})
+                root = variants.get(row_id, row_id if row_id in roots else None)
+                if root is not None:
+                    messages[-1]["retry_root"] = f"stored:{root}"
+                    messages[-1]["previous_response"] = row_id != newest[root]
                 if role == "user" and attachments:
                     messages[-1]["attachments"] = json.loads(attachments)
         return {
@@ -1236,6 +1327,9 @@ class DurableTurns:
                          if activity_row else ActivityState().public(timeline=True)),
             "state": str(live[0]) if live else "idle",
             "partial": str(live[1]) if live else "",
+            "retry_root": next((f"stored:{root}" for root, _, turn in retries
+                                if turn == (live[2] if live and live[2]
+                                            else projection.turn_id)), ""),
             "partial_message_id": f"{live[2]}:0" if live and live[2] else "",
             "fence_generation": int(live[3]) if live else 0,
             "control_epoch": int(control[1]) if control else 0,

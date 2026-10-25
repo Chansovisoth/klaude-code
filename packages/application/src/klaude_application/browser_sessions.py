@@ -57,7 +57,7 @@ def prepare_session_operation(
     else:
         if operation not in {"session-archive", "session-restore", "session-delete"}:
             raise ValueError("Unknown conversation action")
-        if fields["archived"] != (operation != "session-archive"):
+        if operation != "session-delete" and fields["archived"] != (operation != "session-archive"):
             raise ValueError("Conversation status changed; refresh before reviewing")
         verb = operation.removeprefix("session-").capitalize()
         summary = f"{verb} conversation {draft['target']}."
@@ -84,6 +84,8 @@ def run_session_operation(memory: Memory, workspace: Path, request: dict[str, An
             expected_total_turns=request["expected_count"],
             expected_last_row=request["expected_last"],
             expected_workspace=str(workspace.resolve()),
+            expected_archived=(request["archived"]
+                               if request["operation"] == "session-delete" else None),
         )
     return True
 

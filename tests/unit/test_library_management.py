@@ -55,6 +55,53 @@ def _change(manager, item, operation, **extra):
     return _wait(manager, identity)
 
 
+def test_reviewed_tag_edit_removes_only_chosen_ai_tags_and_preserves_provenance(manager):
+    item = manager.artifacts.import_bytes(b"Fixture", "document", "tagged.txt")
+    item = manager.artifacts.apply_ai_tags(item["id"], item["revision"], item["sha256"],
+                                           ["first", "keep"], {"model": "fixture"})
+    prior = manager.artifacts.tagging_info(item["id"])
+    result = _change(manager, item, "tags", value="manual", remove_ai_tags=["first"])
+    assert result["state"] == "completed"
+    saved = manager.artifacts.get(item["id"])
+    assert saved["tags"] == ["manual"] and saved["ai_tags"] == ["keep"]
+    assert manager.artifacts.tagging_info(item["id"]) == {"keep": prior["keep"]}
+    result = _change(manager, saved, "tags", value="manual", remove_ai_tags=["keep"])
+    assert result["state"] == "completed"
+    assert manager.artifacts.get(item["id"])["ai_tags"] == []
+    assert manager.artifacts.get(item["id"])["tags"] == ["manual"]
+
+
+@pytest.mark.parametrize("removals", ["first", ["missing"], ["x" * 41], [1], ["first"] * 21])
+def test_ai_tag_removal_rejects_invalid_or_unknown_choices_without_changes(manager, removals):
+    item = manager.artifacts.import_bytes(b"Fixture", "document", "tagged.txt")
+    item = manager.artifacts.apply_ai_tags(item["id"], item["revision"], item["sha256"],
+                                           ["first", "keep"], {"model": "fixture"})
+    with pytest.raises(ValueError):
+        manager.prepare("browser", {"operation": "tags", "target": item["id"],
+                                    "revision": item["revision"], "value": "manual",
+                                    "remove_ai_tags": removals})
+    assert manager.artifacts.get(item["id"]) == item
+
+
+def test_ai_tag_removal_rechecks_revision_in_worker_and_is_atomic(manager):
+    item = manager.artifacts.import_bytes(b"Fixture", "document", "tagged.txt")
+    item = manager.artifacts.apply_ai_tags(item["id"], item["revision"], item["sha256"],
+                                           ["first", "keep"], {"model": "fixture"})
+    review = manager.prepare("browser", {"operation": "tags", "target": item["id"],
+                                        "revision": item["revision"], "value": "manual",
+                                        "remove_ai_tags": ["first"]})
+    assert "Remove AI tags: first" in review["summary"]
+    saved = manager.artifacts.change(item["id"], item["revision"], "tags", "another client")
+    identity = uuid.uuid4().hex
+    manager.submit("browser", review["review_id"], identity)
+    assert _wait(manager, identity)["state"] == "failed"
+    assert manager.artifacts.get(item["id"]) == saved
+    with pytest.raises(ValueError, match="AI tags changed"):
+        manager.artifacts.change(item["id"], saved["revision"], "tags", "must not save",
+                                 remove_ai_tags=["missing"])
+    assert manager.artifacts.get(item["id"]) == saved
+
+
 def test_metadata_reads_do_not_start_workers_or_initialize_stores(manager, monkeypatch):
     def unexpected(*_args, **_kwargs):
         pytest.fail("Browsing must not start a worker or model")

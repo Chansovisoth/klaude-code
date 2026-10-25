@@ -48,6 +48,30 @@ def test_metadata_orientation_alpha_and_explicit_crop_are_normalized():
         assert image.getpixel((0, 0)) == (255, 255, 255)
 
 
+@pytest.mark.parametrize("size", ["thumbnail", "preview"])
+def test_browser_derivatives_keep_transparent_and_partial_alpha(tmp_path, size):
+    from klaude_core.library_artifacts import ArtifactStore
+    from klaude_webhost.library_images import LibraryImages
+
+    source = io.BytesIO()
+    pixels = Image.new("RGBA", (3, 1))
+    pixels.putdata([(255, 0, 0, 0), (0, 255, 0, 128), (0, 0, 255, 255)])
+    pixels.save(source, format="PNG")
+    original = source.getvalue()
+    store = ArtifactStore(tmp_path / "library")
+    item = store.import_bytes(original, "media", "transparent.png")
+    cache = LibraryImages()
+    mime, output = cache.read(store, item["id"], item["revision"], size, cancelled=lambda: False)
+    assert mime == "image/png"
+    with Image.open(io.BytesIO(output)) as image:
+        assert [image.convert("RGBA").getpixel((x, 0)) for x in range(3)] == [
+            pixels.getpixel((x, 0)) for x in range(3)
+        ]
+    assert cache.read(store, item["id"], item["revision"], size,
+                      cancelled=lambda: False) == (mime, output)
+    assert store.read_content(item["id"], item["revision"]) == original
+
+
 def test_private_large_input_does_not_deadlock_short_polling_or_transmit_padding():
     source = picture(size=(1, 1)) + b"x" * 7_500_000
     started = time.monotonic()

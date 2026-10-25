@@ -49,6 +49,7 @@ def _compact_repo(base_url: str, item: dict[str, Any], repo_type: str) -> dict[s
         "url": _repo_url(base_url, repo_type, repo_id) if repo_id else "",
         "likes": item.get("likes", 0),
         "downloads": item.get("downloads", 0),
+        "downloads_known": "downloads" in item,
         "last_modified": item.get("lastModified") or item.get("last_modified", ""),
         "tags": tags[:12],
         "summary": item.get("description") or item.get("pipeline_tag") or "",
@@ -75,6 +76,7 @@ def hub_repo_search(
         if filter_tag != "gguf" or endpoint != "models":
             raise ValueError("Unsupported model discovery filter")
         params["filter"] = filter_tag
+        params["direction"] = -1
         import json
 
         with httpx.Client(
@@ -190,3 +192,65 @@ def _readme_revisions(
     add("main")
     add("master")
     return candidates
+
+
+def hub_gguf_files(base_url: str, api_key: str, repo_id: str) -> dict[str, Any]:
+    """Bounded metadata for exact top-level GGUF files, never weight downloads."""
+    import json
+    import re
+
+    part = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}"
+    if not re.fullmatch(rf"{part}/{part}", repo_id):
+        raise ValueError("Choose an exact Hugging Face repository")
+    with httpx.Client(
+        timeout=httpx.Timeout(5, connect=3), trust_env=False, follow_redirects=False
+    ) as client:
+        with client.stream(
+            "GET",
+            f"{base_url.rstrip('/')}/api/models/{repo_id}",
+            params={"blobs": "true"},
+            headers=_headers(api_key),
+        ) as response:
+            response.raise_for_status()
+            body = bytearray()
+            for chunk in response.iter_bytes():
+                body.extend(chunk)
+                if len(body) > 2_000_000:
+                    raise ValueError("Repository metadata exceeded its bound")
+    value = json.loads(body)
+    if not isinstance(value, dict) or value.get("id") != repo_id:
+        raise ValueError("Repository identity differs from the selected model")
+    siblings = value.get("siblings")
+    if not isinstance(siblings, list) or len(siblings) > 1000:
+        raise ValueError("Repository file inventory exceeds its bound")
+    files = []
+    for row in siblings:
+        if not isinstance(row, dict):
+            raise ValueError("Invalid repository file metadata")
+        name = row.get("rfilename", "")
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.gguf", name, re.I)
+            or re.search(r"-\d+-of-\d+\.gguf$", name, re.I)
+            or name.lower().startswith("mmproj")
+            or len(f"hf.co/{repo_id}:{name}") > 200
+        ):
+            continue
+        lfs = row.get("lfs")
+        lfs = lfs if isinstance(lfs, dict) else {}
+        size = row.get("size", lfs.get("size"))
+        files.append(
+            {"filename": name, "size": size if type(size) is int and 0 <= size < 2**63 else None}
+        )
+        if len(files) == 64:
+            break
+    card = value.get("cardData")
+    card = card if isinstance(card, dict) else {}
+    license_name = card.get("license")
+    return {
+        "id": repo_id,
+        "files": files,
+        "license": license_name
+        if isinstance(license_name, str) and len(license_name) < 100
+        else None,
+    }

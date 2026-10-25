@@ -19,7 +19,7 @@ chat and Research require tools; Utility and Vision do not. Utility, Research an
 Vision exclude known mandatory-Thinking models and unsupported adapters. Utility
 and Vision fallback controls use the same role filters as their primaries.
 
-Unknown capabilities stay selectable with Verify on review, rather than being
+Unknown capabilities stay selectable with Capability unknown, rather than being
 presented as verified or silently hiding potentially supported cloud models.
 Exact existing review checks remain authoritative, including Vision inspection.
 Review also rejects Codex for bounded Utility/Research roles and mandatory-Thinking
@@ -90,3 +90,8 @@ Changed files: `browser_media_settings.py`, `host.py`, static `media.js` and
 `webui_model_defaults_smoke.py`, `AGENTS.md`, `coverage.md` and this record.
 The date/time validation record adds the shared live activation evidence.
 Pre-existing dirty worktree changes remain intact; no stash/reset/commit/push.
+
+The subsequent [Store and settings completion](model_store/completion-validation.md)
+adds a native searchable picker with the shared numbered pager for each primary
+and fallback slot. It retains staged Apply/Discard and the underlying native
+select/change seam. Enabled Vision cannot clear its primary until disabled.

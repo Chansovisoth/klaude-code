@@ -45,8 +45,10 @@ def parse(text: str) -> list[str]:
         raise ValueError("Model did not return a JSON tag array; retry explicitly") from None
 
 
-def prepare(cfg: Any, identity: str, revision: int, context: int, output: int) -> dict:
-    return {**vision.prepare(cfg, identity, revision, QUESTION, context, output),
+def prepare(cfg: Any, identity: str, revision: int, context: int, output: int,
+            *, reference: str | None = None) -> dict:
+    return {**vision.prepare(cfg, identity, revision, QUESTION, context, output,
+                             reference=reference),
             "consumer": "image-tags-v1"}
 
 

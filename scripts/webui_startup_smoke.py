@@ -103,9 +103,12 @@ async def verify(host, root, gates, failures):
                 await tab.wait(
                     "!!document.querySelector('#app-startup') && !!document.styleSheets.length"
                 )
+                await tab.wait("document.documentElement.dataset.startupFontReady==='true'")
                 assert await tab.js("""(() => {
                   const shell=document.querySelector('.shell');
                   const screen=document.querySelector('#app-startup');
+                  const progressPainted=!!document.querySelector(
+                    '.startup-progress svg path, .startup-progress canvas');
                   return document.documentElement?.dataset.startup==='loading' && shell.inert &&
                     shell.getAttribute('aria-hidden')==='true' &&
                     getComputedStyle(shell).visibility==='hidden' &&
@@ -114,7 +117,12 @@ async def verify(host, root, gates, failures):
                     document.querySelector('.startup-progress')
                       .getAttribute('role')==='progressbar' &&
                     !document.querySelector('.startup-progress').hasAttribute('aria-valuenow') &&
-                    !!document.querySelector('.startup-progress > .material-loading svg path') &&
+                    progressPainted &&
+                    document.fonts.check('750 36px Roboto') &&
+                    getComputedStyle(document.querySelector('.startup-brand')).visibility==='visible' &&
+                    Math.abs(document.querySelector('.startup-brand').getBoundingClientRect().left +
+                      document.querySelector('.startup-brand').getBoundingClientRect().width/2 - innerWidth/2)<1 &&
+                    +document.querySelector('.startup-progress').firstElementChild.getAttribute('aria-valuenow')<90 &&
                     !document.querySelector('#startup-wave') &&
                     document.documentElement.scrollWidth<=innerWidth && !startupLeaks.length;
                 })()""")
@@ -124,19 +132,21 @@ async def verify(host, root, gates, failures):
                     "document.documentElement?.dataset.startup==='ready' && "
                     "document.querySelector('#app-startup').hidden"
                 )
-                assert await tab.js(
-                    "!document.querySelector('.shell').inert && !startupLeaks.length && "
-                    "!document.querySelector('.startup-progress').children.length"
-                )
                 if signed_in:
                     await tab.wait(
-                        "authenticated && latest?.session_id && sessionsLoaded && pollTimer!==null"
+                        "authenticated && latest?.session_id && sessionsLoaded && "
+                        "pollTimer!==null && byId('local-access').hidden"
                     )
                     assert await tab.js("byId('local-access').hidden && !layout.hidden")
                 else:
                     assert await tab.js(
                         "!byId('local-access').hidden && layout.hidden && layout.inert"
                     )
+                assert await tab.js(
+                    f"document.querySelector('.shell').inert==={str(not signed_in).lower()} && "
+                    "!startupLeaks.length && "
+                    "!document.querySelector('.startup-progress').children.length"
+                )
 
             async def screenshot(name):
                 shot = await tab.command("Page.captureScreenshot", {"format": "png"})
@@ -146,14 +156,26 @@ async def verify(host, root, gates, failures):
             # executes. System dark, corrupt JSON and denied storage are included.
             await tab.command("Page.navigate", {"url": host.origin})
             await ready()
+            assert await tab.js(
+                "appearance.theme==='dark' && appearance.palette==='cocoa' && "
+                "appearance.variant==='fidelity'"
+            ), "Fresh profiles use the shared WebUI defaults"
             cases = [
-                (320, "dark", "ocean", False, "expressive", False),
-                (390, "light", "peach", True, "expressive", False),
-                (768, "system", "slate", False, "expressive", True),
-                (1440, "dark", "lavender", False, "expressive", False),
-                (390, "dark", "sage", False, "classic", False),
+                (320, "dark", "ocean", False, "expressive", "expressive", False),
+                (390, "light", "peach", True, "expressive", "expressive", False),
+                (768, "system", "slate", False, "expressive", "expressive", True),
+                (1440, "dark", "lavender", False, "expressive", "classic", False),
+                (390, "dark", "sage", False, "classic", "expressive", False),
+                (1440, "dark", "cocoa", False, "expressive", "material", False),
+                (390, "dark", "cocoa", False, "expressive", "material-static-thick", False),
             ]
-            for width, theme, palette, reduced, loading_style, system_reduced in cases:
+            for width, theme, palette, reduced, loading_style, bar_style, system_reduced in cases:
+                base_bar_style = bar_style.removesuffix("-thick")
+                visible_bar = "wavy" if base_bar_style == "expressive" else "straight"
+                hidden_bar = "straight" if base_bar_style == "expressive" else "wavy"
+                indicator_selector = (
+                    ".mtrl-progress" if base_bar_style == "material" else ".md3-linear-progress"
+                )
                 await tab.command(
                     "Emulation.setDeviceMetricsOverride",
                     {
@@ -180,6 +202,9 @@ async def verify(host, root, gates, failures):
                     "reduced": reduced,
                     "chatDensity": "compact",
                     "loadingStyle": loading_style,
+                    # A legacy thick choice keeps its design, never its weight.
+                    "loadingBarStyle": bar_style,
+                    **({"loadingBarThickness": "thick"} if bar_style.endswith("-thick") else {}),
                 }
                 await tab.js(
                     "localStorage.setItem('klaude.webui.appearance.v1',"
@@ -208,33 +233,45 @@ async def verify(host, root, gates, failures):
                 assert await tab.js("!document.activeElement.closest('.shell')")
                 await tab.js(
                     "window.startupIndicator="
-                    "document.querySelector('.startup-progress > .material-loading');"
-                    "window.startupRenderer=MaterialLoading"
+                    f"document.querySelector('.startup-progress > {indicator_selector}');"
+                    "window.startupRenderer=MaterialProgress"
                 )
-                motion = (
-                    "getComputedStyle(startupIndicator,'::after').transform"
-                    if loading_style == "classic" else
-                    "startupIndicator.querySelector('g').getAttribute('transform')"
+                indicator_shape_check = (
+                    "!!startupIndicator.querySelector('.mtrl-progress__canvas')"
+                    if base_bar_style == "material" else
+                    "startupIndicator.classList.contains('md3-linear-progress-material-static') && "
+                    "startupIndicator.dataset.thickness==='thick' && "
+                    "startupIndicator.style.getPropertyValue('--bar-height')==='20px' && "
+                    "!!startupIndicator.querySelector('.md3-linear-progress-indicator')"
+                    if base_bar_style == "material-static" else
+                    "getComputedStyle(startupIndicator.querySelector("
+                    f"'.md3-linear-progress-{visible_bar}')).display!=='none' && "
+                    "getComputedStyle(startupIndicator.querySelector("
+                    f"'.md3-linear-progress-{hidden_bar}')).display==='none'"
                 )
-                first = await tab.js(motion)
+                startup_valid = await tab.js(
+                    "startupIndicator.getAttribute('role')==='progressbar' && "
+                    "+startupIndicator.getAttribute('aria-valuenow')>=0 && "
+                    "+startupIndicator.getAttribute('aria-valuenow')<=100 && "
+                    "(startupIndicator.querySelector('canvas')?.style.height==='20px' || startupIndicator.dataset.thickness==='thick') && "
+                    "document.documentElement.dataset.loadingBarStyle==="
+                    f"{json.dumps(base_bar_style)} && "
+                    + indicator_shape_check
+                )
+                assert startup_valid, await tab.js("({tag:startupIndicator.outerHTML.slice(0,700),barStyle:document.documentElement.dataset.loadingBarStyle})")
                 await asyncio.sleep(0.2)
-                second = await tab.js(motion)
-                assert (first == second) == (reduced or system_reduced), (
-                    reduced, system_reduced, loading_style, first, second
-                )
-                if width == 1440:
-                    path = await tab.js("startupIndicator.querySelector('path').getAttribute('d')")
-                    await asyncio.sleep(.9)
-                    assert path != await tab.js(
-                        "startupIndicator.querySelector('path').getAttribute('d')"
-                    ), "The early indicator must morph before app.js is released"
+                assert await tab.js(
+                    "+startupIndicator.getAttribute('aria-valuenow')>0 && "
+                    "+startupIndicator.getAttribute('aria-valuenow')<90 && "
+                    "document.documentElement.dataset.startup==='loading'"
+                ), "Splash progress should begin visibly and hold below completion until startup is ready"
                 await screenshot(f"startup-{theme}-{palette}-{width}.png")
                 release("/app.js")
                 await entered("/api/v1/auth/method")
                 await loading()
                 assert await tab.js(
-                    "MaterialLoading===startupRenderer && "
-                    "document.querySelector('.startup-progress > .material-loading')"
+                    "MaterialProgress===startupRenderer && "
+                    f"document.querySelector('.startup-progress > {indicator_selector}')"
                     "===startupIndicator"
                 ), "The deferred app must retain the early renderer and indicator"
                 assert (
@@ -249,14 +286,14 @@ async def verify(host, root, gates, failures):
                 )
             print(
                 "Pre-paint themes, delayed scripts/auth, keyboard isolation, "
-                "shared early Material loader/reduced motion and logged-out refresh passed",
+                "early progress/readiness isolation and logged-out refresh passed",
                 flush=True,
             )
 
             # Sign in using the existing real account endpoint, then delay the
             # first session snapshot on refresh. Keep the cover until it exists.
             await tab.js(
-                "byId('login-password').value="
+                "byId('login-username').value='admin';byId('login-password').value="
                 + json.dumps(host.accounts.initial_password())
                 + ";byId('account-login').requestSubmit()"
             )
@@ -294,8 +331,9 @@ async def verify(host, root, gates, failures):
             await tab.command("Page.reload", {"ignoreCache": True})
             await ready()
             assert await tab.js(
-                "document.documentElement.dataset.theme==='system' && "
-                "document.documentElement.dataset.palette==='lavender'"
+                "document.documentElement.dataset.theme==='dark' && "
+                "document.documentElement.dataset.palette==='cocoa' && "
+                "appearance.variant==='fidelity'"
             )
             blocked_storage = await tab.command(
                 "Page.addScriptToEvaluateOnNewDocument",
@@ -306,7 +344,9 @@ async def verify(host, root, gates, failures):
             )
             await tab.command("Page.reload", {"ignoreCache": True})
             await ready()
-            assert await tab.js("document.documentElement.dataset.theme==='system'")
+            assert await tab.js("document.documentElement.dataset.theme==='dark' && "
+                                "document.documentElement.dataset.palette==='cocoa' && "
+                                "appearance.variant==='fidelity'")
             await tab.command(
                 "Page.removeScriptToEvaluateOnNewDocument",
                 {"identifier": blocked_storage["identifier"]},

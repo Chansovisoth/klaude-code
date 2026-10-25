@@ -7,7 +7,12 @@ window.KlaudeColors ??= (() => {
   const seeds = Object.freeze({ slate: '#777777', lavender: '#65558f', sage: '#43664e',
     peach: '#8b4e33', ocean: '#235d91', rose: '#914468', teal: '#006a68', amber: '#795900',
     crimson: '#98415a', coral: '#9c4430', violet: '#7b4397', indigo: '#515b96',
-    emerald: '#006c48', lime: '#516523', sky: '#006780', cocoa: '#80543e' });
+    emerald: '#006c48', lime: '#516523', sky: '#006780', cocoa: '#554736' });
+  // Cocoa restores the original clock's soft brown/beige color family. Keep
+  // Material's dynamic role tones and contrast rules; other variants continue
+  // to transform its seed normally rather than overriding individual UI roles.
+  const cocoaTones = Object.freeze({ primary: '#554736', secondary: '#504739',
+    tertiary: '#654d35', neutral: '#24221e', neutralVariant: '#d2c7bc' });
   const roles = ['primary', 'onPrimary', 'primaryContainer', 'onPrimaryContainer',
     'secondary', 'onSecondary', 'secondaryContainer', 'onSecondaryContainer',
     'tertiary', 'onTertiary', 'tertiaryContainer', 'onTertiaryContainer',
@@ -21,11 +26,14 @@ window.KlaudeColors ??= (() => {
   function palette(value, dark) {
     const source = value.colorSource || 'preset';
     const seed = source === 'preset' ? seeds[value.palette] : value.accent;
-    const variant = source === 'preset' && value.palette === 'slate' ? 'monochrome' : value.variant;
-    const key = `${seed}/${variant}/${dark}`;
+    const variant = source === 'preset' && value.palette === 'slate' ? 'monochrome' : value.variant || 'tonal-spot';
+    const key = `${source === 'preset' ? value.palette : 'accent'}/${seed}/${variant}/${dark}`;
     if (cache.has(key)) return cache.get(key);
     const scheme = new (m.variants[variant] || m.variants['tonal-spot'])(
       m.Hct.fromInt(m.argbFromHex(seed || seeds.lavender)), dark, 0);
+    if (source === 'preset' && value.palette === 'cocoa' && variant === 'tonal-spot')
+      for (const [role, color] of Object.entries(cocoaTones))
+        scheme[role + 'Palette'] = m.TonalPalette.fromInt(m.argbFromHex(color));
     const result = Object.fromEntries(roles.map(role => [kebab(role), m.hexFromArgb(scheme[role])]));
     // Success is a separate semantic palette, never a replacement for primary.
     const success = m.TonalPalette.fromHueAndChroma(150, 35);

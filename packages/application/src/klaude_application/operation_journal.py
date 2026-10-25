@@ -267,10 +267,14 @@ class OperationJournal:
         resource: str,
         payload: object,
         lease_seconds: float = 15,
+        conflicts_with: tuple[str, ...] = (),
+        exclusive: bool = False,
     ) -> OperationReceipt:
         self._validate(request_id, owner_id, kind, resource)
         if not 1 <= lease_seconds <= 60:
             raise ValueError("Invalid operation lease")
+        if len(conflicts_with) > 8 or any(not IDENTITY.fullmatch(r) for r in conflicts_with):
+            raise ValueError("Invalid conflicting resources")
         now = self._clock()
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
@@ -283,6 +287,16 @@ class OperationJournal:
                 if row[1] != owner_id or row[4] != fingerprint:
                     raise OperationConflict("Request ID already belongs to another intent")
                 return self._receipt(row)
+            if exclusive and db.execute(
+                "SELECT 1 FROM operation_resources WHERE request_id<>'' LIMIT 1"
+            ).fetchone():
+                raise OperationConflict("Finish or reconcile other operations before model work")
+            for conflict in conflicts_with:
+                if db.execute(
+                    "SELECT 1 FROM operation_resources WHERE resource=? AND request_id<>''",
+                    (conflict,),
+                ).fetchone():
+                    raise OperationConflict("Conflicting model work is active or unresolved")
             owned = db.execute(
                 "SELECT generation,request_id FROM operation_resources WHERE resource=?",
                 (resource,),

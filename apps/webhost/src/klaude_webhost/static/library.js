@@ -1,5 +1,174 @@
 "use strict";
 
+/* BEGIN MD3 TABS: python3 scripts/bundle_webui_tabs.py */
+/* material@3.2.4 | MIT | Copyright 2025 floor */
+window.KlaudeMD3Tabs = (() => {
+const DEFAULT_CONFIG = {
+    widthStrategy: 'auto',
+    fixedWidth: 40,
+    visible: true,
+    prefix: 'mtrl',
+    variant: 'primary',
+};
+const PRIMARY_HEIGHT = 3;
+const SECONDARY_HEIGHT = 2;
+const PRIMARY_INSET = 2;
+const MIN_LENGTH = 24;
+const createTabIndicator = (config = {}) => {
+    const mergedConfig = { ...DEFAULT_CONFIG, ...config };
+    const prefix = mergedConfig.prefix || 'mtrl';
+    const element = document.createElement('div');
+    element.className = `${prefix}-tabs__indicator`;
+    const anchorSupport = () => {
+        const host = (element.ownerDocument.defaultView ?? globalThis);
+        const supports = host.CSS?.supports;
+        return typeof supports === 'function' ? supports('anchor-name', 'none') : null;
+    };
+    const anchor = anchorSupport();
+    const strategy = mergedConfig.widthStrategy ?? 'auto';
+    const custom = mergedConfig.animationDuration !== undefined || mergedConfig.animationTiming !== undefined;
+    const motion = (property) => `${property} ${mergedConfig.animationDuration ?? 250}ms ${mergedConfig.animationTiming ?? 'cubic-bezier(0.4, 0, 0.2, 1)'}`;
+    const transition = custom ? `${motion(anchor === false ? 'transform' : 'left')}, ${motion('width')}` : '';
+    element.style.transition = transition;
+    element.style.height = `${mergedConfig.height ?? (mergedConfig.variant === 'secondary' ? SECONDARY_HEIGHT : PRIMARY_HEIGHT)}px`;
+    if (anchor === false)
+        element.style.width = `${mergedConfig.fixedWidth}px`;
+    if (strategy !== 'auto')
+        element.classList.add(`${prefix}-tabs__indicator--${strategy}`);
+    if (strategy === 'fixed' || strategy === 'content') {
+        element.style.setProperty(`--${prefix}-tabs-indicator-width`, `${mergedConfig.fixedWidth || 40}px`);
+    }
+    if (mergedConfig.visible === false) {
+        element.style.opacity = '0';
+    }
+    if (mergedConfig.color) {
+        element.style.backgroundColor = mergedConfig.color;
+    }
+    let currentTab = null;
+    const calculateWidth = (tab) => {
+        if (mergedConfig.widthStrategy === 'auto') {
+            if (mergedConfig.variant === 'secondary') {
+                return tab.element.offsetWidth;
+            }
+            const textElement = tab.element.querySelector(`.${prefix}-button__text`);
+            if (textElement) {
+                return Math.max(textElement.getBoundingClientRect().width - 2 * PRIMARY_INSET, MIN_LENGTH);
+            }
+            return Math.max(tab.element.offsetWidth / 2, 30);
+        }
+        switch (mergedConfig.widthStrategy) {
+            case 'dynamic':
+                return Math.max(tab.element.offsetWidth / 2, 30);
+            case 'content':
+                const text = tab.element.querySelector(`.${prefix}-button__text`);
+                if (text) {
+                    return Math.max(text.clientWidth, 30);
+                }
+                return mergedConfig.fixedWidth || 40;
+            case 'fixed':
+            default:
+                return mergedConfig.fixedWidth || 40;
+        }
+    };
+    const getTabPosition = (tabElement) => {
+        const scrollContainer = tabElement.parentElement;
+        if (!scrollContainer) {
+            console.error('Tab has no parent element, cannot position indicator');
+            return { left: 0, width: tabElement.offsetWidth };
+        }
+        const tabRect = tabElement.getBoundingClientRect();
+        const containerRect = scrollContainer.getBoundingClientRect();
+        return {
+            left: tabRect.left - containerRect.left,
+            width: tabRect.width
+        };
+    };
+    const calculatePosition = (tab, indicatorWidth) => {
+        const { left, width: tabWidth } = getTabPosition(tab.element);
+        if (mergedConfig.variant !== 'secondary' &&
+            (mergedConfig.widthStrategy === 'auto' || mergedConfig.widthStrategy === 'content')) {
+            const textElement = tab.element.querySelector(`.${prefix}-button__text`);
+            if (textElement) {
+                const textRect = textElement.getBoundingClientRect();
+                const tabRect = tab.element.getBoundingClientRect();
+                const textLeft = textRect.left - tabRect.left;
+                return {
+                    left: left + textLeft + (textRect.width - indicatorWidth) / 2
+                };
+            }
+        }
+        if (indicatorWidth < tabWidth) {
+            return {
+                left: left + ((tabWidth - indicatorWidth) / 2)
+            };
+        }
+        return { left };
+    };
+    const moveToTab = (tab, immediate = false) => {
+        if (!tab || !tab.element) {
+            console.error('Invalid tab or tab has no element');
+            return;
+        }
+        currentTab = tab;
+        if (anchor !== false) {
+            if (anchor === true && immediate) {
+                element.style.transition = 'none';
+                void element.offsetHeight;
+                element.style.transition = transition;
+            }
+            return;
+        }
+        const width = calculateWidth(tab);
+        const { left } = calculatePosition(tab, width);
+        if (immediate) {
+            element.style.transition = 'none';
+            element.offsetHeight;
+        }
+        element.style.width = `${width}px`;
+        element.style.transform = `translateX(${left}px)`;
+        if (immediate) {
+            setTimeout(() => {
+                element.style.transition = transition;
+            }, 10);
+        }
+    };
+    const update = () => {
+        if (currentTab) {
+            moveToTab(currentTab, true);
+        }
+    };
+    const show = () => {
+        element.style.opacity = '1';
+    };
+    const hide = () => {
+        element.style.opacity = '0';
+    };
+    const setColor = (color) => {
+        element.style.backgroundColor = color;
+    };
+    const destroy = () => {
+        if (element.parentNode) {
+            element.parentNode.removeChild(element);
+        }
+        currentTab = null;
+    };
+    return {
+        element,
+        moveToTab,
+        show,
+        hide,
+        setColor,
+        update,
+        destroy
+    };
+};
+
+return Object.freeze({ createTabIndicator });
+})();
+/* END MD3 TABS */
+
+"use strict";
+
 // Same-origin adapter for shared Library services. Untrusted names, previews and
 // knowledge snippets are always DOM text; downloaded documents never execute.
 let librarySection = readNavigationChoice("library-section",
@@ -15,7 +184,6 @@ if (librarySection === "knowledge") {
 let fileKind = readNavigationChoice("file-kind", ["all", "document", "research", "media"], "all");
 let fileStatus = readNavigationChoice("file-status", ["saved", "archived"], "saved");
 let fileView = readNavigationChoice("file-view", ["list", "grid", "gallery"], "grid");
-let fileScope = readNavigationChoice("file-scope", ["current", "all"], "all");
 const fileSorts = ["newest", "oldest", "name", "name_desc", "largest", "smallest", "type"];
 const FILE_PAGE_SIZE = 24;
 let filePage = null;
@@ -84,7 +252,6 @@ let knowledgeChunkPage = null;
 let knowledgeChunkRead = null;
 let knowledgeReaderIndex = 0;
 let knowledgeDeletePending = null;
-let knowledgeActionNotice = "";
 let knowledgeOrigin = null;
 const LIBRARY_PAGE_SIZE = 20;
 const domainPageSizes = { library: 24, knowledge: 20, sources: 20, skills: 20 };
@@ -105,7 +272,6 @@ let installedSkills = [];
 let detailSkill = null;
 let skillReviewPending = false;
 const skillChanges = new Map();
-const skillFailures = new Map();
 const domainRefreshes = new Map();
 let selectedArtifact = null;
 let managementReview = null;
@@ -184,8 +350,8 @@ async function refreshDomain(prefix) {
   button.disabled = true;
   button.setAttribute("aria-busy", "true");
   token.timer = setTimeout(() => {
-    if (domainRefreshes.get(prefix) !== token || !window.MaterialLoading) return;
-    token.indicator = MaterialLoading.create({ size: "small" });
+    if (domainRefreshes.get(prefix) !== token || !window.MaterialLoadingCircle) return;
+    token.indicator = MaterialLoadingCircle.create({ size: "small" });
     button.prepend(token.indicator);
   }, 120);
   if (prefix === "library") { clearTimeout(fileSearchTimer); filePages.clear(); artifactDetails.clear(); }
@@ -207,6 +373,10 @@ function activeDomainStatus() {
 function domainError(error, target = activeDomainStatus()) {
   if (error.name === "AbortError" || error.authEpoch !== undefined && error.authEpoch !== authEpoch) return;
   if (error.status === 401) { showLocalAccess(); return; }
+  if (["connections-status", "skills-status", "knowledge-status"].includes(target)) {
+    byId(target).textContent = "";
+    return;
+  }
   byId(target).textContent = error.message || String(error);
 }
 async function domainRequest(path, method = "GET", body, options = {}) {
@@ -238,6 +408,7 @@ async function domainPage(path, parameters, resolveTotal = true, options = {}) {
   }
   if (data.page_size === undefined) {
     const key = data.hits ? "hits" : "items";
+    const allSkills = path === "/api/v1/integrations/skills" ? data[key] : null;
     let items = data[key];
     const inventory = path === "/api/v1/integrations/skills" ||
       path === "/api/v1/library/knowledge" && !parameters.query;
@@ -251,10 +422,16 @@ async function domainPage(path, parameters, resolveTotal = true, options = {}) {
     const total = inventory ? items.length : data.total ??
       (!data.more && (items.length || offset === 0) ? offset + items.length : null);
     const knownTotal = total ?? (items.length ? offset + items.length + Number(Boolean(data.more)) : 0);
+    const counts = allSkills ? {
+      all: allSkills.length,
+      enabled: allSkills.filter(item => item.enabled).length,
+      disabled: allSkills.filter(item => !item.enabled).length,
+      limited: Boolean(data.more),
+    } : undefined;
     if (inventory) items = items.slice(offset);
     data = { ...data, [key]: items.slice(0, LIBRARY_PAGE_SIZE),
       more: items.length > LIBRARY_PAGE_SIZE || !inventory && Boolean(data.more),
-      limited: inventory && Boolean(data.more), page_size: LIBRARY_PAGE_SIZE,
+      limited: inventory && Boolean(data.more), ...(counts ? { counts } : {}), page_size: LIBRARY_PAGE_SIZE,
       total, known_total: knownTotal };
   } else if (path === "/api/v1/integrations/skills" && parameters.state && data.state !== parameters.state) {
     throw new Error("Restart Web UI and reload to filter Skills by status.");
@@ -329,9 +506,6 @@ function renderTabCounts(counts = {}) {
     const label = domainText("span", button.dataset.label);
     if (Number.isSafeInteger(total) && total >= 0) {
       const badge = domainText("span", `${total.toLocaleString()}${count.limited ? "+" : ""}`, "tab-count");
-      // Section badges describe the full inventory. A Current-scoped page uses
-      // its server-filtered pager total; never show a global total as scoped.
-      badge.hidden = fileScope === "current" && ["files", "outputs"].includes(button.dataset.countKey);
       button.replaceChildren(badge, document.createTextNode(" "), label);
     } else button.replaceChildren(label);
   }
@@ -399,6 +573,7 @@ function isLibraryImage(item) {
 }
 function artifactImage(item, expanded = false, source = "") {
   const img = document.createElement("img");
+  img.draggable = false;
   img.alt = item.name;
   img.loading = "lazy";
   img.decoding = "async";
@@ -475,6 +650,7 @@ const fileIconPaths = {
   gallery: "M3 3h18v18H3ZM3 16l6-6 5 5 3-3 4 4M7 7h.01",
   previous: "m15 5-7 7 7 7", next: "m9 5 7 7-7 7",
   expand: "M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5",
+  sidebar: "M3 3h18v18H3ZM15 3v18",
   search: "M15 15a7 7 0 1 1 0-10 7 7 0 0 1 0 10Zm0 0 6 6",
   options: "M4 7h16M4 17h16M8 4v6m8 4v6",
   disclosure: "M8.7 4.8a1.5 1.5 0 0 0-2.3 1.3v11.8a1.5 1.5 0 0 0 2.3 1.3l9.4-5.9a1.5 1.5 0 0 0 0-2.6L8.7 4.8Z",
@@ -487,6 +663,7 @@ const fileIconPaths = {
   fit: "M3 9V3h6m6 0h6v6M3 15v6h6m6 0h6v-6M8 8h8v8H8z",
   plus: "M12 5v14M5 12h14", minus: "M5 12h14",
   link: "M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-2 2M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l2-2",
+  tags: "M3 3h7l11 11-7 7L3 10V3Zm4 4h.01",
   sparkles: "m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3ZM20 2v4m-2-2h4",
   info: "M12 16v-4m0-4h.01M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z",
   trash: "M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7",
@@ -565,15 +742,12 @@ function fileParameters(offset = libraryOffset) {
     archived: String(fileStatus === "archived"), offset,
     source: librarySection === "outputs" ? "output" : "input",
     query: byId("artifact-query").value, sort: byId("artifact-sort").value,
-    ...(fileScope === "current" ? { scope: "current", references: window.ChatAttachmentsUI?.artifactIds().join(",") || "" } : {}),
     ...(fileView === "gallery" ? { images: "1" } : {}) };
 }
 async function readFilePage(offset, signal) {
   if (latest && latest.library_artifact_sources !== true) throw new Error(
     "Restart Web UI after the active reply to separate your Uploads from Generated.");
-  if (fileScope === "current" && latest?.context_panel !== true) throw new Error(
-    "Restart Web UI, then reload to filter files for this conversation.");
-  const params = fileParameters(offset), key = JSON.stringify([params, fileScope === "current" ? latest?.session_id : null]);
+  const params = fileParameters(offset), key = JSON.stringify(params);
   const cached = filePages.get(key);
   if (cached && Date.now() - cached.time < 30000) return cached.data;
   const data = await gridPage("/api/v1/library/items", params, FILE_PAGE_SIZE, { signal });
@@ -588,7 +762,6 @@ function restoreLibraryLocation() {
   librarySection = query.get("library");
   if (librarySection === "files" && query.get("files-type") === "research") librarySection = "outputs";
   fileView = ["list", "grid", "gallery"].includes(query.get("files-view")) ? query.get("files-view") : fileView;
-  fileScope = query.get("files-scope") === "current" ? "current" : "all";
   fileKind = normalizeFileKind(query.get("files-type"));
   fileStatus = query.get("files-status") === "archived" ? "archived" : "saved";
   configureArtifactKinds();
@@ -603,12 +776,13 @@ function rememberLibraryLocation(replace = false) {
   if (!authenticated || currentView !== "library") return;
   const url = new URL(location.href);
   url.searchParams.delete("view");
+  // The full Library always spans conversations; only Context Library has scope.
+  url.searchParams.delete("files-scope");
   url.searchParams.delete("session"); url.searchParams.delete("message");
   for (const key of [...url.searchParams.keys()])
     if (["integrations", "settings", "sources-page"].includes(key) || key.startsWith("knowledge-") || key.startsWith("skills-")) url.searchParams.delete(key);
   url.searchParams.set("library", librarySection);
   const state = { "files-view": fileView, "files-type": fileKind, "files-status": fileStatus,
-    "files-scope": fileScope,
     "files-sort": byId("artifact-sort").value, "files-q": byId("artifact-query").value,
     "files-page": String(Math.floor(libraryOffset / FILE_PAGE_SIZE) + 1) };
   for (const [key, value] of Object.entries(state)) {
@@ -618,7 +792,6 @@ function rememberLibraryLocation(replace = false) {
   if (next !== location.pathname + location.search) history[replace ? "replaceState" : "pushState"](
     { ...history.state, klaudeLibrary: true }, "", next);
   saveNavigationChoice("file-view", fileView);
-  saveNavigationChoice("file-scope", fileScope);
   saveNavigationChoice("library-section", librarySection);
   const prefix = librarySection === "outputs" ? "output" : "file";
   saveNavigationChoice(`${prefix}-kind`, fileKind); saveNavigationChoice(`${prefix}-status`, fileStatus);
@@ -688,6 +861,27 @@ function renderSkillsFilter() {
   for (const button of byId("skills-state-filter").children)
     button.setAttribute("aria-pressed", String(button.dataset.skillState === skillsState));
 }
+function renderSkillsCounts(counts = {}) {
+  for (const state of ["all", "enabled", "disabled"]) {
+    const node = byId("skills-state-filter").querySelector(`[data-skill-count="${state}"]`);
+    if (!node) continue;
+    const total = counts[state];
+    const known = Number.isSafeInteger(total) && total >= 0;
+    node.textContent = known ? `${total}${counts.limited ? "+" : ""}` : "—";
+    const label = node.parentElement.querySelector(".filter-chip-label").textContent;
+    node.closest("button").setAttribute("aria-label", known ?
+      `${label} Skills, ${total}${counts.limited ? " or more" : ""}` : `${label} Skills, count unavailable`);
+  }
+}
+async function readSkillsCounts(options = {}) {
+  const states = ["all", "enabled", "disabled"];
+  const results = await Promise.all(states.map(state => domainPage(
+    "/api/v1/integrations/skills",
+    { offset: 0, ...(state === "all" ? {} : { state }) }, true, options)));
+  const counts = Object.fromEntries(states.map((state, index) => [state,
+    results[index].total ?? results[index].known_total ?? null]));
+  return { ...counts, limited: results.some(result => result.limited) };
+}
 function loadIntegrationSection() {
   renderIntegrationSection();
   if (integrationSection === "connections") return window.BrowserManagement?.loadConnections();
@@ -702,13 +896,126 @@ function stopIntegrationReads() {
   clearTimeout(knowledgeSearchTimer);
   for (const id of ["knowledge-items", "source-items", "skill-items"]) cancelLoading(byId(id));
 }
+// Native selects remain the state/event seam and the fallback for older browsers.
+// The same adapter supplies all three Library dropdown chips.
+function createTrailingFilterChip(select) {
+  if (typeof HTMLElement.prototype.showPopover !== "function") return null;
+  const original = select.closest("label"), name = original.firstChild.textContent.trim();
+  const field = domainText("div", "", "file-filter-field");
+  if (original.classList.contains("file-sort-field")) field.classList.add("file-sort-field");
+  let closeOnClick = false;
+  const trigger = domainButton("", () => {
+    if (closeOnClick) { closeOnClick = false; close(); return; }
+    open();
+  }, "filter-chip library-filter-chip");
+  trigger.id = `${select.id}-chip`;
+  trigger.setAttribute("aria-haspopup", "menu"); trigger.setAttribute("aria-expanded", "false");
+  const face = domainText("span", "", "filter-chip-face");
+  const label = domainText("span", "", "filter-chip-label");
+  const arrow = libraryIcon("disclosure"); arrow.classList.add("filter-chip-menu-arrow");
+  face.append(label, arrow); trigger.append(face);
+  const menu = domainText("div", "", "message-menu library-filter-menu");
+  menu.id = `${select.id}-menu`; menu.setAttribute("popover", "auto");
+  menu.setAttribute("role", "menu"); menu.setAttribute("aria-label", name);
+  trigger.setAttribute("aria-controls", menu.id);
+  original.replaceWith(field); select.hidden = true; select.setAttribute("aria-label", name);
+  field.append(select, trigger); document.body.append(menu);
+  const showing = () => menu.matches(":popover-open");
+  function close(focus = false) {
+    if (showing()) menu.hidePopover();
+    trigger.setAttribute("aria-expanded", "false");
+    if (focus) trigger.focus({ preventScroll: true });
+  }
+  function sync() {
+    const selected = select.selectedOptions[0];
+    label.textContent = selected?.textContent || name;
+    trigger.setAttribute("aria-label", `${name}: ${label.textContent}`);
+    trigger.title = `${name}: ${label.textContent}`;
+    trigger.disabled = select.disabled;
+    trigger.dataset.filterActive = String(select.value !== select.options[0]?.value);
+  }
+  function position() {
+    if (!showing()) return;
+    const viewport = window.visualViewport;
+    const left = (viewport?.offsetLeft || 0) + 8, top = (viewport?.offsetTop || 0) + 8;
+    const right = left + (viewport?.width || innerWidth) - 16;
+    const bottom = top + (viewport?.height || innerHeight) - 16;
+    menu.style.maxHeight = `${bottom - top}px`;
+    const anchor = trigger.getBoundingClientRect(), row = field.parentElement.getBoundingClientRect();
+    if (anchor.bottom <= top || anchor.top >= bottom || anchor.right <= row.left || anchor.left >= row.right) {
+      close(); return;
+    }
+    const bounds = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(left, Math.min(anchor.left, right - bounds.width))}px`;
+    const y = anchor.bottom + 4 + bounds.height <= bottom ? anchor.bottom + 4 :
+      anchor.top - bounds.height - 4;
+    menu.style.top = `${Math.max(top, Math.min(y, bottom - bounds.height))}px`;
+  }
+  function open(last = false) {
+    if (showing()) { close(); return; }
+    search = ""; typedAt = 0;
+    menu.replaceChildren(...[...select.options].map(option => {
+      const item = domainButton("", () => {
+        close(true);
+        if (select.value === option.value) return;
+        select.value = option.value; sync(); select.dispatchEvent(new Event("change", { bubbles: true }));
+      }, "message-action");
+      item.setAttribute("role", "menuitemradio"); item.tabIndex = -1;
+      item.setAttribute("aria-checked", String(option.selected));
+      item.disabled = option.disabled; item.dataset.value = option.value;
+      const check = libraryIcon("check"); check.classList.add("filter-menu-check");
+      item.append(check, domainText("span", option.textContent));
+      return item;
+    }));
+    menu.showPopover(); trigger.setAttribute("aria-expanded", "true"); position();
+    const enabled = [...menu.querySelectorAll("button:not(:disabled)")];
+    (last ? enabled.at(-1) : menu.querySelector('[aria-checked="true"]:not(:disabled)') || enabled[0])?.focus({ preventScroll: true });
+  }
+  trigger.addEventListener("keydown", event => {
+    if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
+    event.preventDefault(); open(event.key === "ArrowUp");
+  });
+  trigger.addEventListener("pointerdown", () => { closeOnClick = showing(); });
+  let search = "", typedAt = 0;
+  menu.addEventListener("keydown", event => {
+    const items = [...menu.querySelectorAll("button:not(:disabled)")];
+    const index = items.indexOf(document.activeElement);
+    let next;
+    if (event.key === "ArrowDown") next = (index + 1) % items.length;
+    if (event.key === "ArrowUp") next = (index - 1 + items.length) % items.length;
+    if (event.key === "Home") next = 0;
+    if (event.key === "End") next = items.length - 1;
+    if (next !== undefined) { event.preventDefault(); items[next]?.focus(); }
+    if (event.key === "Escape") { event.preventDefault(); close(true); }
+    if (event.key === "Tab") close(true);
+    if (event.key.length === 1 && event.key !== " " && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      search = Date.now() - typedAt < 700 && search !== event.key ? search + event.key : event.key;
+      typedAt = Date.now();
+      const ordered = [...items.slice(index + 1), ...items.slice(0, index + 1)];
+      const match = ordered.find(item => item.textContent.toLocaleLowerCase().startsWith(search.toLocaleLowerCase()));
+      if (match) { event.preventDefault(); match.focus(); }
+    }
+    event.stopPropagation();
+  });
+  menu.addEventListener("toggle", () => trigger.setAttribute("aria-expanded", String(showing())));
+  select.addEventListener("change", sync);
+  window.addEventListener("resize", position);
+  window.visualViewport?.addEventListener("resize", position);
+  window.visualViewport?.addEventListener("scroll", position);
+  document.addEventListener("scroll", event => {
+    if (menu.contains(event.target)) return;
+    position();
+  }, true);
+  document.addEventListener("klaude-view", () => close());
+  document.addEventListener("klaude-auth-reset", () => close());
+  sync();
+  return { sync, close };
+}
+const libraryFilterMenus = ["artifact-kind", "artifact-status", "artifact-sort"]
+  .map(id => createTrailingFilterChip(byId(id))).filter(Boolean);
+
 function renderFileToolbar() {
   for (const button of byId("file-view-modes").children) button.setAttribute("aria-pressed", String(button.dataset.fileView === fileView));
-  const options = byId("file-options-toggle");
-  const sortLabel = byId("artifact-sort").selectedOptions[0].textContent;
-  options.title = `Filters and sort · ${sortLabel}`;
-  options.setAttribute("aria-description", sortLabel);
-  const crumbs = byId("file-breadcrumbs");
   const outputs = librarySection === "outputs";
   byId("generated-tools").hidden = !outputs;
   if (outputs) window.BrowserManagement?.loadJobs();
@@ -717,22 +1024,13 @@ function renderFileToolbar() {
   if (!outputs) byId("image-generate-panel").close();
   byId("artifact-query").placeholder = outputs ? "Search generated files…" : "Search uploads…";
   byId("artifact-filter").querySelector(".file-search-label span").textContent = outputs ? "Find generated files" : "Find uploads";
-  const root = domainButton("Library", () => {
-    fileKind = "all"; fileStatus = "saved"; libraryOffset = 0;
-    byId("artifact-kind").value = "all"; byId("artifact-status").value = "saved";
-    byId("artifact-query").value = "";
-    rememberLibraryLocation(); loadLibrary();
-  });
-  const current = domainText("span", outputs ? "Generated" : "Uploads");
-  current.title = current.textContent;
-  current.setAttribute("aria-current", "location");
-  crumbs.replaceChildren(root, libraryIcon("next"), current);
   const available = latest?.library_images === true;
   const gallery = byId("file-view-modes").querySelector('[data-file-view="gallery"]');
   gallery.disabled = Boolean(latest) && !available;
   gallery.title = gallery.disabled ? "Restart Web UI after the active reply to enable Gallery" : "Gallery view";
   for (const option of byId("artifact-sort").options) option.disabled =
     Boolean(latest) && !available && !["newest", "oldest", "name"].includes(option.value);
+  for (const menu of libraryFilterMenus) menu.sync();
 }
 function refreshLibraryCapabilities() {
   if (!latest || libraryImageCapability === (latest.library_images === true) &&
@@ -829,9 +1127,6 @@ async function loadLibrary() {
   for (const button of document.querySelectorAll("#library-sections button")) {
     button.setAttribute("aria-pressed", String(button.dataset.section === librarySection));
   }
-  for (const button of document.querySelectorAll("[data-file-scope]"))
-    button.setAttribute("aria-pressed", String(button.dataset.fileScope === fileScope));
-  for (const badge of byId("library-sections").querySelectorAll(".tab-count")) badge.hidden = fileScope === "current";
   const load = ++libraryLoad;
   const section = librarySection;
   const offset = libraryOffset;
@@ -841,8 +1136,7 @@ async function loadLibrary() {
   renderFileToolbar();
   byId("artifact-tools").hidden = false;
   const grid = byId("library-items");
-  const key = JSON.stringify([section, fileKind, fileStatus, fileScope,
-    fileScope === "current" ? latest?.session_id : null, offset,
+  const key = JSON.stringify([section, fileKind, fileStatus, offset,
     byId("artifact-query").value, byId("artifact-sort").value, fileView]);
   if (grid.dataset.contentKey !== key) byId("library-pages").hidden = true;
   const finish = beginLoading(grid, { kind: fileView === "list" ? "rows" : "cards", count: Math.min(6, pageSize),
@@ -894,7 +1188,6 @@ function knowledgeLocation(library, source = "", keepQuery = false) {
   select.value = library;
   byId("learn-library").value = library;
   knowledgeSource = source;
-  knowledgeActionNotice = "";
   knowledgeOffset = 0;
   if (!sameLibrary) sourceOffset = 0;
   knowledgeLocationPage = sourceLocationPage = null;
@@ -919,7 +1212,8 @@ function knowledgeHeading(summary = null) {
     else crumbs.append(domainText("span", library, "knowledge-current"));
     crumbs.lastChild.setAttribute("aria-current", "page");
   }
-  byId("knowledge-title").textContent = library || (knowledgeQuery ? "Search results" : "Your knowledge");
+  byId("knowledge-heading").hidden = !library && !knowledgeQuery;
+  byId("knowledge-title").textContent = library || (knowledgeQuery ? "Search results" : "");
   byId("knowledge-query").placeholder = knowledgeSource ? "Search this source…" : library ? "Search this knowledge…" : "Search all knowledge…";
   byId("knowledge-search-label").textContent = knowledgeSource ? "Search chunk text in this source" : library ?
     "Search sources and chunk text in this knowledge" : "Search libraries, sources and chunk text";
@@ -930,7 +1224,7 @@ function knowledgeHeading(summary = null) {
   byId("knowledge-browser").classList.toggle("has-library", Boolean(library));
   if (summary) byId("knowledge-summary").textContent = library ?
     `${countLabel(summary.sources, "source")} · ${countLabel(summary.chunks, "chunk")}` :
-    knowledgeQuery ? "Matches in library names, sources and indexed text" : "Open a library to explore its sources and chunks.";
+    knowledgeQuery ? "Matches in library names, sources and indexed text" : "";
 }
 async function knowledgeRequest(path, parameters, options = {}) {
   try { return await domainRequest(`${path}?${new URLSearchParams(parameters)}`, "GET", undefined, options); }
@@ -982,7 +1276,7 @@ async function loadKnowledge() {
   }
   if (grid.dataset.contentKey !== key) byId("knowledge-pages").hidden = true;
   const finish = beginLoading(grid, { kind: "rows", count: 4, preserve: grid.dataset.contentKey === key, label: "Loading Knowledge…" });
-  byId("knowledge-status").textContent = knowledgeActionNotice;
+  byId("knowledge-status").textContent = "";
   try {
     const data = await knowledgeRequest("/api/v1/library/knowledge/contents", {
       library, source: knowledgeSource, query: knowledgeQuery, offset }, { signal });
@@ -1105,7 +1399,7 @@ byId("knowledge-delete").addEventListener("click", async () => {
   if (knowledgeDeletePending || reviewDialog.open) return;
   const library = byId("knowledge-library").value, source = knowledgeSource, epoch = authEpoch;
   if (!library) return;
-  const pending = { library, source }; knowledgeDeletePending = pending; knowledgeActionNotice = ""; knowledgeHeading();
+  const pending = { library, source }; knowledgeDeletePending = pending; knowledgeHeading();
   const current = () => authenticated && epoch === authEpoch && currentView === "integrations" &&
     integrationSection === "knowledge" && library === byId("knowledge-library").value && source === knowledgeSource;
   try {
@@ -1131,10 +1425,9 @@ document.addEventListener("klaude-operations", event => {
   if (!operation || !["completed", "failed", "unknown"].includes(operation.state)) return;
   if (operation.state === "unknown") {
     pending.unknown = true;
-    knowledgeActionNotice = "Deletion is unconfirmed. Check Activity before making another change.";
     knowledgeHeading();
     byId("knowledge-delete").disabled = true;
-    byId("knowledge-status").textContent = knowledgeActionNotice;
+    byId("knowledge-status").textContent = "";
     return;
   }
   knowledgeDeletePending = null;
@@ -1144,8 +1437,7 @@ document.addEventListener("klaude-operations", event => {
   } else {
     knowledgeHeading();
     if (operation.state === "failed") {
-      knowledgeActionNotice = "Deletion was rejected. Refresh and review the current knowledge.";
-      byId("knowledge-status").textContent = knowledgeActionNotice;
+      byId("knowledge-status").textContent = "";
     }
   }
 });
@@ -1196,6 +1488,29 @@ const artifactViewer = (() => {
   const menu = byId("artifact-menu"), more = byId("artifact-more");
   const phone = matchMedia("(max-width: 850px)");
   const inspectorTabs = byId("inspector-tabs"), inspectorScroll = panel.querySelector(".preview-information-scroll");
+  const inspectorIndicator = window.KlaudeMD3Tabs.createTabIndicator({ variant: "primary", widthStrategy: "auto" });
+  inspectorIndicator.element.setAttribute("aria-hidden", "true");
+  const inspectorDivider = document.createElement("div");
+  inspectorDivider.className = "mtrl-tabs__divider"; inspectorDivider.setAttribute("aria-hidden", "true");
+  inspectorTabs.append(inspectorDivider, inspectorIndicator.element);
+  const indicatorElement = inspectorIndicator.element;
+  indicatorElement.style.left = "0px";
+  indicatorElement.style.transition = "transform 450ms cubic-bezier(0.2, 0, 0, 1), width 450ms cubic-bezier(0.2, 0, 0, 1)";
+  let inspectorIndicatorReady = false;
+  function positionInspectorIndicator(selected, immediate = false) {
+    const label = selected?.querySelector(".mtrl-button__text");
+    if (!label) return;
+    const width = Math.max(24, label.offsetWidth - 4);
+    const left = selected.offsetLeft + label.offsetLeft + (label.offsetWidth - width) / 2;
+    if (immediate) indicatorElement.style.transition = "none";
+    indicatorElement.style.width = `${width}px`;
+    indicatorElement.style.transform = `translateX(${left}px)`;
+    if (immediate) requestAnimationFrame(() => {
+      indicatorElement.style.transition = "transform 450ms cubic-bezier(0.2, 0, 0, 1), width 450ms cubic-bezier(0.2, 0, 0, 1)";
+    });
+  }
+  new ResizeObserver(() => positionInspectorIndicator(inspectorTabs.querySelector("[aria-selected='true']"), true)).observe(inspectorTabs);
+  document.fonts?.ready.then(() => positionInspectorIndicator(inspectorTabs.querySelector("[aria-selected='true']"), true));
   let inspectorTab = "details", inspectorArtifact = null;
   const inspectorScrolls = { details: 0, "ai-review": 0 };
   function selectInspector(tab, focus = false) {
@@ -1206,8 +1521,11 @@ const artifactViewer = (() => {
     for (const button of inspectorTabs.querySelectorAll("[role='tab']")) {
       const active = button === selected;
       button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1;
+      button.classList.toggle("mtrl-tab--active", active);
       byId(button.getAttribute("aria-controls")).hidden = !active;
     }
+    positionInspectorIndicator(selected, !inspectorIndicatorReady);
+    inspectorIndicatorReady = true;
     inspectorScroll.scrollTop = inspectorScrolls[tab];
     if (focus) selected.focus({ preventScroll: true });
   }
@@ -1228,15 +1546,19 @@ const artifactViewer = (() => {
     inspectorScrolls.details = inspectorScrolls["ai-review"] = 0;
   });
   let item = null, draftTags = [], editingTags = false, allTags = false;
+  const removedAITags = new Set();
   let editingSource = false, suggestedTags = [], suggestionsSignature = "";
   const metadataChanges = new Map();
   const normalizeTag = value => value.trim().replace(/\s+/gu, " ");
   const tagKey = value => normalizeTag(value).toLocaleLowerCase();
+  const retainedAITags = () => (item?.ai_tags || []).filter(tag => !removedAITags.has(tag));
+  const tagsChanged = () => removedAITags.size > 0 || JSON.stringify(draftTags) !== JSON.stringify(item?.tags || []);
   const metadataKey = operation => `${item?.id}:${operation}`;
   const metadataBusy = () => [...metadataChanges.values()].some(change => change.target === item?.id);
-  function editorStatus(operation, message = "", error = false) {
+  function editorStatus(operation) {
     const target = byId(operation === "tags" ? "artifact-tags-status" : "artifact-source-status");
-    target.textContent = message; target.dataset.state = error ? "error" : "";
+    target.textContent = "";
+    target.dataset.state = "";
   }
   function editorControls() {
     const busy = metadataBusy();
@@ -1244,26 +1566,38 @@ const artifactViewer = (() => {
       byId(id).setAttribute("aria-busy", String(busy));
       for (const control of byId(id).querySelectorAll("input,button")) control.disabled = busy;
     }
+    byId("artifact-source-input").disabled = busy;
     byId("artifact-source-edit").disabled = busy || latest?.library_source_links !== true;
-    byId("artifact-source-remove").disabled = busy || latest?.library_source_links !== true;
+    const sourcePlaceholder = byId("artifact-source").querySelector(".inspector-source-placeholder");
+    if (sourcePlaceholder) sourcePlaceholder.disabled = busy || latest?.library_source_links !== true;
     byId("artifact-tags-edit").disabled = busy;
-    byId("artifact-source-save").disabled = busy || !editingSource ||
-      byId("artifact-source-input").value.trim() === (item?.source_url || "");
-    byId("artifact-tags-save").disabled = busy || !editingTags ||
-      JSON.stringify(draftTags) === JSON.stringify(item?.tags || []);
+    byId("artifact-tags-save").disabled = busy || !editingTags || !tagsChanged();
   }
   async function saveMetadata(operation, value) {
     if (!item || metadataBusy() || reviewDialog.open) return;
+    if (operation === "tags" && removedAITags.size && latest?.library_ai_tag_edit !== true) {
+      editorStatus("tags", "Restart the Web UI host and reload to save AI tag removals. Your draft is kept.", true);
+      return;
+    }
     const key = metadataKey(operation), target = item, epoch = authEpoch;
     const change = { operation, target: target.id, phase: "preparing", request_id: null };
-    metadataChanges.set(key, change); editorStatus(operation, "Preparing confirmation…"); editorControls();
+    metadataChanges.set(key, change);
+    if (operation !== "source_link") editorStatus(operation, "Saving…");
+    editorControls();
     const current = () => authenticated && epoch === authEpoch && item === target && artifactDialog.open;
+    const canCommitMetadata = () => authenticated && epoch === authEpoch && metadataChanges.get(key) === change;
     try {
-      const opened = await prepareChange({ operation, target: target.id, revision: target.revision, value }, {
-        current,
+      const opened = await submitDirectChange({ operation, target: target.id, revision: target.revision, value,
+        ...(operation === "tags" && removedAITags.size ? { remove_ai_tags: [...removedAITags] } : {}),
+      }, {
+        current: canCommitMetadata,
+        onSubmitting: receipt => {
+          change.phase = "submitting"; change.request_id = receipt.request_id;
+          if (current()) editorControls();
+        },
         onAccepted: receipt => {
-          change.phase = "accepted"; change.request_id = receipt.request_id;
-          if (current()) { editorStatus(operation, "Saving…"); editorControls(); }
+          change.phase = "accepted"; change.request_id ||= receipt.request_id;
+          if (current()) { if (operation !== "source_link") editorStatus(operation, "Saving…"); editorControls(); }
         },
         onDiscard: review => {
           if (epoch !== authEpoch) return;
@@ -1291,6 +1625,7 @@ const artifactViewer = (() => {
         if (item?.id === change.target) { editorStatus(change.operation, "Save unconfirmed. Your draft is kept; check Activity before trying again.", true); editorControls(); }
         continue;
       }
+      if (receipt.state === "completed") artifactDetails.delete(change.target);
       if (!authenticated || item?.id !== change.target || !artifactDialog.open) { metadataChanges.delete(key); continue; }
       if (receipt.state !== "completed") {
         metadataChanges.delete(key); editorStatus(change.operation, "Could not save. Your draft is kept. The file may have changed; reopen it to inspect the current version.", true); editorControls(); continue;
@@ -1305,7 +1640,7 @@ const artifactViewer = (() => {
         artifactDetails.set(item.id, { time: Date.now(), data: result });
         if (change.operation === "tags") { editingTags = false; byId("artifact-tag-new").value = ""; }
         else editingSource = false;
-        if (!editingTags) draftTags = [...item.tags];
+        if (!editingTags) { draftTags = [...item.tags]; removedAITags.clear(); }
         renderSource(); renderTags(); renderMenu();
         byId("artifact-download").href = artifactUrl(item);
         window.BrowserVision?.select(canPreviewImage(item) && !item.archived ? item : null);
@@ -1335,20 +1670,25 @@ const artifactViewer = (() => {
   }
   function setDetails(state, focus = false) {
     if (phone.matches && state !== "closed") state = "full";
-    if (state !== "closed") artifactDialog.classList.remove("image-expanded");
-    else closeMenu();
+    if (state === "closed") closeMenu();
     artifactDialog.dataset.details = state;
     panel.inert = state === "closed";
+    byId("image-details").hidden = state !== "closed";
+    byId("preview-sidebar-toggle").setAttribute("aria-expanded", String(state !== "closed"));
     byId("image-details").setAttribute("aria-expanded", String(state !== "closed"));
     byId("image-details").setAttribute("aria-label", state === "closed" ? "Show file details" : "Hide file details");
+    byId("image-details").title = state === "closed" ? "Show file details" : "Hide file details";
     byId("preview-sheet-handle").setAttribute("aria-label", phone.matches && state !== "closed" ? "Close file inspector" : "Expand file details");
     byId("preview-sheet-scrim").hidden = !phone.matches || state === "closed";
     artifactDialog.querySelector(".preview-main").inert = phone.matches && state !== "closed";
     if (focus && state === "closed") byId("image-details").focus({ preventScroll: true });
-    else if (focus) requestAnimationFrame(() => {
-      if (artifactDialog.open && artifactDialog.dataset.details !== "closed")
-        byId("preview-sheet-handle").focus({ preventScroll: true });
-    });
+    else if (focus) {
+      const previousFocus = document.activeElement;
+      requestAnimationFrame(() => {
+        if (artifactDialog.open && artifactDialog.dataset.details !== "closed" && document.activeElement === previousFocus)
+          byId("preview-sheet-handle").focus({ preventScroll: true });
+      });
+    }
   }
   function transform() {
     const image = preview.querySelector("img");
@@ -1408,25 +1748,33 @@ const artifactViewer = (() => {
   }
   function renderTags() {
     byId("artifact-tag-new").setCustomValidity("");
+    if (!byId("artifact-tag-new").value) byId("artifact-tag-new").style.width = "";
     const combined = [...draftTags.map(tag => ({ tag, manual: true })),
-      ...(item?.ai_tags || []).map(tag => ({ tag, manual: false }))];
+      ...retainedAITags().map(tag => ({ tag, manual: false }))];
     byId("artifact-tag-count").textContent = `(${combined.length})`;
     byId("artifact-tags-input").value = draftTags.join(", ");
     byId("artifact-tag-editor").hidden = !editingTags;
     byId("artifact-tags-edit").hidden = editingTags;
+    byId("artifact-tags-edit").textContent = combined.length ? "Edit tags" : "+ Add tags";
     const shown = editingTags || allTags ? combined : combined.slice(0, 8);
-    byId("artifact-tag-list").replaceChildren(...shown.map(({ tag, manual }) => {
-      const chip = domainText("span", "", `preview-tag${manual ? "" : " tag-generated"}`);
+    byId("artifact-tag-items").replaceChildren(...shown.map(({ tag, manual }) => {
+      const chip = domainText("span", "", `preview-tag input-chip${manual ? "" : " tag-generated"}`);
       chip.title = manual ? "Manual tag" : "AI tag";
-      chip.append(domainText("span", tag));
-      if (editingTags && manual) {
-        const remove = domainButton("", () => { draftTags = draftTags.filter(value => value !== tag); editorStatus("tags"); renderTags(); byId("artifact-tag-new").focus(); }, "icon-button");
+      const face = domainText("span", "", "filter-chip-face");
+      face.append(domainText("span", tag, "input-chip-label")); chip.append(face);
+      if (editingTags) {
+        const remove = domainButton("", () => {
+          if (manual) draftTags = draftTags.filter(value => value !== tag);
+          else removedAITags.add(tag);
+          editorStatus("tags"); renderTags(); byId("artifact-tag-new").focus();
+        }, "icon-button");
         remove.setAttribute("aria-label", `Remove tag ${tag}`);
         remove.append(libraryIcon("close")); chip.append(remove);
       }
       return chip;
     }));
-    if (!combined.length) byId("artifact-tag-list").append(domainText("p", "No tags yet.", "muted"));
+    byId("artifact-tag-draft").hidden = !editingTags;
+    if (!combined.length && !editingTags) byId("artifact-tag-items").append(domainText("p", "No tags yet.", "muted"));
     const moreTags = byId("artifact-tags-more");
     moreTags.hidden = editingTags || combined.length <= 8;
     moreTags.textContent = allTags ? "Show less" : `Show all ${combined.length} tags`;
@@ -1434,13 +1782,14 @@ const artifactViewer = (() => {
     renderTagSuggestions(); editorControls();
   }
   function renderTagSuggestions() {
-    const offered = suggestedTags.filter(tag => ![...draftTags, ...(item?.ai_tags || [])].some(existing => tagKey(existing) === tagKey(tag)));
+    const offered = suggestedTags.filter(tag => ![...draftTags, ...retainedAITags()].some(existing => tagKey(existing) === tagKey(tag)));
     const signature = JSON.stringify([editingTags, offered]);
     if (signature === suggestionsSignature) return;
     suggestionsSignature = signature;
     byId("artifact-tag-suggestions").hidden = !editingTags || !offered.length;
     byId("artifact-tag-suggestion-list").replaceChildren(...offered.map(tag => {
-      const button = domainButton(`+ ${tag}`, () => addTag(tag), "preview-tag tag-suggestion");
+      const button = domainButton("", () => addTag(tag), "filter-chip tag-suggestion");
+      const face = domainText("span", `+ ${tag}`, "filter-chip-face"); button.append(face);
       button.setAttribute("aria-label", `Add suggested tag ${tag}`); return button;
     }));
     editorControls();
@@ -1450,19 +1799,24 @@ const artifactViewer = (() => {
     if (metadataBusy()) return false;
     const values = [...draftTags];
     for (const value of (typeof suggestion === "string" ? suggestion : input.value).split(",").map(normalizeTag).filter(Boolean))
-      if (![...values, ...(item?.ai_tags || [])].some(tag => tagKey(tag) === tagKey(value))) values.push(value);
+      if (![...values, ...retainedAITags()].some(tag => tagKey(tag) === tagKey(value))) values.push(value);
     if (values.length > 20 || values.some(value => Array.from(value).length > 40 || /[\x00-\x1f\x7f-\x9f]/.test(value))) {
-      editorStatus("tags", "Use up to 20 printable tags of at most 40 characters.", true);
+      editorStatus("tags");
       input.setCustomValidity("Use up to 20 printable tags of at most 40 characters."); input.reportValidity(); return false;
     }
     editorStatus("tags"); input.setCustomValidity(""); draftTags = values;
     if (typeof suggestion !== "string") input.value = "";
     renderTags(); return true;
   }
+  function resizeSourceEditor() {
+    const input = byId("artifact-source-input");
+    input.style.height = "auto"; input.style.height = `${input.scrollHeight}px`;
+  }
   function editSource() {
     editingSource = true; editorStatus("source_link");
     byId("artifact-source-input").value = item.source_url || "";
     renderSource();
+    resizeSourceEditor();
     byId("artifact-source-input").focus();
   }
   function renderSource() {
@@ -1470,22 +1824,31 @@ const artifactViewer = (() => {
     source.replaceChildren(); source.hidden = editingSource;
     byId("artifact-source-form").hidden = !editingSource;
     byId("artifact-source-edit").hidden = editingSource;
-    byId("artifact-source-edit").textContent = item?.source_url ? "Edit" : "+ Add link";
-    byId("artifact-source-remove").hidden = editingSource || !item?.source_url;
-    let url;
-    try {
-      url = new URL(item.source_url);
-      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) url = null;
-    } catch { url = null; }
-    if (url) {
-      const link = domainText("a", item.source_url);
-      link.className = "inspector-source-link"; link.title = item.source_url;
-      link.href = url.href; link.target = "_blank"; link.rel = "noopener noreferrer";
-      link.setAttribute("aria-label", `Open source link ${item.source_url}`); source.append(link);
-      source.append(domainButton("Copy link", async () => {
-        notice(await ChatMarkdown.copyText(item.source_url, artifactDialog) ? "Source link copied." : "Select the source link to copy it.");
-      }));
-    } else source.append(domainText("p", "No source link added.", "muted"));
+    byId("artifact-source-edit").textContent = item?.source_url ? "Edit source" : "+ Add source";
+    if (editingSource) {
+      byId("artifact-source-edit").title = latest?.library_source_links === true ? "" : "Restart the WebUI host to edit source links";
+      editorControls();
+      return;
+    }
+    if (item.source_url) {
+      const note = domainText("p", "", "muted inspector-source-note");
+      for (const part of item.source_url.split(/(https?:\/\/[^\s<>"']+)/giu)) {
+        let url;
+        try {
+          url = new URL(part);
+          if (!/^https?:\/\//i.test(part) || !["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password || url.port === "0" || /[\s\\]/u.test(part)) url = null;
+        } catch { url = null; }
+        if (!url) { note.append(document.createTextNode(part)); continue; }
+        const link = domainText("a", part, "inspector-source-reference");
+        link.href = url.href; link.target = "_blank"; link.rel = "noopener noreferrer";
+        link.title = part; note.append(link);
+      }
+      source.append(note);
+    } else {
+      const placeholder = domainButton("No source link added.", editSource, "inspector-source-placeholder");
+      placeholder.setAttribute("aria-label", "Add source notes or a link");
+      source.append(placeholder);
+    }
     byId("artifact-source-edit").title = latest?.library_source_links === true ? "" : "Restart the WebUI host to edit source links";
     editorControls();
   }
@@ -1557,7 +1920,7 @@ const artifactViewer = (() => {
   }
   function render(data) {
     const chat = data.chat_attachment === true;
-    item = data.item; editingTags = allTags = editingSource = false; draftTags = [...item.tags];
+    item = data.item; editingTags = allTags = editingSource = false; draftTags = [...item.tags]; removedAITags.clear();
     suggestedTags = []; editorStatus("tags"); editorStatus("source_link");
     const image = canPreviewImage(item);
     artifactDialog.classList.toggle("is-image", image);
@@ -1600,7 +1963,7 @@ const artifactViewer = (() => {
     byId("artifact-learn-library").value = byId("knowledge-library").value || "";
     byId("artifact-tags").hidden = chat;
     byId("image-toolbar").hidden = false;
-    for (const id of ["image-fit", "image-expand"]) byId(id).hidden = !image;
+    for (const id of ["image-fit", "image-lens"]) byId(id).hidden = !image;
     byId("artifact-download").hidden = chat && !data.download_url;
     artifactDialog.querySelector(".preview-zoom-controls").hidden = !image;
     byId("artifact-download").href = chat ? data.download_url || "" : artifactUrl(item);
@@ -1610,6 +1973,7 @@ const artifactViewer = (() => {
     more.disabled = chat; notice("");
   }
   function begin(image, opening) {
+    window.BrowserLens?.reset();
     window.BrowserVision?.select(null);
     item = null; closeMenu(); resetZoom(); notice("");
     renderTextControls(null);
@@ -1627,14 +1991,15 @@ const artifactViewer = (() => {
     byId("artifact-tag-new").setCustomValidity("");
     byId("artifact-tag-count").textContent = "";
     byId("image-toolbar").hidden = true;
-    if (opening) { artifactDialog.classList.remove("image-expanded"); setDetails(phone.matches ? "closed" : "partial"); }
+    if (opening) { setDetails(phone.matches ? "closed" : "partial"); }
   }
-  for (const [id, icon] of [["artifact-close", "close"], ["artifact-more", "more"], ["image-zoom-out", "minus"], ["image-zoom-in", "plus"], ["image-fit", "fit"], ["artifact-download", "download"], ["image-details", "info"]]) byId(id).append(libraryIcon(icon));
+  for (const [id, icon] of [["artifact-close", "close"], ["artifact-more", "more"], ["image-zoom-out", "minus"], ["image-zoom-in", "plus"], ["image-fit", "fit"], ["artifact-download", "download"], ["image-details", "info"], ["preview-sidebar-toggle", "sidebar"]]) byId(id).append(libraryIcon(icon));
   byId("image-details").append(domainText("span", "Details"));
   byId("image-zoom-in").onclick = () => zoom(scale * 1.5);
   byId("image-zoom-out").onclick = () => zoom(scale / 1.5);
   byId("image-fit").onclick = resetZoom;
   byId("image-details").onclick = () => setDetails(artifactDialog.dataset.details === "closed" ? "partial" : "closed", true);
+  byId("preview-sidebar-toggle").onclick = () => setDetails("closed", true);
   byId("preview-sheet-scrim").onclick = () => setDetails("closed", true);
   byId("preview-sheet-handle").onclick = event => { if (event.detail && sheetStart === undefined) return; setDetails(phone.matches ? "closed" : artifactDialog.dataset.details === "full" ? "partial" : "full", true); };
   let sheetStart;
@@ -1670,30 +2035,37 @@ const artifactViewer = (() => {
   });
   document.addEventListener("click", event => { if (!menu.contains(event.target) && !more.contains(event.target)) closeMenu(); });
   byId("artifact-source-title").prepend(libraryIcon("link"));
+  byId("artifact-tags-title").prepend(libraryIcon("tags"));
   byId("artifact-tag-add").append(libraryIcon("plus"));
-  byId("artifact-tags-edit").onclick = () => { editingTags = true; draftTags = [...item.tags]; editorStatus("tags"); renderTags(); byId("artifact-tag-new").focus(); };
-  byId("artifact-tags-cancel").onclick = () => { editingTags = false; draftTags = [...item.tags]; byId("artifact-tag-new").value = ""; editorStatus("tags"); renderTags(); byId("artifact-tags-edit").focus(); };
+  byId("artifact-tags-edit").onclick = () => { editingTags = true; draftTags = [...item.tags]; removedAITags.clear(); editorStatus("tags"); renderTags(); byId("artifact-tag-new").focus(); };
+  byId("artifact-tags-cancel").onclick = () => { editingTags = false; draftTags = [...item.tags]; removedAITags.clear(); byId("artifact-tag-new").value = ""; editorStatus("tags"); renderTags(); byId("artifact-tags-edit").focus(); };
   byId("artifact-tags-more").onclick = () => { allTags = !allTags; renderTags(); };
   byId("artifact-tag-add").onclick = addTag;
-  byId("artifact-tag-new").addEventListener("input", event => { event.target.setCustomValidity(""); editorStatus("tags"); });
+  byId("artifact-tag-new").addEventListener("input", event => { event.target.setCustomValidity(""); event.target.style.width = `${Math.max(3, Math.min(24, Array.from(event.target.value).length + 1))}ch`; editorStatus("tags"); });
+  byId("artifact-tag-new").addEventListener("blur", () => { if (editingTags && byId("artifact-tag-new").value.trim()) addTag(); });
   byId("artifact-tag-new").addEventListener("keydown", event => { if (event.key === "Enter") { event.preventDefault(); addTag(); } });
   byId("artifact-source-edit").onclick = editSource;
-  byId("artifact-source-remove").onclick = () => { editingSource = true; byId("artifact-source-input").value = ""; renderSource(); saveMetadata("source_link", ""); };
-  byId("artifact-source-cancel").onclick = () => { editingSource = false; byId("artifact-source-input").value = item.source_url || ""; editorStatus("source_link"); renderSource(); byId("artifact-source-edit").focus(); };
-  byId("artifact-source-input").addEventListener("input", event => { event.target.setCustomValidity(""); editorStatus("source_link"); editorControls(); });
-  byId("artifact-source-form").addEventListener("submit", event => {
-    event.preventDefault();
+  byId("artifact-source-input").addEventListener("input", event => { event.target.setCustomValidity(""); resizeSourceEditor(); editorStatus("source_link"); editorControls(); });
+  const commitSourceLink = () => {
     const input = byId("artifact-source-input"), value = input.value.trim();
-    if (!item || !editingSource || value === (item.source_url || "")) return;
-    try {
-      if (value) {
-        const url = new URL(value);
-        if (!/^https?:\/\/[^/]/i.test(value) || !["http:", "https:"].includes(url.protocol) || url.username || url.password || url.port === "0" || /[\s\\\x00-\x1f\x7f-\x9f]/u.test(value) || Array.from(value).length > 2048) throw new Error("Invalid source URL");
-      }
-    } catch {
-      editorStatus("source_link", "Enter a valid HTTP or HTTPS link without credentials or spaces.", true); input.focus(); return;
+    if (!item || !editingSource || metadataBusy()) return;
+    if (value === (item.source_url || "")) {
+      editingSource = false; renderSource(); return;
     }
+    if (Array.from(value).length > 2048 || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/u.test(value)) return;
     saveMetadata("source_link", value);
+  };
+  byId("artifact-source-input").addEventListener("keydown", event => {
+    if (event.key === "Escape") {
+      event.preventDefault(); event.stopPropagation(); editingSource = false; byId("artifact-source-input").value = item?.source_url || "";
+      editorStatus("source_link"); renderSource(); byId("artifact-source-edit").focus();
+    } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault(); commitSourceLink();
+    }
+  });
+  byId("artifact-source-input").addEventListener("blur", commitSourceLink);
+  byId("artifact-source-form").addEventListener("submit", event => {
+    event.preventDefault(); commitSourceLink();
   });
   byId("artifact-learn").addEventListener("submit", event => {
     event.preventDefault();
@@ -1704,7 +2076,7 @@ const artifactViewer = (() => {
   });
   byId("artifact-tags").addEventListener("submit", event => {
     event.preventDefault();
-    if (!item || !editingTags || !addTag() || JSON.stringify(draftTags) === JSON.stringify(item.tags)) return;
+    if (!item || !editingTags || !addTag() || !tagsChanged()) return;
     saveMetadata("tags", draftTags.join(", "));
   });
   preview.addEventListener("pointerdown", event => {
@@ -1751,17 +2123,20 @@ const artifactViewer = (() => {
   preview.addEventListener("wheel", event => { if (!preview.querySelector("img") || !event.ctrlKey) return; event.preventDefault(); zoom(scale * Math.exp(-event.deltaY * .01), event.clientX, event.clientY); }, { passive: false });
   artifactDialog.addEventListener("cancel", event => {
     if (more.getAttribute("aria-expanded") === "true") { event.preventDefault(); closeMenu(true); }
+    else if (editingTags) { event.preventDefault(); byId("artifact-tags-cancel").click(); }
     else if (phone.matches && artifactDialog.dataset.details !== "closed") { event.preventDefault(); setDetails("closed", true); }
   });
   artifactDialog.addEventListener("keydown", event => {
+    if (event.key === "Escape" && editingTags) {
+      event.preventDefault(); event.stopPropagation(); byId("artifact-tags-cancel").click(); return;
+    }
     if (event.key !== "Escape" || !phone.matches || artifactDialog.dataset.details === "closed") return;
     event.preventDefault(); event.stopPropagation(); setDetails("closed", true);
   });
   return { begin, render, reset: () => { closeMenu(); resetZoom(); renderTextControls(null);
     window.BrowserVision?.select(null);
     for (const id of ["artifact-subtitle", "preview-truncation", "preview-source-note"]) byId(id).textContent = "";
-    item = null; draftTags = []; byId("artifact-source-input").value = ""; byId("artifact-tag-new").value = ""; byId("artifact-source-form").hidden = true; byId("artifact-learn-library").value = ""; byId("artifact-learn").hidden = true; setDetails("closed"); },
-    toggleExpanded: () => { const expanded = !artifactDialog.classList.contains("image-expanded"); setDetails(expanded ? "closed" : "partial"); artifactDialog.classList.toggle("image-expanded", expanded); return expanded; },
+    item = null; draftTags = []; removedAITags.clear(); byId("artifact-source-input").value = ""; byId("artifact-tag-new").value = ""; byId("artifact-source-form").hidden = true; byId("artifact-learn-library").value = ""; byId("artifact-learn").hidden = true; setDetails("closed"); },
     key: event => {
       if (event.target.closest(".preview-information, #artifact-menu") || !preview.querySelector("img")) return false;
       if (["+", "=", "-", "0", "f", "F"].includes(event.key)) { event.preventDefault(); if (["0", "f", "F"].includes(event.key)) resetZoom(); else zoom(scale * (event.key === "-" ? 1 / 1.5 : 1.5)); return true; }
@@ -1850,9 +2225,6 @@ artifactDialog.addEventListener("close", () => {
   if (artifactDialog.open) return;
   artifactLoad += 1; selectedArtifact = null; artifactRead?.abort(); artifactViewer.reset();
   byId("image-navigation").hidden = true;
-  artifactDialog.classList.remove("image-expanded");
-  byId("image-expand").setAttribute("aria-pressed", "false");
-  byId("image-expand").setAttribute("aria-label", "Expand image preview");
   cancelLoading(byId("artifact-preview")); byId("artifact-preview").replaceChildren();
   for (const card of document.querySelectorAll(".file-selected")) { card.classList.remove("file-selected"); card.querySelector("button")?.removeAttribute("aria-current"); }
   const contextOrigin = contextPreviewOrigin; contextPreviewOrigin = null;
@@ -1912,12 +2284,6 @@ for (const direction of ["previous", "next"]) {
   byId(`image-${direction}`).append(libraryIcon(direction));
   byId(`image-${direction}`).addEventListener("click", () => nextImage(direction === "next" ? 1 : -1));
 }
-byId("image-expand").append(libraryIcon("expand"));
-byId("image-expand").addEventListener("click", () => {
-  const expanded = artifactViewer.toggleExpanded();
-  byId("image-expand").setAttribute("aria-pressed", String(expanded));
-  byId("image-expand").setAttribute("aria-label", expanded ? "Reduce image preview" : "Expand image preview");
-});
 artifactDialog.addEventListener("keydown", event => {
   if (["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName) || event.altKey || event.ctrlKey || event.metaKey) return;
   if (artifactViewer.key(event) || event.target.closest(".preview-information, #artifact-menu")) return;
@@ -2013,7 +2379,7 @@ async function prepareChange(draft, { current = () => true, beforeOpen = () => {
     return;
   }
   managementReview = { ...result, request_id: requestId(), onAccepted, onDiscard };
-  const destructive = ["delete", "skill-delete", "memory-delete", "mcp-remove", "session-delete", "knowledge-delete"].includes(draft.operation);
+  const destructive = ["delete", "model-delete", "model-connection-remove", "skill-delete", "memory-delete", "mcp-remove", "session-delete", "knowledge-delete"].includes(draft.operation);
   const ai = ["vision-analyze", "vision-tags"].includes(draft.operation), tags = draft.operation === "vision-tags";
   reviewDialog.classList.toggle("ai-confirmation", ai);
   byId("domain-review-title").textContent = ai ? tags ? "Suggest image tags?" : "Review image?" : destructive ?
@@ -2039,11 +2405,11 @@ async function prepareChange(draft, { current = () => true, beforeOpen = () => {
   return managementReview;
 }
 
-async function submitToggleChange(draft, { current = () => true, onSubmitting, onAccepted, onDiscard } = {}) {
-  if (!["skill-enabled", "mcp-enable", "mcp-disable"].includes(draft.operation))
+async function submitDirectChange(draft, { current = () => true, onSubmitting, onAccepted, onDiscard } = {}) {
+  if (!["skill-enabled", "mcp-enable", "mcp-disable", "session-rename", "source_link", "tags", "vision-tags", "vision-analyze"].includes(draft.operation))
     throw new Error("This action requires confirmation");
-  // The switch click is the owner's action. Keep the existing exact snapshot,
-  // revision checks and durable submission without opening a second dialog.
+  // The click, inline commit, or rename submission is the owner's action. Keep exact snapshot,
+  // revision checks and durable submission without opening a confirmation dialog.
   const prepared = await domainRequest("/api/v1/library/review", "POST", { draft });
   const discard = () => domainRequest("/api/v1/library/discard", "POST", { review_id: prepared.review_id }).catch(() => {});
   if (!current()) { discard(); return; }
@@ -2270,16 +2636,24 @@ async function loadSkills() {
       skillsOffset = Math.max(0, offset - pageSize);
       return loadSkills();
     }
+    let counts = data.counts;
+    if (!counts) {
+      try { counts = await readSkillsCounts({ signal: skillsRead.signal }); }
+      catch (error) {
+        if (error.name === "AbortError" || load !== skillsLoad) return;
+        counts = {};
+      }
+      if (load !== skillsLoad) return;
+    }
     installedSkills = data.items;
+    renderSkillsCounts(counts);
     renderSkills();
     grid.dataset.contentKey = key;
     updateDomainPager("skills", offset, data);
     rememberIntegrationLocation(true);
     const noMatch = state === "all" ? "No Skills match this search" : `No ${state} Skills match this search`;
     const noItems = state === "all" ? "No installed Skills" : `No ${state} Skills`;
-    byId("skills-status").textContent = data.items.length ?
-      data.limited ? "Inventory limited to 1,000." : "" :
-      query ? `${noMatch}.` : `${noItems}.`;
+    byId("skills-status").textContent = "";
     if (!data.items.length) collectionEmpty(grid, query ? noMatch : noItems,
       query ? "Try another name or description." : state === "all" ? "Import a package to get started." : "Try All or another status filter.", "skill");
   } catch (error) { if (load === skillsLoad) domainError(error, "skills-status"); }
@@ -2310,20 +2684,20 @@ function renderSkills() {
     if (current) { detailSkill = current; renderSkillDetails(); }
   }
 }
-function skillPendingText(name) {
-  const change = skillChanges.get(name);
-  return change ? change.phase === "review" ? "Awaiting review" :
-    change.phase === "unknown" ? "Unconfirmed · check Activity before retrying" : "Updating…" : skillFailures.get(name) || "";
-}
 function updateSkillStates() {
+  const skillsByName = new Map(installedSkills.map(skill => [skill.name, skill]));
   for (const row of byId("skill-items").querySelectorAll(".skill-card")) {
     const name = row.dataset.rowKey, pending = skillChanges.has(name);
+    const skill = skillsByName.get(name);
+    if (!skill) continue;
+    const label = skill.enabled ? "Enabled" : "Disabled";
+    const metadata = row.querySelector(".collection-metadata");
+    metadata.textContent = label;
+    row.firstChild.setAttribute("aria-description", `${skill.description || "No description provided."} ${label}.`);
     const toggle = row.querySelector(".skill-toggle");
     toggle.disabled = pending || skillReviewPending;
     toggle.setAttribute("aria-busy", String(pending));
-    const status = row.querySelector(".skill-row-status");
-    status.textContent = skillPendingText(name);
-    status.setAttribute("role", "status");
+    row.querySelector(".skill-row-status").textContent = "";
   }
   if (skillDialog.open) renderSkillDetails();
 }
@@ -2338,7 +2712,7 @@ function renderSkillDetails() {
     ["Installation", skill.source_label], ["Indexed files", skill.indexed_file_count], ["Knowledge library", skill.library]]) {
     if (value !== undefined && value !== null) metadata.append(domainText("dt", label), domainText("dd", String(value)));
   }
-  byId("skill-detail-status").textContent = skillPendingText(skill.name);
+  byId("skill-detail-status").textContent = "";
   byId("skill-detail-change").textContent = skill.enabled ? "Disable" : "Enable";
   for (const id of ["skill-detail-change", "skill-detail-delete"]) byId(id).disabled = skillChanges.has(skill.name) || skillReviewPending;
 }
@@ -2348,13 +2722,13 @@ function openSkill(skill) {
 async function changeSkill(skill, operation) {
   if (skillChanges.has(skill.name) || skillReviewPending || reviewDialog.open) return;
   const direct = operation === "skill-enabled";
-  const epoch = authEpoch, state = { phase: direct ? "preparing" : "review" };
-  skillChanges.set(skill.name, state); skillFailures.delete(skill.name);
+  const epoch = authEpoch, state = { phase: direct ? "preparing" : "review", operation };
+  skillChanges.set(skill.name, state);
   skillReviewPending = true; updateSkillStates();
   const current = () => authenticated && epoch === authEpoch && skillChanges.get(skill.name) === state;
   const mayOpenReview = () => current() && currentView === "integrations" && integrationSection === "skills";
   try {
-    await (direct ? submitToggleChange : prepareChange)({ operation, name: skill.name, identity: skill.identity,
+    await (direct ? submitDirectChange : prepareChange)({ operation, name: skill.name, identity: skill.identity,
       expected_enabled: skill.enabled, ...(operation === "skill-enabled" ? { enabled: !skill.enabled } : {}) }, {
       current: mayOpenReview,
       beforeOpen: () => { if (skillDialog.open) skillDialog.close(); },
@@ -2377,7 +2751,6 @@ async function changeSkill(skill, operation) {
   } catch (error) {
     if (current()) {
       skillChanges.delete(skill.name);
-      skillFailures.set(skill.name, "Could not update Skill. Its confirmed state is unchanged.");
       domainError(error, "skills-status");
     }
   } finally {
@@ -2401,7 +2774,6 @@ async function loadOperations() {
       if (operation.state === "unknown") pending.phase = "unknown";
       else {
         skillChanges.delete(name); skillSettled = true;
-        if (operation.state === "failed") skillFailures.set(name, "Update rejected. Its confirmed state is unchanged.");
       }
     }
     updateSkillStates();
@@ -2416,9 +2788,9 @@ async function loadOperations() {
         item.state === "failed" ? "Rejected · reload and review the current item" : item.state;
       node.append(domainText("strong", item.kind.replaceAll("-", " ")), domainText("span", status),
         domainText("small", item.request_id, "muted"));
-      if (window.MaterialLoading && ["accepted", "running", "cancelling"].includes(item.state)) {
+      if (window.MaterialLoadingCircle && ["accepted", "running", "cancelling"].includes(item.state)) {
         node.dataset.working = "true";
-        node.prepend(MaterialLoading.create({ size: "medium" }));
+        node.prepend(MaterialLoadingCircle.create({ size: "medium" }));
       }
       return node;
     }));
@@ -2487,19 +2859,6 @@ byId("file-add").addEventListener("click", () => {
 });
 byId("artifact-import-close").append(libraryIcon("close"));
 byId("artifact-import-close").addEventListener("click", () => importDialog.close());
-byId("file-options-toggle").append(libraryIcon("options"));
-byId("file-options-toggle").addEventListener("click", () => {
-  const open = byId("artifact-filter").classList.toggle("options-open");
-  byId("file-options-toggle").setAttribute("aria-expanded", String(open));
-});
-byId("artifact-filter").addEventListener("keydown", (event) => {
-  if (event.key !== "Escape" || !byId("file-options-toggle").getClientRects().length ||
-      !byId("artifact-filter").classList.contains("options-open")) return;
-  event.preventDefault();
-  byId("artifact-filter").classList.remove("options-open");
-  byId("file-options-toggle").setAttribute("aria-expanded", "false");
-  byId("file-options-toggle").focus();
-});
 byId("skills-refresh").addEventListener("click", () => refreshDomain("integrations"));
 for (const button of byId("integration-sections").querySelectorAll("[data-integration]")) {
   button.addEventListener("click", () => {
@@ -2562,14 +2921,8 @@ byId("artifact-query").addEventListener("input", () => {
     libraryOffset = 0; rememberLibraryLocation(); loadLibrary();
   }, 200);
 });
-for (const button of document.querySelectorAll('[data-file-scope]')) button.addEventListener('click', () => {
-  if (fileScope === button.dataset.fileScope) return;
-  fileScope = button.dataset.fileScope; libraryOffset = 0;
-  rememberLibraryLocation(); loadLibrary();
-});
 document.addEventListener('klaude-chat-session-changed', () => {
   filePages.clear();
-  if (fileScope === 'current') { libraryOffset = 0; if (currentView === 'library') loadLibrary(); }
 });
 byId("artifact-sort").addEventListener("change", () => { libraryOffset = 0; rememberLibraryLocation(); loadLibrary(); });
 for (const id of ["artifact-kind", "artifact-status"]) {
@@ -2647,7 +3000,6 @@ document.addEventListener("klaude-view", (event) => {
 document.addEventListener("klaude-auth-reset", () => {
   knowledgeSource = ""; knowledgeChunkPage = null; knowledgeDeletePending = null; knowledgeOrigin = null;
   knowledgeSourceNames.clear();
-  knowledgeActionNotice = "";
   cancelDroppedImports();
   integrationAddGeneration += 1; integrationAddDialog.close();
   clearTimeout(fileSearchTimer);
@@ -2658,7 +3010,7 @@ document.addEventListener("klaude-auth-reset", () => {
   for (const id of ["library-refresh", "skills-refresh"]) {
     byId(id).disabled = false; byId(id).setAttribute("aria-busy", "false");
   }
-  skillChanges.clear(); skillFailures.clear(); skillReviewPending = false; detailSkill = null;
+  skillChanges.clear(); skillReviewPending = false; detailSkill = null;
   skillDialog.close();
   for (const id of ["skill-detail-title", "skill-detail-description", "skill-detail-metadata", "skill-detail-status"]) byId(id).replaceChildren();
   stopIntegrationReads();
@@ -2690,6 +3042,7 @@ document.addEventListener("klaude-auth-reset", () => {
     byId(`${prefix}-pages`).hidden = true;
   }
   installedSkills = [];
+  renderSkillsCounts({ all: 0, enabled: 0, disabled: 0 });
   selectedArtifact = null;
   managementReview = null;
   operationSignature = null;
@@ -2697,7 +3050,7 @@ document.addEventListener("klaude-auth-reset", () => {
   artifactDialog.close();
   importDialog.close();
   for (const id of ["library-items", "knowledge-items", "skill-items", "source-items", "artifact-preview", "artifact-actions", "domain-operations"]) byId(id).replaceChildren();
-  for (const id of ["artifact-metadata", "artifact-source", "artifact-tag-list", "artifact-menu"]) byId(id).replaceChildren();
+  for (const id of ["artifact-metadata", "artifact-source", "artifact-tag-items", "artifact-menu"]) byId(id).replaceChildren();
   byId("artifact-tag-count").textContent = "";
   byId("artifact-tags-input").value = "";
   byId("artifact-source-input").value = "";
@@ -2712,14 +3065,14 @@ document.addEventListener("klaude-auth-reset", () => {
   for (const id of ["artifact-import", "knowledge-learn", "skill-import", "artifact-tags", "artifact-filter", "skills-filter"]) byId(id).reset();
   byId("artifact-kind").value = fileKind;
   byId("artifact-status").value = fileStatus;
-  byId("artifact-filter").classList.remove("options-open");
-  byId("file-options-toggle").setAttribute("aria-expanded", "false");
+  for (const menu of libraryFilterMenus) menu.sync();
   byId("artifact-import-status").textContent = "";
   byId("knowledge-query").value = "";
   byId("knowledge-library").replaceChildren();
   byId("knowledge-breadcrumbs").replaceChildren();
+  byId("knowledge-heading").hidden = true;
   byId("knowledge-summary").textContent = "";
-  byId("knowledge-title").textContent = "Your knowledge";
+  byId("knowledge-title").textContent = "";
   byId("knowledge-content-title").textContent = "Chunks";
   byId("knowledge-chunk-status").textContent = "";
   byId("knowledge-chunk-title").textContent = "Chunk";

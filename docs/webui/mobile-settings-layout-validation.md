@@ -129,3 +129,34 @@ cases**, including dirty desktop footer coverage and mobile docking, with zero
 JavaScript errors. Evidence: `/tmp/klaude-theme-dirty-settings.log` and
 `/tmp/klaude-theme-dirty-layout.log`. JavaScript syntax, scoped Ruff, both static
 bundle checks and whitespace checks passed. Refresh the page to load the update.
+
+## Shared Theme footer styling
+
+Agent and Models now use the same footer class as Theme: the tonal divider
+surface, square footer edges, quiet Discard and filled Apply changes buttons.
+Agent spans its card padding like Theme; Models spans its combined settings
+panel. Mobile bars retain the existing measured application dock. Unsaved counts,
+conflict resolution and Check save status keep their original transaction flow.
+
+The responsive smoke passed all 100 light/dark layouts with zero browser errors,
+including shared footer/button assertions, desktop placement, mobile safe areas,
+keyboard overlay geometry, draft retention and Discard/Apply. It also exposed an
+optional AI Review description being dereferenced after its removal; the renderer
+now checks that the description exists before updating it. The Expressive bundler
+preserves existing CSS appended after its owned block when regenerating styles.
+
+## Agent Help dialogs
+
+Settings → Agents question-mark controls open their existing explanatory text in
+one shared native dialog, with the setting name as its title and a single OK
+button. No inline note expands. Escape dismisses it and focus returns to the
+invoking Help button. The sign-in Help popup retains its original behavior.
+The isolated browser smoke passed all 100 layouts and checked every Agent Help
+control at 390px and 1440px in light/dark mode, including modal focus, viewport
+bounds, OK/Escape dismissal and focus restoration; no browser errors occurred.
+
+The custom accent hex value is a borderless inline text editor with the same
+font, dimensions, colors and zero padding at rest and on focus. Blur or Enter
+updates the existing accent preview; Escape cancels the edit. Three-digit and
+six-digit hex values are accepted, with invalid drafts restored to the current
+accent. Theme Apply/Discard continues to control persistence.

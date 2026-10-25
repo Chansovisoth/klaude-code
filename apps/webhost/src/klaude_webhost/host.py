@@ -1,4 +1,4 @@
-"""Authenticated HTTP/SSE adapter for one application session."""
+"""Authenticated HTTP/SSE adapter for bounded workspace conversations."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -22,6 +23,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from klaude_application import HeadlessApplication
 from klaude_application.browser_jobs import generated_jobs
+from klaude_application.browser_media_settings import OPERATIONS as MODEL_SETTINGS_OPERATIONS
 from klaude_application.browser_models import BrowserModels
 from klaude_application.browser_sessions import public_markdown, workspace_sessions
 from klaude_application.browser_settings import read_browser_settings
@@ -50,8 +52,9 @@ from klaude_core.model_discovery import ModelDiscoveryError, discover_connection
 from klaude_core.model_runtime import ModelInfo
 from klaude_tools import build_tools
 
-from .accounts import AccountStore, LoginLimited, LoginLimiter
+from .accounts import AccountIdentity, AccountStore, LoginLimited, LoginLimiter
 from .attachments import ChatAttachments
+from .chat_previews import PREVIEW_CSP, ChatPreviews
 from .lan import lan_ipv4_addresses, private_lan_ip
 from .library_images import ImageBusy, LibraryImages
 from .transfers import MAX_UPLOAD, BrowserTransfers, display_filename
@@ -59,6 +62,12 @@ from .transfers import MAX_UPLOAD, BrowserTransfers, display_filename
 COOKIE = "klaude_webui_session"
 MAX_BODY = 256 * 1024
 STATIC = Path(__file__).with_name("static")
+# Packaged manifest is the explicit publication allowlist; directory contents are not.
+AI_ICON_NAMES = frozenset(
+    name for name in json.loads((STATIC / "icons" / "ai" / "manifest.json").read_text())["icons"]
+    if re.fullmatch(r"[a-z0-9-]+", name)
+)
+
 READ_ONLY_TOOLS = frozenset({
     "read_file", "list_dir", "workspace_info", "grep", "git_status", "git_diff",
 }) | ASSISTANT_READ_TOOLS
@@ -72,6 +81,7 @@ class _BrowserSession:
     touched: float
     clients: dict[str, float] = field(default_factory=dict)
     account_revision: int | None = None
+    account: AccountIdentity | None = None
 
 
 class _BoundedHTTPServer(ThreadingHTTPServer):
@@ -108,15 +118,20 @@ class LocalWebHost:
         staging_dir: Path | None = None,
         accounts: AccountStore | None = None,
         library: LibraryManagement | None = None,
+        application_factory: Callable[[], HeadlessApplication] | None = None,
     ) -> None:
         if not 0 <= port <= 65535:
             raise ValueError("invalid port")
         self.application = application
+        self._application_factory = application_factory
+        self._applications = [application]
+        self._application_edits: dict[int, bool] = {}
         self.accounts = accounts
         self.library = library
         self._library_downloads = threading.BoundedSemaphore(2)
         self._attachment_reads = threading.BoundedSemaphore(2)
         self.library_images = LibraryImages()
+        self.chat_previews = ChatPreviews()
         self.login_limiter = LoginLimiter()
         self.transfers: BrowserTransfers | None = None
         self.attachments = ChatAttachments()
@@ -182,7 +197,7 @@ class LocalWebHost:
     def start_lan(self, ip: str, directory: Path) -> None:
         private_lan_ip(ip)
         with self._lock:
-            if self._edits_activated:
+            if any(app.agent.workspace.write_enabled for app in self._applications):
                 raise RuntimeError("Disable file edits by restarting the host before LAN preview")
             if self._lan_http is not None:
                 if self.lan_ip == ip:
@@ -255,7 +270,7 @@ class LocalWebHost:
         if account is None:
             return None
         with self._lock:
-            if self._stopping or self.accounts.revision() != account.revision:
+            if self._stopping or self.accounts.identity(account.username) != account:
                 return None
             now = time.monotonic()
             # Retain a bounded number of sessions, including abandoned browser logins.
@@ -267,7 +282,7 @@ class LocalWebHost:
                 raise LoginLimited
             token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
             self._sessions[hashlib.sha256(token.encode()).hexdigest()] = _BrowserSession(
-                csrf, now, now, account_revision=account.revision,
+                csrf, now, now, account_revision=account.revision, account=account,
             )
             return token, csrf
 
@@ -275,7 +290,8 @@ class LocalWebHost:
         if self.accounts is None:
             return session.account_revision is None
         try:
-            return session.account_revision == self.accounts.revision()
+            return (session.account is not None
+                    and self.accounts.identity(session.account.username) == session.account)
         except (OSError, ValueError):
             return False
 
@@ -315,6 +331,7 @@ class LocalWebHost:
 
     def logout(self, identity: str) -> None:
         with self._lock:
+            self.chat_previews.revoke(identity)
             session = self._sessions.pop(identity, None)
             if self.transfers is not None:
                 self.transfers.revoke(identity)
@@ -322,10 +339,11 @@ class LocalWebHost:
             if self.library is not None and session is not None:
                 for client in session.clients:
                     self.library.revoke(client)
-        control = self.application.control()
-        if control is not None and (control[0] == identity or
-                                    session is not None and control[0] in session.clients):
-            self.application.close_interactions()
+            for app in self._applications:
+                control = app.control()
+                if control is not None and (control[0] == identity or
+                                            session is not None and control[0] in session.clients):
+                    app.close_interactions()
 
     def session_active(self, identity: str) -> bool:
         with self._lock:
@@ -371,11 +389,45 @@ class LocalWebHost:
 
     def public_snapshot(self, viewer_id: str | None = None) -> dict[str, Any]:
         """One bounded public projection for browser and same-account IPC."""
+        with self._lock:
+            return self._public_snapshot(viewer_id)
+
+    def _public_snapshot(self, viewer_id: str | None = None) -> dict[str, Any]:
         snapshot = self.application.snapshot(viewer_id=viewer_id)
         edits_enabled = self._edits_activated and self.application.agent.workspace.write_enabled
         messages = []
         budget = 700_000
-        for item in reversed(snapshot["messages"][-100:]):
+        candidates = {item["id"]: item for item in snapshot["messages"]}
+        selected_ids: set[str] = set()
+        pending_messages = list(reversed(snapshot["messages"][-100:]))
+        active_root = snapshot["retry_root"]
+        if active_root:
+            original = candidates.get(active_root)
+            if original is None:
+                saved = self.application.sessions.public_message(
+                    snapshot["session_id"], int(active_root.removeprefix("stored:")),
+                )
+                if saved is not None:
+                    original = asdict(saved)
+                    original.update(retry_root=active_root, previous_response=True)
+            if original is not None:
+                pending_messages.insert(0, original)
+        while pending_messages:
+            item = pending_messages.pop(0)
+            if item["id"] in selected_ids:
+                continue
+            root = item.get("retry_root")
+            if root and root != item["id"] and root not in selected_ids:
+                original = candidates.get(root)
+                if original is None:
+                    saved = self.application.sessions.public_message(
+                        snapshot["session_id"], int(root.removeprefix("stored:")),
+                    )
+                    if saved is not None:
+                        original = asdict(saved)
+                        original.update(retry_root=root, previous_response=True)
+                if original is not None:
+                    pending_messages.insert(0, original)
             content = item["content"][:16_000]
             size = len(content.encode("utf-8"))
             if item.get("attachments"):
@@ -384,10 +436,14 @@ class LocalWebHost:
                 break
             messages.append({"id": item["id"], "role": item["role"],
                              "content": content, "created_at": item["created_at"]})
+            selected_ids.add(item["id"])
+            for attribute in ("retry_root", "previous_response"):
+                if attribute in item:
+                    messages[-1][attribute] = item[attribute]
             if item.get("attachments"):
                 messages[-1]["attachments"] = item["attachments"]
             budget -= size
-        messages.reverse()
+        messages.sort(key=lambda item: int(item["id"].removeprefix("stored:")))
         approvals = []
         questions = []
         # Authenticated clients belong to the same local owner. Show the exact
@@ -422,13 +478,21 @@ class LocalWebHost:
         return {
             "api_version": "1", "session_id": snapshot["session_id"],
             "message_actions": True,
+            "message_retry_in_place": True,
+            "retry_root": snapshot["retry_root"],
             "attachments": True,
             "attachment_content": True,
             "library_images": True,
             "library_source_links": True,
+            "library_source_notes": True,
+            "library_ai_tag_edit": self.library is not None,
             "library_artifact_sources": True,
             "profile_management": self.library is not None,
             "media_management": self.library is not None,
+            "model_store": self.library is not None,
+            "image_studio": self.library is not None,
+            "model_settings": self.library is not None,
+            "model_store_catalog": self.library is not None,
             "requires_model_selection": snapshot.get("requires_model_selection", False),
             "model_providers": getattr(self.application.agent, "browser_models", None) is not None,
             "model_connection": self.application.agent.model_info.connection_id,
@@ -452,6 +516,7 @@ class LocalWebHost:
             ),
             "approvals": approvals, "questions": questions,
             "active_turn_id": self.application.active_turn_id(),
+            "parallel_sessions": self._application_factory is not None,
             "has_control": snapshot["has_control"],
             "control_epoch": snapshot["control_epoch"],
             "queue": snapshot["queue"],
@@ -485,7 +550,10 @@ class LocalWebHost:
                     compatible = True
                 except ValueError:
                     compatible = False
-                rows.append({**item, "resumable": compatible})
+                running = next((app for app in self._applications
+                                if app.session_id == item["session_id"]), None)
+                active = bool(running and running.active_turn_id())
+                rows.append({**item, "resumable": compatible or active, "active": active})
                 if len(rows) >= 30:
                     break
             return rows
@@ -541,11 +609,32 @@ class LocalWebHost:
         )
         return replace(found, capabilities=caps)
 
+    @staticmethod
+    def _application_busy(app: HeadlessApplication) -> bool:
+        return bool(app.active_turn_id() or app.turns.queue(
+            app.session_id, app.controller_id, include_submitted=False,
+        ))
+
+    def _new_application(self) -> HeadlessApplication:
+        if self._application_factory is None:
+            raise RuntimeError("Finish active work before switching sessions")
+        # Each live conversation owns its Agent, runtime, broker, queue and lease.
+        # Evict only idle, unselected instances; never cancel work to free a slot.
+        if len(self._applications) >= 4:
+            idle = next((app for app in self._applications
+                         if app is not self.application and not self._application_busy(app)), None)
+            if idle is None:
+                raise RuntimeError("Four conversations are running; wait for a reply or cancel one")
+            asyncio.run(idle.close())
+            self._applications.remove(idle)
+            self._application_edits.pop(id(idle), None)
+        return self._application_factory()
+
     def switch_session(
         self, viewer: str, request_id: str, expected_session_id: str,
         session_id: str, control_epoch: int,
     ) -> str:
-        """Switch only at an idle boundary with exact browser control."""
+        """Select a conversation without mutating another conversation's worker."""
         with self._lock:
             previous = self._session_receipts.get(request_id)
             if previous is not None:
@@ -554,55 +643,126 @@ class LocalWebHost:
                 if self.application.session_id != previous[2]:
                     raise ValueError("session changed after request")
                 return previous[2]
-            if self._stopping or self.application.session_id != expected_session_id:
+            source = self.application
+            if self._stopping or source.session_id != expected_session_id:
                 raise ValueError("session changed")
-            control = self.application.control()
+            control = source.control()
             if control is not None and control != (viewer, control_epoch):
                 raise ValueError("session control changed")
             if session_id:
                 if self.library is not None and self.library.session_busy(session_id):
                     raise RuntimeError("Conversation management change is active or unconfirmed")
-                binding = self.application.turns.workspace(session_id)
-                if (binding is None or binding[0] !=
-                        str(self.application.agent.workdir.resolve())):
+                binding = source.turns.workspace(session_id)
+                if binding is None or binding[0] != str(source.agent.workdir.resolve()):
                     raise ValueError("session belongs to another workspace")
-                models = getattr(self.application.agent, "browser_models", None)
-                if models is not None:
-                    try:
-                        models.saved(self.application.memory, session_id)
-                    except ValueError:
-                        self.application.resume_local(session_id)
-                    else:
-                        self.application.resume_configured(session_id)
+            candidate = next((app for app in self._applications
+                              if session_id and app.session_id == session_id), None)
+            created = False
+            if candidate is None:
+                if self._application_busy(source):
+                    candidate = self._new_application()
+                    created = True
                 else:
-                    self.application.resume_local(session_id)
-                selected = session_id
-            else:
-                from klaude_core.ai_defaults import read_defaults
-                from klaude_core.settings_store import read_settings
-
-                cfg = self.application.agent.tool_config
-                info, require_selection = None, False
-                if isinstance(cfg, Config):
-                    preferences = read_settings(cfg.data_dir / "chat-preferences.json")
-                    selections = preferences.get("model_default_selections", {})
-                    if isinstance(selections, dict) and selections.get("chat") in {
-                        "manual", "automatic"
-                    }:
-                        reference = read_defaults(cfg).chat
-                        if reference:
-                            info = BrowserModels(cfg).verify_ref(reference)
+                    candidate = source
+            running = self._application_busy(candidate)
+            try:
+                if running:
+                    if candidate.session_id != session_id:
+                        raise RuntimeError("Finish active work before switching sessions")
+                    selected = session_id
+                else:
+                    if session_id:
+                        if self.library is not None and self.library.session_busy(session_id):
+                            raise RuntimeError(
+                                "Conversation management change is active or unconfirmed"
+                            )
+                        binding = candidate.turns.workspace(session_id)
+                        if (binding is None or binding[0] !=
+                                str(candidate.agent.workdir.resolve())):
+                            raise ValueError("session belongs to another workspace")
+                        models = getattr(candidate.agent, "browser_models", None)
+                        if models is not None:
+                            try:
+                                models.saved(candidate.memory, session_id)
+                            except ValueError:
+                                candidate.resume_local(session_id)
+                            else:
+                                candidate.resume_configured(session_id)
                         else:
-                            require_selection = True
-                selected = self.application.start_session(
-                    model_info=info, require_selection=require_selection,
-                )
-            if session_id:
-                self.application.requires_model_selection = False
-            self.application.agent.workspace.write_enabled = False
-            for name in FILE_EDIT_TOOLS:
-                self.application.agent.tools.pop(name, None)
-            self._edits_activated = False
+                            candidate.resume_local(session_id)
+                        selected = session_id
+                    else:
+                        from klaude_core.ai_defaults import read_defaults
+                        from klaude_core.settings_store import read_settings
+
+                        cfg = candidate.agent.tool_config
+                        info, require_selection = None, False
+                        if isinstance(cfg, Config):
+                            preferences = read_settings(cfg.data_dir / "chat-preferences.json")
+                            selections = preferences.get("model_default_selections", {})
+                            if isinstance(selections, dict) and selections.get("chat") in {
+                                "manual", "automatic"
+                            }:
+                                reference = read_defaults(cfg).chat
+                                if reference:
+                                    info = BrowserModels(cfg).verify_ref(reference)
+                                else:
+                                    require_selection = True
+                        if created and info is None and not require_selection:
+                            # With no new-chat default, preserve the source choice
+                            # using a fresh runtime, never the running runtime object.
+                            source_info = source.agent.model_info
+                            if candidate.agent.model_info != source_info:
+                                revision = candidate.snapshot()["settings_revision"]
+                                if source_info.connection_id:
+                                    candidate.choose_configured_model(
+                                        source_info, expected_revision=revision,
+                                        request_id=secrets.token_hex(16),
+                                    )
+                                else:
+                                    candidate.choose_local_model(
+                                        source_info, expected_revision=revision,
+                                        request_id=secrets.token_hex(16),
+                                    )
+                            source_effort = (source.agent.reasoning_effort
+                                             if source.agent.reasoning_mode == "thinking" else None)
+                            candidate_effort = (candidate.agent.reasoning_effort
+                                                if candidate.agent.reasoning_mode == "thinking"
+                                                else None)
+                            if (candidate.agent.reasoning_mode != source.agent.reasoning_mode
+                                    or candidate_effort != source_effort):
+                                candidate.choose_reasoning(
+                                    source.agent.reasoning_mode, source_effort,
+                                    expected_revision=candidate.snapshot()["settings_revision"],
+                                    request_id=secrets.token_hex(16),
+                                )
+                        selected = candidate.start_session(
+                            model_info=info, require_selection=require_selection,
+                        )
+            except BaseException:
+                if created:
+                    asyncio.run(candidate.close())
+                raise
+            if created:
+                self._applications.append(candidate)
+            # Idle switches revoke edit activation as before. An in-flight worker
+            # retains its own reviewed tools; returning to it restores that state.
+            self._application_edits[id(source)] = self._edits_activated
+            if candidate is not source and not self._application_busy(source):
+                source.agent.workspace.write_enabled = False
+                for name in FILE_EDIT_TOOLS:
+                    source.agent.tools.pop(name, None)
+                self._application_edits[id(source)] = False
+            self.application = candidate
+            if not running:
+                if session_id:
+                    candidate.requires_model_selection = False
+                candidate.agent.workspace.write_enabled = False
+                for name in FILE_EDIT_TOOLS:
+                    candidate.agent.tools.pop(name, None)
+            self._edits_activated = bool(
+                running and self._application_edits.get(id(candidate), False)
+            )
             self._activation_receipts.clear()
             self._decision_receipts.clear()
             if len(self._session_receipts) >= 128:
@@ -614,7 +774,7 @@ class LocalWebHost:
         self, viewer: str, request_id: str, source: str, message_id: str,
         action: str, control_epoch: int,
     ) -> str:
-        """Branch or explicitly retry one saved reply without changing its source."""
+        """Branch explicitly, or retry in place while preserving saved replies."""
         with self._lock:
             if action not in ("branch", "retry"):
                 raise ValueError("Invalid message action")
@@ -628,30 +788,33 @@ class LocalWebHost:
                 if self._stopping or source != self.application.session_id:
                     raise ValueError("Session changed; reload")
                 control = self.application.control()
-                if control is not None and control != (viewer, control_epoch):
+                if (action != "retry" and control is not None
+                        and control != (viewer, control_epoch)):
                     raise ValueError("Session control changed")
                 if not message_id.startswith("stored:") or not message_id[7:].isdigit():
                     raise ValueError("Choose a saved assistant reply")
                 row_id = int(message_id[7:])
                 if not 0 < row_id <= 2**63 - 1:
                     raise ValueError("Choose a saved assistant reply")
-                selected, prompt = self.application.branch_message(
-                    row_id, retry=action == "retry",
-                )
-                self.application.agent.workspace.write_enabled = False
-                for name in FILE_EDIT_TOOLS:
-                    self.application.agent.tools.pop(name, None)
-                self._edits_activated = False
-                self._activation_receipts.clear()
-                self._decision_receipts.clear()
+                if action == "retry":
+                    self.application.retry_message(
+                        row_id,
+                        request_id="retry:" + hashlib.sha256(request_id.encode()).hexdigest(),
+                        controller_id=viewer,
+                        control_epoch=control_epoch,
+                    )
+                    selected, prompt = source, None
+                else:
+                    selected, prompt = self.application.branch_message(row_id)
+                    self.application.agent.workspace.write_enabled = False
+                    for name in FILE_EDIT_TOOLS:
+                        self.application.agent.tools.pop(name, None)
+                    self._edits_activated = False
+                    self._activation_receipts.clear()
+                    self._decision_receipts.clear()
                 if len(self._message_receipts) >= 128:
                     self._message_receipts.pop(next(iter(self._message_receipts)))
                 self._message_receipts[request_id] = (*key, selected, prompt)
-            if prompt is not None:
-                self.application.submit(
-                    prompt, request_id="retry:" + hashlib.sha256(request_id.encode()).hexdigest(),
-                    _controller_id=viewer,
-                )
             return selected
 
     def activate_edits(
@@ -712,11 +875,13 @@ class LocalWebHost:
             self._sessions.clear()
             self._decision_receipts.clear()
             self._activation_receipts.clear()
-            self.application.close_interactions()
+            for app in self._applications:
+                app.close_interactions()
             if self.transfers is not None:
                 self.transfers.revoke_all()
             self.attachments.revoke()
             self.library_images.clear()
+            self.chat_previews.revoke()
 
     def stop(self) -> None:
         self.begin_shutdown()
@@ -728,7 +893,8 @@ class LocalWebHost:
             while self._stream_count and time.monotonic() < deadline:
                 self._stream_condition.wait(deadline - time.monotonic())
         try:
-            asyncio.run(self.application.close(drain=True))
+            for app in self._applications:
+                asyncio.run(app.close(drain=True))
         finally:
             if self.library is not None:
                 self.library.close()
@@ -759,18 +925,23 @@ class _Handler(BaseHTTPRequestHandler):
         return
 
     def _headers(self, status: int, content_type: str, length: int | None = None,
-                 *, cookie: str = "", attachment: str = "") -> None:
+                 *, cookie: str = "", attachment: str = "", preview: bool = False) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("X-Frame-Options", "DENY")
+        if not preview:
+            self.send_header("X-Frame-Options", "DENY")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header(
             "Content-Security-Policy",
+            PREVIEW_CSP if preview else
             "default-src 'none'; script-src 'self'; style-src 'self'; "
-            "connect-src 'self'; font-src 'self'; img-src 'self'; base-uri 'none'; "
+            "connect-src 'self' https: http:; font-src 'self'; "
+            "img-src 'self' data: blob: https: http:; "
+            "frame-src 'self'; "
+            "form-action 'self' https://lens.google.com https://www.google.com; base-uri 'none'; "
             "object-src 'none'; frame-ancestors 'none'",
         )
         if length is not None:
@@ -817,10 +988,17 @@ class _Handler(BaseHTTPRequestHandler):
         expected = getattr(self.server, "host_origin", "")
         return origin == expected if mutation else origin in (None, expected)
 
+    def _admin_management_allowed(self) -> bool:
+        # Embedded bootstrap hosts preserve their existing loopback authority.
+        # Account-backed hosts always authorize the validated principal's role,
+        # independently of listener/address, username or client-supplied fields.
+        if self.owner.accounts is None:
+            return not bool(getattr(self.server, "host_lan", False))
+        auth = self.owner.authenticate(self.headers.get("Cookie", ""))
+        return bool(auth and auth[1].account and auth[1].account.role == "admin")
+
     def _mcp_management_allowed(self) -> bool:
-        # Authenticated owner reviews work on both production listeners. Legacy
-        # bootstrap-only embedded hosts retain local-only MCP management.
-        return not bool(getattr(self.server, "host_lan", False)) or self.owner.accounts is not None
+        return self._admin_management_allowed()
 
     def _authenticated(self, *, mutation: bool = False) -> tuple[str, _BrowserSession] | None:
         if self.owner._stopping:
@@ -889,24 +1067,44 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.FORBIDDEN, "forbidden", "Request origin rejected")
             return
         path = urlsplit(self.path).path
-        if path in ("/fonts/Roboto.ttf", "/fonts/JetBrainsMono.ttf"):
+        if path in ("/fonts/Roboto.ttf", "/fonts/JetBrainsMono.ttf",
+                    "/fonts/SpaceGrotesk.ttf", "/fonts/ReadexPro.ttf",
+                    "/fonts/NotoSansKhmer.ttf"):
             payload = (STATIC / path.removeprefix("/")).read_bytes()
             self._headers(HTTPStatus.OK, "font/ttf", len(payload))
             self.wfile.write(payload)
             return
+        if path.startswith("/icons/ai/") and path.removeprefix("/icons/ai/") in {
+            f"{name}.svg" for name in AI_ICON_NAMES
+        }:
+            payload = (STATIC / path.removeprefix("/")).read_bytes()
+            self._headers(HTTPStatus.OK, "image/svg+xml; charset=utf-8", len(payload))
+            self.wfile.write(payload)
+            return
+        if path == "/icons/google-lens.svg":
+            payload = (STATIC / "icons/google-lens.svg").read_bytes()
+            self._headers(HTTPStatus.OK, "image/svg+xml; charset=utf-8", len(payload))
+            self.wfile.write(payload)
+            return
+        if path == "/lockscreen-bg.jpg":
+            payload = (STATIC / "lockscreen-bg.jpg").read_bytes()
+            self._headers(HTTPStatus.OK, "image/jpeg", len(payload))
+            self.wfile.write(payload)
+            return
         if path in ("/", "/app.js", "/library.js", "/management.js", "/media.js", "/attachments.js",
-                    "/style.css", "/markdown.js",
+                    "/style.css", "/markdown.js", "/lens.js", "/ai-icons.js",
                     "/loading-indicator.js", "/vendor/material-loading-shapes.js",
-                    "/vendor/markdown-it.min.js", "/vendor/prism.min.js"):
+                    "/vendor/markdown-it.min.js", "/vendor/prism.min.js", "/vendor/katex.min.js"):
             name = {"/": "index.html", "/app.js": "app.js", "/library.js": "library.js",
                     "/attachments.js": "attachments.js",
                     "/management.js": "management.js",
                     "/media.js": "media.js",
-                    "/style.css": "style.css", "/markdown.js": "markdown.js",
+                    "/ai-icons.js": "ai-icons.js", "/style.css": "style.css", "/markdown.js": "markdown.js", "/lens.js": "lens.js",
                     "/loading-indicator.js": "loading-indicator.js",
                     "/vendor/material-loading-shapes.js": "vendor/material-loading-shapes.js",
                     "/vendor/markdown-it.min.js": "vendor/markdown-it.min.js",
-                    "/vendor/prism.min.js": "vendor/prism.min.js"}[path]
+                    "/vendor/prism.min.js": "vendor/prism.min.js",
+                    "/vendor/katex.min.js": "vendor/katex.min.js"}[path]
             payload = (STATIC / name).read_bytes()
             media = "text/html" if path == "/" else (
                 "text/javascript" if path.endswith(".js") else "text/css"
@@ -922,9 +1120,20 @@ class _Handler(BaseHTTPRequestHandler):
         auth = self._authenticated()
         if auth is None:
             return
+        if path.startswith("/api/v1/chat-previews/"):
+            try:
+                payload = self.owner.chat_previews.read(auth[0], path.rsplit("/", 1)[-1])
+            except FileNotFoundError:
+                self._error(HTTPStatus.NOT_FOUND, "not_found", "Preview expired; open it again")
+                return
+            self._headers(HTTPStatus.OK, "text/html; charset=utf-8", len(payload), preview=True)
+            self.wfile.write(payload)
+            return
         if path == "/api/v1/auth":
             self._json(HTTPStatus.OK, {"api_version": "1", "csrf": auth[1].csrf,
-                                     "username": "admin" if self.owner.accounts else None})
+                                     "username": (auth[1].account.username
+                                                  if auth[1].account else None),
+                                     "role": auth[1].account.role if auth[1].account else None})
         elif path == "/api/v1/session":
             viewer = self._viewer(auth[0])
             if viewer is None:
@@ -992,9 +1201,11 @@ class _Handler(BaseHTTPRequestHandler):
                 if set(params) != {"id"} or len(params["id"]) != 1:
                     raise ValueError("Choose a conversation")
                 identity = params["id"][0]
-                payload = public_markdown(
-                    self.owner.application.memory, self.owner.application.agent.workdir, identity,
-                )
+                with self.owner._lock:
+                    payload = public_markdown(
+                        self.owner.application.memory,
+                        self.owner.application.agent.workdir, identity,
+                    )
             except ValueError:
                 self._error(HTTPStatus.BAD_REQUEST, "invalid_argument",
                             "Conversation unavailable or exceeds browser export limits")
@@ -1006,6 +1217,51 @@ class _Handler(BaseHTTPRequestHandler):
             self._headers(HTTPStatus.OK, "text/markdown; charset=utf-8", len(payload),
                           attachment=f"klaude-{identity}.md")
             self.wfile.write(payload)
+        elif path in {
+            "/api/v1/models/store", "/api/v1/models/store/detail",
+            "/api/v1/models/installed", "/api/v1/models/downloads",
+        }:
+            if self._viewer(auth[0]) is None:
+                return
+            from klaude_application import model_store
+
+            try:
+                service = self.owner.library
+                if service is None:
+                    raise ValueError("Model Store requires a current host")
+                params = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                if path.endswith("/installed"):
+                    if set(params) != {"connection"} or len(params["connection"]) != 1:
+                        raise ValueError("Choose one native Ollama connection")
+                    result = model_store.inventory(service.cfg, params["connection"][0])
+                elif path.endswith("/detail"):
+                    from klaude_application.model_store_catalog import detail
+
+                    if set(params) != {"id"} or len(params["id"]) != 1:
+                        raise ValueError("Choose one exact catalog model")
+                    result = detail(service.cfg, params["id"][0])
+                else:
+                    if path.endswith("/store") and params:
+                        from klaude_application.model_store_catalog import catalog
+
+                        if (set(params) - {"source", "query", "sort", "refresh"}
+                                or params.get("source") != ["huggingface"]
+                                or any(len(v) != 1 for v in params.values())
+                                or params.get("refresh", ["0"])[0] not in {"0", "1"}):
+                            raise ValueError("Unknown Model Store filter")
+                        result = catalog(service.cfg, params.get("query", [""])[0],
+                                         params.get("sort", ["downloads"])[0],
+                                         refresh=params.get("refresh") == ["1"])
+                    else:
+                        if params:
+                            raise ValueError("Unknown Model Store filter")
+                        result = (model_store.discovery() if path.endswith("/store")
+                                  else service.model_jobs())
+                    result["management_allowed"] = self._admin_management_allowed()
+                self._json(HTTPStatus.OK, result)
+            except (ValueError, OSError, RuntimeError, sqlite3.Error):
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE, "model_unavailable",
+                            "Model Store read unavailable; check the configured server")
         elif path in {"/api/v1/models/connections", "/api/v1/models/catalog"}:
             if self._viewer(auth[0]) is None:
                 return
@@ -1076,7 +1332,7 @@ class _Handler(BaseHTTPRequestHandler):
             "/api/v1/integrations/skills", "/api/v1/integrations/connections",
             "/api/v1/settings/memory",
             "/api/v1/settings/agent",
-            "/api/v1/settings/models",
+            "/api/v1/settings/models", "/api/v1/settings/model-connections",
         }:
             self._library_read(path, auth[0])
         else:
@@ -1112,7 +1368,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.UNAUTHORIZED, "invalid_credentials",
                             "Incorrect username or password")
                 return
-            self._json(HTTPStatus.OK, {"csrf": session[1], "username": "admin"},
+            principal = self.owner.authenticate(f"{COOKIE}={session[0]}")
+            if principal is None or principal[1].account is None:
+                self._error(HTTPStatus.UNAUTHORIZED, "invalid_credentials",
+                            "Account changed; sign in again")
+                return
+            self._json(HTTPStatus.OK, {"csrf": session[1],
+                                     "username": principal[1].account.username,
+                                     "role": principal[1].account.role},
                        cookie=f"{COOKIE}={session[0]}; HttpOnly; SameSite=Strict; Path=/")
             return
         if path == "/api/v1/auth/exchange":
@@ -1141,6 +1404,21 @@ class _Handler(BaseHTTPRequestHandler):
             return
         body = self._body()
         if body is None:
+            return
+        if path == "/api/v1/chat-previews":
+            try:
+                if set(body) != {"source"}:
+                    raise ValueError("Invalid preview fields")
+                with self.owner._lock:
+                    if not self.owner.session_active(auth[0]):
+                        self._error(HTTPStatus.UNAUTHORIZED, "unauthenticated", "Sign in locally")
+                        return
+                    identity = self.owner.chat_previews.create(auth[0], body["source"])
+            except ValueError:
+                self._error(HTTPStatus.BAD_REQUEST, "invalid_argument",
+                            "Invalid or oversized preview")
+                return
+            self._json(HTTPStatus.CREATED, {"url": f"/api/v1/chat-previews/{identity}"})
             return
         if path == "/api/v1/clients":
             if body:
@@ -1216,9 +1494,58 @@ class _Handler(BaseHTTPRequestHandler):
             self._attachment_change(path, body, auth[0], viewer)
         elif path in {
             "/api/v1/library/review", "/api/v1/library/submit", "/api/v1/library/discard",
-            "/api/v1/library/cancel",
+            "/api/v1/library/cancel", "/api/v1/library/vision/clear",
         }:
             self._library_change(path, body, auth[0], viewer)
+        elif path in {"/api/v1/settings/model-connections/test",
+                      "/api/v1/settings/models/image-test"}:
+            if not self._admin_management_allowed():
+                self._error(HTTPStatus.FORBIDDEN, "forbidden",
+                            "Model service tests require an admin account")
+                return
+            try:
+                service = self.owner.library
+                if service is None:
+                    raise ValueError("Model settings unavailable")
+                if path.endswith("image-test"):
+                    from klaude_core.image_generation import inspect
+
+                    if set(body) != {"endpoint"} or not isinstance(body["endpoint"], str):
+                        raise ValueError("Choose an image-service address")
+                    evidence = inspect(body["endpoint"])
+                    result = {key: evidence[key] for key in (
+                        "model", "limits", "sampler", "scheduler",
+                        "cancel_queued", "cancel_generating",
+                    )}
+                else:
+                    from klaude_application.browser_model_settings import test_connection
+
+                    result = test_connection(service.cfg, body)
+                self._json(HTTPStatus.OK, result)
+            except Exception:
+                self._error(HTTPStatus.BAD_REQUEST, "model_unavailable",
+                            "Service test unavailable; check its address and credentials")
+        elif path in {"/api/v1/models/cancel", "/api/v1/models/reconcile"}:
+            if not self._admin_management_allowed():
+                self._error(HTTPStatus.FORBIDDEN, "forbidden",
+                            "Model management requires an admin account")
+                return
+            try:
+                from klaude_application import model_store
+
+                with self.owner._lock:
+                    service = self.owner.library
+                    if (service is None or set(body) != {"request_id"}
+                            or not isinstance(body["request_id"], str)):
+                        raise ValueError("Choose an exact model operation")
+                    result = (service.cancel_model(body["request_id"])
+                              if path.endswith("/cancel") else
+                              model_store.reconcile(service.cfg, service.journal,
+                                                    body["request_id"]))
+                    self._json(HTTPStatus.OK, result)
+            except (ValueError, RuntimeError, OSError, sqlite3.Error):
+                self._error(HTTPStatus.CONFLICT, "model_unconfirmed",
+                            "Model outcome not confirmed. Check Downloads and the Ollama server.")
         elif path == "/api/v1/auth/logout":
             if body:
                 self._error(HTTPStatus.BAD_REQUEST, "invalid_argument", "Unexpected fields")
@@ -1281,6 +1608,8 @@ class _Handler(BaseHTTPRequestHandler):
                         self._error(HTTPStatus.SERVICE_UNAVAILABLE, "host_stopping",
                                     "Web UI is stopping")
                         return
+                    if self.owner.library is not None and self.owner.library.model_busy():
+                        raise RuntimeError("Model work active or unconfirmed; check Downloads")
                     if disposition == "queue":
                         if body.get("attachments"):
                             raise ValueError("Send attachments when the current reply finishes")
@@ -1488,6 +1817,8 @@ class _Handler(BaseHTTPRequestHandler):
                     control = self.owner.application.control()
                     if control is not None and control != (viewer, body["control_epoch"]):
                         raise ValueError("session control changed")
+                    if self.owner.library is not None and self.owner.library.model_busy():
+                        raise RuntimeError("Model work active or unconfirmed; check Downloads")
                     if key == "model_ref":
                         revision = self.owner.application.choose_configured_model(
                             info, expected_revision=body["expected_revision"],
@@ -1737,6 +2068,12 @@ class _Handler(BaseHTTPRequestHandler):
                     identities=references if scope == "current" else (),
                 )
                 result.update(scope=scope, session_id=session, scope_limited=scope_limited)
+            elif path == "/api/v1/library/image-capabilities":
+                if query:
+                    raise ValueError("Unknown image-service filter")
+                from klaude_application.browser_jobs import image_capabilities
+
+                result = image_capabilities(service.cfg)
             elif path == "/api/v1/library/item":
                 if set(query) != {"id"}:
                     raise ValueError("Choose an item")
@@ -1802,12 +2139,21 @@ class _Handler(BaseHTTPRequestHandler):
                 if query:
                     raise ValueError("Unknown setting filter")
                 result = read_browser_settings(service.cfg)
+            elif path == "/api/v1/settings/model-connections":
+                from klaude_application.browser_model_settings import inventory
+
+                if query:
+                    raise ValueError("Unknown model-connection filter")
+                result = inventory(
+                    service.cfg, management_allowed=self._admin_management_allowed()
+                )
             elif path == "/api/v1/settings/models":
                 from klaude_application.browser_media_settings import media_settings
 
                 if query:
                     raise ValueError("Unknown model setting filter")
                 result = media_settings(service.cfg)
+                result["management_allowed"] = self._admin_management_allowed()
             elif path == "/api/v1/library/operations":
                 if query:
                     raise ValueError("Unknown operation filter")
@@ -1984,7 +2330,8 @@ class _Handler(BaseHTTPRequestHandler):
                         mime, output = "image/png", data
                     else:
                         metadata, output = prepare_image(
-                            data, detail="detailed", frame=0, cancelled=lambda: not current(),
+                            data, detail="detailed", frame=0, preserve_alpha=True,
+                            cancelled=lambda: not current(),
                         )
                         mime = metadata["mime"]
                 else:
@@ -2090,7 +2437,15 @@ class _Handler(BaseHTTPRequestHandler):
             with self.owner._lock:
                 if self.owner._stopping or not self.owner.session_active(identity):
                     raise OperationConflict("Sign in again")
-                if path.endswith("/cancel"):
+                if path == "/api/v1/library/vision/clear":
+                    if (set(body) != {"artifact", "revision", "result"}
+                            or not isinstance(body["artifact"], str)
+                            or type(body["revision"]) is not int
+                            or not isinstance(body["result"], str)):
+                        raise ValueError("Choose an exact image review")
+                    service.clear_vision_review(body["artifact"], body["revision"], body["result"])
+                    self._json(HTTPStatus.OK, {"status": "cleared"})
+                elif path.endswith("/cancel"):
                     if set(body) != {"request_id"} or not isinstance(body["request_id"], str):
                         raise ValueError("Choose an exact image operation")
                     self._json(HTTPStatus.OK, service.cancel_vision(body["request_id"]))
@@ -2103,13 +2458,16 @@ class _Handler(BaseHTTPRequestHandler):
                     if set(body) != {"draft"} or not isinstance(body["draft"], dict):
                         raise ValueError("Invalid review")
                     draft = body["draft"]
-                    if (draft.get("operation") == "session-delete"
-                            and draft.get("target") == self.owner.application.session_id):
-                        raise ValueError("Switch conversations before deleting")
+                    if (str(draft.get("operation", "")).startswith("model-")
+                            or str(draft.get("operation", "")) in MODEL_SETTINGS_OPERATIONS):
+                        if not self._admin_management_allowed():
+                            self._error(HTTPStatus.FORBIDDEN, "forbidden",
+                                        "Model management requires an admin account")
+                            return
                     if (str(draft.get("operation", "")).startswith("mcp-")
                             and not self._mcp_management_allowed()):
                         self._error(HTTPStatus.FORBIDDEN, "forbidden",
-                                    "MCP management over LAN requires owner account sign-in")
+                                    "MCP management requires an admin account")
                         return
                     upload_id = draft.get("upload_id")
                     if upload_id is not None:
@@ -2145,13 +2503,33 @@ class _Handler(BaseHTTPRequestHandler):
                     if (not self._mcp_management_allowed()
                             and service.local_review(viewer, body["review_id"])):
                         self._error(HTTPStatus.FORBIDDEN, "forbidden",
-                                    "MCP management over LAN requires owner account sign-in")
+                                    "MCP management requires an admin account")
                         return
+                    if (service.admin_model_review(viewer, body["review_id"])
+                            and not self._admin_management_allowed()):
+                        self._error(HTTPStatus.FORBIDDEN, "forbidden",
+                                    "Model management requires an admin account")
+                        return
+                    connection_review = service.reviewed_connection(viewer, body["review_id"])
+                    if connection_review is not None:
+                        info = self.owner.application.agent.model_info
+                        current_identity = info.connection_id or DEFAULT_IDS.get(info.backend, "")
+                        current_connection = (
+                            BrowserModels(service.cfg).connections().get(current_identity)
+                        )
+                        if (connection_review["id"] == current_identity or
+                                current_connection and current_connection.key_env and
+                                current_connection.key_env == connection_review.get("key_env")):
+                            raise OperationConflict(
+                                "Choose a different conversation model before changing "
+                                "its connection or credential"
+                            )
+                    if service.model_review(viewer, body["review_id"]):
+                        if any(self.owner._application_busy(app)
+                               for app in self.owner._applications):
+                            raise OperationConflict("Finish active conversations before model work")
                     current = self.owner.application.session_id
                     action = service.reviewed_session_action(viewer, body["review_id"], current)
-                    if action == "session-delete":
-                        raise ValueError("Switch conversations before deleting")
-
                     def new_chat() -> None:
                         self.owner.switch_session(
                             viewer, f"archive-{body['request_id']}", current, "",
@@ -2160,9 +2538,11 @@ class _Handler(BaseHTTPRequestHandler):
 
                     result = service.submit(
                         viewer, body["review_id"], body["request_id"],
-                        before_start=new_chat if action == "session-archive" else None,
+                        before_start=(new_chat if action in {
+                            "session-archive", "session-delete",
+                        } else None),
                     )
-                    if result["kind"] == "session-archive":
+                    if result["kind"] in {"session-archive", "session-delete"}:
                         result["session_id"] = self.owner.application.session_id
                     self._json(HTTPStatus.ACCEPTED, result)
         except (BrokenPipeError, ConnectionResetError):

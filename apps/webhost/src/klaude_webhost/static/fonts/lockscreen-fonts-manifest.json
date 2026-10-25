@@ -1,0 +1,12 @@
+{
+  "SpaceGrotesk.ttf": {
+    "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/spacegrotesk/SpaceGrotesk%5Bwght%5D.ttf",
+    "sha256": "acad6de1fc93436f5c0f1f4137751ef04f1aea3063e7036535970ffcfbd79f72",
+    "license": "SIL-OFL-1.1"
+  },
+  "ReadexPro.ttf": {
+    "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/readexpro/ReadexPro%5BHEXP%2Cwght%5D.ttf",
+    "sha256": "268bba7e1e8f3b14d798b3fb0e40ebaa3fc39308c9ac0020e2faf6df181cc30e",
+    "license": "SIL-OFL-1.1"
+  }
+}

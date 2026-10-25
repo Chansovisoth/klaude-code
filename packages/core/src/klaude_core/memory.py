@@ -12,6 +12,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
@@ -1507,6 +1508,34 @@ class Memory:
                 "FROM session_names WHERE session_id=?",
                 (target, source),
             )
+            if self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='application_message_retries'"
+            ).fetchone():
+                original_rows = self.db.execute(
+                    "SELECT rowid FROM turns WHERE session_id=? "
+                    "AND (? IS NULL OR rowid<=?) ORDER BY ts,rowid", (source, cutoff, cutoff),
+                ).fetchall()
+                copied_rows = self.db.execute(
+                    "SELECT rowid FROM turns WHERE session_id=? ORDER BY ts,rowid", (target,),
+                ).fetchall()
+                copied = {old[0]: new[0]
+                          for old, new in zip(original_rows, copied_rows, strict=True)}
+                for root, user, answer in self.db.execute(
+                    "SELECT source_row_id,user_row_id,assistant_row_id "
+                    "FROM application_message_retries WHERE session_id=? "
+                    "ORDER BY user_row_id", (source,),
+                ).fetchall():
+                    if root not in copied or user not in copied:
+                        continue
+                    self.db.execute(
+                        "INSERT INTO application_message_retries "
+                        "(request_id,session_id,turn_id,source_row_id,"
+                        "user_row_id,assistant_row_id) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (f"fork:{target}:{user}", target, uuid.uuid4().hex,
+                         copied[root], copied[user], copied.get(answer)),
+                    )
             runtime = self.session_runtime(source)
             if runtime is not None:
                 self._store_session_runtime(target, runtime)
@@ -1587,7 +1616,7 @@ class Memory:
         for table in (
             "application_queue", "application_control", "application_workspace",
             "application_session_options", "application_streams", "application_decisions",
-            "application_activity",
+            "application_activity", "application_message_retries",
         ):
             if table in tables:
                 self.db.execute(f"DELETE FROM {table} WHERE session_id=?", (session_id,))
@@ -1602,15 +1631,18 @@ class Memory:
         self, session_id: str, operation: str, *, expected_total_turns: int | None = None,
         expected_last_row: int | None = None,
         expected_workspace: str | None = None,
+        expected_archived: bool | None = None,
     ) -> None:
         """Atomically archive/restore/delete, excluding active worker leases.
 
         Archive changes browsing visibility only. Turns, events, names and recall
-        remain intact. Deletion requires the record to still be archived; a stale
-        confirmation cannot delete a session another client has restored.
+        remain intact. Deletion defaults to archived records. Browser reviews
+        may provide the exact reviewed archive state for deleting saved records.
         """
         if operation not in {"archive", "restore", "delete"}:
             raise ValueError("Unknown session action")
+        if expected_archived is not None and type(expected_archived) is not bool:
+            raise ValueError("Invalid reviewed archive state")
         with self._db_lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
@@ -1642,8 +1674,19 @@ class Memory:
                     if active[0] and float(active[1]) > time.time():
                         raise ValueError("Session has an active worker")
                     raise ValueError("Session has unresolved work; reconcile it first")
+                if self.db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='application_queue'"
+                ).fetchone() and self.db.execute(
+                    "SELECT 1 FROM application_queue WHERE session_id=? "
+                    "AND state NOT IN ('removed','submitted')", (session_id,),
+                ).fetchone():
+                    raise ValueError(
+                        "Session has queued work; resolve it before changing its status"
+                    )
                 archived = self.session_archived(session_id)
-                if archived != (operation != "archive"):
+                reviewed_archived = (expected_archived if operation == "delete" and
+                                     expected_archived is not None else operation != "archive")
+                if archived != reviewed_archived:
                     raise ValueError("Session archive state changed; reload the list")
                 if operation == "archive":
                     self.db.execute(
@@ -1705,7 +1748,7 @@ class Memory:
             for table in (
                 "application_queue", "application_workspace", "application_control",
                 "application_streams", "application_session_options",
-                "application_activity",
+                "application_activity", "application_message_retries",
             ):
                 if table in tables:
                     session_ids.extend(str(row[0]) for row in self.db.execute(

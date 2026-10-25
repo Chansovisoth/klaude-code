@@ -22,10 +22,11 @@ connection and draft data. Legacy local-only hosts use their existing endpoint.
 The main view participates in URL/history/reload navigation. Phones keep the
 five-destination bar and open Models through the keyboard-accessible More menu.
 
-No endpoints, dependencies, provider settings or persistence rules were added.
-Connection creation/credentials, Model Manager, downloads, serving and SSH remain
-terminal features. Settings' reviewed Model Defaults and image-service forms are
-preserved.
+This describes the original configured-catalog slice. The subsequent
+[Model Store and settings completion](model_store/completion-validation.md) adds
+public discovery, reviewed native downloads/deletion and connection/credential
+management while retaining this configured catalog. Serving, SSH and interactive
+provider OAuth remain terminal features.
 
 Validation completed:
 

@@ -59,8 +59,60 @@ async def verify(host, root, state, *, legacy=False):
             await tab.command("Runtime.enable")
             await tab.command("Page.enable")
             await tab.command("Page.navigate", {"url": host.bootstrap_url})
-            await tab.wait("typeof latest !== 'undefined' && authenticated && latest")
+            await tab.wait("typeof latest !== 'undefined' && authenticated && latest && document.documentElement.dataset.startup==='ready'")
+            assert await tab.js("""(() => {
+                const cases=[['gpt-4o','','openai'], ['openrouter@router/anthropic/claude-sonnet-4','','claude'],
+                    ['gemini-2.5-pro','','gemini'], ['kimi-k2','','kimi'], ['phi4:latest','','microsoft'],
+                    ['gemma:latest','ollama','gemma'], ['gemma2:9b','ollama','gemma'],
+                    ['gemma3:12b','ollama','gemma'], ['gemma3n:e4b','ollama','gemma'],
+                    ['GEMMA3:4B','ollama','gemma'], ['google/gemma-3-12b-it','ollama','gemma'],
+                    ['ollama@local/gemma3:4b','','gemma'],
+                    ['ollama@local/hf.co/google/gemma3-12b-it-GGUF:Q4_K_M','','gemma'],
+                    ['gemmatic','ollama','generic'], ['my-gemma-notes','ollama','generic'],
+                    ['meta-llama/llama-3.3','','meta'], ['qwen3.5:4b','','qwen'],
+                    ['deepseek-r1:8b','','deepseek'], ['custom','ollama','generic'],
+                    ['custom','openrouter','generic'], ['custom','openai_api','generic'],
+                    ['unknown','','generic'], ['gpt-not-a-family-lookalike','','openai'],
+                    ['my-gpt-notes','','generic']];
+                return cases.every(([ref,provider,expected])=>modelLogoBrand(ref,provider)===expected);
+            })()""")
+            assert await tab.js("""(async () => {
+                for(const name of ['gpt','gemini','gemma','ollama','openrouter',
+                    'claude','kimi','phi','llama','generic']) {
+                    const response=await fetch('/icons/ai/'+name+'.svg');
+                    if(!response.ok || !response.headers.get('Content-Type').startsWith('image/svg+xml')) return false;
+                }
+                return getComputedStyle(byId('model-logo')).width==='16px' &&
+                    getComputedStyle(byId('model-logo')).maskImage.includes('/icons/ai/');
+            })()""")
+            # Exercise every bundled asset in all supported sizes and both themes.
+            assert await tab.js("""(async () => {
+                const stage=document.createElement('div'); document.body.append(stage);
+                stage.style.cssText='position:fixed;inset:0;z-index:99999;overflow:auto;background:var(--surface);color:var(--on-surface);display:flex;align-content:flex-start;flex-wrap:wrap;gap:8px';
+                for(const name of Object.keys(AIIcons.catalog.icons)) {
+                    const response=await fetch('/icons/ai/'+name+'.svg');
+                    if(!response.ok) throw Error(name+' missing');
+                    const image=new Image(); image.src='/icons/ai/'+name+'.svg';
+                    await image.decode();
+                    if(!image.naturalWidth || !image.naturalHeight) throw Error(name+' invalid');
+                }
+                for(const theme of ['light','dark']) {
+                    stage.style.color=theme==='dark'?'#f0f0f0':'#202020';
+                    stage.style.background=theme==='dark'?'#202020':'#f0f0f0';
+                    for(const provider of AIIcons.catalog.providers) for(const size of [16,20,24,32]) {
+                        const box=document.createElement('span'); box.className='model-brand-icon';
+                        AIIcons.setModelIcon(box,provider.namespaces[0]+'/unknown',{size});
+                        stage.append(box);
+                        const r=box.getBoundingClientRect();
+                        if(r.width!==size || r.height!==size) throw Error(provider.id+' sizing');
+                    }
+                    stage.replaceChildren();
+                }
+                stage.remove(); return true;
+            })()""")
             await tab.click("#nav-models")
+            if await tab.js("Boolean(window.ModelStoreUI)"):
+                await tab.click("#store-sections [data-section=connections]")
             await tab.wait("byId('models-items').querySelectorAll('.models-model').length===20")
             assert await tab.js("currentView==='models' && location.search.includes('view=models')")
             assert await tab.js("byId('models-numbers').querySelectorAll('button').length===2")
@@ -90,11 +142,91 @@ async def verify(host, root, state, *, legacy=False):
             assert await tab.js("byId('models-items').querySelector('button').disabled && "
                                "byId('models-status').textContent.includes('ready')")
             await tab.click("#nav-chat")
+            assert await tab.js("!byId('thinking-control').hidden && "
+                "byId('thinking-menu').contains(byId('effort-choice')) && "
+                "!byId('model-menu').contains(byId('effort-choice'))")
+            for width in (320, 390, 768, 1440):
+                await tab.command("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": 844, "deviceScaleFactor": 1, "mobile": False,
+                })
+                for control, menu_id in (("model-picker", "model-menu"), ("thinking-menu summary", "thinking-menu")):
+                    await tab.click("#" + control)
+                    await tab.wait(f"byId('{menu_id}').open")
+                    await asyncio.sleep(.1)
+                    assert await tab.js(f"""(() => {{
+                        const popup=byId('{menu_id}').querySelector('.model-row').getBoundingClientRect();
+                        const composer=byId('composer');
+                        const model=byId('model-picker').getBoundingClientRect();
+                        const thinking=byId('mode-toggle').getBoundingClientRect();
+                        return popup.left>=15 && popup.right<=innerWidth-15 &&
+                            document.documentElement.scrollWidth<=innerWidth &&
+                            byId('thinking-control').getBoundingClientRect().right<=innerWidth &&
+                            byId('model-control').getBoundingClientRect().left>=0 &&
+                            model.height===32 && thinking.height===32 &&
+                            byId('plan-toggle').getBoundingClientRect().height===32;
+                    }})()"""), await tab.js(f"""(() => {{
+                        const r=byId('{menu_id}').querySelector('.model-row').getBoundingClientRect();
+                        return {{width:innerWidth,popup:{{left:r.left,right:r.right}},
+                        composer:[byId('composer').scrollWidth,byId('composer').clientWidth],
+                        model:byId('model-picker').getBoundingClientRect().height,
+                        thinking:byId('mode-toggle').getBoundingClientRect().height}};
+                    }})()""")
+                    assert await tab.js(f"""(() => {{
+                        const popup=byId('{menu_id}').querySelector('.model-row');
+                        const r=popup.getBoundingClientRect();
+                        return popup.matches(':popover-open') &&
+                            [[r.left+16,r.top+16],[r.right-16,r.bottom-16]].every(([x,y])=>
+                                popup.contains(document.elementFromPoint(x,y)));
+                    }})()""")
+                    if width == 1440:
+                        assert await tab.js(f"""(() => {{
+                            const popup=byId('{menu_id}').querySelector('.model-row');
+                            const edge=byId('main-content').getBoundingClientRect().left;
+                            popup.style.left=(edge-40)+'px';
+                            const r=popup.getBoundingClientRect();
+                            const visible=popup.contains(document.elementFromPoint(edge-8,r.top+32));
+                            positionChatSelector(byId('{menu_id}'));
+                            return visible;
+                        }})()""")
+                    capture = await tab.command("Page.captureScreenshot", {"format": "png"})
+                    (output / f"chat-{menu_id}-{width}.png").write_bytes(base64.b64decode(capture["data"]))
+                    await tab.js(f"byId('{menu_id}').querySelector('select').focus()")
+                    for event in ("keyDown", "keyUp"):
+                        await tab.command("Input.dispatchKeyEvent", {"type": event, "key": "Escape",
+                            "code": "Escape", "windowsVirtualKeyCode": 27})
+                    assert await tab.js(f"!byId('{menu_id}').open && "
+                        f"document.activeElement===byId('{menu_id}').querySelector('summary')")
+            await tab.js("""(() => {
+                const saved=latest.effort_levels;
+                latest.effort_levels=['off']; renderModelOptions();
+                if(!byId('thinking-control').hidden) throw Error('Unsupported Thinking remains visible');
+                latest.effort_levels=saved; renderModelOptions();
+            })()""")
+            await tab.click("#thinking-menu summary")
             await tab.js("byId('effort-choice').value='high';"
                          "byId('effort-choice').dispatchEvent(new Event('change'))")
             await tab.wait("!runtimeChoiceInFlight && latest.effort==='high'")
             assert host.application.agent.reasoning_effort == "high"
+            assert await tab.js("!byId('thinking-menu').open && document.activeElement===byId('mode-toggle')")
+            await tab.click("#mode-toggle")
+            await tab.wait("!runtimeChoiceInFlight && latest.mode==='standard'")
+            await asyncio.sleep(.3)
+            assert await tab.js("getComputedStyle(byId('mode-toggle')).backgroundColor===getComputedStyle(byId('plan-toggle')).backgroundColor && "
+                "getComputedStyle(byId('thinking-menu').querySelector('summary')).backgroundColor===getComputedStyle(byId('plan-toggle')).backgroundColor")
+            await tab.js("window.offModeColor=getComputedStyle(byId('mode-toggle')).backgroundColor")
+            await tab.click("#mode-toggle")
+            await tab.wait("!runtimeChoiceInFlight && latest.mode==='thinking'")
+            await tab.click("#plan-toggle")
+            await tab.wait("latest.plan_mode===true")
+            await asyncio.sleep(.3)
+            assert await tab.js("getComputedStyle(byId('mode-toggle')).backgroundColor===getComputedStyle(byId('plan-toggle')).backgroundColor && "
+                "getComputedStyle(byId('mode-toggle')).backgroundColor!==offModeColor && "
+                "getComputedStyle(byId('thinking-menu').querySelector('summary')).backgroundColor===getComputedStyle(byId('plan-toggle')).backgroundColor")
+            await tab.click("#plan-toggle")
+            await tab.wait("latest.plan_mode===false")
             await tab.click("#nav-models")
+            if await tab.js("Boolean(window.ModelStoreUI)"):
+                await tab.click("#store-sections [data-section=connections]")
             await tab.wait("!byId('models-refresh').disabled")
             await tab.js("byId('models-query').value='model-02';"
                          "byId('models-query').dispatchEvent(new Event('input'))")
@@ -176,6 +308,7 @@ async def verify(host, root, state, *, legacy=False):
                                      "rows:byId('models-items').textContent,"
                                      "connections:byId('models-connections').textContent})"
                                      )) from error
+            await tab.wait("document.documentElement.dataset.startup==='ready'")
             await tab.command("Emulation.setDeviceMetricsOverride", {
                 "width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": True,
             })
@@ -183,6 +316,8 @@ async def verify(host, root, state, *, legacy=False):
             await tab.click("#nav-more")
             await tab.wait("navigationMore.matches(':popover-open')")
             await tab.js("navigationMore.querySelector('[data-app-view=models]').focus()")
+            await asyncio.sleep(.1)
+            assert await tab.js("document.activeElement===navigationMore.querySelector('[data-app-view=models]')"), await tab.js("({active:document.activeElement.id,view:currentView,open:navigationMore.matches(':popover-open')})")
             for kind in ("keyDown", "keyUp"):
                 await tab.command("Input.dispatchKeyEvent", {
                     "type": kind, "key": "Enter", "code": "Enter",
@@ -200,7 +335,7 @@ async def verify(host, root, state, *, legacy=False):
             await tab.click("#models-refresh")
             await tab.wait("typeof releaseModels==='function'")
             assert await tab.js("byId('models-refresh').getAttribute('aria-busy')==='true' && "
-                               "byId('models-status').textContent.includes('Loading')")
+                               "byId('models-items').getAttribute('aria-busy')==='true'")
             await tab.click("#logout")
             await tab.wait("!authenticated")
             await tab.js("releaseModels();window.fetch=modelsFetch")

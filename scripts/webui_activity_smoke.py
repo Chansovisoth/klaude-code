@@ -80,7 +80,8 @@ async def verify(host, root, chrome, runtime):
             await tab.command("Page.enable")
             await tab.command("Page.navigate", {"url": host.origin})
             await tab.wait('typeof byId !== "undefined" && !byId("local-access").hidden')
-            await tab.js('byId("login-password").value=' + json.dumps(
+            await tab.js('byId("login-username").value="admin";'
+                        'byId("login-password").value=' + json.dumps(
                 host.accounts.initial_password()
             ) + ';byId("account-login").requestSubmit()')
             await tab.wait('latest?.session_id')
@@ -119,7 +120,7 @@ async def verify(host, root, chrome, runtime):
             await tab.wait('typeof latest !== "undefined" && latest?.activity.label === "Error"')
             # Presentation fixtures cover labels for tools unavailable to browser
             # chat today. Execution classification is covered by Python tests.
-            for width in (1280, 390):
+            for width in (1440, 768, 390, 320):
                 await tab.command("Emulation.setDeviceMetricsOverride", {
                     "width": width, "height": 844, "deviceScaleFactor": 1, "mobile": False,
                 })
@@ -133,6 +134,17 @@ async def verify(host, root, chrome, runtime):
                     assert (await tab.js('byId("agent-activity-label").textContent')
                             == activity.value)
                     assert await tab.js('document.documentElement.scrollWidth <= innerWidth')
+                    for expanded in (False, True):
+                        await tab.js(f'byId("agent-activity").open={json.dumps(expanded)}')
+                        assert await tab.js('''(() => {
+                          const card=byId("agent-activity"), wrapper=card.parentElement;
+                          const style=getComputedStyle(wrapper);
+                          const available=wrapper.clientWidth-parseFloat(style.paddingLeft)-
+                            parseFloat(style.paddingRight);
+                          return card.getBoundingClientRect().width<=480 &&
+                            card.getBoundingClientRect().width<=available+1 &&
+                            card.scrollWidth<=card.clientWidth;
+                        })()''')
             await tab.command("Emulation.setEmulatedMedia", {"features": [
                 {"name": "prefers-reduced-motion", "value": "reduce"},
             ]})

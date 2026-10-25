@@ -312,9 +312,9 @@ window.ChatAttachmentsUI = (() => {
 // Keep it bundled here so existing hosts do not need another static route.
 window.ContextPanel = (() => {
   const root = byId("inspector"), timeline = byId("cp-activity");
-  let panel = readNavigationChoice("context-panel-tab", ["agent", "library"], "agent");
+  let panel = "library";
   let section = readNavigationChoice("context-inspector-tab", ["activity", "changes", "details"], "activity");
-  let scope = readNavigationChoice("context-library-scope", ["current", "all"], "current");
+  let scope = "all";
   let view = readNavigationChoice("context-library-view", ["list", "grid", "gallery"], "list");
   let session = "", offset = 0, libraryRead = 0, controller, timer, loadedKey = "", selectedKey = "";
   let changesKey = "", detailsKey = "";

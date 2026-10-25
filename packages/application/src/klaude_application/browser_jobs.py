@@ -13,6 +13,27 @@ OPERATIONS = frozenset({"research-create", "research-run", "research-stop",
                         "image-generate", "image-cancel", "image-recover"})
 
 
+def image_capabilities(cfg: Config) -> dict[str, Any]:
+    """Explicit studio check, using only the saved opt-in service, never chat/Vision."""
+    import httpx
+    from klaude_core.image_generation import inspect, read
+
+    settings = read(cfg)
+    result: dict[str, Any] = {"backend": "stable-diffusion.cpp", "model": settings["model"],
+                              "enabled": settings["enabled"], "available": False}
+    if not settings["enabled"]:
+        return {**result, "message": "Enable and test an image service in Settings → Models."}
+    try:
+        observed = inspect(settings["endpoint"])
+        if observed["model"] != settings["model"] or not observed["cancel_queued"]:
+            return {**result, "message": "Service capabilities changed; test and save in Settings."}
+    except (ValueError, OSError, httpx.HTTPError):
+        return {**result, "message": "Image service unavailable. Check the server, then retry."}
+    return {**result, "available": True, "limits": observed["limits"],
+            "cancel_generating": observed["cancel_generating"],
+            "sampler": observed["sampler"], "scheduler": observed["scheduler"]}
+
+
 def generated_jobs(cfg: Config) -> dict[str, Any]:
     from klaude_core.ai_defaults import read_defaults
     from klaude_core.image_generation import history, read
@@ -89,10 +110,11 @@ def prepare_generated_operation(
     if operation == "image-generate":
         from klaude_core.image_generation import prepare
 
-        if set(draft) != {"operation", "prompt", "width", "height", "steps"}:
+        if set(draft) not in ({"operation", "prompt", "width", "height", "steps"},
+                              {"operation", "prompt", "width", "height", "steps", "seed"}):
             raise ValueError("Invalid image generation draft")
         spec = prepare(cfg, draft["prompt"], width=draft["width"], height=draft["height"],
-                       steps=draft["steps"])
+                       steps=draft["steps"], seed=draft.get("seed", -1))
         return {"spec": spec}, f"image:{spec['id']}", (
             f"Generate one image with {spec['settings']['model']}:\n{spec['prompt']}\n"
             f"{spec['width']} × {spec['height']}, {spec['steps']} steps, seed {spec['seed']}. "

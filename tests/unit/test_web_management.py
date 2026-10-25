@@ -314,6 +314,39 @@ def test_session_management_rejects_other_workspaces_and_stale_names(profile_bro
     assert memory.session_title(identity) == "Named elsewhere"
 
 
+@pytest.mark.parametrize("current", [False, True])
+def test_saved_conversation_can_be_deleted_without_archiving(profile_browser, current):
+    host, service, memory, auth = profile_browser
+    identity = host.application.session_id if current else uuid.uuid4().hex
+    if not current:
+        host.application.turns.bind_workspace(identity, str(service.workspace), expected_revision=0)
+    memory.log_turn(identity, "user", "Delete this saved conversation")
+    assert not memory.session_archived(identity)
+    review = _review(host, auth, {"operation": "session-delete", "target": identity})
+    assert "cannot be undone" in review["summary"]
+    receipt, body = _submit(host, service, auth, review)
+    assert receipt["state"] == "completed"
+    assert not memory.load_session(identity)
+    selected = host.application.session_id
+    if current:
+        assert selected != identity
+        assert host.application.snapshot()["messages"] == []
+    status, _, replay = _request(host, "POST", "/api/v1/library/submit", body=body, **auth)
+    assert status == 202 and replay["session_id"] == selected
+    assert host.application.session_id == selected
+
+
+def test_saved_conversation_deletion_rechecks_archive_state(profile_browser):
+    host, service, memory, auth = profile_browser
+    identity = uuid.uuid4().hex
+    host.application.turns.bind_workspace(identity, str(service.workspace), expected_revision=0)
+    memory.log_turn(identity, "user", "Keep if the reviewed state changes")
+    review = _review(host, auth, {"operation": "session-delete", "target": identity})
+    memory.change_session_archive(identity, "archive")
+    assert _submit(host, service, auth, review)[0]["state"] == "failed"
+    assert memory.load_session(identity)
+
+
 def test_archiving_current_conversation_opens_one_new_chat_and_keeps_history(profile_browser):
     host, service, memory, auth = profile_browser
     original = host.application.session_id

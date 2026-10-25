@@ -38,7 +38,8 @@ An exact static-file snapshot and initial Git status/diff are retained at
 4. Chat/composer, stable technical Markdown, code, attachment/status surfaces and
    native actions are restyled without changing agent or approval contracts.
 5. Full/Context Library use common Gallery geometry and original artifact
-   identity. Full Library has Current/All; Context Attach supports every viewport,
+   identity. Full Library spans conversations; Context Library retains Current/All.
+   Context Attach supports every viewport,
    and the panel is closed by default. Existing draft-only drop behavior remains.
 6. Models, Integrations, Activity, Memory, account/session/review dialogs and
    empty/error/loading surfaces use the same components. Workspaces has file

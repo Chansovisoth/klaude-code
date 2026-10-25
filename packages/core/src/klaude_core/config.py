@@ -12,6 +12,7 @@ import os
 import re
 import tomllib
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -201,7 +202,10 @@ def _env_value(name: str, default: str = "") -> str:
     return value.strip() if isinstance(value, str) else default
 
 
-def save_provider_secret(config_dir: Path, name: str, value: str) -> Path:
+def save_provider_secret(
+    config_dir: Path, name: str, value: str, *,
+    before_publish: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
+) -> Path:
     """Atomically persist one provider secret in an owner-only dotenv file.
 
     The value is never returned or logged. Empty values remove the assignment
@@ -214,10 +218,17 @@ def save_provider_secret(config_dir: Path, name: str, value: str) -> Path:
     config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = config_dir / ".env"
     with settings_lock(path):
+        revision = uuid.uuid4().hex
+        if before_publish is not None:
+            before_publish(
+                {"value": _parse_env_file(path).get(name),
+                 "revision": provider_secret_revision(config_dir, name)},
+                {"value": value or None, "revision": revision},
+            )
         # A random revision invalidates delayed work without storing a secret
         # or a secret-derived fingerprint. Invalidate before publishing the key:
         # a failed key write may cause a harmless retry, never stale publication.
-        update_settings(config_dir / ".env.revisions.json", {(name,): uuid.uuid4().hex})
+        update_settings(config_dir / ".env.revisions.json", {(name,): revision})
         _save_provider_secret_locked(path, name, value)
     if value:
         os.environ[name] = value

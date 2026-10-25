@@ -26,7 +26,6 @@ from collections.abc import Callable, Iterator
 from itertools import islice
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 MAX_BYTES = 32 * 1024 * 1024
 PAGE_SIZE = 100
@@ -52,25 +51,23 @@ def manual_tags(value: str) -> list[str]:
     return tags
 
 
+def ai_tag_removals(value: Any) -> list[str]:
+    """Validate a bounded list of exact saved AI tags selected for removal."""
+    if (not isinstance(value, list) or len(value) > 20 or any(
+        not isinstance(tag, str) or not 1 <= len(tag) <= 40
+        or not tag.isprintable() or "," in tag for tag in value
+    )):
+        raise ValueError("Choose up to 20 existing AI tags to remove")
+    return list(dict.fromkeys(value))
+
+
 def source_link(value: str) -> str:
-    """A user-opened reference only; storing a link never fetches its contents."""
+    """Bounded source notes; stored text is never fetched or executed."""
     if not isinstance(value, str) or len(value) > 2048:
-        raise ValueError("Source links must fit in 2048 characters")
+        raise ValueError("Source text must fit in 2048 characters")
     value = value.strip()
-    if not value:
-        return ""
-    try:
-        parsed = urlsplit(value)
-        valid = (
-            parsed.scheme in {"http", "https"} and parsed.hostname
-            and parsed.username is None and parsed.password is None
-            and parsed.port != 0 and "\\" not in value
-            and not any(c.isspace() or ord(c) < 32 or 127 <= ord(c) <= 159 for c in value)
-        )
-    except ValueError:
-        valid = False
-    if not valid:
-        raise ValueError("Enter an HTTP or HTTPS source link without credentials or spaces")
+    if any((ord(c) < 32 and c not in "\n\r\t") or 127 <= ord(c) <= 159 for c in value):
+        raise ValueError("Source text contains unsupported control characters")
     return value
 
 
@@ -288,10 +285,19 @@ class ArtifactStore:
                 where += f" AND {'NOT ' if source == 'input' else ''}({output})"
             if query:
                 columns = ["name", "tags", "origin", "mime"] + (["generated_tags"] if join else [])
-                where += " AND (" + " OR ".join(
+                matches = [
                     f"instr(lower({column}),lower(?))>0" for column in columns
-                ) + ")"
+                ]
                 values += [query[:200]] * len(columns)
+                links = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='artifact_links' AND type='table'"
+                ).fetchone()
+                if links:
+                    matches.append("EXISTS (SELECT 1 FROM artifact_links "
+                                   "WHERE artifact_links.artifact=artifacts.id "
+                                   "AND instr(lower(artifact_links.url),lower(?))>0)")
+                    values.append(query[:200])
+                where += " AND (" + " OR ".join(matches) + ")"
             total = db.execute(
                 "SELECT count(*) FROM artifacts" + join + " WHERE " + where, values
             ).fetchone()[0] if include_total else None
@@ -481,13 +487,17 @@ class ArtifactStore:
         )
 
     def change(
-        self, identity: str, revision: int, operation: str, value: str = ""
+        self, identity: str, revision: int, operation: str, value: str = "", *,
+        remove_ai_tags: list[str] | None = None,
     ) -> dict[str, Any]:
         if not ID.fullmatch(identity) or operation not in {
             "tags", "clear_ai_tags", "archive", "restore", "delete", "source_link"
         }:
             raise ValueError("Unknown artifact change")
         tags = manual_tags(value) if operation == "tags" else []
+        if remove_ai_tags is not None and operation != "tags":
+            raise ValueError("AI tag removals require a tags change")
+        removals = ai_tag_removals(remove_ai_tags if remove_ai_tags is not None else [])
         url = source_link(value) if operation == "source_link" else ""
         with self.database(write=True) as db:
             db.execute("BEGIN IMMEDIATE")
@@ -521,15 +531,19 @@ class ArtifactStore:
                 db.execute("DELETE FROM image_tags WHERE artifact=?", (identity,))
                 db.execute("UPDATE artifacts SET revision=revision+1 WHERE id=?", (identity,))
             elif operation == "tags":
+                prior = db.execute("SELECT generated_tags,provenance FROM image_tags "
+                                   "WHERE artifact=?", (identity,)).fetchone()
+                saved_ai = json.loads(prior[0]) if prior else []
+                if not set(removals).issubset(saved_ai):
+                    raise ValueError("AI tags changed; reload before retrying")
                 db.execute(
                     "UPDATE artifacts SET tags=?,revision=revision+1 WHERE id=?",
                     (json.dumps(tags, ensure_ascii=False), identity),
                 )
-                prior = db.execute("SELECT generated_tags,provenance FROM image_tags "
-                                   "WHERE artifact=?", (identity,)).fetchone()
                 if prior:
                     manual = {tag.casefold() for tag in tags}
-                    retained = [tag for tag in json.loads(prior[0]) if tag.casefold() not in manual]
+                    retained = [tag for tag in saved_ai
+                                if tag.casefold() not in manual and tag not in removals]
                     sources = json.loads(prior[1])
                     db.execute("UPDATE image_tags SET generated_tags=?,provenance=? "
                                "WHERE artifact=?",

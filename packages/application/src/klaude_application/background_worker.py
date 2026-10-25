@@ -87,7 +87,7 @@ def execute(request: dict[str, Any], progress=None) -> object:
     if kind == "library_management_operation":
         from .library_management import run_management_operation
 
-        return run_management_operation(request)
+        return run_management_operation(request, progress)
     if kind == "model_default_candidates":
         for name, value in request.get("environment_keys", {}).items():
             if (

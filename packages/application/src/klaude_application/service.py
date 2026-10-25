@@ -485,6 +485,19 @@ class HeadlessApplication:
             self.session_id = target
             return target, prompt
 
+    def retry_message(
+        self, row_id: int, *, request_id: str, controller_id: str,
+        control_epoch: int | None = None,
+    ) -> TurnHandle:
+        """Regenerate the original input in this conversation without forking it."""
+        with self._lock:
+            text, model_input, _ = self.turns.retry_input(self.session_id, row_id)
+            return self.submit(
+                text, request_id=request_id, _controller_id=controller_id,
+                _retry_source_row_id=row_id, _retry_model_input=model_input,
+                _expected_control_epoch=control_epoch,
+            )
+
     def start_session(
         self, *, model_info: ModelInfo | None = None, require_selection: bool = False,
     ) -> str:
@@ -604,6 +617,9 @@ class HeadlessApplication:
         scope: TurnScope | str = TurnScope.STANDARD,
         _controller_id: str | None = None,
         attachments: ChatAttachmentInput | None = None,
+        _retry_source_row_id: int | None = None,
+        _retry_model_input: dict[str, Any] | None = None,
+        _expected_control_epoch: int | None = None,
     ) -> TurnHandle:
         if not isinstance(text, str) or not text.strip() or len(text) > 65_536:
             raise ValueError("turn text must contain 1-65536 characters")
@@ -611,7 +627,8 @@ class HeadlessApplication:
         self._validate_request_id(identity)
         selected_scope = TurnScope(scope)
         public_text = attachments.public_text(text) if attachments else text
-        input_key = attachments.identity if attachments else ""
+        input_key = (f"retry:{_retry_source_row_id}" if _retry_source_row_id is not None else
+                     attachments.identity if attachments else "")
         if len(public_text) > 65_536:
             raise ValueError("Message and attachment names must fit in 65536 characters")
         with self._lock:
@@ -641,6 +658,8 @@ class HeadlessApplication:
                 controller_id=_controller_id or self.controller_id,
                 input_key=input_key,
                 attachments=attachments,
+                retry_source_row_id=_retry_source_row_id,
+                expected_control_epoch=_expected_control_epoch,
             )
             handle = TurnHandle(identity, self.session_id, admission.turn_id, self.agent)
             handle.state = cast(Any, admission.state)
@@ -655,7 +674,9 @@ class HeadlessApplication:
             self._requests[identity] = (key, handle)
             self._active = handle
             worker = threading.Thread(
-                target=self._run, args=(handle, text, selected_scope, admission.fence, attachments),
+                target=self._run,
+                args=(handle, text, selected_scope, admission.fence,
+                      attachments, _retry_model_input),
                 name="klaude-application-turn", daemon=True,
             )
             handle.worker = worker
@@ -874,6 +895,7 @@ class HeadlessApplication:
     def _run(
         self, handle: TurnHandle, text: str, scope: TurnScope, fence: int,
         attachments: ChatAttachmentInput | None = None,
+        retry_model_input: dict[str, Any] | None = None,
     ) -> None:
         agent = self.agent
         previous_cancel = agent.cancellation_check
@@ -940,7 +962,7 @@ class HeadlessApplication:
             builder = getattr(agent, "system_prompt_builder", None)
             if getattr(agent, "browser_tools", None) is not None and callable(builder):
                 agent.set_system_prompt(builder())
-            effective_input: str | dict[str, Any] = text
+            effective_input: str | dict[str, Any] = retry_model_input or text
             if attachments:
                 try:
                     effective_input = attachments.compose(text, agent, handle.session_id)
@@ -948,6 +970,7 @@ class HeadlessApplication:
                     final_text = f"Attachment preparation failed: {exc}"
                     saved = True
                     raise
+            if isinstance(effective_input, dict):
                 self.turns.save_model_input(
                     request_id=handle.request_id, session_id=handle.session_id,
                     turn_id=handle.turn_id, worker_id=self.client_id, fence=fence,

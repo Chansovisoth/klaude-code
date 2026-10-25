@@ -96,4 +96,12 @@ class ModelManagerCommand:
         from klaude_core.config import load_config
         from klaude_core.ollama_manager import execute_manager
 
-        return execute_manager(load_config(), self.worker_request(), progress or (lambda _: None))
+        cfg = load_config()
+        if self.operation in {"pull", "delete"} and (self.data_dir / "operations.db").exists():
+            from .operation_journal import OperationJournal
+
+            journal = OperationJournal(self.data_dir / "operations.db")
+            if journal.resource_busy("browser-model-work"):
+                return {"status": "busy", "message": "Browser model work active or unconfirmed; "
+                        "check Model Store Downloads before another mutation"}
+        return execute_manager(cfg, self.worker_request(), progress or (lambda _: None))

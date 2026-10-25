@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Klaude Model Store — Editorial Layout Reference</title>
+  <style>
+    /* VISUAL REFERENCE ONLY. Reuse Klaude's real application shell, typography,
+       theme roles, auth, navigation, dialogs, and APIs in production. */
+    :root {
+      --surface: #151110;
+      --surface-raised: #211b19;
+      --surface-low: #29221f;
+      --border: #4c403a;
+      --text: #f6eeea;
+      --muted: #c0ada2;
+      --accent: #edd0ba;
+      --max-content: 1150px;
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; color: var(--text); background: var(--surface); font: 15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, input:focus-visible, a:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+    .shell-header { height: 72px; border-bottom: 1px solid #2a2421; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 0 max(20px, calc((100vw - var(--max-content))/2)); }
+    .brand { font-size: 21px; font-weight: 800; letter-spacing: -.8px; }
+    .brand-mark { display: inline-grid; place-items: center; background: #605047; width: 36px; height: 36px; border-radius: 50%; margin-right: 7px; font-size: 21px; }
+    .shell-actions { display: flex; gap: 12px; color: var(--muted); }
+    .shell-actions span { border: 1px solid #4c403a; border-radius: 50%; width: 34px; height: 34px; display: grid; place-items: center; }
+    main { max-width: var(--max-content); margin: auto; padding: 28px 24px 72px; }
+    .page-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+    .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: .14em; color: var(--muted); font-weight: 700; }
+    h1 { font-size: clamp(25px,3.4vw,36px); letter-spacing: -.045em; margin: 4px 0 0; line-height: 1.15; }
+    h2 { margin: 0; font-size: clamp(20px,2.5vw,26px); letter-spacing: -.035em; }
+    .icon-button { border: 0; color: var(--text); background: var(--surface-low); border-radius: 14px; height: 44px; width: 44px; font-size: 22px; }
+    .tabs { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 6px; margin-bottom: 22px; }
+    .tab { height: 48px; min-width: 0; padding: 0 7px; color: var(--muted); background: #342b27; border: none; border-radius: 23px; font-size: 14px; font-weight: 600; }
+    .tab[aria-selected=true] { color: #211913; background: var(--accent); }
+    .tab-panel[hidden] { display: none !important; }
+    .search-row { display: flex; gap: 10px; margin-bottom: 25px; }
+    .search { display: flex; align-items: center; flex: 1; min-width: 0; gap: 10px; height: 50px; border: 1px solid var(--border); background: #2d2623; border-radius: 14px; padding: 0 15px; }
+    .search svg { flex: none; color: var(--muted); }
+    .search input { min-width: 0; flex: 1; color: var(--text); background: transparent; border: 0; outline: 0; }
+    .search input::placeholder { color: #b6a49a; }
+    .filter-btn { border: 1px solid var(--border); background: #342b27; color: var(--text); border-radius: 14px; padding: 0 15px; min-height: 50px; }
+    .filter-panel { display: none; padding: 16px; background: var(--surface-raised); border: 1px solid var(--border); border-radius: 16px; margin: -12px 0 22px; color: var(--muted); }
+    .filter-panel.is-open { display: block; }
+    .filter-panel button { border: 1px solid var(--border); background: #41342e; color: var(--text); border-radius: 999px; padding: 9px 12px; margin: 6px 6px 0 0; }
+    .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 28px 0 14px; }
+    .section-heading:first-of-type { margin-top: 0; }
+    .subheading { color: var(--muted); font-size: 13px; }
+    .quiet-link { color: var(--accent); text-decoration: none; font-size: 13px; font-weight: 650; white-space: nowrap; }
+    .billboards { display: grid; grid-template-columns: 1.55fr 1fr 1fr; gap: 13px; }
+    .billboard { isolation: isolate; position: relative; min-height: 335px; overflow: hidden; background: #1f2445; border-radius: 24px; }
+    .billboard .art { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -2; }
+    .billboard::after { content: ''; position: absolute; inset: 0; z-index: -1; background: linear-gradient(0deg,rgba(8,9,21,.92) 0%,rgba(8,9,21,.28) 60%,rgba(8,9,21,.02) 100%); }
+    .billboard--main::after { background: linear-gradient(90deg,rgba(13,12,32,.94) 0%,rgba(13,12,32,.8) 38%,rgba(13,12,32,.1) 100%); }
+    .billboard__copy { display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-end; height: 100%; padding: 22px; color: white; }
+    .billboard--main .billboard__copy { justify-content: center; max-width: 75%; }
+    .billboard__label { font-size: 10px; font-weight: 850; letter-spacing: .16em; text-transform: uppercase; color: #ffce9d; }
+    .billboard h3 { font-size: clamp(23px,2.4vw,32px); letter-spacing: -.045em; line-height: 1.04; max-width: 15ch; margin: 10px 0 9px; }
+    .billboard:not(.billboard--main) h3 { font-size: clamp(22px,2vw,27px); }
+    .billboard p { max-width: 28ch; font-size: 13px; color: #f4ebee; margin: 0 0 16px; }
+    .billboard__cta { padding: 10px 15px; border-radius: 999px; color: #221a19; background: white; border: 0; font-weight: 700; font-size: 12px; }
+    .billboard--orange { background: #ff6e32; }
+    .billboard--green { background: #18766e; }
+    .rank-list { display: grid; gap: 0; }
+    .rank-row { display: grid; grid-template-columns: 25px 48px minmax(0,1fr) auto; align-items: center; gap: 12px; min-height: 74px; padding: 9px 1px; border-bottom: 1px solid #352b27; }
+    .rank { color: #d0b5a6; text-align: center; font-size: 15px; font-weight: 700; }
+    .model-icon { width: 48px; height: 48px; border-radius: 13px; display: grid; place-items: center; font-weight: 900; font-size: 23px; background: #3c3455; color: #bfbcff; }
+    .model-icon--orange { color: #ffb489; background: #542c24; }
+    .model-icon--teal { color: #76e4c8; background: #1f463e; }
+    .model-icon--blue { color: #7fb6ff; background: #1c3552; }
+    .model-name { font-weight: 720; font-size: 14px; overflow-wrap: anywhere; }
+    .model-desc { font-size: 12px; color: var(--muted); margin-top: 3px; }
+    .pill { border: 0; border-radius: 999px; padding: 9px 16px; background: #3e332e; color: var(--accent); font-weight: 800; font-size: 12px; min-height: 38px; }
+    .categories { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 12px; }
+    .category { position: relative; min-width: 0; padding: 17px 16px 19px; border-radius: 19px; border: 1px solid #4c403a; overflow: hidden; background: #2b2332; text-align: left; color: white; min-height: 138px; display: flex; flex-direction: column; justify-content: end; }
+    .category::before { content: ''; position: absolute; width: 105px; height: 105px; top: -23px; right: -19px; opacity: .9; border-radius: 24px; transform: rotate(22deg); background: repeating-linear-gradient(135deg,rgba(255,255,255,.24) 0 5px,transparent 5px 14px), radial-gradient(circle at 25% 25%, #c7a5ff,#4f3e8a); }
+    .category--reason { background: #503027; }
+    .category--reason::before { border-radius: 50%; background: radial-gradient(circle at 36% 30%,#ffed6a, #ff7a42 48%,#a7437c 72%); }
+    .category--vision { background: #173e42; }
+    .category--vision::before { border-radius: 50% 14% 50% 14%; background: conic-gradient(from 80deg,#85fbd0,#38a4ff,#eab6ff,#85fbd0); }
+    .category--light { background: #403d21; }
+    .category--light::before { border-radius: 30%; background: radial-gradient(circle,#f2ffad 12%,#b1d445 30%,#63924c 69%); }
+    .category strong { position: relative; font-size: 17px; letter-spacing: -.03em; text-shadow: 0 1px 8px rgba(0,0,0,.45); }
+    .category small { position: relative; font-size: 12px; color: #eee4e0; margin-top: 3px; text-shadow: 0 1px 8px rgba(0,0,0,.45); }
+    .info { border: 1px solid var(--border); border-radius: 18px; background: var(--surface-raised); padding: 18px; }
+    .empty { min-height: 360px; display: grid; align-content: center; justify-items: center; text-align: center; gap: 10px; }
+    .empty-icon { width: 68px; height: 68px; border-radius: 24px; background: #3d322b; display: grid; place-items: center; font-size: 30px; }
+    .empty h3 { margin: 8px 0 0; font-size: 21px; }
+    .empty p { margin: 0; color: var(--muted); max-width: 35ch; }
+    .demo-note { margin-top: 35px; font-size: 12px; color: #a5958d; }
+    @media (max-width: 850px) {
+      main { padding: 22px 20px 80px; }
+      .billboards { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(245px,65vw); grid-template-columns: none; overflow-x: auto; scroll-snap-type: x mandatory; overscroll-behavior-inline: contain; padding-bottom: 7px; }
+      .billboard { min-height: 300px; scroll-snap-align: start; }
+      .billboard--main .billboard__copy { max-width: 84%; justify-content: flex-end; }
+      .billboard--main::after { background: linear-gradient(0deg,rgba(10,8,25,.95),rgba(10,8,25,.1) 85%); }
+      .categories { grid-template-columns: repeat(2,minmax(0,1fr)); }
+    }
+    @media (max-width: 480px) {
+      .shell-header { height: 58px; padding: 0 18px; }
+      .shell-actions { gap: 7px; }
+      .shell-actions span { width: 30px; height: 30px; }
+      main { padding: 20px 17px 92px; }
+      .tab { font-size: 13px; }
+      .billboards { margin-right: -17px; padding-right: 17px; grid-auto-columns: 84%; gap: 10px; }
+      .billboard { min-height: 270px; border-radius: 21px; }
+      .billboard__copy { padding: 18px; }
+      .billboard h3 { font-size: 29px; }
+      .billboard p { font-size: 12px; }
+      .rank-row { grid-template-columns: 16px 45px minmax(0,1fr) auto; gap: 8px; }
+      .model-icon { width: 45px; height: 45px; }
+      .pill { padding: 8px 12px; }
+      .category { min-height: 126px; }
+      .search { padding: 0 12px; }
+      .filter-btn { padding: 0 12px; }
+    }
+    @media (prefers-reduced-motion: reduce) { *,*::before,*::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <header class="shell-header" aria-label="Example application header">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">✦</span>klaude.</div>
+    <div class="shell-actions" aria-hidden="true"><span>⌕</span><span>☰</span></div>
+  </header>
+  <main>
+    <div class="page-heading">
+      <div><div class="eyebrow">Explore local AI</div><h1>Model Store</h1></div>
+      <button class="icon-button" type="button" aria-label="Refresh" title="Example only" id="refresh">↻</button>
+    </div>
+    <div class="tabs" role="tablist" aria-label="Model Store sections">
+      <button class="tab" type="button" role="tab" aria-selected="true" aria-controls="discover-panel" id="discover-tab" data-tab="discover">Discover</button>
+      <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="installed-panel" id="installed-tab" data-tab="installed">Installed</button>
+      <button class="tab" type="button" role="tab" aria-selected="false" aria-controls="downloads-panel" id="downloads-tab" data-tab="downloads">Downloads</button>
+    </div>
+
+    <section class="tab-panel" id="discover-panel" role="tabpanel" aria-labelledby="discover-tab">
+      <div class="search-row">
+        <label class="search">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.7" cy="10.7" r="6.7"/><path d="m16 16 5 5"/></svg>
+          <input type="search" id="model-search" placeholder="Search models or a use case" aria-label="Search sample models">
+        </label>
+        <button class="filter-btn" id="filter-toggle" aria-expanded="false" aria-controls="filters" type="button">Filters ☷</button>
+      </div>
+      <div class="filter-panel" id="filters"><strong>Browse by use case</strong><br><button type="button" data-search-term="coding">Coding</button><button type="button" data-search-term="reasoning">Reasoning</button><button type="button" data-search-term="vision">Vision</button><button type="button" data-search-term="">Clear filters</button><p style="margin-bottom:0;font-size:12px">Real implementation: add verified capability, size, source and ordering controls here, not above the artwork.</p></div>
+
+      <div class="section-heading"><h2>Featured</h2><span class="subheading">Illustrative collections</span></div>
+      <div class="billboards" aria-label="Featured model collections">
+        <article class="billboard billboard--main" data-model="qwen coder coding">
+          <!-- Original, image-led vector artwork. Production may replace it with curated, bundled WebP/AVIF assets. -->
+          <svg class="art" viewBox="0 0 800 520" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Colorful original editorial artwork with floating holographic computer screens">
+            <defs>
+              <radialGradient id="bg-a" cx="78%" cy="36%" r="84%"><stop stop-color="#e33bff"/><stop offset=".36" stop-color="#4939ef"/><stop offset=".8" stop-color="#141749"/><stop offset="1" stop-color="#080a1e"/></radialGradient>
+              <linearGradient id="glass-a" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#76f9fa"/><stop offset=".45" stop-color="#9387ff"/><stop offset="1" stop-color="#ff68cf"/></linearGradient>
+              <linearGradient id="warm-a" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#ffd775"/><stop offset="1" stop-color="#ff578d"/></linearGradient>
+              <filter id="blur-a"><feGaussianBlur stdDeviation="32"/></filter>
+            </defs>
+            <rect width="800" height="520" fill="url(#bg-a)"/>
+            <circle cx="615" cy="125" r="160" fill="#fa6de2" opacity=".52" filter="url(#blur-a)"/>
+            <circle cx="695" cy="380" r="150" fill="#00e9f2" opacity=".45" filter="url(#blur-a)"/>
+            <g opacity=".45" stroke="#c3d7ff" stroke-width="2" fill="none"><path d="M390 500 715-8M430 520 755 12M470 540 795 32"/><path d="M480 90 790 300M450 130 760 340"/></g>
+            <g transform="translate(494 96) rotate(-12 112 135)">
+              <rect x="8" y="10" width="237" height="304" rx="24" fill="#041b47" opacity=".65"/>
+              <rect width="237" height="304" rx="24" fill="#1c265c" stroke="url(#glass-a)" stroke-width="8"/>
+              <rect x="20" y="23" width="197" height="258" rx="13" fill="#192d75"/>
+              <circle cx="42" cy="42" r="6" fill="#ff7599"/><circle cx="62" cy="42" r="6" fill="#ffe36f"/><circle cx="82" cy="42" r="6" fill="#79eddf"/>
+              <path d="M48 104 92 142 48 180M152 104 111 180" fill="none" stroke="#b4fdfa" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M53 220h132" stroke="#ff79cf" stroke-width="9" stroke-linecap="round"/>
+              <path d="M53 243h83" stroke="#a991fa" stroke-width="9" stroke-linecap="round"/>
+            </g>
+            <g transform="translate(620 275) rotate(15)"><rect width="145" height="107" rx="17" fill="#ec73ff" stroke="#ffeabc" stroke-width="7"/><path d="M25 35h90M25 61h68" stroke="#2b246c" stroke-width="12" stroke-linecap="round"/></g>
+            <g transform="translate(435 380) rotate(-22)"><ellipse cx="80" cy="33" rx="100" ry="34" fill="url(#warm-a)"/><path d="M-20 33Q80 118 180 33" fill="#fd8e8d"/><ellipse cx="80" cy="33" rx="55" ry="17" fill="#491883"/></g>
+            <g fill="#fff2af"><path d="m438 63 9 25 25 9-25 9-9 25-9-25-25-9 25-9z"/><circle cx="700" cy="89" r="9"/><circle cx="755" cy="210" r="5"/></g>
+          </svg>
+          <div class="billboard__copy"><span class="billboard__label">Featured · Coding</span><h3>Ideas to working code.</h3><p>Discover the Qwen coding model family.</p><button type="button" class="billboard__cta" data-detail="Qwen coding family">Explore family ↗</button></div>
+        </article>
+        <article class="billboard billboard--orange" data-model="deepseek reasoning">
+          <svg class="art" viewBox="0 0 450 520" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Vivid orange and magenta illustrated glass sculpture resembling a blossoming idea">
+            <defs><radialGradient id="bg-b"><stop stop-color="#ffe98b"/><stop offset=".42" stop-color="#f86540"/><stop offset="1" stop-color="#6c185a"/></radialGradient><linearGradient id="petal-b"><stop stop-color="#fff0ba"/><stop offset=".55" stop-color="#ff74ad"/><stop offset="1" stop-color="#b952d5"/></linearGradient></defs>
+            <rect width="450" height="520" fill="url(#bg-b)"/>
+            <circle cx="235" cy="185" r="137" fill="#ffea9b" opacity=".5"/>
+            <g transform="translate(236 180)">
+              <g fill="url(#petal-b)" stroke="#ffe9c2" stroke-width="5" opacity=".96">
+                <ellipse cx="0" cy="-92" rx="56" ry="115"/><ellipse cx="0" cy="-92" rx="56" ry="115" transform="rotate(60)"/><ellipse cx="0" cy="-92" rx="56" ry="115" transform="rotate(120)"/><ellipse cx="0" cy="-92" rx="56" ry="115" transform="rotate(180)"/><ellipse cx="0" cy="-92" rx="56" ry="115" transform="rotate(240)"/><ellipse cx="0" cy="-92" rx="56" ry="115" transform="rotate(300)"/>
+              </g><circle r="45" fill="#ffc855" stroke="#fff0bc" stroke-width="9"/><circle r="14" fill="#a62d61"/>
+            </g><path d="M30 65q30-40 58-10M340 310q48-45 84-8" stroke="#ffeeaa" stroke-width="6" fill="none" stroke-linecap="round"/>
+          </svg>
+          <div class="billboard__copy"><span class="billboard__label">Reasoning</span><h3>Think in new directions.</h3><p>Explore reasoning models.</p><button type="button" class="billboard__cta" data-detail="Reasoning models">Discover ↗</button></div>
+        </article>
+        <article class="billboard billboard--green" data-model="vision multimodal gemma">
+          <svg class="art" viewBox="0 0 450 520" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Colorful teal illustrated optical lens with luminous geometric shapes">
+            <defs><radialGradient id="bg-c"><stop stop-color="#a7ff7b"/><stop offset=".48" stop-color="#00b5b3"/><stop offset="1" stop-color="#123d71"/></radialGradient><radialGradient id="iris-c"><stop stop-color="#101a49"/><stop offset=".19" stop-color="#9b70ff"/><stop offset=".56" stop-color="#62fdcf"/><stop offset="1" stop-color="#fdf6a1"/></radialGradient></defs>
+            <rect width="450" height="520" fill="url(#bg-c)"/>
+            <g transform="translate(235 172) rotate(-14)"><rect x="-133" y="-99" width="266" height="198" rx="68" fill="#e4fff1" opacity=".88"/><ellipse rx="98" ry="91" fill="url(#iris-c)" stroke="#fff" stroke-width="13"/><circle r="35" fill="#142448" stroke="#a4ffee" stroke-width="13"/><circle cx="-20" cy="-21" r="16" fill="white" opacity=".8"/></g>
+            <path d="m60 78 29 40-29 40-29-40z" fill="#e3b8ff"/><path d="m364 267 43 27-43 27-43-27z" fill="#fff0b1"/><circle cx="375" cy="82" r="20" fill="#ff9eca"/>
+          </svg>
+          <div class="billboard__copy"><span class="billboard__label">Multimodal</span><h3>See what AI sees.</h3><p>Explore image-capable models.</p><button type="button" class="billboard__cta" data-detail="Vision models">Explore ↗</button></div>
+        </article>
+      </div>
+
+      <div class="section-heading"><h2>Popular models</h2><a href="#categories" class="quiet-link">See categories ›</a></div>
+      <div class="rank-list" aria-label="Example popular model rows — not live rankings">
+        <div class="rank-row" data-model="qwen3 coder coding"><span class="rank">1</span><div class="model-icon" aria-hidden="true">⌘</div><div><div class="model-name">Qwen3-Coder</div><div class="model-desc">Coding · Agent tasks</div></div><button class="pill" data-detail="Qwen3-Coder">GET</button></div>
+        <div class="rank-row" data-model="deepseek r1 reasoning"><span class="rank">2</span><div class="model-icon model-icon--orange" aria-hidden="true">✺</div><div><div class="model-name">DeepSeek-R1</div><div class="model-desc">Reasoning</div></div><button class="pill" data-detail="DeepSeek-R1">GET</button></div>
+        <div class="rank-row" data-model="gemma3 vision general"><span class="rank">3</span><div class="model-icon model-icon--teal" aria-hidden="true">◉</div><div><div class="model-name">Gemma 3</div><div class="model-desc">General · Vision variants</div></div><button class="pill" data-detail="Gemma 3">GET</button></div>
+        <div class="rank-row" data-model="llama general"><span class="rank">4</span><div class="model-icon model-icon--blue" aria-hidden="true">◈</div><div><div class="model-name">Llama</div><div class="model-desc">General purpose</div></div><button class="pill" data-detail="Llama family">GET</button></div>
+      </div>
+
+      <div class="section-heading" id="categories"><h2>Explore by category</h2><span class="subheading">Find your use case</span></div>
+      <div class="categories">
+        <button class="category" data-category="coding"><strong>Coding</strong><small>Build and debug</small></button>
+        <button class="category category--reason" data-category="reasoning"><strong>Reasoning</strong><small>Solve complex tasks</small></button>
+        <button class="category category--vision" data-category="vision"><strong>Vision</strong><small>Understand images</small></button>
+        <button class="category category--light" data-category="lightweight"><strong>Lightweight</strong><small>Smaller models</small></button>
+      </div>
+      <p class="demo-note">Design/reference only. Model ranks, names and category associations are illustrative. The production UI must use verified catalog metadata and actual Ollama tags. Colored artwork is original SVG illustration, not just a gradient surface.</p>
+    </section>
+
+    <section class="tab-panel" id="installed-panel" role="tabpanel" aria-labelledby="installed-tab" hidden>
+      <div class="section-heading"><h2>Installed models</h2><span class="subheading">Example inventory</span></div>
+      <div class="rank-list">
+        <div class="rank-row"><span class="rank">●</span><div class="model-icon" aria-hidden="true">⌘</div><div><div class="model-name">qwen3-coder:30b</div><div class="model-desc">Installed · Exact local model</div></div><button class="pill" data-detail="qwen3-coder:30b">Manage</button></div>
+        <div class="rank-row"><span class="rank">●</span><div class="model-icon model-icon--teal" aria-hidden="true">◉</div><div><div class="model-name">gemma3:4b</div><div class="model-desc">Installed · Exact local model</div></div><button class="pill" data-detail="gemma3:4b">Manage</button></div>
+      </div>
+      <p class="demo-note">Production: select Ollama endpoint only when more than one native endpoint exists; installed inventory comes from real endpoint service.</p>
+    </section>
+    <section class="tab-panel" id="downloads-panel" role="tabpanel" aria-labelledby="downloads-tab" hidden>
+      <div class="empty" role="status"><div class="empty-icon" aria-hidden="true">⇩</div><h3>No downloads yet</h3><p>When you download an Ollama model, its progress and status will appear here.</p><button type="button" class="pill" data-tab-switch="discover">Discover models</button></div>
+      <p class="demo-note">Do not show unused endpoint selectors or an inactive “Download by tag” form in this empty state.</p>
+    </section>
+  </main>
+  <dialog id="detail" style="width:min(92vw,440px);border-radius:22px;border:1px solid #54423a;background:#2e2521;color:#f8ede5;padding:24px;box-shadow:0 20px 100px #0009">
+    <form method="dialog"><div class="eyebrow">Design prototype · No model operation</div><h2 id="detail-name" style="margin:8px 0">Model details</h2><p style="color:#c4afa3">Production: this opens the real model detail view with verified model tags, sizes, capabilities, exact endpoint and Download/Use actions.</p><button class="pill" style="margin-top:12px">Close</button></form>
+  </dialog>
+  <script>
+    // Only for the standalone prototype. The production WebUI must use its
+    // existing router, state, accessible dialogs and fixed application services.
+    const tabs = [...document.querySelectorAll('[data-tab]')];
+    function activateTab(id) {
+      for (const tab of tabs) {
+        const selected = tab.dataset.tab === id;
+        tab.setAttribute('aria-selected', String(selected));
+        document.getElementById(tab.getAttribute('aria-controls')).hidden = !selected;
+      }
+    }
+    tabs.forEach(t => t.addEventListener('click', () => activateTab(t.dataset.tab)));
+    document.querySelectorAll('[data-tab-switch]').forEach(b => b.addEventListener('click', () => activateTab(b.dataset.tabSwitch)));
+    const filterToggle = document.getElementById('filter-toggle');
+    filterToggle.addEventListener('click', () => {
+      const visible = document.getElementById('filters').classList.toggle('is-open');
+      filterToggle.setAttribute('aria-expanded', String(visible));
+    });
+    const search = document.getElementById('model-search');
+    search.addEventListener('input', () => {
+      const term = search.value.trim().toLowerCase();
+      document.querySelectorAll('[data-model]').forEach(el => { el.hidden = !!term && !el.dataset.model.includes(term); });
+    });
+    document.querySelectorAll('[data-category],[data-search-term]').forEach(b => b.addEventListener('click', () => {
+      search.value = b.dataset.category || b.dataset.searchTerm || '';
+      search.dispatchEvent(new Event('input'));
+      search.focus();
+      window.scrollTo({top: 0,behavior: 'smooth'});
+    }));
+    const detail = document.getElementById('detail');
+    document.querySelectorAll('[data-detail]').forEach(b => b.addEventListener('click', () => {
+      document.getElementById('detail-name').textContent = b.dataset.detail;
+      detail.showModal();
+    }));
+    document.getElementById('refresh').addEventListener('click', () => { search.value=''; search.dispatchEvent(new Event('input')); activateTab('discover'); });
+  </script>
+</body>
+</html>

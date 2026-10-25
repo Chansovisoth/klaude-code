@@ -10,7 +10,7 @@ from klaude_core.image_preparation import MAX_SOURCE_BYTES
 from klaude_core.image_tags import QUESTION, checked_tags
 from klaude_core.library_artifacts import ArtifactStore
 from klaude_core.research import model_binding
-from klaude_core.vision import budget, question_text
+from klaude_core.vision import budget, model_references, question_text
 
 from .browser_results import BrowserResults
 from .operation_journal import OperationJournal
@@ -61,8 +61,12 @@ def results(cfg: Config, identity: str, revision: int) -> dict[str, Any]:
             resource(identity)
         )
         if fenced is not None:
-            pending = {"request_id": fenced.receipt.request_id, "state": fenced.receipt.state}
-    return {"items": items, "pending": pending, "available_hours": 24}
+            pending = {"request_id": fenced.receipt.request_id, "state": fenced.receipt.state,
+                       "kind": fenced.receipt.kind}
+    defaults = read_defaults(cfg)
+    return {"items": items, "pending": pending, "available_hours": 24,
+            "settings": {"reference": defaults.vision, "enabled": defaults.vision_enabled,
+                         "fallbacks": list(defaults.vision_fallbacks), "session_model": True}}
 
 
 def prepare_vision_operation(
@@ -82,6 +86,10 @@ def prepare_vision_operation(
             "artifact:" + stored["artifact"]
         ), f"Save AI tags for {name}: " + ", ".join(selected) + ". Manual tags are retained."
     fields = {"operation", "target", "revision", "context", "output_tokens"}
+    if "reference" in draft:
+        fields.add("reference")
+        if not isinstance(draft["reference"], str) or not draft["reference"]:
+            raise ValueError("Choose a configured Vision model")
     if operation == "vision-analyze":
         fields.add("question")
     if operation not in READ_OPERATIONS or set(draft) != fields:
@@ -89,17 +97,16 @@ def prepare_vision_operation(
     item = _current(cfg, draft["target"], draft["revision"])
     budget(draft["context"], draft["output_tokens"])
     question = question_text(draft["question"]) if operation == "vision-analyze" else QUESTION
-    defaults = read_defaults(cfg)
-    if not defaults.vision_enabled or not defaults.vision:
-        raise ValueError("Choose and enable a Vision model in Settings → Model Defaults")
+    references = model_references(cfg, draft.get("reference"))
     models = []
-    for reference in (defaults.vision, *defaults.vision_fallbacks):
+    for reference in references:
         connection, _, credential = model_binding(cfg, reference)
         models.append({"reference": reference, "connection_revision": connection.revision,
                        "credential_revision": credential})
     verb = "Analyze" if operation == "vision-analyze" else "Suggest tags for"
     return {"artifact": item["id"], "revision": item["revision"], "sha256": item["sha256"],
             "question": question, "models": models,
+            **({"reference": draft["reference"]} if "reference" in draft else {}),
             "context": draft["context"], "output_tokens": draft["output_tokens"]}, resource(
                 item["id"]
             ), (f"{verb} {item['name']}.\n"
@@ -136,9 +143,8 @@ def run_vision_operation(cfg: Config, request: dict[str, Any]) -> dict[str, bool
             raise
         return {"ok": True}
     current = _current(cfg, request["artifact"], request["revision"])
-    defaults = read_defaults(cfg)
-    references = (defaults.vision, *defaults.vision_fallbacks)
-    if (not defaults.vision_enabled or tuple(item["reference"] for item in request["models"])
+    references = model_references(cfg, request.get("reference"))
+    if (tuple(item["reference"] for item in request["models"])
             != references or current["sha256"] != request["sha256"]):
         return {"rejected": True}
     for expected in request["models"]:
@@ -147,7 +153,8 @@ def run_vision_operation(cfg: Config, request: dict[str, Any]) -> dict[str, bool
                 or credential != expected["credential_revision"]):
             return {"rejected": True}
     values = {"artifact": request["artifact"], "revision": request["revision"],
-              "context": request["context"], "output_tokens": request["output_tokens"]}
+              "context": request["context"], "output_tokens": request["output_tokens"],
+              **({"reference": request["reference"]} if "reference" in request else {})}
     if operation == "vision-analyze":
         values["question"] = request["question"]
     prepared = VisionCommand.for_client(

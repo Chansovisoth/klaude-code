@@ -158,6 +158,11 @@ def save_defaults(
             raise SettingsConflictError("AI default changed; reload and select again")
         candidate = {**defaults.public(), change.field: change.value}
         updated = defaults_from_preferences(cfg, {"ai_defaults": candidate})
+        if updated.vision_enabled and updated.vision is None:
+            raise ValueError(
+                "Choose a Vision model before enabling image input, or disable Vision "
+                "before clearing its primary model"
+            )
         refs = (
             getattr(updated, change.field)
             if change.field in {"fallbacks", "vision_fallbacks"}

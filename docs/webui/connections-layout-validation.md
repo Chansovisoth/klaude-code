@@ -1,6 +1,6 @@
 # Connections layout validation
 
-Filter spacing follow-up (2026-10-22): All/Enabled/Disabled now have 16px horizontal
+Earlier filter spacing follow-up (2026-10-22): All/Enabled/Disabled had 16px horizontal
 padding per side, up from 12px, while retaining their existing height, selected
 states and filtering behavior. A focused real Chrome fixture passed all three
 states across light/dark at 320/390/768/1440px: eight layouts, 24 filter states,
@@ -8,6 +8,19 @@ one-row fit, no horizontal overflow and zero JavaScript errors. Evidence:
 `/tmp/klaude-connections-padding.{json,log}`. The CSS bundle and whitespace checks
 passed. This CSS-only adjustment does not change backend behavior; refresh the
 page to load it.
+
+Filter chip follow-up (2026-10-23): Skills and MCP Connections now use a shared
+md3.io-inspired filter chip design. Each native button has a 48px target around
+a 32px visual chip with 8px corners, an outline when unselected and a tonal
+surface plus checkmark when selected. Existing single-selection filters, search,
+URLs, wrapping and keyboard actions remain. Skills no longer repeats empty
+results in the status line below the navigation; the empty result stays in the
+list content. The focused Skills Chrome fixture passed 24 light/dark layouts
+at 320/390/850/1440px, and the isolated Connections management fixture passed
+with no console errors. The broader loading smoke reached an unrelated old
+Knowledge route fixture before its Skills empty-state step, so it is not
+counted as passed. The source-to-component mapping and API deviation are in
+`docs/webui/md3-io-reference.md`.
 
 Validated on 2026-10-21.
 

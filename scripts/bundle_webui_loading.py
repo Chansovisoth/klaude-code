@@ -7,6 +7,7 @@ run this script. The controller outside the marked block is preserved verbatim.
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 STATIC = Path(__file__).resolve().parents[1] / "apps/webhost/src/klaude_webhost/static"
@@ -16,6 +17,8 @@ COLOR_START = "/* BEGIN EARLY MATERIAL COLORS: python3 scripts/bundle_webui_load
 COLOR_END = "/* END EARLY MATERIAL COLORS */"
 GEOMETRY_START = "/* BEGIN EARLY MATERIAL GEOMETRY: python3 scripts/bundle_webui_loading.py */"
 GEOMETRY_END = "/* END EARLY MATERIAL GEOMETRY */"
+PROGRESS_START = "/* BEGIN EARLY MATERIAL PROGRESS: python3 scripts/bundle_webui_loading.py */"
+PROGRESS_END = "/* END EARLY MATERIAL PROGRESS */"
 
 
 def bundle(check: bool = False) -> None:
@@ -25,7 +28,8 @@ def bundle(check: bool = False) -> None:
     loading = STATIC / "loading-indicator.js"
     loading_source = loading.read_text()
     runtime = loading_source
-    for start, end in ((COLOR_START, COLOR_END), (GEOMETRY_START, GEOMETRY_END)):
+    for start, end in ((COLOR_START, COLOR_END), (GEOMETRY_START, GEOMETRY_END),
+                       (PROGRESS_START, PROGRESS_END)):
         if start in runtime:
             assert runtime.count(start) == runtime.count(end) == 1
             before, owned = runtime.split(start, 1)
@@ -36,9 +40,11 @@ def bundle(check: bool = False) -> None:
     # matched geometry in this public asset, without another blocking request or
     # a new static route that would require a running host to restart.
     geometry = (STATIC / "vendor/material-loading-shapes.js").read_text().rstrip()
+    progress = (STATIC / "vendor/material-progress.min.js").read_text().rstrip()
     early = (COLOR_START + "\n" + "\n".join(p.read_text().rstrip() for p in colors)
              + "\n" + COLOR_END + "\n\n" + GEOMETRY_START + "\n" + geometry
-             + "\n" + GEOMETRY_END + "\n\n" + runtime)
+             + "\n" + GEOMETRY_END + "\n\n" + PROGRESS_START + "\n" + progress
+             + "\n" + PROGRESS_END + "\n\n" + runtime)
     if check:
         assert loading_source == early, "Run python3 scripts/bundle_webui_loading.py"
     else:
@@ -53,9 +59,17 @@ def bundle(check: bool = False) -> None:
         assert not before.strip()
         controller = block.split(END, 1)[1]
     controller = controller.lstrip("\n")
+    # Offline quote data travels in the existing app route. No runtime fetch or
+    # additional public route is needed, including on a running legacy host.
+    quote_data = json.loads((STATIC / "lockscreen-quotes.json").read_text())
+    quote_source = ("window.KlaudeLockQuoteCollection = "
+                    + json.dumps(quote_data, ensure_ascii=True, separators=(",", ":")) + ";")
     dependencies = [STATIC / "loading-indicator.js", STATIC / "expressive.js"]
+    lockscreen = [STATIC / "lockscreen-quotes.js", STATIC / "lockscreen.js"]
     output = ('"use strict";\n\n' + START + "\n" +
               "\n".join(path.read_text().rstrip() for path in dependencies) +
+              "\n" + quote_source + "\n" +
+              "\n".join(path.read_text().rstrip() for path in lockscreen) +
               "\n" + END + "\n\n" + controller)
     if check:
         assert source == output, "Run python3 scripts/bundle_webui_loading.py"

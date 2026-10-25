@@ -121,11 +121,14 @@ def generate(cache: Path, check: bool) -> None:
         shapes = json.loads(subprocess.run(
             ["java", "-cp", f"{base}:{classpath}", "Export", "shapes"],
             capture_output=True, text=True, check=True).stdout)
+        lock_shapes = json.loads(subprocess.run(
+            ["java", "-cp", f"{base}:{classpath}", "Export", "lock-shapes"],
+            capture_output=True, text=True, check=True).stdout)
     assert len(morphs) == 7
     for morph in morphs:
         assert len(morph["start"]) == len(morph["end"])
         assert len(morph["start"]) % 6 == 2
-    data = {"names": NAMES, "morphs": morphs, "shapes": shapes}
+    data = {"names": NAMES, "morphs": morphs, "shapes": shapes, "lockShapes": lock_shapes}
     script = (
         "/* Generated from Google Material / AndroidX; Apache-2.0.\n"
         " * Copyright 2024 The Android Open Source Project.\n"

@@ -112,6 +112,13 @@ Uncontained indicators use `--primary`. Contained indicators use
 `--primary-container` and `--on-primary-container`. All existing palettes and
 light/dark/system modes retain their current tokens.
 
+The morphing `MaterialLoading` renderer is the **Generating indicator** and is
+reserved for AI work: active chat responses, image reviews and generated tag
+suggestions. General page loading uses `MaterialLoadingCircle`, which is built
+from the same `MaterialCircularProgress` factory shown by Settings → Theme's
+Loading circle preview. It follows the selected circle style and rotates while
+indeterminate. Existing status text remains the accessible loading announcement.
+
 - Chat's running activity summary uses a 32px uncontained indicator beside the
   real label, including response preparation and tool activity. Repeated status
   updates retain its element. Needs input, completion, errors and cancellation
@@ -121,7 +128,7 @@ light/dark/system modes retain their current tokens.
   pending, then hands off to real activity. Older hosts without the activity
   field show a generation indicator until the turn ends or input is required.
   A rejected send keeps the draft and clears the pending status.
-- Delayed page/read placeholders show one contained indicator with the real
+- Delayed page/read placeholders show the selected Loading circle with the real
   loading description and static content skeletons. Tiny count placeholders
   remain static. Existing request ownership, 120ms delay, cancellation, retained
   content and errors are preserved.
@@ -132,10 +139,12 @@ light/dark/system modes retain their current tokens.
   the existing operation kind/state. Unchanged polls retain DOM identity rather
   than restarting the sequence; completed/failed/unknown operations stop.
 
-One `requestAnimationFrame` loop services visible indicators. Intersection and
-document visibility suspend hidden animation; disconnected nodes are released
-even when reduced motion has stopped the loop. System `prefers-reduced-motion`
-and Klaude's reduced-motion setting display a static official shape. No layout,
+One `requestAnimationFrame` loop services visible Generating indicators.
+Intersection and document visibility suspend hidden animation; disconnected nodes
+are released even when reduced motion has stopped the loop. System
+`prefers-reduced-motion` and Klaude's reduced-motion setting display a static
+official shape. Loading circles use the existing Material circular-progress
+factory and stop their rotation under either reduced-motion preference. No layout,
 blur, filter, external fetch or CSS shape animation runs per frame. Decorative
 SVGs are hidden from assistive technology; existing status/live text communicates
 the actual wait, without adding focusable controls.

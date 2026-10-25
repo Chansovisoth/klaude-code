@@ -1,0 +1,1281 @@
+{
+  "version": 1,
+  "collection_id": "klaude-quotes-5b69a58f4724fb5e",
+  "dataset": {
+    "id": "geosfero/positivequotation-public-domain-quotes",
+    "url": "https://huggingface.co/datasets/geosfero/positivequotation-public-domain-quotes",
+    "revision": "4c8151903a29476f8fc66b26237c5911e1199835",
+    "source_file": "data.json",
+    "source_sha256": "f9e8db216cc7e83dbb21dc24735d2d828a6047c709381ed4240e5e049e2bd7c4",
+    "reviewed_rows": 30,
+    "selected_rows": 19,
+    "license": "other",
+    "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA.",
+    "attribution_notice": "Preserve attribution, source_entry and source_url when republishing.",
+    "license_notice": "vendor/lockscreen-quotes-NOTICE.txt"
+  },
+  "source_verification": {
+    "url": "https://www.gutenberg.org/ebooks/39281.txt.utf-8",
+    "sha256": "1ae9bc98d49be7ec3d78d2015fa34951c3733f138230545ea89dc1af401d9f9e",
+    "method": "Exact complete proverb matched to its numbered source entry; no truncation or reattribution."
+  },
+  "easter_eggs": {
+    "source_file": "lockscreen-quotes.json",
+    "selected_rows": 130,
+    "pop_culture_rows": 38,
+    "meme_rows": 71,
+    "greeting_rows": 21,
+    "notice": "User supplied examples and original Klaude microcopy; not part of the proverb dataset."
+  },
+  "quotes": [
+    {
+      "id": 4591,
+      "quote": "Old age is honourable.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 15,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4591",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4592,
+      "quote": "Lose nothing for asking.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 44,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4592",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4594,
+      "quote": "Great boast, small roast.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 140,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4594",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4595,
+      "quote": "Charity begins at home.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 231,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4595",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4597,
+      "quote": "Custom is second nature.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 372,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4597",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4599,
+      "quote": "Extremes seldom last long.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 520,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4599",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4600,
+      "quote": "First come, first served.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 579,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4600",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4602,
+      "quote": "Grasp all, lose all.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 717,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4602",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4603,
+      "quote": "Impudence is not courage.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 852,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4603",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4604,
+      "quote": "Kindness will always conquer.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 889,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4604",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4605,
+      "quote": "Labour warms, sloth harms.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 910,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4605",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4606,
+      "quote": "Better late than never.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 920,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4606",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4608,
+      "quote": "Live and let live.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 982,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4608",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4609,
+      "quote": "Look before you leap.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 989,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4609",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4610,
+      "quote": "Love is no lack.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 1000,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4610",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4612,
+      "quote": "Manners often make fortunes.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 1025,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4612",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4615,
+      "quote": "Share and share alike.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 1421,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4615",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4616,
+      "quote": "Still waters run deep.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 1530,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4616",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 4617,
+      "quote": "More haste worse speed.",
+      "attribution": "English Proverb",
+      "source_title": "A Dictionary of English Proverbs and Proverbial Phrases",
+      "source_compiler": "Thomas Preston",
+      "source_entry": 753,
+      "source_url": "https://www.gutenberg.org/ebooks/39281",
+      "detail_url": "https://positivequotation.com/quote/4617",
+      "public_domain_scope": "Project Gutenberg marks this source edition public domain in the USA."
+    },
+    {
+      "id": 10001,
+      "quote": "Also try Minecraft.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10002,
+      "quote": "Also try Terraria.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10003,
+      "quote": "Also try Hytale.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10004,
+      "quote": "67",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10005,
+      "quote": "TETSUOOOO",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10006,
+      "quote": "May the source be with you.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10007,
+      "quote": "A wild idea appeared.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10008,
+      "quote": "Roll for initiative. Fix the bug.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10009,
+      "quote": "The cake can wait. Ship the fix.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10010,
+      "quote": "A save point is a good place to breathe.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10011,
+      "quote": "Side quest: drink some water.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10012,
+      "quote": "Inventory full. Curiosity isn't.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10013,
+      "quote": "This is the way to the logs.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10014,
+      "quote": "One does not simply close 47 tabs.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10015,
+      "quote": "New game plus, same old TODO.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10016,
+      "quote": "Your next quest starts with one line.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10017,
+      "quote": "Somewhere, a tiny robot is cheering.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10018,
+      "quote": "Plot twist: the bug was a feature request.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10019,
+      "quote": "Choose your character. Keep your kindness.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10020,
+      "quote": "The portal opens after one more test.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10021,
+      "quote": "Respawn with a fresh cup of tea.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10022,
+      "quote": "The stars have aligned. The build passed.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10023,
+      "quote": "A long time ago, in a branch far away...",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10024,
+      "quote": "Every hero needs a loading screen.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10025,
+      "quote": "The secret level is called sleep.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10026,
+      "quote": "Welcome back, choom.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10027,
+      "quote": "Good morning, Night City.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10028,
+      "quote": "Greetings, Tarnished.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10029,
+      "quote": "Welcome aboard, Helldiver.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10030,
+      "quote": "Hey there, Traveler.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10031,
+      "quote": "Welcome back, Trailblazer.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10032,
+      "quote": "Hello, Proxy.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10033,
+      "quote": "Welcome back, crewmate.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10034,
+      "quote": "Hi, Barbie!",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10035,
+      "quote": "Hi, Ken!",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10036,
+      "quote": "Hello there.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10037,
+      "quote": "Welcome to the multiverse.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10038,
+      "quote": "The Digital Circus welcomes you.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "pop_culture",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10039,
+      "quote": "It works on my machine. The machine is worried.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10040,
+      "quote": "Task failed successfully.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10041,
+      "quote": "My tabs have tabs.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10042,
+      "quote": "I have no idea what I'm doing, but the tests pass.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10043,
+      "quote": "One more tiny change. Famous last words.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10044,
+      "quote": "I came. I saw. I forgot why I opened this tab.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10045,
+      "quote": "The bug has entered its character arc.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10046,
+      "quote": "Please hold while I negotiate with the cache.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10047,
+      "quote": "Keyboard: clack clack. Brain: buffering.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10048,
+      "quote": "This meeting could have been a comment.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10049,
+      "quote": "My coffee has a dependency tree.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10050,
+      "quote": "The spinner and I are in a staring contest.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10051,
+      "quote": "The logs know what you did.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10052,
+      "quote": "A semicolon walked into a bar. It ended there.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10053,
+      "quote": "Nobody panic. I found the missing bracket.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10054,
+      "quote": "The deploy button is looking at me funny.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10055,
+      "quote": "404: motivation briefly unavailable.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10056,
+      "quote": "This is fine. The tests are on fire.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10057,
+      "quote": "I asked for a sign. Got a stack trace.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10058,
+      "quote": "Current mood: waiting for localhost.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10059,
+      "quote": "I have 99 problems and a cache is 98.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10060,
+      "quote": "The TODOs are multiplying when I'm not looking.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10061,
+      "quote": "If this compiles, I'm telling nobody.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10062,
+      "quote": "Loading... my second thought.",
+      "attribution": "Klaude",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "original_microcopy"
+    },
+    {
+      "id": 10063,
+      "quote": "What's up, brother? ☝️🤓",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10064,
+      "quote": "Hello, everynyan!",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10065,
+      "quote": "Hi, hi! Good morning!",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10066,
+      "quote": "Close enough. Welcome back!",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10067,
+      "quote": "Chat, we're so back.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10068,
+      "quote": "Wakey wakey, it's coding time.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10069,
+      "quote": "It's giving welcome back.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10070,
+      "quote": "The bug filed a bug report about me.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10071,
+      "quote": "I fixed one thing. Three things took it personally.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10072,
+      "quote": "The error message said 'good luck.'",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10073,
+      "quote": "The code works. Please do not make eye contact.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10074,
+      "quote": "I gave the bug a name. Now it's a feature.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10075,
+      "quote": "Today's forecast: scattered stack traces.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10076,
+      "quote": "The database has trust issues.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10077,
+      "quote": "My rubber duck asked for a transfer.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10078,
+      "quote": "The compiler and I are no longer speaking.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10079,
+      "quote": "I deleted the bug. It respawned in staging.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10080,
+      "quote": "The build passed. Nobody move.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10081,
+      "quote": "The unit tests are unionizing.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10082,
+      "quote": "The README is a historical fiction novel.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10083,
+      "quote": "Even my TODO list has a TODO list.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10084,
+      "quote": "The CSS is holding everything together emotionally.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10085,
+      "quote": "The frontend is smiling. The backend knows why.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10086,
+      "quote": "I asked AI for help. It asked me for context.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10087,
+      "quote": "The agent is autonomous until it needs a password.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10088,
+      "quote": "The token budget has left the chat.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10089,
+      "quote": "My GPU sounds like it's filing a complaint.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10090,
+      "quote": "The cache remembers things I wish it wouldn't.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10091,
+      "quote": "We don't talk about the third migration.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10092,
+      "quote": "The branch is called final-final-actually-final.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10093,
+      "quote": "The merge conflict won custody of the semicolon.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10094,
+      "quote": "I put the bug in dark mode. It's still there.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10095,
+      "quote": "If it's undocumented, it's a treasure hunt.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10096,
+      "quote": "The test is flaky. So am I before coffee.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10097,
+      "quote": "404: weekend not found.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10098,
+      "quote": "I have achieved inbox zero. By closing the tab.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10099,
+      "quote": "My password hint is 'nice try.'",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10100,
+      "quote": "The Wi-Fi has chosen a dramatic exit.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10101,
+      "quote": "Autocorrect has joined the enemy team.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10102,
+      "quote": "My keyboard knows too much.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10103,
+      "quote": "Coffee first. Existential debugging later.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10104,
+      "quote": "I turned on focus mode. My brain filed an appeal.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10105,
+      "quote": "The progress bar is thinking about its future.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10106,
+      "quote": "I accepted the cookies. They accepted my fate.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10107,
+      "quote": "The printer has been promoted to final boss.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10108,
+      "quote": "Yesterday's quick fix is today's ancient curse.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10109,
+      "quote": "Success! Something else has broken.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "meme",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10110,
+      "quote": "Hello, sugar.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10111,
+      "quote": "Welcome back to the lobby.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10112,
+      "quote": "Hey, adventurer. New quest?",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10113,
+      "quote": "Hello from another timeline.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10114,
+      "quote": "Greetings, mysterious protagonist.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10115,
+      "quote": "Welcome to your next episode.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10116,
+      "quote": "GM, internet stranger!",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10117,
+      "quote": "Hey bestie. You made it.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10118,
+      "quote": "Well, well, well. Look who's back.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10119,
+      "quote": "Hello, World!",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10120,
+      "quote": "Welcome back, localhost.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10121,
+      "quote": "Hey, developer. Missed you.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10122,
+      "quote": "Greetings, carbon-based lifeform.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10123,
+      "quote": "Welcome back. Your branch awaits.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10124,
+      "quote": "Oh, hi. Want to build something?",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10125,
+      "quote": "Hello from the other side of the stack.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10126,
+      "quote": "Hey, human. Ready for round two?",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10127,
+      "quote": "Your next commit says hello.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10128,
+      "quote": "Welcome back. Your TODOs missed you.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10129,
+      "quote": "Hey, the terminal remembers you.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    },
+    {
+      "id": 10130,
+      "quote": "Greetings, keeper of the code.",
+      "attribution": "User supplied",
+      "source_kind": "easter_egg",
+      "category": "greeting",
+      "origin": "user_prompt"
+    }
+  ]
+}

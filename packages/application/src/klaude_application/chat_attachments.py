@@ -118,7 +118,7 @@ def prepare_attachment(
         thumbnail = b""
         if preview:
             try:
-                _, thumbnail = prepare_image(data, thumbnail=True, frame=0)
+                _, thumbnail = prepare_image(data, thumbnail=True, frame=0, preserve_alpha=True)
             except ValueError:
                 # The file icon remains; turn preparation still verifies pixels.
                 pass

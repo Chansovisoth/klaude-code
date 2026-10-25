@@ -127,10 +127,11 @@ async def verify(host, root, chrome):
             await tab.wait('filePage && !loadingStates.has(byId("library-items"))')
             await tab.js('window.finishMaterial=beginLoading(byId("library-items"),'
                          '{kind:"rows",count:3,preserve:false,label:"Loading uploads…"})')
-            await tab.wait('byId("library-items").querySelector(".material-loading")!==null')
+            await tab.wait('byId("library-items").querySelector('
+                           '".loading-circle-indicator")!==null')
             assert await tab.js('byId("library-items").textContent.includes("Loading uploads") && '
                                 'byId("library-items").querySelector('
-                                '".material-loading[data-size=large][data-contained=true]")!==null')
+                                '".loading-circle-indicator[data-size=large]")!==null')
             await shot("page-loading-dark-1280.png")
             # A contained static strip of the seven canonical frames makes curve
             # provenance and outlines easy to inspect at a useful magnification.
@@ -195,7 +196,8 @@ async def verify(host, root, chrome):
                 refreshFetch(input,options);
               refreshDomain('library');true;
             ''')
-            await tab.wait('byId("library-refresh").querySelector(".material-loading")!==null')
+            await tab.wait('byId("library-refresh").querySelector('
+                           '".loading-circle-indicator")!==null')
             assert await tab.js('retainedUploads.isConnected && '
                                 'byId("library-refresh").getAttribute("aria-label")'
                                 '==="Refresh Library" && '
@@ -204,7 +206,7 @@ async def verify(host, root, chrome):
             assert await tab.js('materialRefreshRequests===1')
             await tab.js('releaseMaterialRefresh()')
             await tab.wait('!domainRefreshes.has("library") && !byId("library-refresh")'
-                           '.querySelector(".material-loading")')
+                           '.querySelector(".loading-circle-indicator")')
             await tab.js('window.fetch=refreshFetch')
             await tab.click("#nav-activity")
             await tab.wait('!operationPollBusy')
@@ -215,15 +217,16 @@ async def verify(host, root, chrome):
                   headers:{'Content-Type':'application/json'}})) : materialFetch(input,options);
             ''')
             await tab.js('loadOperations()')
-            await tab.wait('byId("domain-operations").querySelector(".material-loading")!==null')
+            await tab.wait('byId("domain-operations").querySelector('
+                           '".loading-circle-indicator")!==null')
             await tab.js('window.operationIndicator=byId("domain-operations").querySelector('
-                         '".material-loading")')
+                         '".loading-circle-indicator")')
             await tab.js('loadOperations()')
             assert await tab.js('operationIndicator===byId("domain-operations")'
-                                '.querySelector(".material-loading")')
+                                '.querySelector(".loading-circle-indicator")')
             await tab.js('operationFixture.state="completed";loadOperations()')
             await tab.wait('!operationPollBusy && !byId("domain-operations")'
-                           '.querySelector(".material-loading")')
+                           '.querySelector(".loading-circle-indicator")')
             await tab.js('window.fetch=materialFetch')
             await tab.wait('MaterialLoading.activeCount()===0')
             # No orphaned animation states after repeated short page loads.

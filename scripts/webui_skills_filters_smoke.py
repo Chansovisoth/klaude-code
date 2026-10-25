@@ -50,9 +50,10 @@ async def verify(host, root):
             await tab.command("Page.enable")
             await tab.command("Page.navigate", {"url": host.origin})
             await tab.wait('typeof byId!=="undefined" && !byId("local-access").hidden')
-            await tab.js('byId("login-password").value=' + json.dumps(host.accounts.initial_password()) + ';byId("account-login").requestSubmit()')
+            await tab.js('byId("login-username").value="admin";byId("login-password").value=' + json.dumps(host.accounts.initial_password()) + ';byId("account-login").requestSubmit()')
             await tab.wait('latest?.session_id && document.documentElement.dataset.startup==="ready"')
             await tab.js('stream?.close();stream=null;clearInterval(pollTimer);showView("integrations")')
+            assert await tab.js('[...byId("integration-sections").children].map(button=>button.dataset.integration).join(",")==="connections,skills,knowledge" && byId("integration-sections").querySelector("[data-integration=skills]").getAttribute("aria-pressed")==="true"')
 
             async def expect(state, query="", offset=0):
                 expected = [item for item in ITEMS if (state == "all" or item["enabled"] == (state == "enabled"))
@@ -66,9 +67,31 @@ async def verify(host, root):
                 assert await tab.js('byId("skill-items").querySelectorAll(".skill-card").length') == len(names)
                 if expected:
                     assert await tab.js('byId("skills-numbers").dataset.last') == str((len(expected) + 19) // 20)
+                else:
+                    assert await tab.js('!byId("skills-status").textContent && Boolean(byId("skill-items").querySelector(".collection-empty"))')
                 return expected
 
             await expect("all")
+            assert await tab.js('''(()=>{
+              const group=byId("skills-state-filter"),buttons=[...group.children];
+              return !group.hasAttribute("data-segment-layout") && buttons.every(button=>{
+                const face=button.querySelector(".filter-chip-face"),style=getComputedStyle(face);
+                return button.getBoundingClientRect().height>=48 && face.getBoundingClientRect().height===32 &&
+                  style.borderTopLeftRadius==="8px" && style.borderTopRightRadius==="8px" &&
+                  style.borderBottomLeftRadius==="8px" && style.borderBottomRightRadius==="8px";
+              }) && buttons.filter(button=>button.getAttribute("aria-pressed")==="true").length===1;
+            })()''')
+            assert await tab.js('''(()=>{
+              const skill=installedSkills[0], row=byId("skill-items").querySelector(".skill-card");
+              skillChanges.set(skill.name,{phase:"preparing",operation:"skill-enabled"});
+              updateSkillStates();
+              const correct=row.querySelector(".collection-metadata").textContent==="Updating…" &&
+                !row.querySelector(".skill-row-status").textContent &&
+                row.querySelector(".skill-toggle").disabled;
+              skillChanges.delete(skill.name); updateSkillStates();
+              return correct && row.querySelector(".collection-metadata").textContent==="Disabled";
+            })()''')
+            report["toggle_pending_in_place"] = True
             for state in ("enabled", "disabled", "all"):
                 await tab.click(f'[data-skill-state="{state}"]')
                 expected = await expect(state)
@@ -107,6 +130,7 @@ async def verify(host, root):
                 await tab.command("Input.dispatchKeyEvent", {"type": "keyUp", "key": key})
                 await expect(state)
                 assert await tab.js("document.activeElement.dataset.skillState") == state
+                assert await tab.js('document.activeElement.matches(":focus-visible") && parseFloat(getComputedStyle(document.activeElement.querySelector(".filter-chip-face")).outlineWidth)>=3')
             report["keyboard"] = True
 
             for width in (320, 390, 850, 1440):
@@ -116,7 +140,7 @@ async def verify(host, root):
                     for state in ("all", "enabled", "disabled"):
                         await tab.click(f'[data-skill-state="{state}"]')
                         await expect(state)
-                        geometry = await tab.js('(()=>{const buttons=[...byId("skills-state-filter").children],r=buttons.map(b=>b.getBoundingClientRect());return {fits:r.every(x=>x.right<=innerWidth),oneRow:r.every(x=>Math.abs(x.top-r[0].top)<1),targets:r.every(x=>x.height>=44&&x.width>=44),pageFits:document.documentElement.scrollWidth<=innerWidth};})()')
+                        geometry = await tab.js('(()=>{const buttons=[...byId("skills-state-filter").children],r=buttons.map(b=>b.getBoundingClientRect());return {fits:r.every(x=>x.right<=innerWidth),oneRow:r.every(x=>Math.abs(x.top-r[0].top)<1),targets:r.every(x=>x.height>=48&&x.width>=48),pageFits:document.documentElement.scrollWidth<=innerWidth};})()')
                         assert all(geometry.values()), (width, theme, state, geometry)
                         report["layouts"].append({"width": width, "theme": theme, "state": state})
                     if width in (320, 1440):

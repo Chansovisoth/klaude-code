@@ -476,3 +476,17 @@ def test_title_action_acknowledges_actual_save_even_if_history_fails(setup, monk
     assert memory.session_title("session") == "Cache task"
     assert events[-1][0] == "session_title_saved" and events[-1][1][1]
     assert events[0][0] == "utility_history_failed"
+
+
+def test_enabled_vision_requires_primary_and_preserves_preferences(setup):
+    cfg, _, lab = setup
+    save_defaults(cfg, change(setup, "vision", lab.model_ref("image")))
+    save_defaults(cfg, DefaultsChange("vision_enabled", True, False))
+    path = cfg.data_dir / "chat-preferences.json"
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="disable Vision"):
+        save_defaults(cfg, change(setup, "vision", None))
+    assert path.read_bytes() == before
+    save_defaults(cfg, DefaultsChange("vision_enabled", False, True))
+    save_defaults(cfg, change(setup, "vision", None))
+    assert read_defaults(cfg).vision is None

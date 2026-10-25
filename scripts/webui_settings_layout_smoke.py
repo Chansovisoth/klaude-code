@@ -41,8 +41,14 @@ MEASURE = """(()=>{
   const buttons=[...tabs.querySelectorAll('button:not([hidden])')];
   const actions=[...bar.querySelectorAll('button:not([hidden])')]
     .map(el=>el.getBoundingClientRect());
+  const discard=bar.querySelector('[id$="-discard"],#theme-reset');
+  const apply=bar.querySelector('[id$="-save"],#theme-apply');
+  const barStyle=getComputedStyle(bar);
   const end=view.scrollHeight-view.scrollTop-view.clientHeight<2;
   return {mobile:innerWidth<=850,width:innerWidth,bar:b.toJSON(),dock:d.toJSON(),rail:rail.toJSON(),
+    sharedFooter:bar.classList.contains('theme-actions')&&discard?.classList.contains('quiet')&&
+      apply?.textContent==='Apply changes'&&barStyle.borderRadius==='0px'&&
+      barStyle.boxShadow==='none',
     main:main.toJSON(),tabs:n.toJSON(),end,colors,
     docked:bar.parentElement===dock,barId:bar.id,
     bodyFits:document.documentElement.scrollWidth<=innerWidth,
@@ -115,6 +121,27 @@ async def verify(host, root, chrome):
                   'Agent tools and permissions':button.dataset.settings;
                 button.append(label);
               });""")
+            # Editing the hex value must preserve its resting appearance.
+            await tab.js("showSettingsSection('theme')")
+            assert await tab.js("""(()=>{
+              const e=byId('theme-accent-value'),color=byId('theme-accent');
+              const measure=()=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();
+                return JSON.stringify([r.width,r.height,s.padding,s.borderWidth,
+                  s.backgroundColor,s.font,s.color,s.boxShadow,s.outlineStyle]);};
+              const before=measure();e.focus();const focused=measure();
+              e.value='#abc';e.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter'}));
+              const committed=color.value==='#aabbcc'&&e.value==='#aabbcc'&&
+                document.querySelector('input[name="color-source"]:checked').value==='custom';
+              e.focus();e.value='bad hex';e.blur();
+              const invalid=color.value==='#aabbcc'&&e.value==='#aabbcc';
+              e.focus();e.value='#112233';
+              e.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));
+              const cancelled=color.value==='#aabbcc'&&e.value==='#aabbcc';
+              e.focus();e.value='#123456';e.blur();
+              const blurred=color.value==='#123456';
+              byId('theme-reset').click();
+              return before===focused&&committed&&invalid&&cancelled&&blurred;
+            })()""")
             reports = []
             for theme in ("light", "dark"):
                 for width, height in (
@@ -152,6 +179,53 @@ async def verify(host, root, chrome):
                                 "byId('agent-settings').querySelectorAll('details')"
                                 ".forEach(section=>section.open=true)"
                             )
+                        if category == "agent" and width in (390, 1440):
+                            help_count = await tab.js(
+                                "byId('agent-settings').querySelectorAll('.settings-help-button').length"
+                            )
+                            assert help_count >= 20
+                            for index in range(help_count):
+                                await tab.js(
+                                    "byId('agent-settings').querySelectorAll('.settings-help-button')"
+                                f"[{index}].click()"
+                                )
+                                assert await tab.js("""(()=>{
+                                  const d=byId('agent-help-dialog'),r=d.getBoundingClientRect();
+                                  return d.matches(':modal')&&
+                                    d.querySelectorAll('button').length===1&&
+                                    d.querySelector('button').textContent==='OK'&&
+                                    document.activeElement===d.querySelector('button')&&
+                                    byId('agent-help-text').textContent.length>30&&
+                                    r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight;
+                                })()""")
+                                if index % 2:
+                                    await tab.command(
+                                        "Input.dispatchKeyEvent",
+                                        {
+                                            "type": "keyDown",
+                                            "key": "Escape",
+                                            "code": "Escape",
+                                            "windowsVirtualKeyCode": 27,
+                                        },
+                                    )
+                                    await tab.command(
+                                        "Input.dispatchKeyEvent",
+                                        {
+                                            "type": "keyUp",
+                                            "key": "Escape",
+                                            "code": "Escape",
+                                            "windowsVirtualKeyCode": 27,
+                                        },
+                                    )
+                                else:
+                                    await tab.js(
+                                        "byId('agent-help-dialog').querySelector('button').click()"
+                                    )
+                                await tab.wait(
+                                    "!byId('agent-help-dialog').open&&document.activeElement==="
+                                    "byId('agent-settings').querySelectorAll('.settings-help-button')"
+                                    f"[{index}]"
+                                )
                         positions = (0, 0.5, 1) if width > 850 and category == "theme" else (0, 1)
                         for position in positions:
                             await tab.js(
@@ -165,6 +239,7 @@ async def verify(host, root, chrome):
                             assert (
                                 result["bodyFits"] and result["viewFits"] and result["separate"]
                             ), result
+                            assert result["sharedFooter"], result
                             if width <= 850:
                                 assert all(
                                     result[key]
@@ -262,6 +337,10 @@ async def verify(host, root, chrome):
               Object.defineProperty(window,'visualViewport',{configurable:true,
                 value:{height:360,offsetTop:32,scale:1}});
               layoutViewport.dispatchEvent(new Event('resize'));""")
+            await tab.wait(
+                "byId('settings-action-dock').getBoundingClientRect().bottom<="
+                "visualViewport.height+visualViewport.offsetTop"
+            )
             await asyncio.sleep(0.15)
             overlay = await tab.js("""(()=>{
               const d=byId('settings-action-dock').getBoundingClientRect(),

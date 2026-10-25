@@ -399,16 +399,28 @@ def prepared_input(data: bytes, checked: dict, question: str,
     return metadata, prepared
 
 
+def model_references(cfg: Any, reference: str | None = None) -> tuple[str, ...]:
+    defaults = read_defaults(cfg)
+    if not defaults.vision_enabled:
+        raise ValueError("Enable Vision in Model Defaults → Vision")
+    if reference is not None:
+        if not isinstance(reference, str) or not reference:
+            raise ValueError("Choose a configured Vision model")
+        binding(cfg, reference)
+        return (reference,)
+    if not defaults.vision:
+        raise ValueError("Choose a model in Model Defaults → Vision")
+    return (defaults.vision, *defaults.vision_fallbacks)
+
+
 def prepare(
-    cfg: Any, identity: str, revision: int, question: str, context: int = 4096, output: int = 512
+    cfg: Any, identity: str, revision: int, question: str, context: int = 4096, output: int = 512,
+    *, reference: str | None = None,
 ) -> dict:
     budget(context, output)
-    defaults = read_defaults(cfg)
-    if not defaults.vision_enabled or not defaults.vision:
-        raise ValueError("Enable Vision and choose a model in Model Defaults → Vision")
+    references = model_references(cfg, reference)
     question = question_text(question)
     item, data = image(cfg, identity, revision)
-    references = (defaults.vision, *defaults.vision_fallbacks)
     models = [inspect_model(cfg, ref, analysis=True) for ref in references]
     preparations = [prepared_input(data, checked, question, context, output)[0]
                     for checked in models]
@@ -421,6 +433,7 @@ def prepare(
         "context": context,
         "output_tokens": output,
         "preparation": preparations,
+        **({"reference": reference} if reference is not None else {}),
     }
 
 
@@ -515,9 +528,8 @@ def http_analysis(
 def analyze(cfg: Any, spec: dict) -> dict:
     from .utility import eligible_failure
 
-    defaults = read_defaults(cfg)
-    refs = (defaults.vision, *defaults.vision_fallbacks)
-    if not defaults.vision_enabled or tuple(m["reference"] for m in spec["models"]) != refs:
+    refs = model_references(cfg, spec.get("reference"))
+    if tuple(m["reference"] for m in spec["models"]) != refs:
         raise ValueError("Vision settings changed; review again")
     budget(spec["context"], spec["output_tokens"])
     question_text(spec["question"])
@@ -564,8 +576,7 @@ def analyze(cfg: Any, spec: dict) -> dict:
                     stream=True,
                 )
             binding(cfg, reference, checked)
-            current = read_defaults(cfg)
-            if not current.vision_enabled or (current.vision, *current.vision_fallbacks) != refs:
+            if model_references(cfg, spec.get("reference")) != refs:
                 raise ValueError("Vision settings changed during analysis; review again")
             image(cfg, spec["artifact"], spec["revision"])
             return {
@@ -599,7 +610,8 @@ def execute(request: dict) -> dict:
 
             if request["operation"] == "tags_prepare":
                 return {"spec": image_tags.prepare(cfg, request["artifact"], request["revision"],
-                                                 request["context"], request["output_tokens"])}
+                                                 request["context"], request["output_tokens"],
+                                                 reference=request.get("reference"))}
             if request["operation"] == "tags_suggest":
                 return image_tags.suggest(cfg, request["spec"])
             if request["operation"] == "tags_apply":
@@ -615,6 +627,7 @@ def execute(request: dict) -> dict:
                     request["question"],
                     request.get("context", 4096),
                     request.get("output_tokens", 512),
+                    reference=request.get("reference"),
                 )
             }
         if request["operation"] == "analyze":

@@ -70,8 +70,10 @@ Current reproduction, focused browser evidence and limits are recorded in
   Activity and existing empty/error/loading states share the same system.
 - The Context Panel starts closed. Its existing public inspector and exact
   Library attachment identity/drop pipeline remain. Rows open Preview; attachment
-  uses drag-to-chat or the composer's Library picker. Full Library adds Current/All using the existing scoped service.
-  Current hides global section-count badges; scoped pagination uses actual totals.
+  uses drag-to-chat or the composer's Library picker. Context Library retains
+  Current/All; the full Library's Uploads and Generated span conversations without
+  scope controls. Legacy main-Library scope preferences/URLs no longer filter its
+  inventories or hide section counts.
 - Workspace rows/breadcrumbs navigate the existing bounded filesystem reader.
   Source previews reuse the existing safe token highlighter and clipboard path.
   Diff colors derive from actual prefixes. No workspace security rule changed.
@@ -118,9 +120,10 @@ Evidence directory: `/tmp/klaude-expressive-validation/`.
   custom image colors or a complete visual-accessibility certification.
 - Real Theme input/preview/Discard/Apply/local storage, local image decoding and
   quantization, image-seed-only persistence; measured switch track dimensions.
-- Full Library Current/All filter and global-count handling, image-only Gallery,
-  spatial keyboard navigation and authenticated preview. Context Library keeps
-  its independently validated exact-ID attachment pipeline.
+- Full Library inventory/counts, image-only Gallery, spatial keyboard navigation
+  and authenticated preview. Context Library Current/All returns the actual
+  conversation-linked/full inventories and keeps its independently validated
+  exact-ID attachment pipeline.
 - Real workspace directory/file navigation, highlighted preview, retained rows on
   a failed directory refresh, preserved file preview on returning to Workspaces
   and rejected out-of-workspace read.

@@ -1,15 +1,17 @@
 # Startup theme and authentication loading screen
 
 Refresh now restores the saved theme before the first styled paint and shows
-Klaude's existing paw/wordmark with the shared 48px Material loading indicator.
-The custom SVG wave/progress sweep and its CSS animations are removed.
+Klaude's existing paw/wordmark with a thick Material progress bar using the
+selected Loading bar style. Roboto is preloaded, and the splash brand/status text
+remains hidden until that font is loaded so fallback glyphs never appear first.
 The shell stays hidden, inert and excluded from accessibility navigation until
 authentication and the existing initial session, navigation, conversations and
 model reads complete. The initial HTML also hides/inerts the chat layout.
 Unauthenticated or failed initialization reveals the existing sign-in/error
 panel; it never uncovers the chat shell as a loading placeholder.
 
-The cover fades out over 160ms with no minimum display delay. Both the saved
+The splash remains visible for at least 500ms so the progress can visibly start,
+then fades out over 160ms. Both the saved
 Reduced motion setting and the system preference stop indicator motion and skip
 the fade. Completed startup removes its indicator and clears its recovery timer. A
 missing app script or a startup longer than 15 seconds offers Reload; it does
@@ -37,12 +39,13 @@ links retain their focus and scroll behavior after the shell is revealed.
 - `scripts/webui_startup_smoke.py` delays real fixture asset/auth/session reads
   and exercises both signed-in and signed-out refreshes.
 
-The splash now calls `MaterialLoading.create({size: "large"})`, reusing the
-existing Apache-licensed matched Google geometry and end-4 motion adaptation:
-seven smoothly morphed shapes, 800ms cadence, 12s continuous rotation,
-90-degree/350ms leaps and 750ms zoom. The saved classic spinner is respected;
-reduced motion displays a static shape/spinner. There is no simulated percentage.
-Source, licensing and motion details remain in `klaude-expressive-reference.md`.
+The splash progress bar advances from 0 to 90% over 800ms, then holds until
+the existing startup gate confirms authentication and initial reads. Startup
+completion moves it to 100% before removing it. The selected style is preserved
+while splash weight is forced to Thick; reduced motion stops bar animation. The
+normal application Loading bar retains its separately selected style and weight.
+The generating indicator continues to use the shared `MaterialLoading` renderer;
+source, licensing and motion details remain in `klaude-expressive-reference.md`.
 
 Authentication, owner checks, CSP (including no inline script/style), backend
 APIs and appearance storage semantics remain unchanged. The reused public asset

@@ -12,6 +12,38 @@ complete generated palette before CSS, avoiding first-paint palette shifts.
 Current color/contrast evidence supersedes the fixed-hex measurements below:
 see `klaude-expressive-reference.md` and `klaude-expressive-validation.md`.
 
+### Cocoa: original lockscreen colors
+
+Cocoa now provides the original clock's muted brown/beige family throughout the
+application. Its default Tonal spot variant builds Material tonal palettes from
+the original primary container (`#554736`), secondary (`#504739`), tertiary
+(`#654d35`), neutral (`#24221e`) and neutral-variant (`#d2c7bc`) references. Material
+Color Utilities still assigns semantic role tones and contrast: the dark clock
+container is `#524434` with `#f4dfc8` foreground, close to the original
+`#554736` / `#f2dfc9`. Light mode uses the coordinated inverse tonal hierarchy.
+Other Material variants transform the warm brown seed normally. Custom/image
+accents remain independent, including when their seed matches Cocoa's.
+
+The existing `cocoa` preference ID and picker label are preserved. The swatch,
+CSS fallback, synchronous startup palette and app bundle use the revised family;
+there are no separate clock color overrides. Choose **Theme → Cocoa → Tonal spot**
+and Apply changes for this appearance. Clock geometry, animation and
+authentication are unchanged.
+
+Validation: all **288** preset/variant/mode combinations retained at least
+**4.51:1** contrast for the checked text role pairs. The isolated real-browser
+lockscreen run passed **648** color/variant/mode/transparency cases and eleven
+viewport sizes, plus Cocoa Apply, session expiry and reload, native editing,
+keyboard resize, reduced motion and actual login/failure/timeout checks, with no
+browser exceptions. The keyboard check now waits for the native resize event
+before reading its resulting state. Desktop/mobile light and dark Cocoa captures
+and an authenticated Theme Settings capture are under
+`/tmp/klaude-lockscreen-validation/theme-*-cocoa-*.png`; report:
+`/tmp/klaude-lockscreen-validation/report.json`. Color-role/cache verification:
+`/tmp/klaude-cocoa-palette-check.json`. Bundle consistency, JavaScript syntax,
+focused Ruff and whitespace checks passed. No backend changes or full-suite run
+were needed for this palette update.
+
 The first eight palettes were implemented and checked 2026-10-20; expanded to
 sixteen and checked 2026-10-22.
 
@@ -25,8 +57,79 @@ without a purple tint. System appearance follows the browser's color scheme.
 The picker uses four columns on phones and eight when the settings card has
 room, with 44px swatches and at least 44×44px selection targets. Preview, Apply,
 Discard and cancellation when leaving Settings retain their existing behavior.
-The version 1 storage key accepts the original presets and all sixteen; Lavender
-remains the default. Saved choices synchronize between tabs on the same origin.
+The version 1 storage key accepts the original presets and all sixteen. The WebUI
+defaults are **Fidelity, Dark, Cocoa**; saved selections remain authoritative.
+**Reset default** at the bottom of Theme Settings previews the complete appearance
+defaults, including Compact chat, Material shapes, Material wavy, zero transparency and
+normal motion (system reduced motion still applies), with Material shapes and
+Material wavy as the generating-indicator and loading-bar defaults. Apply changes saves them;
+Discard restores the previous saved appearance. Saved choices synchronize between
+tabs on the same origin.
+
+Default/reset follow-up validation: `scripts/webui_expressive_smoke.py` passed
+88 layout cases and the native Reset default → Discard / Apply → reload flow,
+including restoration of a saved image palette on Discard. The new button was
+measured and visually checked at 390px and 1440px; captures are
+`/tmp/klaude-expressive-validation/theme-default-reset-{390,1440}.png`.
+`scripts/webui_startup_smoke.py` passed fresh/corrupt/blocked-storage defaults,
+existing saved themes before first paint, delayed startup, login/logout and
+recovery checks. Both runs reported no browser exceptions. Bundle consistency,
+JavaScript syntax, focused Ruff and whitespace checks passed.
+
+Loading-preview follow-up (2026-10-23): the Loading indicator selector now has a
+matching preview card using the shared 48px contained Material renderer. It shows
+the actual selected Material shapes or Classic spinner, inherits theme colors
+and honors reduced motion. It updates with unsaved choices, Discard, Reset and
+Apply; leaving Theme or signing out removes the preview renderer. The preview is
+decorative rather than an announcement of an ongoing loading operation.
+The isolated Expressive browser check passed all 88 layout cases plus live
+spinner/morph switching, path motion, reduced-motion freezing, saved/draft
+behavior and renderer cleanup, with no browser exceptions. Desktop style captures:
+`/tmp/klaude-expressive-validation/loading-preview-{expressive,classic}-1440.png`;
+mobile: `/tmp/klaude-expressive-validation/theme-default-reset-390.png`.
+Bundle, JavaScript syntax, focused Ruff and whitespace checks passed.
+
+Theme layout follow-up: the live previews share the left column, with all
+appearance controls and Reset default on the right. Apply/Discard retains its
+existing footer/dock. The preview group stays visible while scrolling wide,
+tall layouts. Narrow cards stack previews above controls; short viewports scroll
+without sticking.
+Palette columns use the controls' available width. Real browser measurements at
+390, 1100, 1440 and 1920px verified stacking/column placement and unclipped
+44px swatches; the 88-case Expressive check and preview/save/reset checks passed
+with no browser exceptions. Captures are under
+`/tmp/klaude-expressive-validation/theme-default-reset-*.png`.
+
+Loading bar and chat preview follow-up (2026-10-23): Theme now has separate
+Loading indicator and Loading bar selectors. The bar selector changes the actual
+splash progress component between the existing wavy path and a straight path;
+its own preview uses that same component and loops decoratively without
+announcing a real loading operation. The first live preview now changes chat
+spacing when Comfortable or Compact is selected. Existing saved preferences
+use Material wavy when the new bar field is absent. Fresh and reset defaults use
+Material shapes and Material wavy. The isolated Expressive browser
+check passed 88 layouts, live selection, draft/Discard/Apply, reduced motion and
+preview cleanup with no browser exceptions. The startup browser check passed
+both path choices before the deferred app loaded, including a Classic bar with
+an Expressive spinner. Captures:
+`/tmp/klaude-expressive-validation/loading-bar-preview-{expressive,classic}-1440.png`.
+
+Loading bar also offers `Material wavy static`, a fixed-phase SVG translation
+of Material's linear wave geometry. Splash progress still advances; only the
+wave phase stays still. The Expressive browser check passed its geometry,
+no-animation, persistence and preview cleanup assertions. The startup check
+exercised the preset before app.js loaded. Captures:
+`/tmp/klaude-expressive-validation/loading-bar-preview-material-static-1440.png`
+and `/tmp/klaude-startup-preview/startup-dark-cocoa-390.png`.
+
+The bar preview stacks the 4px Thin sample above the 8px Thick sample. Theme
+settings choose only the bar design; callers choose its weight for the context.
+The pre-auth splash explicitly uses Thick, while ordinary progress defaults to
+Thin. Saved `-thick` style variants normalize to their base design, and the
+former `loadingBarThickness` preference is ignored. Both samples stay visible
+for comparison, without a selected-weight highlight. The existing Chrome
+captures above predate this refinement; the updated browser checks cover both
+sample heights, style-only choices, migration and Thick startup progress.
 
 Initial eight-palette validation:
 
@@ -89,3 +192,76 @@ Evidence: `/tmp/klaude-more-palettes-check.{json,log}`,
 `/tmp/klaude-more-palettes-preview/`. Changed files: static `app.js`, `index.html`,
 `style.css`, `scripts/webui_settings_smoke.py`, `AGENTS.md` and this record.
 Unrelated changes are preserved; no stash, reset, commit or push.
+
+## Loading circle (2026-10-23)
+
+Settings → Theme now offers an independent Loading circle choice (Material wavy
+static, Classic, or animated Material wavy) and a matching preview. It persists
+in the existing version-1 local appearance record. Fresh/reset and missing-field
+defaults now use animated Material wavy; explicit saved choices are preserved.
+It follows the same
+Discard / Apply / Reset default flow as the generating indicator and loading
+bar. The Theme preview is decorative; the shared
+`MaterialCircularProgress.create({ value, max, size, label })` factory exposes a
+real, labelled determinate progressbar with `setValue` for application use.
+
+Reference: [material Progress documentation](https://md3.io/docs/components/progress/)
+(48px wavy circular indicator, thin 4px strokes, primary active arc, secondary
+container track, 4px gap, 1.6px wave amplitude at 40px with 15px wavelength).
+The fixed SVG geometry follows the library's circular path formula and
+measurements, with a fixed wave phase and no animation loop. The sample's
+`buffer` is linear-only and therefore does not apply to this circular control.
+The preview shows 51% without a continuous animation, so it does not consume
+frames while Settings is open. It unmounts when Theme is hidden and is hidden
+from assistive technology. The shared factory also exposes a labelled,
+determinate progressbar API for application use.
+
+Loading circle application follow-up (2026-10-25): non-AI page loading now uses
+the same circular progress renderer and selected style as this Settings preview,
+rotated as an indeterminate indicator. The morphing Generating indicator is
+reserved for AI work such as chat responses, image reviews and tag generation.
+
+Validation: the authenticated Chrome expressive smoke passed 88 responsive
+layouts, Theme preview switching, Discard / Apply / Reset, persistence, preview
+cleanup and the labelled `setValue` progressbar API. Browser exceptions: zero;
+minimum measured contrast in its covered samples: 4.51:1. Classic and Wavy
+screenshots were inspected at
+`/tmp/klaude-expressive-validation/loading-circle-preview-{classic,wavy}-1440.png`.
+The original SVG and runtime are bundled into the existing static assets.
+The full accessibility audit was not run.
+
+## Installed material progress preset (2026-10-23)
+
+`material@3.2.4` was installed in `/tmp/klaude-md3-reference` for source review.
+The MIT-licensed vanilla progress factory and its one component stylesheet are
+vendored in Klaude, bundled into its existing JS/CSS routes, and served offline.
+Theme adds `Material wavy` to Loading bar and Loading circle while retaining
+their earlier options. Material's bar is used by the splash screen when selected;
+its circle powers the Theme preview and the shared determinate circle API.
+Both use Klaude's live color roles. Preview factories are destroyed when hidden,
+and the browser's or Klaude's reduced-motion preference stops animation.
+The component catalog, source paths, license and measurements are recorded in
+`docs/webui/md3-io-reference.md`.
+
+Validation for the installed preset: authenticated Chrome expressive smoke passed
+88 layouts, Material preview switching, saved choices, teardown and the in-app
+reduced-motion still frame. The same 88-layout run verifies that Loading circle
+and Loading bar remain on one row at 320, 390, 850 and 1440px in both modes,
+with Generating indicator above and Surface transparency below. The startup smoke passed Material on the actual
+pre-auth splash, delayed app/auth gates, session protection and zero browser
+exceptions. Classic/Wavy/Material screenshots are under
+`/tmp/klaude-expressive-validation/`. An offline `klaude-webhost` wheel built
+successfully and contains the vendored JS, CSS and MIT license. The all-workspace
+package smoke built all wheels, but its isolated dependency installation was
+stopped after it began downloading large unrelated packages; it is not recorded
+as a completed full package smoke.
+
+## Palette action row on phones (2026-10-23)
+
+At narrow Theme control widths, the custom accent/value and Choose an image
+button stay on one row. The button can wrap its label within its own bounds at
+320px. The accent swatch keeps its alignment with the first preset swatch by
+using the shared palette gap and swatch-size tokens. The isolated Chrome
+expressive smoke passed at 320, 390 and desktop widths with row overlap and
+overflow checks, and no browser exceptions. Captures:
+`/tmp/klaude-expressive-validation/theme-palette-actions-{320,390}.png`.

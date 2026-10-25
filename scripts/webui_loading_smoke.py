@@ -152,7 +152,7 @@ async def verify(host, profile, chrome):
                 'document.querySelector("#account-login")&&!document.querySelector("#local-access").hidden'
             )
             await tab.js(
-                'byId("login-password").value='
+                'byId("login-username").value="admin";byId("login-password").value='
                 + json.dumps(host.accounts.initial_password())
                 + ';byId("account-login").requestSubmit()'
             )
@@ -421,7 +421,7 @@ async def verify(host, profile, chrome):
             """)
             await skeleton("skill-items")
             await reply("/api/v1/integrations/skills", page([]))
-            await tab.wait('byId("skills-status").textContent.includes("No installed Skills")')
+            await tab.wait('byId("skill-items").textContent.includes("No installed Skills") && !byId("skills-status").textContent')
             assert await tab.js('byId("skill-items").getAttribute("aria-busy")==="false"')
             await tab.click("#nav-activity")
             await skeleton("domain-operations")

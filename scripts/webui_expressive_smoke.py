@@ -89,12 +89,17 @@ async def verify(host, root):
             await tab.command("Page.navigate", {"url": host.origin})
             await wait('typeof byId!=="undefined" && !byId("local-access").hidden')
             await tab.js(
-                'byId("login-password").value='
+                'byId("login-username").value="admin";byId("login-password").value='
                 + json.dumps(host.accounts.initial_password())
                 + ';byId("account-login").requestSubmit()'
             )
             await wait('latest?.session_id && window.KlaudeExpressive && byId("command-open")')
             await wait('document.documentElement.dataset.startup==="ready"')
+            assert await tab.js('appearance.theme==="dark" && appearance.palette==="cocoa" && '
+                                'appearance.variant==="fidelity" && appearance.loadingStyle==="expressive" && '
+                                'appearance.loadingCircleStyle==="material" && defaultAppearance.loadingCircleStyle==="material" && '
+                                'appearance.loadingBarStyle==="material" && defaultAppearance.loadingBarStyle==="material" && '
+                                '!Object.hasOwn(appearance,"loadingBarThickness") && !byId("theme-loading-bar-thickness")'), 'Fresh WebUI defaults use Material shapes and Material wavy without a separate weight field'
             await tab.js(
                 "document.fonts.ready;stream?.close();stream=null;clearInterval(pollTimer)"
             )
@@ -191,12 +196,278 @@ async def verify(host, root):
             )
             report["theme_live_discard_apply_local_image"] = True
 
+            await wait('byId("theme-loading-preview").querySelector(".material-loading")')
+            await tab.js('byId("theme-loading-preview").scrollIntoView({block:"center"});'
+                         'window.previewLoader=byId("theme-loading-preview").firstElementChild;'
+                         'window.previewSaved=localStorage.getItem(preferenceKey);'
+                         'byId("theme-loading-style").value="classic";'
+                         'byId("theme-loading-style").dispatchEvent(new Event("change"))')
+            assert await tab.js('byId("theme-loading-name").textContent==="Classic spinner" && '
+                                'getComputedStyle(previewLoader.querySelector("svg")).visibility==="hidden" && '
+                                'getComputedStyle(previewLoader,"::after").animationName==="expressive-spin" && '
+                                'localStorage.getItem(preferenceKey)===previewSaved && '
+                                'previewLoader.getAttribute("aria-hidden")==="true" && '
+                                '!previewLoader.hasAttribute("role")'), 'The preview uses the actual spinner without announcing an ongoing operation'
+            await shot('loading-preview-classic-1440')
+            assert await tab.js('getComputedStyle(byId("theme-indicator-previews")).gridTemplateColumns.split(" ").length===2 && '
+                                'byId("theme-progress-preview").firstElementChild.querySelector("canvas").style.height==="10px" && '
+                                'byId("theme-progress-preview-thick").firstElementChild.querySelector("canvas").style.height==="20px" && '
+                                '!byId("theme-progress-thin-sample").hasAttribute("data-selected") && '
+                                '!byId("theme-progress-thick-sample").hasAttribute("data-selected") && '
+                                'Array.from(byId("theme-loading-bar-style").options).every(option=>!option.value.endsWith("-thick")) && '
+                                '!Object.hasOwn(document.documentElement.dataset,"loadingBarThickness")'), 'Both weights preview the same bar style without a weight setting'
+            assert await tab.js('(()=>{const thin=MaterialProgress.create({preview:true,style:"material-static"});'
+                                'const thick=MaterialProgress.create({preview:true,style:"material-static",thickness:"thick"});'
+                                'const valid=thin.element.dataset.thickness==="thin" && thick.element.dataset.thickness==="thick" && '
+                                'KlaudeAppearance.read(JSON.stringify({...appearance,loadingBarStyle:"material-static-thick",loadingBarThickness:"thick"})).loadingBarStyle==="material-static";'
+                                'thin.destroy();thick.destroy();return valid})()'), 'Callers choose bar weight independently; legacy thick preferences keep their design'
+            await wait('byId("theme-progress-preview").querySelector(".md3-linear-progress, .mtrl-progress")')
+            await tab.js('window.progressPreview=byId("theme-progress-preview").firstElementChild;'
+                         'byId("theme-loading-bar-style").value="classic";'
+                         'byId("theme-loading-bar-style").dispatchEvent(new Event("change"))')
+            await tab.js('window.progressPreview=byId("theme-progress-preview").firstElementChild')
+            assert await tab.js('byId("theme-progress-name").textContent==="Classic linear" && '
+                                'getComputedStyle(progressPreview.querySelector(".md3-linear-progress-wavy")).display==="none" && '
+                                'getComputedStyle(progressPreview.querySelector(".md3-linear-progress-straight")).display!=="none" && '
+                                'byId("theme-loading-name").textContent==="Classic spinner" && '
+                                'localStorage.getItem(preferenceKey)===previewSaved && '
+                                'progressPreview.getAttribute("aria-hidden")==="true"'), 'The loading bar has an independent live preview'
+            await shot('loading-bar-preview-classic-1440')
+            await wait('byId("theme-circle-preview").querySelector(".mtrl-progress")')
+            await tab.js('window.circlePreview=byId("theme-circle-preview").firstElementChild;'
+                         'byId("theme-loading-circle-style").value="classic";'
+                         'byId("theme-loading-circle-style").dispatchEvent(new Event("change"))')
+            await tab.js('window.circlePreview=byId("theme-circle-preview").firstElementChild')
+            assert await tab.js('byId("theme-circle-name").textContent==="Classic" && '
+                                'getComputedStyle(circlePreview.querySelector(".md3-circular-progress-wavy")).display==="none" && '
+                                'getComputedStyle(circlePreview.querySelector(".md3-circular-progress-classic")).display!=="none" && '
+                                'circlePreview.querySelector(".md3-circular-progress-classic").getAttribute("d")!=='
+                                'circlePreview.querySelector(".md3-circular-progress-wavy").getAttribute("d") && '
+                                'circlePreview.getAttribute("aria-hidden")==="true" && '
+                                'localStorage.getItem(preferenceKey)===previewSaved'), 'Circular progress independently previews classic and wavy geometry'
+            await shot('loading-circle-preview-classic-1440')
+            assert await tab.js('(()=>{const progress=MaterialCircularProgress.create({value:51,size:48,label:"Uploading files"});'
+                                'document.body.append(progress.element);'
+                                'const valid=progress.element.getAttribute("role")==="progressbar" && '
+                                'progress.element.getAttribute("aria-label")==="Uploading files" && '
+                                'progress.element.getAttribute("aria-valuenow")==="51" && '
+                                'progress.setValue(80)===80 && progress.element.getAttribute("aria-valuenow")==="80";'
+                                'progress.element.remove();return valid})()'), 'Circular progress exposes real determinate state'
+            await tab.click('#theme-reset')
+            assert await tab.js('byId("theme-loading-name").textContent==="Material shapes" && '
+                                'getComputedStyle(previewLoader.querySelector("svg")).visibility==="visible" && '
+                                'byId("theme-loading-preview").firstElementChild===previewLoader && '
+                                'byId("theme-progress-name").textContent==="Material wavy" && '
+                                'byId("theme-progress-preview").firstElementChild.classList.contains("mtrl-progress") && '
+                                'byId("theme-progress-preview").firstElementChild!==progressPreview && '
+                                'byId("theme-circle-name").textContent==="Material wavy" && '
+                                'byId("theme-circle-preview").firstElementChild!==circlePreview && '
+                                'byId("theme-circle-preview").firstElementChild.classList.contains("mtrl-progress") && '
+                                'getComputedStyle(byId("theme-circle-preview").querySelector("canvas")).visibility!=="hidden"')
+            await tab.js('byId("theme-loading-circle-style").value="wavy";'
+                         'byId("theme-loading-circle-style").dispatchEvent(new Event("change"))')
+            assert await tab.js('byId("theme-circle-name").textContent==="Material wavy static" && '
+                                'byId("theme-circle-preview").firstElementChild.classList.contains("md3-circular-progress-static") && '
+                                'getComputedStyle(byId("theme-circle-preview").querySelector(".md3-circular-progress-wavy")).display!=="none"')
+            await tab.js('window.staticCirclePath=byId("theme-circle-preview").querySelector(".md3-circular-progress-wavy").getAttribute("d")')
+            await asyncio.sleep(.3)
+            assert await tab.js('staticCirclePath===byId("theme-circle-preview").querySelector(".md3-circular-progress-wavy").getAttribute("d") && '
+                                'byId("theme-circle-preview").querySelectorAll("path").length===2'), 'Static Material circle holds the Material wave geometry without animation'
+            await tab.js('window.previewPath=previewLoader.querySelector("path").getAttribute("d")')
+            await wait('previewPath!==previewLoader.querySelector("path").getAttribute("d")')
+            await shot('loading-preview-expressive-1440')
+            await shot('loading-bar-preview-expressive-1440')
+            await shot('loading-circle-preview-wavy-1440')
+            await tab.js('byId("theme-loading-bar-style").value="material-static";'
+                         'byId("theme-loading-bar-style").dispatchEvent(new Event("change"))')
+            assert await tab.js('byId("theme-progress-name").textContent==="Material wavy static" && '
+                                'byId("theme-progress-preview").firstElementChild.classList.contains("md3-linear-progress-material-static") && '
+                                'byId("theme-progress-preview").querySelector(".md3-linear-progress-indicator").getAttribute("d").includes("L") && '
+                                'getComputedStyle(byId("theme-progress-preview").querySelector(".md3-linear-progress-indicator")).strokeDasharray==="none" && '
+                                'byId("theme-progress-preview").firstElementChild.getAttribute("aria-hidden")==="true" && '
+                                'localStorage.getItem(preferenceKey)===previewSaved'), 'Static Material bar uses the new fixed wave geometry'
+            await tab.js('window.staticBarPath=byId("theme-progress-preview").querySelector(".md3-linear-progress-indicator").getAttribute("d")')
+            await asyncio.sleep(.3)
+            assert await tab.js('staticBarPath===byId("theme-progress-preview").querySelector(".md3-linear-progress-indicator").getAttribute("d")'), 'Static Material bar does not animate its wave'
+            await tab.js('byId("theme-progress-preview").scrollIntoView({block:"center"})')
+            await shot('loading-bar-preview-material-static-1440')
+            await tab.js('byId("theme-loading-bar-style").value="expressive";'
+                         'byId("theme-loading-bar-style").dispatchEvent(new Event("change"))')
+            await tab.click('#reduced-motion')
+            await asyncio.sleep(.1)
+            await tab.js('window.previewStill=previewLoader.querySelector("svg").innerHTML')
+            await asyncio.sleep(.9)
+            assert await tab.js('previewStill===previewLoader.querySelector("svg").innerHTML'), 'Preview honors reduced motion'
+            assert await tab.js('getComputedStyle(byId("theme-progress-preview").querySelector(".md3-linear-progress-indicator")).animationName==="none"'), 'Loading bar honors reduced motion'
+            await tab.js('byId("theme-loading-bar-style").value="material";'
+                         'byId("theme-loading-bar-style").dispatchEvent(new Event("change"));'
+                         'byId("theme-loading-circle-style").value="material";'
+                         'byId("theme-loading-circle-style").dispatchEvent(new Event("change"))')
+            material_preview_state = await tab.js('''(()=>({
+              library:typeof window.KlaudeMD3, bar:document.documentElement.dataset.loadingBarStyle,
+              circle:document.documentElement.dataset.loadingCircleStyle,
+              barHtml:byId("theme-progress-preview").innerHTML.slice(0,300),
+              circleHtml:byId("theme-circle-preview").innerHTML.slice(0,300)
+            }))()''')
+            assert await tab.js('!!byId("theme-progress-preview").querySelector(".mtrl-progress__canvas") && '
+                                '!!byId("theme-circle-preview").querySelector(".mtrl-progress__canvas")'), material_preview_state
+            assert await tab.js('byId("theme-progress-name").textContent==="Material wavy" && '
+                                'byId("theme-circle-name").textContent==="Material wavy" && '
+                                'byId("theme-progress-preview").firstElementChild.classList.contains("mtrl-progress--linear") && '
+                                'byId("theme-circle-preview").firstElementChild.classList.contains("mtrl-progress--circular") && '
+                                'byId("theme-progress-preview").firstElementChild.getAttribute("aria-hidden")==="true" && '
+                                'byId("theme-circle-preview").firstElementChild.getAttribute("aria-hidden")==="true" && '
+                                'getComputedStyle(document.documentElement).getPropertyValue("--mtrl-sys-color-primary").trim()==='
+                                'getComputedStyle(document.documentElement).getPropertyValue("--primary").trim() && '
+                                'localStorage.getItem(preferenceKey)===previewSaved'), 'Installed Material presets render offline with Klaude theme roles'
+            await shot('loading-material-presets-reduced-1440')
+            await tab.js('window.materialStill=byId("theme-circle-preview").querySelector("canvas").toDataURL()')
+            await asyncio.sleep(.3)
+            assert await tab.js('materialStill===byId("theme-circle-preview").querySelector("canvas").toDataURL()'), 'Material preview stops drawing under Klaude reduced motion'
+            await tab.click('#theme-reset')
+            await tab.js('byId("theme-loading-bar-style").value="classic";'
+                         'byId("theme-loading-bar-style").dispatchEvent(new Event("change"));'
+                         'byId("theme-loading-circle-style").value="classic";'
+                         'byId("theme-loading-circle-style").dispatchEvent(new Event("change"))')
+            await tab.click('#theme-apply')
+            await tab.js('showSettingsSection("agent")')
+            await wait('!byId("theme-loading-preview").children.length && !byId("theme-progress-preview").children.length && !byId("theme-progress-preview-thick").children.length && !byId("theme-circle-preview").children.length')
+            await tab.js('showSettingsSection("theme")')
+            await wait('byId("theme-loading-preview").children.length===1 && byId("theme-progress-preview").children.length===1 && byId("theme-progress-preview-thick").children.length===1 && byId("theme-circle-preview").children.length===1')
+            assert await tab.js('appearance.loadingStyle==="expressive" && '
+                                'appearance.loadingBarStyle==="classic" && '
+                                'appearance.loadingCircleStyle==="classic" && '
+                                'readAppearance().loadingBarStyle==="classic" && '
+                                'readAppearance().loadingCircleStyle==="classic" && '
+                                'byId("theme-loading-name").textContent==="Material shapes" && '
+                                'byId("theme-progress-name").textContent==="Classic linear" && '
+                                'byId("theme-circle-name").textContent==="Classic"')
+            await tab.js('byId("theme-loading-bar-style").value="material";'
+                         'byId("theme-loading-bar-style").dispatchEvent(new Event("change"));'
+                         'byId("theme-loading-circle-style").value="material";'
+                         'byId("theme-loading-circle-style").dispatchEvent(new Event("change"))')
+            await tab.click('#theme-apply')
+            await tab.js('showSettingsSection("agent")')
+            await wait('!byId("theme-progress-preview").children.length && !byId("theme-progress-preview-thick").children.length && !byId("theme-circle-preview").children.length')
+            await tab.js('showSettingsSection("theme")')
+            assert await tab.js('appearance.loadingBarStyle==="material" && '
+                                'appearance.loadingCircleStyle==="material" && '
+                                'readAppearance().loadingBarStyle==="material" && '
+                                'readAppearance().loadingCircleStyle==="material" && '
+                                'byId("theme-progress-preview").firstElementChild.classList.contains("mtrl-progress") && '
+                                'byId("theme-circle-preview").firstElementChild.classList.contains("mtrl-progress")')
+            await tab.js('byId("theme-loading-bar-style").value="material-static";'
+                         'byId("theme-loading-bar-style").dispatchEvent(new Event("change"))')
+            await tab.click('#theme-apply')
+            assert await tab.js('appearance.loadingBarStyle==="material-static" && '
+                                'readAppearance().loadingBarStyle==="material-static" && '
+                                'byId("theme-progress-preview").firstElementChild.classList.contains("md3-linear-progress-material-static")')
+            await tab.js('byId("theme-loading-bar-style").value="classic";'
+                         'byId("theme-loading-bar-style").dispatchEvent(new Event("change"));'
+                         'byId("theme-loading-circle-style").value="classic";'
+                         'byId("theme-loading-circle-style").dispatchEvent(new Event("change"))')
+            await tab.click('#theme-apply')
+            report['loading_preview_shared_renderer_live_discard_apply_reduced_motion_and_cleanup'] = True
+
+            await tab.js('document.querySelector("input[name=chat-density][value=comfortable]").click()')
+            assert await tab.js('document.documentElement.dataset.chatDensity==="comfortable" && '
+                                'byId("theme-chat-preview-mode").textContent==="Comfortable" && '
+                                'getComputedStyle(document.querySelector(".theme-preview-chat")).gap==="16px"')
+            await tab.js('document.querySelector("input[name=chat-density][value=compact]").click()')
+            assert await tab.js('document.documentElement.dataset.chatDensity==="compact" && '
+                                'byId("theme-chat-preview-mode").textContent==="Compact" && '
+                                'getComputedStyle(document.querySelector(".theme-preview-chat")).gap==="8px"')
+            report['chat_density_live_preview'] = True
+
+            await tab.js('window.savedThemeBeforeReset=localStorage.getItem(preferenceKey)')
+            await tab.click('#theme-default')
+            assert await tab.js('Object.entries(defaultAppearance).every(([k,v])=>appearanceDraft()[k]===v) && '
+                                'localStorage.getItem(preferenceKey)===savedThemeBeforeReset && '
+                                '!byId("theme-save-bar").hidden'), 'Reset previews defaults without saving'
+            await tab.click('#theme-reset')
+            assert await tab.js('Object.entries(JSON.parse(savedThemeBeforeReset)).every(([k,v])=>appearanceDraft()[k]===v) && '
+                                'byId("theme-save-bar").hidden'), 'Discard restores the saved image theme'
+            await tab.click('#theme-default')
+            await tab.click('#theme-apply')
+            assert await tab.js('Object.entries(defaultAppearance).every(([k,v])=>readAppearance()[k]===v) && '
+                                'byId("theme-save-bar").hidden')
+            await tab.command('Page.reload')
+            await wait('typeof appearance!=="undefined" && authenticated && latest?.session_id && '
+                       'document.documentElement.dataset.startup==="ready"')
+            assert await tab.js('appearance.theme==="dark" && appearance.palette==="cocoa" && '
+                                'appearance.variant==="fidelity" && '
+                                'document.querySelector("input[name=theme-variant-choice]:checked").value==="fidelity"')
+            await tab.js('stream?.close();stream=null;clearInterval(pollTimer)')
+            for width in (320,390,1100,1920,1440):
+                await tab.command('Emulation.setDeviceMetricsOverride', {
+                    'width':width,'height':900,'deviceScaleFactor':1,'mobile':width<600,
+                })
+                await asyncio.sleep(.2)
+                assert await tab.js('''(()=>{
+                  const label=document.querySelector('input[name="appearance"][value="system"]').nextElementSibling;
+                  const desktop=label.querySelector('.theme-system-desktop');
+                  const phone=label.querySelector('.theme-system-phone');
+                  return (getComputedStyle(phone).display!=='none')===(innerWidth<=560) &&
+                    (getComputedStyle(desktop).display!=='none')===(innerWidth>560) &&
+                    phone.getAttribute('aria-hidden')==='true';
+                })()'''), width
+                geometry = await tab.js('''(()=>{
+                  const studio=document.querySelector('.theme-studio'),left=studio.querySelector('.theme-studio-previews'),right=studio.querySelector('.theme-studio-controls');
+                  const l=left.getBoundingClientRect(),r=right.getBoundingClientRect(),columns=getComputedStyle(studio).gridTemplateColumns.split(' ').length;
+                  const previews=[...studio.querySelectorAll('.theme-live-preview')];
+                  const actions=right.querySelector('.theme-palette-actions').getBoundingClientRect();
+                  const accent=byId('theme-accent').getBoundingClientRect();
+                  const image=byId('theme-image-choose').getBoundingClientRect();
+                  return {width:innerWidth,columns,previewsLeft:previews.length===4&&previews.every(p=>left.contains(p)),
+                    controlsRight:[...byId('theme-settings').querySelectorAll('input,select,button')].every(e=>e.closest('#theme-save-bar')||right.contains(e)),
+                    geometry:columns===2?l.right+15<=r.left:innerWidth<=850?r.bottom+15<=l.top:l.bottom+15<=r.top,
+                    mobilePreviewsAtBottom:innerWidth>850||r.bottom+15<=l.top,
+                    palettesFit:[...right.querySelectorAll('.palette-swatch')].every(p=>{const b=p.getBoundingClientRect();return b.left>=r.left&&b.right<=r.right&&b.width>=44}),
+                    paletteActionsSameRow:Math.abs((accent.top+accent.bottom-image.top-image.bottom)/2)<2&&
+                      accent.right+4<=image.left&&accent.left>=actions.left-1&&image.right<=actions.right+1};
+                })()''')
+                assert all(geometry[key] for key in ('previewsLeft','controlsRight','geometry','mobilePreviewsAtBottom','palettesFit','paletteActionsSameRow')), geometry
+                assert geometry['columns'] == (2 if width >= 1440 else 1), geometry
+                slider = await tab.js('''(()=>{
+                  const input=byId('theme-transparency'),visual=input.parentElement;
+                  const track=visual.querySelector('.material-slider-track');
+                  const stop=visual.querySelector('.material-slider-stop');
+                  return {native:input.type==='range',height:visual.getBoundingClientRect().height,
+                    trackHeight:track.getBoundingClientRect().height,
+                    outerRadius:getComputedStyle(track).borderRadius,
+                    inputMargin:getComputedStyle(input).margin,
+                    stopSize:stop.getBoundingClientRect().width,
+                    fits:visual.getBoundingClientRect().left>=0&&visual.getBoundingClientRect().right<=innerWidth};
+                })()''')
+                assert slider == {'native': True, 'height': 48, 'trackHeight': 24,
+                                  'outerRadius': '8px', 'inputMargin': '0px',
+                                  'stopSize': 4, 'fits': True}, slider
+                if width in (320, 390):
+                    await tab.js('byId("theme-accent").scrollIntoView({block:"center"})')
+                    await shot(f'theme-palette-actions-{width}')
+                await tab.js('byId("theme-default").scrollIntoView({block:"center"})')
+                await asyncio.sleep(.2)
+                assert await tab.js('(()=>{const r=byId("theme-default").getBoundingClientRect();'
+                                    'return r.width>=44&&r.height>=44&&r.left>=0&&r.right<=innerWidth&&'
+                                    'r.top>=0&&r.bottom<=innerHeight&&'
+                                    'byId("theme-default").parentElement.parentElement.lastElementChild===byId("theme-default").parentElement})()')
+                await shot(f'theme-default-reset-{width}')
+            report['theme_defaults_preview_discard_apply_reload_and_responsive_button'] = True
+            report['theme_previews_left_controls_right_and_responsive_stacking'] = True
+
             await tab.js('showView("library")')
+            await wait('!byId("theme-loading-preview").children.length && !byId("theme-progress-preview").children.length && !byId("theme-progress-preview-thick").children.length')
             await wait('byId("library-items").querySelectorAll(".file-item").length===5')
-            await tab.click('[data-file-scope="current"]')
-            assert await tab.js('[...byId("library-sections").querySelectorAll(".tab-count")].every(b=>b.hidden)')
-            await wait('byId("library-items").querySelectorAll(".file-item").length===1')
-            await tab.click('[data-file-scope="all"]')
+            assert await tab.js('!byId("library-view").querySelector("[data-file-scope]") && '
+                                '[...byId("library-sections").querySelectorAll(".tab-count")].every(b=>!b.hidden)')
+            await tab.js('showView("chat");setContextPanel(true)')
+            await tab.click('#cp-tab-library')
+            await tab.click('#cp-scope-current')
+            await wait('byId("cp-file-items").children.length===1')
+            await tab.click('#cp-scope-all')
+            await wait('byId("cp-file-items").children.length===5')
+            await tab.click('#cp-tab-agent')
+            await tab.js('setContextPanel(false);showView("library")')
             await wait('byId("library-items").querySelectorAll(".file-item").length===5')
             await tab.click('[data-file-view="gallery"]')
             await wait(
@@ -213,7 +484,7 @@ async def verify(host, root):
             )
             await shot("image-preview-desktop")
             await tab.click("#artifact-close")
-            report["library_scope_gallery_keyboard_preview"] = True
+            report["library_full_inventory_context_scopes_gallery_keyboard_preview"] = True
             await tab.js('showView("workspace");workspaceRead("files")')
             await wait('byId("workspace-result").querySelector(".workspace-files")')
             # A failed same-directory refresh retains the usable file rows.
@@ -309,6 +580,18 @@ async def verify(host, root):
                             await accessibility(f"{page}/{section}")
                         report["layouts"].append({**layout, "theme": theme, "section": section})
                         assert layout["bodyFits"] and layout["mainFits"], layout
+                        if section == "theme":
+                            controls = await tab.js('''(()=>{
+                              const group=document.querySelector('.theme-surface-controls');
+                              const indicator=byId('theme-loading-style').parentElement.getBoundingClientRect();
+                              const circle=byId('theme-loading-circle-style').parentElement.getBoundingClientRect();
+                              const bar=byId('theme-loading-bar-style').parentElement.getBoundingClientRect();
+                              const transparency=byId('theme-transparency').parentElement.getBoundingClientRect();
+                              const bounds=group.getBoundingClientRect();
+                              return {sameRow:Math.abs(circle.top-bar.top)<1,ordered:indicator.bottom<=circle.top&&circle.bottom<=transparency.top,
+                                fit:circle.left>=bounds.left&&bar.right<=bounds.right&&circle.right<=bar.left};
+                            })()''')
+                            assert all(controls.values()), {"width": width, "theme": theme, **controls}
                         if width in (1440, 390):
                             await shot(f"{page}-{section or 'page'}-{theme}-{width}")
                     await tab.js('showView("chat");setContextPanel(true)')

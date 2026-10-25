@@ -65,6 +65,7 @@ def prepare_image(
     crop: tuple[int, int, int, int] | None = None,
     thumbnail: bool = False,
     thumbnail_size: int = 128,
+    preserve_alpha: bool = False,
     cancelled: Callable[[], bool] = lambda: False,
 ) -> tuple[dict[str, Any], bytes]:
     if not data or len(data) > MAX_SOURCE_BYTES:
@@ -80,6 +81,7 @@ def prepare_image(
         "crop": crop,
         "thumbnail": thumbnail,
         "thumbnail_size": thumbnail_size,
+        "preserve_alpha": preserve_alpha,
     }
     payload = json.dumps(options).encode() + b"\n" + data
     environment = {
@@ -201,17 +203,24 @@ def _decode(data: bytes, options: dict[str, Any]) -> tuple[dict[str, Any], bytes
             oriented = oriented.convert("RGBA")
             if oriented.size != size:
                 oriented = oriented.resize(size, Image.Resampling.LANCZOS)
-            background = Image.new("RGBA", size, "white")
-            background.alpha_composite(oriented)
-            rgb = background.convert("RGB")
+            if options.get("preserve_alpha"):
+                rgb = oriented
+            else:
+                background = Image.new("RGBA", size, "white")
+                background.alpha_composite(oriented)
+                rgb = background.convert("RGB")
             rgb.info.clear()
             output = io.BytesIO()
             rgb.save(output, format="PNG")
             prepared, mime = output.getvalue(), "image/png"
             if len(prepared) > MAX_PREPARED_BYTES:
                 output = io.BytesIO()
-                rgb.save(output, format="JPEG", quality=90, exif=b"", icc_profile=None)
-                prepared, mime = output.getvalue(), "image/jpeg"
+                if options.get("preserve_alpha"):
+                    rgb.save(output, format="WEBP", quality=90, exif=b"", icc_profile=None)
+                    prepared, mime = output.getvalue(), "image/webp"
+                else:
+                    rgb.save(output, format="JPEG", quality=90, exif=b"", icc_profile=None)
+                    prepared, mime = output.getvalue(), "image/jpeg"
             return {
                 "mime": mime,
                 "width": size[0],

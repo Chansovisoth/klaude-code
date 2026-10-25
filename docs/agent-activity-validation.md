@@ -32,6 +32,9 @@ write. Filesystem races remain subject to the existing mutation guards.
 
 ## Integration and persistence
 
+- The chat Execution details container is capped at 480px and fills narrower
+  available chat space. Its expanded timeline retains its existing internal
+  scrolling and wrapping.
 - `PublicEvent.activity` adds only an allowlisted label. Requested, started and
   finished events retain their execution IDs; finished status distinguishes
   succeeded, failed and rejected, independently of the existing executed flag.

@@ -512,3 +512,67 @@ zero JavaScript exceptions. Phone and desktop screenshots were visually checked:
 `/tmp/klaude-library-browser-preview/generated-filters-{390,1440}.png`.
 Focused Ruff, Python compilation and `git diff --check` passed. This records the
 focused filter run; no new full browser or repository suite pass is claimed.
+
+### Heading view controls and breadcrumb removal
+
+List/Grid/Gallery now share the Library heading action row directly before
+Refresh in both Uploads and Generated. The redundant breadcrumb and its reset
+handler are removed; existing search, type and status controls remain available.
+The heading can wrap on narrow screens while keeping the three view buttons and
+Refresh together. Context Panel controls and workspace navigation are unchanged.
+
+An isolated Chrome probe checked Uploads and Generated at 320/390/560/1000px:
+the view group and Refresh have the same vertical center, the group sits to its
+left, all controls fit the viewport, no breadcrumb remains and no horizontal
+page overflow occurs. All three views switched through their existing handlers
+in every case, with zero JavaScript exceptions. CSS bundle consistency,
+JavaScript syntax, focused Ruff and diff checks passed. This was a focused
+temporary-store probe, not a rerun of the complete Library browser suite.
+
+### Always-visible dropdown filter chips
+
+Type, Status and Sort now use the shared md3.io-inspired filter-chip face with
+a trailing dropdown arrow. The old Filters button and expandable panel are
+removed. Chips stay visible beneath Search in a single horizontal row: overflow
+scrolls natively and both standard and WebKit scrollbar styling hide the bar.
+Chip controls retain 48px targets and 32px faces with 8px corners.
+
+A shared adapter preserves the existing native select values and change events,
+per-section preferences, query URLs and disabled sort choices. Native selects are
+the fallback when popovers are unsupported. Popover menus use menuitemradio
+semantics, selected checks, arrows/Home/End/typeahead navigation, Escape focus
+restoration and outside dismissal. Menus track the scrolling chip row in the
+top layer rather than being clipped inside it; scrolling the menu itself does
+not dismiss it. Navigation and sign-out close open menus.
+
+`scripts/webui_library_filter_chips_smoke.py` passed eight Uploads/Generated cases
+at 320/390/768/1440px. It used real temporary saved/archived document, image and
+report records, native pointer input and keyboard input to check results,
+selected labels, Escape/outside/repeated-trigger dismissal, popup viewport bounds,
+one-row geometry, hidden scrollbars, touch dimensions and page overflow. Zero
+JavaScript exceptions. The existing focused Generated-filter probe also passed
+at those widths after updating its explicit login fixture and visible-control
+assertions. Focused Ruff, JavaScript syntax, bundle and diff checks passed.
+The complete Library/management browser suites were not rerun.
+
+### Empty-state vertical alignment
+
+Page-level empty collections now grow into the remaining content space and
+vertically center their existing icon, heading and description. Conditional
+flex/grid rules preserve the normal populated layouts and account for toolbar
+and footnote sizes without viewport offsets or fixed content heights.
+
+An isolated Chrome geometry probe checked Uploads, Generated, Skills, MCPs and
+Knowledge at 320×760, 390×844, 1000×900 and 320×460. All 20 empty groups were
+centered within 0.01px of their content area's midpoint, without horizontal
+overflow. Short screens retained the group's intrinsic height and allowed page
+scrolling. Adding a temporary file and using Refresh restored the regular Grid
+layout. No JavaScript exceptions occurred; CSS bundle and diff checks passed.
+
+Source notes and URLs participate in the shared inventory's literal substring
+search alongside existing names/tags/metadata. The same predicate is used for
+counts and page reads, with existing archive, type, source and session filters.
+Context Panel search inherits this behavior. Legacy stores without artifact_links
+remain searchable without schema writes. Regression coverage includes multiline
+notes, URLs, case-insensitive matches, literal SQL/wildcard characters, archived
+items, session scoping and results spanning the core page size.

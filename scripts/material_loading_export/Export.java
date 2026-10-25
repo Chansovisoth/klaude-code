@@ -5,6 +5,10 @@
 import androidx.graphics.shapes.Cubic;
 import androidx.graphics.shapes.Morph;
 import androidx.graphics.shapes.RoundedPolygon;
+import androidx.graphics.shapes.ShapesKt;
+import androidx.graphics.shapes.Shapes_androidKt;
+import androidx.graphics.shapes.CornerRounding;
+import android.graphics.Matrix;
 import android.graphics.RectF;
 import com.google.android.material.shape.MaterialShapes;
 import java.util.List;
@@ -20,6 +24,21 @@ public class Export {
     System.out.print("]");
   }
   public static void main(String[] args) {
+    if (args.length > 0 && args[0].equals("lock-shapes")) {
+      String[] names = {"clover-4", "arrow", "clam-shell", "pentagon", "clock-cookie"};
+      Matrix turn = new Matrix(); turn.setRotate(30);
+      RoundedPolygon cookie = Shapes_androidKt.transformed(ShapesKt.star(
+        RoundedPolygon.Companion, 14, 1f, .8f, new CornerRounding(1.5f / 14, 0)), turn);
+      RoundedPolygon[] all = {MaterialShapes.CLOVER_4, MaterialShapes.ARROW,
+        MaterialShapes.CLAM_SHELL, MaterialShapes.PENTAGON, cookie};
+      System.out.print("{");
+      for (int i = 0; i < all.length; i++) {
+        if (i > 0) System.out.print(",");
+        System.out.print("\"" + names[i] + "\":");
+        path(MaterialShapes.normalize(all[i], true, new RectF(-1,-1,1,1)).getCubics());
+      }
+      System.out.println("}"); return;
+    }
     if (args.length > 0 && args[0].equals("shapes")) {
       String[] names = {"circle", "pill", "oval", "diamond", "cookie", "burst", "sunny", "flower", "soft-burst"};
       RoundedPolygon[] all = {MaterialShapes.CIRCLE, MaterialShapes.PILL, MaterialShapes.OVAL,

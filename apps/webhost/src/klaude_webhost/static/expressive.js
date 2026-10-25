@@ -8,8 +8,9 @@ window.KlaudeExpressive = (() => {
   const svgNS = 'http://www.w3.org/2000/svg';
   const closest = (target, selector) => target instanceof Element ? target.closest(selector) : null;
   let imageGeneration = 0;
+  let barPreviewInstances = [], materialCirclePreview = null, barPreviewStyle = null, circlePreviewStyle = null;
   function shape(name, size = 48) {
-    const points = window.MaterialLoadingGeometry.shapes?.[name];
+    const points = window.MaterialLoadingGeometry.shapes?.[name] || window.MaterialLoadingGeometry.lockShapes?.[name];
     if (!points) return document.createElement('span');
     const svg = document.createElementNS(svgNS, 'svg');
     svg.setAttribute('viewBox', '-1 -1 2 2'); svg.setAttribute('width', size); svg.setAttribute('height', size);
@@ -27,21 +28,83 @@ window.KlaudeExpressive = (() => {
       if (source) source.checked = true;
       for (const [id, next] of Object.entries({ 'theme-accent': value.accent || '#65558f',
         'theme-variant': value.variant || 'tonal-spot', 'theme-transparency': value.transparency || 0,
-        'theme-loading-style': value.loadingStyle || 'expressive' })) {
+        'theme-loading-style': value.loadingStyle || 'expressive',
+        'theme-loading-bar-style': value.loadingBarStyle || 'material',
+        'theme-loading-circle-style': value.loadingCircleStyle || 'material' })) {
         const input = document.getElementById(id); if (input) input.value = next;
       }
     }
     for (const input of document.querySelectorAll('input[name="theme-variant-choice"]'))
       input.checked = input.value === (value.variant || 'tonal-spot');
     const accent = document.getElementById('theme-accent-value');
-    if (accent) accent.textContent = value.accent || '#65558f';
+    if (accent && (sync || document.activeElement !== accent)) accent.value = value.accent || '#65558f';
     const transparency = document.getElementById('theme-transparency-value');
     if (transparency) transparency.textContent = `${value.transparency || 0}%`;
     const range = document.getElementById('theme-transparency');
-    if (range) range.style.setProperty('--range-progress', `${(value.transparency || 0) * 5}%`);
+    if (range) {
+      const amount = Number(value.transparency) || 0;
+      const maximum = Number(range.max) || 20;
+      const minimum = Number(range.min) || 0;
+      const track = range.parentElement;
+      track.style.setProperty('--range-progress', `${Math.max(0, Math.min(100, (amount - minimum) / (maximum - minimum) * 100))}%`);
+      track.dataset.atMax = String(amount >= maximum);
+      track.querySelector('.material-slider-value').textContent = `${amount}%`;
+    }
+    const chatMode = document.getElementById('theme-chat-preview-mode');
+    if (chatMode) chatMode.textContent = value.chatDensity === 'comfortable' ? 'Comfortable' : 'Compact';
+    const loadingName = document.getElementById('theme-loading-name');
+    if (loadingName) loadingName.textContent = value.loadingStyle === 'classic' ? 'Classic spinner' : 'Material shapes';
+    const progressName = document.getElementById('theme-progress-name');
+    if (progressName) progressName.textContent = ({ material: 'Material wavy', 'material-static': 'Material wavy static',
+      classic: 'Classic linear', expressive: 'Classic wavy static' }[value.loadingBarStyle] || 'Material wavy');
+    const circleName = document.getElementById('theme-circle-name');
+    if (circleName) circleName.textContent = value.loadingCircleStyle === 'material' ? 'Material wavy' :
+      value.loadingCircleStyle === 'classic' ? 'Classic' : 'Material wavy static';
+    syncLoadingPreview(true);
+  }
+  function syncLoadingPreview(refreshMaterial = false) {
+    const preview = document.getElementById('theme-loading-preview');
+    const progressPreview = document.getElementById('theme-progress-preview');
+    const progressPreviewThick = document.getElementById('theme-progress-preview-thick');
+    const circlePreview = document.getElementById('theme-circle-preview');
+    if (!preview || !progressPreview || !progressPreviewThick || !circlePreview) return;
+    const showing = !byId('settings-view').hidden && !byId('theme-settings').hidden &&
+      !document.querySelector('.layout').hidden;
+    if (!showing) {
+      barPreviewInstances.forEach(instance => instance.destroy?.()); barPreviewInstances = []; barPreviewStyle = null;
+      materialCirclePreview?.destroy(); materialCirclePreview = null; circlePreviewStyle = null;
+      preview.replaceChildren(); progressPreview.replaceChildren(); progressPreviewThick.replaceChildren(); circlePreview.replaceChildren(); return;
+    }
+    if (!preview.firstElementChild && window.MaterialLoading)
+      preview.append(MaterialLoading.create({ size: 'large', contained: true }));
+    const barStyle = root.dataset.loadingBarStyle || 'material';
+    if (barPreviewStyle !== barStyle || (barStyle === 'material' && refreshMaterial)) {
+      barPreviewInstances.forEach(instance => instance.destroy?.()); barPreviewInstances = [];
+      progressPreview.replaceChildren(); progressPreviewThick.replaceChildren(); barPreviewStyle = barStyle;
+    }
+    if ((!progressPreview.firstElementChild || !progressPreviewThick.firstElementChild) && window.MaterialProgress) {
+      for (const [container, thickness] of [[progressPreview, 'thin'], [progressPreviewThick, 'thick']]) {
+        const instance = MaterialProgress.create({ preview: true, thickness });
+        container.replaceChildren(instance.element);
+        barPreviewInstances.push(instance);
+      }
+    }
+    const circleStyle = root.dataset.loadingCircleStyle || 'material';
+    if (circlePreviewStyle !== circleStyle || (circleStyle === 'material' && refreshMaterial)) {
+      materialCirclePreview?.destroy(); materialCirclePreview = null;
+      circlePreview.replaceChildren(); circlePreviewStyle = circleStyle;
+    }
+    if (!circlePreview.firstElementChild && window.MaterialCircularProgress) {
+      const instance = MaterialCircularProgress.create({ value: 51, size: 48, preview: true });
+      circlePreview.append(instance.element);
+      if (circleStyle === 'material') materialCirclePreview = instance;
+    }
+    if (reduced()) requestAnimationFrame(() => {
+      barPreviewInstances.forEach(instance => instance.freeze?.()); materialCirclePreview?.freeze();
+    });
   }
   function setupSegments() {
-    const selector = '.segmented, .section-chips, .cp-tabs, .connection-filters, .settings-tabs, .file-view-modes, .cp-view-modes, .suggestions';
+    const selector = '.segmented, .section-chips, .cp-tabs, .settings-tabs, .file-view-modes, .cp-view-modes, .suggestions';
     const groups = new Map(), pending = new Set();
     let frame = 0;
     function queue(group) {
@@ -131,6 +194,10 @@ window.KlaudeExpressive = (() => {
     const emblem = document.querySelector('.welcome-emblem');
     if (emblem) { const backing = shape('cookie', 90); backing.classList.add('welcome-shape'); emblem.prepend(backing); }
     themePreview(appearance, true);
+    const loadingVisibility = new MutationObserver(() => syncLoadingPreview());
+    for (const element of [byId('settings-view'), byId('theme-settings'), document.querySelector('.layout')])
+      loadingVisibility.observe(element, { attributes: true, attributeFilter: ['hidden'] });
+    syncLoadingPreview();
     // The source uses wrapping connected choices, rather than a dropdown, for
     // palette variants. The existing select remains the single form value.
     const variants = document.createElement('fieldset'), variantLegend = document.createElement('legend');
@@ -153,6 +220,29 @@ window.KlaudeExpressive = (() => {
       if (id === 'theme-accent') document.querySelector('input[name="color-source"][value="custom"]').checked = true;
       preview();
     });
+    const accentHex = byId('theme-accent-value');
+    const commitAccentHex = () => {
+      let hex = accentHex.value.trim().replace(/^#/, '');
+      if (!/^(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(hex)) {
+        accentHex.value = byId('theme-accent').value;
+        return;
+      }
+      if (hex.length === 3) hex = [...hex].map(char => char + char).join('');
+      const next = `#${hex.toLowerCase()}`;
+      accentHex.value = next;
+      if (next === byId('theme-accent').value) return;
+      byId('theme-accent').value = next;
+      byId('theme-accent').dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    accentHex.addEventListener('blur', commitAccentHex);
+    accentHex.addEventListener('keydown', event => {
+      if (event.key === 'Enter') { event.preventDefault(); accentHex.blur(); }
+      if (event.key === 'Escape') {
+        event.preventDefault(); event.stopPropagation();
+        accentHex.value = byId('theme-accent').value;
+        accentHex.blur();
+      }
+    });
     byId('theme-image-choose').addEventListener('click', () => byId('theme-image').click());
     byId('theme-image').addEventListener('change', async event => {
       const generation = ++imageGeneration, file = event.target.files[0]; event.target.value = '';
@@ -172,6 +262,7 @@ window.KlaudeExpressive = (() => {
       imageGeneration++; byId('theme-image-choose').disabled = false; byId('theme-image-status').textContent = '';
     }
     byId('theme-reset').addEventListener('click', clearImage);
+    byId('theme-default').addEventListener('click', clearImage);
     document.addEventListener('klaude-view', clearImage);
     document.addEventListener('klaude-auth-reset', clearImage);
     new MutationObserver(() => { if (byId('theme-settings').hidden) clearImage(); }).observe(
@@ -193,11 +284,11 @@ window.KlaudeExpressive = (() => {
     }
     document.addEventListener('pointerdown', event => {
       if (event.button !== 0) return;
-      const button = closest(event.target, 'button'); if (!button) return;
+      const button = closest(event.target, 'button, a.icon-button'); if (!button) return;
       const box = button.getBoundingClientRect(); press(button, event.clientX - box.left, event.clientY - box.top);
     });
     document.addEventListener('keydown', event => {
-      if (!event.repeat && ['Enter', ' '].includes(event.key)) press(closest(event.target, 'button'));
+      if (!event.repeat && ['Enter', ' '].includes(event.key)) press(closest(event.target, 'button, a.icon-button'));
     });
     // Native radios retain their arrow/Space behavior. Independent toolbar
     // buttons gain the same predictable Home/End and arrow-key navigation.
@@ -316,7 +407,7 @@ window.KlaudeExpressive = (() => {
         { group: 'Help', label: 'Show keyboard shortcuts', run: () => open('shortcuts') });
       if (!byId('new-session').disabled) available.push({ group: 'Chat', label: 'New conversation', run: () => byId('new-session').click() });
       if (!byId('cancel').disabled && !byId('cancel').hidden) available.push({ group: 'Chat', label: 'Cancel current turn', run: () => byId('cancel').click() });
-      if (!latest?.active_turn_id && !latest?.queue?.length) for (const session of sessions.slice(0, 30)) {
+      if (latest?.parallel_sessions || !latest?.active_turn_id && !latest?.queue?.length) for (const session of sessions.slice(0, 30)) {
         const id = session.id || session.session_id;
         if (id && id !== latest?.session_id && session.resumable) available.push({ group: 'Conversations', label: session.title || session.name || id, run: () => switchSession(id) });
       }

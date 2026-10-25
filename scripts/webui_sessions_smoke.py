@@ -56,8 +56,56 @@ async def verify(host, root, chrome):
             await tab.click("#session-list .session-row button:last-child")
             await tab.wait("byId('session-management').open")
             assert await tab.js("!byId('session-archive').disabled && "
-                                "byId('session-management-description').textContent"
-                                ".includes('new chat')")
+                                "!byId('session-rename').querySelector('button')")
+            await tab.js("byId('session-name').value='\\u0001Invalid'; "
+                         "byId('session-rename').requestSubmit()")
+            await tab.wait("byId('session-management-status').textContent"
+                           ".includes('Enter a conversation name')")
+            assert await tab.js("byId('session-management').open && !reviewDialog.open && "
+                                "!byId('session-name').disabled")
+            await tab.js("byId('session-name').value='Renamed   conversation'; "
+                         "byId('session-name').focus()")
+            await tab.command("Input.dispatchKeyEvent", {
+                "type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13,
+                "text": "\r",
+            })
+            await tab.command("Input.dispatchKeyEvent", {
+                "type": "keyUp", "key": "Enter", "code": "Enter",
+            })
+            await tab.wait("byId('session-management-status').textContent==='Saved.' && "
+                           "!BrowserManagement.hasPending()")
+            assert await tab.js("byId('session-management').open && !reviewDialog.open && "
+                                "byId('session-name').value==='Renamed conversation'")
+            assert await tab.js("fetch(byId('session-export').href).then(async r => "
+                                "r.ok && (await r.text()).includes('Keep this conversation'))")
+            for width in [320, 390, 1000]:
+                await tab.command("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": 844, "deviceScaleFactor": 1, "mobile": width < 600,
+                })
+                assert await tab.js("(()=>{const a=byId('session-export').getBoundingClientRect(),"
+                                    "b=byId('session-archive').getBoundingClientRect();"
+                                    "return Math.abs(a.top-b.top)<1 && a.right<=b.left && "
+                                    "a.left>=0 && b.right<=innerWidth})()")
+                assert await tab.js("(()=>{const nodes=[...document.querySelectorAll("
+                                    "'.session-dialog-actions > .quiet')];"
+                                    "const signatures=nodes.map(node=>{"
+                                    "const s=getComputedStyle(node);"
+                                    "return JSON.stringify([s.height,s.padding,"
+                                    "s.fontSize,s.fontWeight,"
+                                    "s.lineHeight,s.gap,s.borderWidth,s.backgroundColor,"
+                                    "getComputedStyle(node.querySelector('svg')).width])});"
+                                    "return nodes.length===3 && new Set(signatures).size===1 && "
+                                    "nodes.every(n=>{const r=n.getBoundingClientRect();"
+                                    "return r.left>=0 && r.right<=innerWidth}) && "
+                                    "byId('session-delete').textContent==='Delete'})()")
+                if width >= 390:
+                    assert await tab.js("(()=>{const ys=[...document.querySelectorAll("
+                                        "'.session-dialog-actions > .quiet')].map(n=>"
+                                        "n.getBoundingClientRect().top);"
+                                        "return Math.max(...ys)-Math.min(...ys)<1})()")
+            await tab.command("Emulation.setDeviceMetricsOverride", {
+                "width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": True,
+            })
             await tab.click("#session-archive")
             await tab.wait("reviewDialog.open")
             assert await tab.js("byId('domain-review-summary').textContent.includes('new chat')")
@@ -91,7 +139,7 @@ async def verify(host, root, chrome):
             assert host.application.session_id == selected
             await tab.js("toggleSessions(true)")
             await tab.click("#archived-sessions")
-            await tab.wait("byId('session-list').textContent.includes('Keep this conversation')")
+            await tab.wait("byId('session-list').textContent.includes('Renamed conversation')")
             await tab.click("#session-list .session-row button:last-child")
             assert await tab.js("byId('session-archive').textContent.includes('Restore')")
             await tab.click("#session-archive")
@@ -101,10 +149,75 @@ async def verify(host, root, chrome):
             assert not host.application.memory.session_archived(original)
             assert host.application.session_id == selected
             await tab.click("#archived-sessions")
-            await tab.wait("byId('session-list').textContent.includes('Keep this conversation')")
+            await tab.wait("byId('session-list').textContent.includes('Renamed conversation')")
+            assert not tab.errors, tab.errors
+            class WaitingRuntime:
+                def __init__(self):
+                    self.entered = threading.Event()
+                    self.release = threading.Event()
+
+                def chat(self, *_args, **_kwargs):
+                    self.entered.set()
+                    assert self.release.wait(15)
+                    return {"role": "assistant", "content": "Background work finished"}
+
+                def close(self):
+                    pass
+
+            waiting = [WaitingRuntime(), WaitingRuntime()]
+            try:
+                first = host.application
+                first.agent.runtime = first.agent.ollama = waiting[0]
+                await tab.send("Background one")
+                await tab.wait("latest.active_turn_id && !byId('new-session').disabled")
+                assert waiting[0].entered.is_set()
+                await tab.click("#new-session")
+                await tab.wait("latest.session_id!==" + json.dumps(first.session_id))
+                second = host.application
+                second.agent.runtime = second.agent.ollama = waiting[1]
+                await tab.send("Background two")
+                await tab.wait("latest.active_turn_id")
+                assert waiting[1].entered.is_set() and first.active_turn_id()
+                await tab.js("refreshSessions()")
+                assert await tab.js("document.querySelectorAll('.session-running').length===2")
+                await tab.js("toggleSessions(true)")
+                await tab.click(f'[data-session-open="{first.session_id}"]')
+                await tab.wait("latest.session_id===" + json.dumps(first.session_id))
+                assert host.application is first and second.active_turn_id()
+                waiting[0].release.set()
+                await tab.wait("!latest.active_turn_id")
+                await tab.js("refreshSessions()")
+                assert await tab.js("document.querySelectorAll('.session-running').length===1")
+                await tab.js("toggleSessions(true)")
+                await tab.click(f'[data-session-open="{second.session_id}"]')
+                await tab.wait("latest.session_id===" + json.dumps(second.session_id))
+                waiting[1].release.set()
+                await tab.wait("!latest.active_turn_id")
+                second_id = second.session_id
+                await tab.js("refreshSessions()")
+                await tab.js("toggleSessions(true)")
+                await tab.click(
+                    f'.session-row:has([data-session-open="{second_id}"]) button:last-child'
+                )
+                assert await tab.js("!byId('session-delete').hidden")
+                await tab.click("#session-delete")
+                await tab.wait("reviewDialog.open")
+                assert await tab.js("byId('domain-review-summary').textContent"
+                                    ".includes('cannot be undone')")
+                await tab.click("#domain-review-confirm")
+                await tab.wait("!reviewDialog.open && !BrowserManagement.hasPending() && "
+                               "latest.session_id!==" + json.dumps(second_id))
+                assert not second.memory.load_session(second_id)
+                assert first.memory.load_session(first.session_id)
+            finally:
+                for runtime in waiting:
+                    runtime.release.set()
             assert not tab.errors, tab.errors
             print(json.dumps({"current_archive": "review/cancel/archive/fresh chat/"
                                                 "retry/restore passed",
+                              "conversation_dialog": "Enter rename/error/download/layout passed",
+                              "parallel_conversations": "two workers/switch/status passed",
+                              "saved_delete": "current unarchived conversation passed",
                               "width": 390, "console_errors": 0}))
     finally:
         process.terminate()
@@ -121,12 +234,15 @@ def main():
         root = Path(folder)
         config_module.CONFIG_DIR, config_module.DATA_DIR = root / "config", root / "data"
         cfg = Config(models={"coder": "fixture"})
-        app = _app(cfg.data_dir)
-        app.agent.workdir, app.agent.workspace = root, Workspace(root)
-        app.agent.tool_config = cfg
-        app.turns.bind_workspace(app.session_id, str(root), expected_revision=0)
-        host = LocalWebHost(app, library=LibraryManagement(cfg, root),
-                            staging_dir=root / "staging")
+        def factory():
+            app = _app(cfg.data_dir)
+            app.agent.workdir, app.agent.workspace = root, Workspace(root)
+            app.agent.tool_config = cfg
+            app.turns.bind_workspace(app.session_id, str(root), expected_revision=0)
+            return app
+
+        host = LocalWebHost(factory(), library=LibraryManagement(cfg, root),
+                            staging_dir=root / "staging", application_factory=factory)
         serving = threading.Thread(target=host.serve_forever, daemon=True)
         serving.start()
         try:

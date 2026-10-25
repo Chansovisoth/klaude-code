@@ -195,6 +195,14 @@ async def verify_connections(tab, host):
         "byId('connection-items').textContent.includes('fixture') && "
         "!BrowserManagement.hasPending()"
     )
+    assert await tab.js('''(()=>{
+      const group=byId("connections-state-filter"),buttons=[...group.children];
+      return !group.hasAttribute("data-segment-layout") && buttons.every(button=>{
+        const face=button.querySelector(".filter-chip-face"),style=getComputedStyle(face);
+        return button.getBoundingClientRect().height>=48 && face.getBoundingClientRect().height===32 &&
+          style.borderTopLeftRadius==="8px" && style.borderTopRightRadius==="8px";
+      }) && buttons.filter(button=>button.getAttribute("aria-pressed")==="true").length===1;
+    })()''')
     assert not host.library.cfg.mcp_servers_file.is_symlink()
     await tab.wait("!byId('connection-items').querySelector('.connection-toggle').disabled")
     assert await tab.js(
@@ -210,10 +218,17 @@ async def verify_connections(tab, host):
     )
     await tab.click("#connection-detail-close")
     await tab.js("""window.toggleFetch=fetch.bind(window);window.fetch=(input,options)=>
-      String(input).endsWith('/library/review') ? Promise.resolve(new Response(
-        JSON.stringify({error:{message:'Fixture toggle rejected'}}),{status:400})) :
-      toggleFetch(input,options);""")
+      String(input).endsWith('/library/review') ? new Promise(resolve=>{
+        window.releaseConnectionReview=()=>resolve(new Response(
+          JSON.stringify({error:{message:'Fixture toggle rejected'}}),{status:400}));
+      }) : toggleFetch(input,options);""")
     await tab.click("#connection-items .connection-toggle")
+    await tab.wait("typeof releaseConnectionReview==='function'")
+    assert await tab.js(
+        "byId('connection-items').querySelector('.collection-metadata').textContent.startsWith('Updating… ·') && "
+        "!byId('connection-items').querySelector('.integration-row-status').textContent"
+    )
+    await tab.js("releaseConnectionReview()")
     await tab.wait("!byId('connection-items').querySelector('.connection-toggle').disabled")
     assert await tab.js(
         "byId('connection-items').querySelector('.connection-toggle')"
@@ -364,10 +379,10 @@ async def verify(host, root, chrome, session, image_url):
             await tab.click("#nav-library")
             await tab.click("[data-section=outputs]")
             await tab.wait(
-                "!byId('generated-tools').hidden && !byId('image-generate').queryS"
-                "elector('button').disabled"
+                "!byId('generated-tools').hidden && !byId('image-add').disabled"
             )
             await tab.click("#image-add")
+            await tab.wait("!byId('image-generate').querySelector('button[type=submit]').disabled")
             await tab.click("#generation-tab-research")
             await tab.js(
                 "byId('research-question').value='Compare atomic transactions';byId('research-"
@@ -380,6 +395,7 @@ async def verify(host, root, chrome, session, image_url):
                 "ctions') && !BrowserManagement.hasPending()"
             )
             await tab.click("#image-add")
+            await tab.wait("!byId('image-generate').querySelector('button[type=submit]').disabled")
             await tab.js(
                 "[...byId('research-jobs').querySelectorAll('button')].find(button"
                 " => button.textContent === 'Stop').click()"
@@ -391,6 +407,7 @@ async def verify(host, root, chrome, session, image_url):
                 "erManagement.hasPending()"
             )
             await tab.click("#image-add")
+            await tab.wait("!byId('image-generate').querySelector('button[type=submit]').disabled")
             await tab.click("#generation-tab-image")
             await tab.click("#image-generate-close")
             for width, height in [(320, 568), (390, 844), (768, 1024), (1440, 900)]:
@@ -400,17 +417,16 @@ async def verify(host, root, chrome, session, image_url):
                 })
                 await tab.js("byId('image-add').focus()")
                 await tab.click("#image-add")
+                await tab.wait("!byId('image-generate').querySelector('button[type=submit]').disabled")
                 await tab.wait("byId('image-generate-panel').open")
                 assert await tab.js("document.activeElement === byId('image-prompt')")
                 geometry = await tab.js("""(() => {
                     const plus = byId('image-add').getBoundingClientRect();
-                    const filter = byId('file-options-toggle').getBoundingClientRect();
-                    const trailing = filter.width ? filter :
-                      byId('artifact-sort').getBoundingClientRect();
+                    const trailing = byId('artifact-query').getBoundingClientRect();
                     const dialog = byId('image-generate-panel');
                     const jobs = byId('image-jobs');
                     return {width:plus.width,height:plus.height,gap:plus.left-trailing.right,
-                      aligned:Math.abs(plus.bottom-trailing.bottom)<2,filterWidth:filter.width,
+                      aligned:Math.abs(plus.bottom-trailing.bottom)<2,filtersVisible:byId("file-option-fields").getClientRects().length>0,
                       jobsBelowForm:dialog.contains(jobs) &&
                         jobs.getBoundingClientRect().top >=
                         byId('image-generate').getBoundingClientRect().bottom,
@@ -418,7 +434,7 @@ async def verify(host, root, chrome, session, image_url):
                         document.documentElement.scrollWidth<=innerWidth};
                 })()""")
                 assert (geometry["width"] == geometry["height"] == 48
-                        and geometry["filterWidth"] in (0, 48) and geometry["aligned"]
+                        and geometry["filtersVisible"] and geometry["aligned"]
                         and 0 <= geometry["gap"] <= 8 and geometry["fits"]
                         and geometry["jobsBelowForm"]), (width, geometry)
                 if output := os.environ.get("KLAUDE_TEST_SCREENSHOTS"):
@@ -472,13 +488,11 @@ async def verify(host, root, chrome, session, image_url):
                 })
                 await tab.wait("!byId('image-generate-panel').open")
                 assert await tab.js("document.activeElement === byId('image-add')")
-                if geometry["filterWidth"]:
-                    await tab.click("#file-options-toggle")
-                    assert await tab.js("byId('file-option-fields').getClientRects().length > 0")
-                    await tab.click("#file-options-toggle")
+                assert await tab.js("byId('file-option-fields').getClientRects().length > 0")
 
             # Tab changes invalidate preparation for either form while keeping drafts.
             await tab.click("#image-add")
+            await tab.wait("!byId('image-generate').querySelector('button[type=submit]').disabled")
             for kind, form in [("image", "image-generate"), ("research", "research-create")]:
                 await tab.click(f"#generation-tab-{kind}")
                 await tab.js("""window.tabDraftFetch=fetch.bind(window);window.tabDraftDiscards=0;
@@ -501,6 +515,7 @@ async def verify(host, root, chrome, session, image_url):
 
             # Closing during preparation discards its late review.
             await tab.click("#image-add")
+            await tab.wait("!byId('image-generate').querySelector('button[type=submit]').disabled")
             await tab.js("""window.imageDialogFetch=fetch.bind(window);window.imageDialogDiscards=0;
               window.fetch=(input,options)=>{
                 if(String(input).endsWith('/library/discard')) imageDialogDiscards++;
@@ -517,6 +532,7 @@ async def verify(host, root, chrome, session, image_url):
             await tab.js("window.fetch=imageDialogFetch")
             assert await tab.js("!reviewDialog.open && !byId('image-generate-panel').open")
             await tab.click("#image-add")
+            await tab.wait("!byId('image-generate').querySelector('button[type=submit]').disabled")
             await tab.js("byId('image-generate').requestSubmit()")
             await tab.wait("reviewDialog.open && !byId('image-generate-panel').open")
             await tab.click("#domain-review-confirm")
@@ -526,6 +542,7 @@ async def verify(host, root, chrome, session, image_url):
             )
             if os.environ.get("KLAUDE_TEST_GENERATED_ONLY") == "1":
                 await tab.click("#image-add")
+                await tab.wait("!byId('image-generate').querySelector('button[type=submit]').disabled")
                 await tab.js("byId('image-jobs').scrollIntoView({block:'nearest'})")
                 assert await tab.js(
                     "byId('image-jobs').getClientRects().length > 0 && "
@@ -541,12 +558,14 @@ async def verify(host, root, chrome, session, image_url):
                 await tab.js("showView('library')")
                 await tab.wait("!byId('image-add').disabled")
                 await tab.click("#image-add")
+                await tab.wait("!byId('image-generate').querySelector('button[type=submit]').disabled")
                 await tab.click("[data-section=files]")
                 assert await tab.js("!byId('image-generate-panel').open && "
                                     "byId('image-add').hidden && !byId('file-add').hidden")
                 await tab.click("[data-section=outputs]")
                 await tab.wait("!byId('image-add').disabled")
                 await tab.click("#image-add")
+                await tab.wait("!byId('image-generate').querySelector('button[type=submit]').disabled")
                 await tab.js("byId('image-prompt').value='Private draft'")
                 await tab.click("#generation-tab-research")
                 await tab.js("byId('research-question').value='Private research draft'")

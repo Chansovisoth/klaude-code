@@ -92,3 +92,23 @@ class BrowserResults:
                                   artifact, revision, time.time() - LIFETIME,
                               )).fetchall()
         return [row["id"] for row in rows]
+
+    def clear_analysis(self, artifact: str, revision: int, result: str) -> None:
+        """Clear reviews through an exact displayed result, retaining later work and tags."""
+        if not isinstance(result, str) or not re.fullmatch(r"[a-f0-9]{32}", result):
+            raise ValueError("Choose an exact image review")
+        if not self.path.exists():
+            return
+        with self.database(write=True) as db:
+            db.execute("BEGIN IMMEDIATE")
+            anchor = db.execute("SELECT * FROM results WHERE id=?", (result,)).fetchone()
+            if anchor is None:
+                return  # Repeating a completed clear is harmless.
+            if (anchor["artifact"] != artifact or anchor["revision"] != revision
+                    or json.loads(anchor["payload"]).get("kind") != "analysis"):
+                raise ValueError("Image review changed")
+            rows = db.execute("SELECT id,payload FROM results WHERE artifact=? AND revision=? "
+                              "AND created<=?", (artifact, revision, anchor["created"])).fetchall()
+            db.executemany("DELETE FROM results WHERE id=?", [
+                (row["id"],) for row in rows if json.loads(row["payload"]).get("kind") == "analysis"
+            ])

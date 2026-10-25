@@ -1,0 +1,10 @@
+{
+  "package": "material",
+  "version": "3.2.4",
+  "source": "https://md3.io/components/tabs/",
+  "license": "MIT",
+  "files": {
+    "vendor/material-tabs.css": "947cf8e1aeea4a5a3d3f898782b23277177d790dd8a5e5e2996dc9b362f158ea",
+    "vendor/material-tabs-indicator.js": "4d09694f2f10dd074f35ebad3b63553cdde2fc9aed2e4c12097840ae2b0d177b"
+  }
+}

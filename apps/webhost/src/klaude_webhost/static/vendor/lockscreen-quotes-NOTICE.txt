@@ -1,0 +1,36 @@
+Klaude lockscreen quote collection
+
+Source: https://huggingface.co/datasets/geosfero/positivequotation-public-domain-quotes
+Pinned revision: 4c8151903a29476f8fc66b26237c5911e1199835
+data.json SHA-256: f9e8db216cc7e83dbb21dc24735d2d828a6047c709381ed4240e5e049e2bd7c4
+
+19 unmodified English proverbs selected from the 30 reviewed records.
+Every selected row retains all original attribution and provenance fields.
+Separately, 130 local Easter eggs include user supplied lines and
+44 original Klaude microcopy lines. They are not dataset records or
+attributed to any game, film, artist or meme creator. No third-party
+assets are included. All entries and their origin metadata are stored in
+lockscreen-quotes.json.
+Thomas Preston is the source compiler, not the author of these proverbs.
+Hugging Face license metadata is 'other'. The upstream LICENSE file is
+empty; this collection does not claim CC0 or a universal public-domain
+license. The source edition is marked public domain in the USA.
+The fallback 'Make a little room for a new idea.' is original Klaude copy
+under Klaude's MIT license; it is not part of the source collection.
+
+Dataset card: https://huggingface.co/datasets/geosfero/positivequotation-public-domain-quotes/blob/4c8151903a29476f8fc66b26237c5911e1199835/README.md
+Dataset card SHA-256: df6dc3cec4e1e1f849341e8c6759d78f0aae77d8e9d1d70c7863cfccdf424b12
+
+The dataset card requests that attribution, source entry numbers and
+source URLs be retained for provenance. These fields are preserved in
+lockscreen-quotes.json and its bundled copy. The quote container retains
+attribution in an accessible, visually hidden cite element, source title
+and entry in its tooltip, and source URL in its cite attribute.
+
+Book: A Dictionary of English Proverbs and Proverbial Phrases
+Compiler: Thomas Preston
+Source catalog: https://www.gutenberg.org/ebooks/39281
+Source edition status: Public domain in the USA. Other jurisdictions
+and rights may differ; the dataset does not claim a universal license.
+Only the underlying proverb text and factual provenance are included;
+the Gutenberg eBook, trademarked wrapper and dataset card are not copied.

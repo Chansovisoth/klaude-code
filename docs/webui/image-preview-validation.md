@@ -8,6 +8,14 @@ pre-edit implementation plan are in [image-preview-plan.md](image-preview-plan.m
 
 ## Architecture and behavior
 
+Browser previews, Library thumbnails and newly stored chat thumbnails preserve
+alpha. Their image-specific CSS backdrops are transparent. The decoder's default
+model preparation still composites onto white. Focused preparation/attachment
+tests passed (30), including exact transparent and semi-transparent pixel checks
+for cached thumbnails and previews. Existing host caches need a restart to use
+the updated browser derivative path. Previously flattened, thumbnail-only legacy
+attachments cannot recover alpha without their original image.
+
 The existing native `artifact-detail` dialog, file-detail API, image derivatives,
 gallery ordering/page navigation and fixed reviewed-operation worker remain the
 integration points. A local presentation/gesture closure in `library.js` owns
@@ -60,12 +68,14 @@ The existing secure/LAN clipboard helper is reused inside the active dialog.
 
 Source links did not exist in the model. The additive private `artifact_links`
 table is created only on writes; legacy stores return an empty link without
-migration during browsing. HTTP(S)-only values have a 2048-character bound and
-reject credentials, whitespace/control characters, backslashes and invalid ports.
-The fixed `source_link` review validates and captures the normalized value;
-the owned worker rechecks artifact revision and saves under the existing resource
-fence. Links are never fetched, do not replace the private origin, and are removed
-with permanent artifact deletion. The browser detail DTO alone adds `source_url`;
+migration during browsing. Source notes have a 2048-character bound, support line breaks and reject unsafe
+control characters. Plain text is rendered literally; only valid HTTP(S) URLs
+without credentials become clickable links.
+The owner-initiated `source_link` operation validates and captures the normalized
+value, then submits without a confirmation dialog; the owned worker rechecks the
+artifact revision and saves under the existing resource fence. Links are never
+fetched, do not replace the private origin, and are removed with permanent artifact
+deletion. The browser detail DTO alone adds `source_url`;
 inventory reads retain their earlier shape. Older hosts disable link editing with
 restart guidance.
 
@@ -213,3 +223,19 @@ unsupported. The existing manual-tag and image-input limits are unchanged.
   and `/tmp/klaude-preview-header-files.json`.
 - Refresh the browser to load these static asset changes; no host restart is
   required.
+
+
+## Inspector sidebar toggle
+
+The separate Expand image preview toolbar action is removed. The icon-only
+sidebar toggle sits immediately before File options in the inspector heading.
+Closing the inspector gives the image its full stage. Both header actions stay
+in the inspector; a Details button in the bottom picture toolbar becomes
+available while collapsed and reopens the sidebar. One existing
+details-state path controls sidebar visibility, phone-sheet inertness, focus and
+aria-expanded/labels. The toolbar retains zoom, fit and download. The old
+image-expanded class and expansion-specific code are removed.
+
+The source-editor browser fixture checks toggle order, fixed sidebar placement,
+focus return to the bottom Details button and reopening at 1440px/390px. Library browser checks use the same
+toggle in image geometry and Escape/close coverage.

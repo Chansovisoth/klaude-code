@@ -54,6 +54,17 @@ def vision_lab(tmp_path):
         def log_message(self, *args):
             pass
 
+        def do_GET(self):
+            if self.path != "/api/tags":
+                self.send_error(404)
+                return
+            body = json.dumps({"models": [{"name": name, "size": 1024}
+                                          for name in ("vision", "other", "text")]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_POST(self):
             data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             calls.append((self.path, data))
@@ -344,3 +355,18 @@ def test_vision_allows_delayed_headers_within_advertised_request_deadline(vision
         assert result["text"] == "Three colored rectangles."
     finally:
         client.close()
+
+
+def test_temporary_model_does_not_inherit_global_fallbacks_or_bypass_disable(vision_lab):
+    cfg, connection, _, item, calls, mode, _, select = vision_lab
+    select("vision_fallbacks", (connection.model_ref("other"),))
+    prepared = prepare(cfg, item["id"], item["revision"], "Describe",
+                       reference=connection.model_ref("vision"))
+    assert len(prepared["models"]) == 1
+    mode["value"] = "503"
+    with pytest.raises(httpx.HTTPStatusError):
+        analyze(cfg, prepared)
+    assert [body["model"] for path, body in calls if path == "/api/chat"] == ["vision"]
+    select("vision_enabled", False)
+    with pytest.raises(ValueError, match="Enable Vision"):
+        analyze(cfg, prepared)

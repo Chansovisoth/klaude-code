@@ -45,7 +45,8 @@ async def verify(host, service, root, chrome, image, mode, calls, _set_default):
             })
             await tab.command("Page.navigate", {"url": host.origin})
             await tab.wait("typeof byId!=='undefined' && !byId('local-access').hidden")
-            await tab.js('byId("login-password").value=' + json.dumps(
+            await tab.js('byId("login-username").value="admin";'
+                        'byId("login-password").value=' + json.dumps(
                 host.accounts.initial_password()
             ) + ';byId("account-login").requestSubmit()')
             await tab.wait("latest?.session_id && authenticated")
@@ -305,9 +306,16 @@ async def verify(host, service, root, chrome, image, mode, calls, _set_default):
                       return {width:innerWidth,overflow:s.scrollWidth>s.clientWidth,
                         form:!byId('artifact-source-form').hidden &&
                           !byId('artifact-tag-editor').hidden,
-                        safe:document.documentElement.scrollWidth<=innerWidth};
+                        safe:document.documentElement.scrollWidth<=innerWidth,
+                        chips:[...byId('artifact-tag-list').querySelectorAll('.input-chip')]
+                          .every(chip=>{const face=chip.querySelector('.filter-chip-face');
+                            const style=getComputedStyle(face),remove=chip.querySelector('button');
+                            return face.getBoundingClientRect().height>=32 &&
+                              style.borderTopLeftRadius==='8px' && style.fontSize==='14px' &&
+                              (!remove || remove.getBoundingClientRect().height>=48)})};
                     })()""")
-                    assert not state["overflow"] and state["safe"] and state["form"], state
+                    assert (not state["overflow"] and state["safe"] and state["form"]
+                            and state["chips"]), state
                     await tab.js("byId('artifact-information').querySelector("
                                  "'.preview-information-scroll').scrollTop=0")
                     await screenshot(f"metadata-{theme}-{width}.png")

@@ -1,0 +1,1074 @@
+{
+  "sources": {
+    "lobe.tgz": {
+      "url": "https://registry.npmjs.org/@lobehub/icons-static-svg/-/icons-static-svg-1.98.0.tgz",
+      "sha256": "ceea351dc1c4b8548dd20692152163b61a3a18f78cb0a7d130fa589bc2e624e6"
+    },
+    "simple.tgz": {
+      "url": "https://registry.npmjs.org/simple-icons/-/simple-icons-16.35.0.tgz",
+      "sha256": "20ebead4f6bc93464812a5e260d19fc4d84772e5eeff69a6fbea263ca2441c5f"
+    },
+    "llamacpp-svg.txt": {
+      "url": "https://raw.githubusercontent.com/ggml-org/llama.cpp/78a8ae14be559b45f5f13ddee82c188b683d5d8d/media/llama1-icon-transparent.svg",
+      "sha256": "611af871c3ba331afa3350d4c94e546607ccdd952c6dfd928dc94dc1e0f0b3ba"
+    },
+    "llamacpp-license.txt": {
+      "url": "https://raw.githubusercontent.com/ggml-org/llama.cpp/78a8ae14be559b45f5f13ddee82c188b683d5d8d/LICENSE",
+      "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
+    },
+    "gpt4all-svg.txt": {
+      "url": "https://raw.githubusercontent.com/nomic-ai/gpt4all/b666d16db5aeab8b91aaf7963adcee9c643734d7/gpt4all-chat/icons/gpt4all_transparent.svg",
+      "sha256": "e49a7fbae601a35a51934b3c27f4e7f207d8488e639aa34a26b975b80b79890d"
+    },
+    "gpt4all-license.txt": {
+      "url": "https://raw.githubusercontent.com/nomic-ai/gpt4all/b666d16db5aeab8b91aaf7963adcee9c643734d7/LICENSE.txt",
+      "sha256": "e06bec576945c1ab4cca000d6b2fe35987c2267a0eaf292bc58bd16a54000e1b"
+    },
+    "nomic-svg.txt": {
+      "url": "https://raw.githubusercontent.com/nomic-ai/gpt4all/b666d16db5aeab8b91aaf7963adcee9c643734d7/gpt4all-chat/icons/nomic_logo.svg",
+      "sha256": "2d81ee79b0636878c3ab93372ab30658e4369fe8a6234c4b8fa387ce8867b16b"
+    },
+    "lobe-license.txt": {
+      "url": "https://raw.githubusercontent.com/lobehub/lobe-icons/86b3f06ad9a4cc57011a56e5a7d3a5d4f1e8d835/LICENSE",
+      "sha256": "add9d7531d1b21646317a8958e38fc727506fa39d24bdecb44154d943c82753a"
+    }
+  },
+  "packages": {
+    "lobe": {
+      "name": "@lobehub/icons-static-svg",
+      "version": "1.98.0",
+      "license": "MIT",
+      "integrity": "sha512-soyLV2g74ujV+9BBymPwXrorJ+kQsEz7WvVd4uzhN2wZnd4Jbyc2FsmyjZBosGaufOirCs1RGJQlLe6l9bjwLg=="
+    },
+    "simple": {
+      "name": "simple-icons",
+      "version": "16.35.0",
+      "license": "CC0-1.0",
+      "integrity": "sha512-TCfl/2+GTrx0nCo4pEWGvxhOb8c6NsqOU1OpwjtF4lwJAthB8IYVD0fuIMjLMg6JFuG1YBO0t1iETQqJLqkoJA=="
+    }
+  },
+  "icons": {
+    "ai2": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/ai2.svg",
+      "license": "MIT",
+      "source_sha256": "1f9b7f91cb1f89401b07f5aa0adb20217bf6b1b8e47db6120654fda7ae20b319",
+      "sha256": "45ed7bc6033b6bf6360baaa0f41ae780c0d6296cc11f4cecabf6f47b8040c00d",
+      "package": "lobe",
+      "color": "ai2-color"
+    },
+    "ai2-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/ai2-color.svg",
+      "license": "MIT",
+      "source_sha256": "78a7258e6b0b182f312d84c3b48a60539857fc001302ab4583ba9690624aa258",
+      "sha256": "861ae4d691c062670b73e0b400dffc3bf8ef05f0608215bae683e7b6ebbfcbe5",
+      "package": "lobe"
+    },
+    "ai21": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/ai21.svg",
+      "license": "MIT",
+      "source_sha256": "6c80f2c0d8b11d1bee179666049b00e0ab7f58f5ee8c307ca0dd3327bb49f282",
+      "sha256": "7b157aa46935c4e321cde5ad081f13afa76791d96bbf5cb2db120757e4cdc28d",
+      "package": "lobe"
+    },
+    "alibaba": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/alibaba.svg",
+      "license": "MIT",
+      "source_sha256": "9ecd942970e4616933c9e1c014f58ad31ea4c1775efefc4f41b55ea166f443ee",
+      "sha256": "8fb245ddc2e4bc403ffc35b61cf620da0db81cdc14d027e587b3ffd5cbe312f8",
+      "package": "lobe",
+      "color": "alibaba-color"
+    },
+    "alibaba-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/alibaba-color.svg",
+      "license": "MIT",
+      "source_sha256": "48ee796c5b1da5f5f11dbd70c5c64a3f7efcb9eeb9022ae687d81fc813e942ee",
+      "sha256": "6a23b504974031d94031e30b32a83bb32e0133f81651a6078f4f7a5970b58b47",
+      "package": "lobe"
+    },
+    "anthropic": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/anthropic.svg",
+      "license": "MIT",
+      "source_sha256": "e833fdfa7e7187a86a05b870925067556a506dcd4239089aed73e1e58c9366a3",
+      "sha256": "f34e91ef63b22bc50a7438ccbf61b4c1373a095b50dddd773f9bd4f002f50609",
+      "package": "lobe"
+    },
+    "apple": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/apple.svg",
+      "license": "MIT",
+      "source_sha256": "100637681febc38512bf8d43f7d5f79f2aa8caead15b256cd28b378b053fca69",
+      "sha256": "d6d2b692ddef446a7812317c7ab475135aa354373f68e2f8fd11e6817601624e",
+      "package": "lobe"
+    },
+    "arcee": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/arcee.svg",
+      "license": "MIT",
+      "source_sha256": "3f93dc04611941da19291fb663f935a85f6b1ac44af6449c7b99293df180cc03",
+      "sha256": "32eee44d18317c5b9e0258c577653abdd0c4dec939f0a610253b85b0c63dce62",
+      "package": "lobe",
+      "color": "arcee-color"
+    },
+    "arcee-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/arcee-color.svg",
+      "license": "MIT",
+      "source_sha256": "41a8ed8278ec89d6a12ba5c96172ee30d6fadc93474792a8c95732ad7466233e",
+      "sha256": "38eb077fe4363dac455e6b906544784e678b1b343d499de879b7d2736f2a95f7",
+      "package": "lobe"
+    },
+    "aws": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/aws.svg",
+      "license": "MIT",
+      "source_sha256": "f73f2506defea5df3b064bcea998339e183c4f979b2bb4af4fcbf42c29ae151c",
+      "sha256": "995e2893ca02c0f6df4f9489536092c0bda67b97c99baed6aeb4aed9342bcf13",
+      "package": "lobe",
+      "color": "aws-color"
+    },
+    "aws-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/aws-color.svg",
+      "license": "MIT",
+      "source_sha256": "b23f044479fe5c80f7df0a9515f969e5ea710c5f40d26dffa08969a0151731f3",
+      "sha256": "2a30387393109e8996d84b58b498a6915bed400955d6d2770b578a7efaaf6cf5",
+      "package": "lobe"
+    },
+    "aya": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/aya.svg",
+      "license": "MIT",
+      "source_sha256": "23ead55cf937fa3fdbe8a2c002a11283af2a7b29f36330db02cc71368e918d45",
+      "sha256": "0d977f3c70ae9d75971a8a27994b4502e5323e4ff564f3234be02170cab73cad",
+      "package": "lobe",
+      "color": "aya-color"
+    },
+    "aya-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/aya-color.svg",
+      "license": "MIT",
+      "source_sha256": "b6b5e362acbac104433a32f85a5662a712eb98c7ff13143b27cc834f8ffa054e",
+      "sha256": "901c478a8e84ecd9d0b0f00a77afbda48341e854a48f67223f83350dd2e5236f",
+      "package": "lobe"
+    },
+    "azure": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/azure.svg",
+      "license": "MIT",
+      "source_sha256": "a48fa106b32093acac4cb858df39c4ee6bf1049d2ecec92ad556190f7c4d9a0e",
+      "sha256": "73b15066ffbf43b61a70a351ffb0e656d306bc485209ae4d614e9aff02aa0d64",
+      "package": "lobe",
+      "color": "azure-color"
+    },
+    "azure-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/azure-color.svg",
+      "license": "MIT",
+      "source_sha256": "abc639d094593943c1b201270f4903c74d02d2e26acf26abf592a29c222c5181",
+      "sha256": "b6e16b27706e79647c76b2117e0a953e2b33e4ca513403be61a42022e0a90eb3",
+      "package": "lobe"
+    },
+    "baai": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/baai.svg",
+      "license": "MIT",
+      "source_sha256": "9750791f6dd17af093c6682e03761667cab7e0f08566c79b3f54759b5f46d909",
+      "sha256": "c5ac81e1e58fe5cda6da93b5843ce502e927f0b430c8e75e48f2cb26db601d62",
+      "package": "lobe"
+    },
+    "baichuan": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/baichuan.svg",
+      "license": "MIT",
+      "source_sha256": "6f2640b1b3eca4bd3758bb823b1a2df0327d286959706ba14bb564de11ae0ffb",
+      "sha256": "209c146302cf78d818241acab466a8748ab0700aadf4bda07341292b632d90bd",
+      "package": "lobe",
+      "color": "baichuan-color"
+    },
+    "baichuan-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/baichuan-color.svg",
+      "license": "MIT",
+      "source_sha256": "7d49311206402734850ed9dc112759780429bb363dcee31eccb5a92f428532a6",
+      "sha256": "fcca2fffb36e3fd8d9816b67cc67c9834421e026c1c349b22eb8a58899ac73fc",
+      "package": "lobe"
+    },
+    "baidu": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/baidu.svg",
+      "license": "MIT",
+      "source_sha256": "6eb0cf7d291162b803e0440e61b5a165fc9c36af61b83c8c90d69f5811177f65",
+      "sha256": "ebf8bce6364d09553b86d87a448b961e5332f268dce485cd061cc6709f08db6d",
+      "package": "lobe",
+      "color": "baidu-color"
+    },
+    "baidu-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/baidu-color.svg",
+      "license": "MIT",
+      "source_sha256": "1059750a2069aec6080ff48732931e87a99bd3d22db3e8471cebe255b6014b75",
+      "sha256": "ea6c8b665ae409641e3aa64b1f7109bde749267276f7d74579bf81042fb91929",
+      "package": "lobe"
+    },
+    "baseten": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/baseten.svg",
+      "license": "MIT",
+      "source_sha256": "d560883f6df500c1290b2fb2018836d853c72697c1fc252793538fabf53ff28d",
+      "sha256": "a181eeaa354f79b4d8a3a18539330f9018cb31af6131cc1b06addc2c46da361d",
+      "package": "lobe"
+    },
+    "bedrock": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/bedrock.svg",
+      "license": "MIT",
+      "source_sha256": "b07f07bb6b77a1ee83916430250dc9adfc799ec43fbc5932947af099bcfcb9f9",
+      "sha256": "edea227336eb63ebf132039080b8a485747d89e65a0e2648173dc740532ff2c2",
+      "package": "lobe",
+      "color": "bedrock-color"
+    },
+    "bedrock-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/bedrock-color.svg",
+      "license": "MIT",
+      "source_sha256": "a149a5678ce2b5d821759aabca7b815867027a8231a76723b3673580e8177a60",
+      "sha256": "5926e009da6a5c67373ba163e8e81d6bc83ca77417761a55b197c3c42e97c79f",
+      "package": "lobe"
+    },
+    "bfl": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/bfl.svg",
+      "license": "MIT",
+      "source_sha256": "c08f545c77c40f2447fb91d75f78db81dc2aeebb7291bb51ad2a982276219dc7",
+      "sha256": "05c727a3795efce349f0302ec64b6f8f0c2dcb55a89462bcf6c208af46f5f55d",
+      "package": "lobe"
+    },
+    "bytedance": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/bytedance.svg",
+      "license": "MIT",
+      "source_sha256": "f7ae0a574bd2e28b17258e6e65061c564f764d807cba65d6d1013f50cbfdd7f5",
+      "sha256": "daa7d586aaf266608f6075cafd6563c6e1832ce6445c3d9c0243d6c57ee5f037",
+      "package": "lobe",
+      "color": "bytedance-color"
+    },
+    "bytedance-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/bytedance-color.svg",
+      "license": "MIT",
+      "source_sha256": "3d37647be262c79b044e293bb1a4993202537e9f9ffdbd2bbe7e9fc5378d1005",
+      "sha256": "f118b85ba24f2d81a71dca5f2d18ef0c94b3fa36d63e2a9a4a6153fee0bf86a0",
+      "package": "lobe"
+    },
+    "cerebras": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/cerebras.svg",
+      "license": "MIT",
+      "source_sha256": "05af9593eca3fefdb30c5ad042040f008beea2b27e0a6b7315c319492f7a44ff",
+      "sha256": "0233d7a98efe7c3d404d0ff590d0a6c2d86a90b2e422b922aa564b4acf930362",
+      "package": "lobe",
+      "color": "cerebras-color"
+    },
+    "cerebras-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/cerebras-color.svg",
+      "license": "MIT",
+      "source_sha256": "355c2225284cd06c9cf4246110b60cb21bc86039872981e1be6bb82deec2ffa7",
+      "sha256": "72a8edddbb7a04066a44279a5d0edf43dca60496fc98b15726ee1c3c6188357f",
+      "package": "lobe"
+    },
+    "chatglm": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/chatglm.svg",
+      "license": "MIT",
+      "source_sha256": "9dbb651f279cbd5e4197c5ed27c30336411f5a3496261f35f6bf04b324b6676f",
+      "sha256": "701843a5f34f81861c6ff3573297fdeee21fca87ca4dd930a2efc2fe3e1be707",
+      "package": "lobe",
+      "color": "chatglm-color"
+    },
+    "chatglm-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/chatglm-color.svg",
+      "license": "MIT",
+      "source_sha256": "6e935f6ccad7a776edef259b33bbbfe5b51d6486318d4a0f423708ffe2a27287",
+      "sha256": "ba88bc344b88af72dfc4691363b1e8004bebc854c12d8391344f73cd57e585bf",
+      "package": "lobe"
+    },
+    "claude": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/claude.svg",
+      "license": "MIT",
+      "source_sha256": "365a70a7eb3956d9b9a96086058ebe04e1dbd8e291a756ad964e8a283fbd6d38",
+      "sha256": "fbfec5f4d3e691ffcdd232dc045fdf0e075f8b3557e34ba15ea3ba7568ad2476",
+      "package": "lobe",
+      "color": "claude-color"
+    },
+    "claude-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/claude-color.svg",
+      "license": "MIT",
+      "source_sha256": "a3101f3047a119aa11825ad9369510f0c472428c8c52d420e31bc62db44a8364",
+      "sha256": "9ea0663cc430c432d919a254b2cd0a95de539af0ee5abd72a45fd4a0be4dd9b6",
+      "package": "lobe"
+    },
+    "cohere": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/cohere.svg",
+      "license": "MIT",
+      "source_sha256": "72851dd36d6ab017f535202744765eead8f99cfb5ced77e1840bfdb70db7a85c",
+      "sha256": "e65c6327e0b5c214018db5b69e37938b3990385be4babbdbd755e0321068a00f",
+      "package": "lobe",
+      "color": "cohere-color"
+    },
+    "cohere-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/cohere-color.svg",
+      "license": "MIT",
+      "source_sha256": "84d0ee3cbe66f030e5a18cb2c86da9166ab2137c7a98781693bb1fbf31e392b9",
+      "sha256": "df992c8146ccfaa42623b97806d79a189ea3ee8ec8a5bf804583bdaf7a4d96aa",
+      "package": "lobe"
+    },
+    "commanda": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/commanda.svg",
+      "license": "MIT",
+      "source_sha256": "514f6838307425456dc293f16782b455f6bfbde887337e1519c69133c73fed89",
+      "sha256": "0e08779bd2381af8c17f4dd12cb8116a778259b4a5d5e805be7e77911384021d",
+      "package": "lobe",
+      "color": "commanda-color"
+    },
+    "commanda-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/commanda-color.svg",
+      "license": "MIT",
+      "source_sha256": "d4e4671d08825009f4343d92225dea51bf81535fdc25bd943af366d6a43ce57c",
+      "sha256": "7b7640210773802b552c1326a46e6284051750a54c7984344b451eadc641c613",
+      "package": "lobe"
+    },
+    "databricks": {
+      "source": "simple-icons@16.35.0/package/icons/databricks.svg",
+      "license": "CC0-1.0",
+      "source_sha256": "454aa3efdb318c655e3da2ea844e3577a9c47a20e24d20fff6489362176e5fe4",
+      "sha256": "254a21f5b85eba1da6519236e7faa334e8712959c77eb25a9308fb3465d8854d",
+      "package": "simple"
+    },
+    "dbrx": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/dbrx.svg",
+      "license": "MIT",
+      "source_sha256": "bf3827d806b5b3b6808842556bff4389d82213bd50f8ffa33363c0e0a25ba489",
+      "sha256": "5e54b8f8b8a07669da41c543145da8ae2d7451de21ad1d48deec92d41e9119dd",
+      "package": "lobe",
+      "color": "dbrx-color"
+    },
+    "dbrx-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/dbrx-color.svg",
+      "license": "MIT",
+      "source_sha256": "94e4d31906f8d9755c627ff11b1a0ec0a586a2221563a5b7832c9f4e5f68c6f7",
+      "sha256": "2009ebd99acdedb92d979846e319c8620083e852ab84842bd4ecf8e676cb1947",
+      "package": "lobe"
+    },
+    "deepinfra": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/deepinfra.svg",
+      "license": "MIT",
+      "source_sha256": "2a20be86e90b3c2085d5b3213f52c75e4f0041b239d6140475f5809863d45392",
+      "sha256": "5a95904111d954b96bb590ea9745e26922ef432caca3fa5691d7a477bdeb0886",
+      "package": "lobe",
+      "color": "deepinfra-color"
+    },
+    "deepinfra-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/deepinfra-color.svg",
+      "license": "MIT",
+      "source_sha256": "bfc78853fe658f6446651d03218f3e809215fd7cb3bce841a6526de383286544",
+      "sha256": "572f835fc42b4d208e32e01cfe35e9237d21a9c432146cfa007462f9e2c10f4d",
+      "package": "lobe"
+    },
+    "deepseek": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/deepseek.svg",
+      "license": "MIT",
+      "source_sha256": "8f9443e351b6dacce71871790201b799d92e8bf96a45ef79aeb5e9bf4db423e2",
+      "sha256": "79c6d125e59801beb4a5829b56fa411407eb0500c26f3b11faa124e7c7dfe4c3",
+      "package": "lobe",
+      "color": "deepseek-color"
+    },
+    "deepseek-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/deepseek-color.svg",
+      "license": "MIT",
+      "source_sha256": "deba5f98a5c1796e20fcac3149bcd7eb8a32f0bdd04d048819400b1f28bd1439",
+      "sha256": "7bdcbb2439c5bf1f4930ecae086bd9afd162f2d9af7750de751c701246a9f7f3",
+      "package": "lobe"
+    },
+    "dolphin": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/dolphin.svg",
+      "license": "MIT",
+      "source_sha256": "83fbb4834e9b3d442d43b8ac57b83e76d5556b6f31b7d70014e6b45421aeb2af",
+      "sha256": "bb9e2d0a6ad648eccb9e603d6b1ecfb015a610542b0803f0e11d29e05a27a73a",
+      "package": "lobe"
+    },
+    "doubao": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/doubao.svg",
+      "license": "MIT",
+      "source_sha256": "cbda61929dbe7263a969d34ca8a022226d45d20fddfe333c1608abcb52de7b52",
+      "sha256": "891b79b613ed20be4ad6fd5d4f3295a85474388693c0352a16799a088d2352f9",
+      "package": "lobe",
+      "color": "doubao-color"
+    },
+    "doubao-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/doubao-color.svg",
+      "license": "MIT",
+      "source_sha256": "3cd31ba03ae44b8c29561597a3b863809efecb13fcdfd08407a086df86a69b55",
+      "sha256": "dc395973fb72e77cfcfb77fa13fa1dec5b76107cfc9a159a05c4724ec2ebf5b8",
+      "package": "lobe"
+    },
+    "fireworks": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/fireworks.svg",
+      "license": "MIT",
+      "source_sha256": "9991ab2a8331096d3f408e07a5f2e1cb54c369143dd9fc7a97f6458478b33fe3",
+      "sha256": "99f7872af4c04202a96d78510a0ffcb34d412c0b0b056c20e992aaf0defd71a3",
+      "package": "lobe",
+      "color": "fireworks-color"
+    },
+    "fireworks-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/fireworks-color.svg",
+      "license": "MIT",
+      "source_sha256": "f1c4782b86bc03a36323fd68ad6cc376c6b2ebe57b701cc958ebd6b8d37effd6",
+      "sha256": "e250d7dff11e3ec3291963df25e2bc7f9613dd46fff45af7a59f01fb70696a2c",
+      "package": "lobe"
+    },
+    "flux": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/flux.svg",
+      "license": "MIT",
+      "source_sha256": "c7d557466f39a895b1cd0d233a64c092ef61ba052160af7db20af37464a9138a",
+      "sha256": "6ce653f22006b2fcd3b567ae41eb0b7cfc8189e276b9782f5eab653b42d50c4a",
+      "package": "lobe"
+    },
+    "gemini": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/gemini.svg",
+      "license": "MIT",
+      "source_sha256": "87d5b3c4be75a66f54c1936482a263df68185545b741129badd1b7c2449c18d3",
+      "sha256": "a03280a887ed353b24d4b05ee061d23c7760aa52ac8bbcfd7985587515294605",
+      "package": "lobe",
+      "color": "gemini-color"
+    },
+    "gemini-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/gemini-color.svg",
+      "license": "MIT",
+      "source_sha256": "8ab0a9bafec11f7e69bcb9fc4ffd8f1bc927d1ddcbbb6ff36dee5ae8b5a9d602",
+      "sha256": "9d0cb4b9ac2e37e2e314ddcd0f31f2c67d4c6dfd35364e6163feb07875c533f3",
+      "package": "lobe"
+    },
+    "gemma": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/gemma.svg",
+      "license": "MIT",
+      "source_sha256": "8f9b74f6bbbf17203da8d81c3a4bb8750dbf13afe3ab4c1d482e84be62cd03a6",
+      "sha256": "060d708036734d36c5378f2c4663eab5098c4008fa893ca4d9d406ab539cb255",
+      "package": "lobe",
+      "color": "gemma-color"
+    },
+    "gemma-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/gemma-color.svg",
+      "license": "MIT",
+      "source_sha256": "8cdc48e35113d2f76f602fc93977ce8b8eebe41bc66a65f532ed9c89f6a68e2d",
+      "sha256": "f6539b96b43659ecb7929a838876007efab1bde7c0765c36b5159b8413e1f383",
+      "package": "lobe"
+    },
+    "glmv": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/glmv.svg",
+      "license": "MIT",
+      "source_sha256": "86be708f61eb7bddabe2ed6df35c215d34b66ec15f47eb12959fbd82febd53cc",
+      "sha256": "4b806d0b0be25294e109315bf2404c9f92d6b4f0f3a4cf445e729756bcb2b73f",
+      "package": "lobe",
+      "color": "glmv-color"
+    },
+    "glmv-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/glmv-color.svg",
+      "license": "MIT",
+      "source_sha256": "52c829ec60d4e60ce20c4d20a0fb976bcceacd7518cbacef39c192834d1d5958",
+      "sha256": "1ce72376912dbe8e058f79ae0ac13e4a18192aa5120f21bc6fa5ae223e1f37ce",
+      "package": "lobe"
+    },
+    "google": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/google.svg",
+      "license": "MIT",
+      "source_sha256": "c4bb45d362cb0a98b33b1f2fb424db2a5cd95a90e1043ae4e387de81a5e64951",
+      "sha256": "901a0f2c7860ea6d9081bc2660cf8f8ddf4b8cf2b7dac5c1ef81d4aa655acb12",
+      "package": "lobe",
+      "color": "google-color"
+    },
+    "google-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/google-color.svg",
+      "license": "MIT",
+      "source_sha256": "4e6aa8892ef15a6b431f40f2c9045979bf7e2357524e7bbb89b353cf4f32a5ac",
+      "sha256": "a8d8b236fb661ce14843a0e2550dbf0774ac50fe4c10beb0812bf7b1620bf299",
+      "package": "lobe"
+    },
+    "gpt4all": {
+      "source": "https://raw.githubusercontent.com/nomic-ai/gpt4all/b666d16db5aeab8b91aaf7963adcee9c643734d7/gpt4all-chat/icons/gpt4all_transparent.svg",
+      "license": "MIT",
+      "source_sha256": "e49a7fbae601a35a51934b3c27f4e7f207d8488e639aa34a26b975b80b79890d",
+      "sha256": "2ad862b89fa55d3878cc2f22eaaf3325d6a535205c75aed76023f0ba940f67cf",
+      "license_file": "gpt4all-LICENSE.txt"
+    },
+    "grok": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/grok.svg",
+      "license": "MIT",
+      "source_sha256": "9175fc90c22655160231976c849f25a03b888d7cc0e04c5f1b987b659bb07c95",
+      "sha256": "32cc15afe06de50fb3a852959199d756a8549d6583aa609aa65b4ec8dd1d26cc",
+      "package": "lobe"
+    },
+    "groq": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/groq.svg",
+      "license": "MIT",
+      "source_sha256": "078d5cf6e7a54905040c15ddacf5ea33c13042fe7739e820cedc2096e4406651",
+      "sha256": "d4bfd7d9c9cfd364c7fccc6fb7156eab4d3ced299543703deb671087a0cb97eb",
+      "package": "lobe"
+    },
+    "huawei": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/huawei.svg",
+      "license": "MIT",
+      "source_sha256": "edc88427effc3f4459f15f2f134a95d90609d630fef68b67639288bfc3dbc34d",
+      "sha256": "6be9c9fdbadb0bc3f283e1cbbb3afa95ee53c3963de1c0eab1f0f9bf93d45b0b",
+      "package": "lobe",
+      "color": "huawei-color"
+    },
+    "huawei-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/huawei-color.svg",
+      "license": "MIT",
+      "source_sha256": "ca9af4229ba3d538811cad7939b5f3f9edc87ec9448eae579506c659cd133d4a",
+      "sha256": "0a9b4e92bb644af043bf02c3f47dae3663ef96cb4b568cbff39acf46606cccc4",
+      "package": "lobe"
+    },
+    "huggingface": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/huggingface.svg",
+      "license": "MIT",
+      "source_sha256": "de7f2c60f974b75b385116ef0dc6a9fa62f2fd7bf58156b5623301a5436b91c4",
+      "sha256": "6595ab2ad5fc774b48bf88c89014b57899c05375e9693d14ff20ab37597f6638",
+      "package": "lobe",
+      "color": "huggingface-color"
+    },
+    "huggingface-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/huggingface-color.svg",
+      "license": "MIT",
+      "source_sha256": "5d39d66bb6c9b026d3cb5de7bd9978dad3906570df2aca8f00078a6f8a3d0f5e",
+      "sha256": "a19acaa1d654aebfdebfbf5b4bade86b173491a6ca565e5d53b7b1561543104b",
+      "package": "lobe"
+    },
+    "hunyuan": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/hunyuan.svg",
+      "license": "MIT",
+      "source_sha256": "7306a65eb71c4de61e21a637e5c4fef94afde823678e225c46f891cc783f6531",
+      "sha256": "dd616beae596fa2e9de12ddcbc898d9b6c1e6c6ca3917547cc925870c9fc337b",
+      "package": "lobe",
+      "color": "hunyuan-color"
+    },
+    "hunyuan-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/hunyuan-color.svg",
+      "license": "MIT",
+      "source_sha256": "510e7bb438506b5aadfaf8b9551d1606efd5b4171161a64a64204c72a453658a",
+      "sha256": "48e599043b49fc0a3b53d6af9a7c13b234b592b4be19e48fed9ea7b0ffa93fd8",
+      "package": "lobe"
+    },
+    "ibm": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/ibm.svg",
+      "license": "MIT",
+      "source_sha256": "62c37af8c3f191572921197a29c90687079e62d3033f503faae59cdc96af0fb2",
+      "sha256": "a288f8eaf9dc889c62e96eca740296b49a459067bb2dda0182a909371eccbc8b",
+      "package": "lobe"
+    },
+    "inflection": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/inflection.svg",
+      "license": "MIT",
+      "source_sha256": "d835b74982956f822c07c25351bc681cd17937e8382a2305c1c37b634c84c9b4",
+      "sha256": "36e8a9979ed56bd39a9fb52262a40d8daa062ba965740bebe182b6b0763c70da",
+      "package": "lobe"
+    },
+    "internlm": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/internlm.svg",
+      "license": "MIT",
+      "source_sha256": "2507dd5e17f3ba47e0ed2c89181a677389a24620157aa4e56e9970dd5ecec2f9",
+      "sha256": "45330c49001578df33a224f3b98936951b960d059bf3138e5c61d50058ce0ba7",
+      "package": "lobe",
+      "color": "internlm-color"
+    },
+    "internlm-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/internlm-color.svg",
+      "license": "MIT",
+      "source_sha256": "0e84741d3fb76e65fd86a57d18b6e31f31fa2e6156166c4bfa2487db894221a6",
+      "sha256": "8913acd2f71a141d8227b63b96721ee6a3d3409d6ff1851464ee4cfc5d8ce96b",
+      "package": "lobe"
+    },
+    "jina": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/jina.svg",
+      "license": "MIT",
+      "source_sha256": "dbb78d6217774ddde8c57a6f5c94a3294c59e99c4a1e6ec786e409648b9bdb84",
+      "sha256": "31899b1be60c6740a2cc4752d1723fef5dcf528d8e49a3b9154fea19ed08eb73",
+      "package": "lobe"
+    },
+    "kimi": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/kimi.svg",
+      "license": "MIT",
+      "source_sha256": "ed08131b46acf70e6e2144eceb775e74098b58ea65fa21eaee04be7b05cfe63b",
+      "sha256": "95c5f5e9d769e2fa7d486e40cc34b3206c449756fec3a88789c43d530cf61eb6",
+      "package": "lobe",
+      "color": "kimi-color"
+    },
+    "kimi-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/kimi-color.svg",
+      "license": "MIT",
+      "source_sha256": "0bdb95375d7c6e90a1850e91cd36770da2bc98fa33ec2d783f4a8fed027da85f",
+      "sha256": "6314d98294a195f376cee42225d101965b6bb9d018692d92985748271732dfb1",
+      "package": "lobe"
+    },
+    "lg": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/lg.svg",
+      "license": "MIT",
+      "source_sha256": "170748b661b83c24cec2ccaf0bffacd37f16f1ee840c832518e5fc369308e379",
+      "sha256": "2af91185bc89548a3d359fbab2ccc27e1af2fc898b31f6828766799b9b861994",
+      "package": "lobe",
+      "color": "lg-color"
+    },
+    "lg-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/lg-color.svg",
+      "license": "MIT",
+      "source_sha256": "379fdab6494a237f6ab61053d3a9b28bab724164f33de08018bbb945ed46415e",
+      "sha256": "71d0abec63fb11a0e614b123bd2583cfbcf63b94dad78eda273e0d46de79d77c",
+      "package": "lobe"
+    },
+    "liquid": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/liquid.svg",
+      "license": "MIT",
+      "source_sha256": "4727b1cbd33bd256aca5be79a7d91a4f2753b2feb0dcfbb7b9fb3f23928c2467",
+      "sha256": "3f8e1023a575b9849dfeeac15b7297a30f377a98b077f4b649756f02d979bf9f",
+      "package": "lobe"
+    },
+    "llamacpp": {
+      "source": "https://raw.githubusercontent.com/ggml-org/llama.cpp/78a8ae14be559b45f5f13ddee82c188b683d5d8d/media/llama1-icon-transparent.svg",
+      "license": "MIT",
+      "source_sha256": "611af871c3ba331afa3350d4c94e546607ccdd952c6dfd928dc94dc1e0f0b3ba",
+      "sha256": "eda2e6cef56aad55152c577d9b3ab9e8e74c910fdfa4bf924f0119054f0007c0",
+      "license_file": "llamacpp-LICENSE.txt"
+    },
+    "lmstudio": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/lmstudio.svg",
+      "license": "MIT",
+      "source_sha256": "4a575e8382b52ce742ac5d21d361a7d2a08cea7c12390ee1bbb755ef7d3cc25b",
+      "sha256": "6187792c412fbca967e3e6d2651bcfd37034126a5685680c3964a073f6eeb214",
+      "package": "lobe"
+    },
+    "meta": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/meta.svg",
+      "license": "MIT",
+      "source_sha256": "805ef9a35305393eb5a89be46b0708c9b119b3308ca44aaedd1457ff04857060",
+      "sha256": "9ce8bda65b94ddb881d87453ad7bbf671b0062d96e564798980eda8bf0e1f198",
+      "package": "lobe",
+      "color": "meta-color"
+    },
+    "meta-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/meta-color.svg",
+      "license": "MIT",
+      "source_sha256": "adf9f2c1a646ccd3a37ca8c2e7e5985d64630cd633f4b95fba393d1d44e0578c",
+      "sha256": "e3e33c616a2ca1f0c4f9ea69fdd34cfced80683005f2acab467e38e70d2334e3",
+      "package": "lobe"
+    },
+    "microsoft": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/microsoft.svg",
+      "license": "MIT",
+      "source_sha256": "0617d6111e99845e7ab06dd4ff1e16c2c1ad381575b3204ef02dd71b716ffa4b",
+      "sha256": "835400cdeb8be8720f18924ef726d8b3a008f03baac585518225005837485770",
+      "package": "lobe",
+      "color": "microsoft-color"
+    },
+    "microsoft-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/microsoft-color.svg",
+      "license": "MIT",
+      "source_sha256": "5cfb0ffa3231313c2968b5e3fedfcce8e2e96c61bde4572384c3889a77a80350",
+      "sha256": "6fbab0954ad0b1a4fb4b669108cd2f86c2cce882d833bbd725c52b9b7d779a8b",
+      "package": "lobe"
+    },
+    "minimax": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/minimax.svg",
+      "license": "MIT",
+      "source_sha256": "bb96e2005081494716de6af5fd030701ae551ee68393ad61b325c07325607848",
+      "sha256": "e24a193787826e288a119a74ce9519b01dbd1eace65d4b365476ec11581a9f0b",
+      "package": "lobe",
+      "color": "minimax-color"
+    },
+    "minimax-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/minimax-color.svg",
+      "license": "MIT",
+      "source_sha256": "7f7187fa6d9b341ac5f22f6c5a970523afb439dc45566d64eb4f4b9b604d6b01",
+      "sha256": "196539689e474a60e2072235c6d1727e1fdc27241d7f6305e43ace09b198ec06",
+      "package": "lobe"
+    },
+    "mistral": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/mistral.svg",
+      "license": "MIT",
+      "source_sha256": "a06cfa54e7deff7f7544175b006b7f8a03fbc5624c44f7d553a44d07ea96e629",
+      "sha256": "8c60a0b2e67fcc10aed202c2211deb9466e642f18f3f1374d808ca0ba45651d2",
+      "package": "lobe",
+      "color": "mistral-color"
+    },
+    "mistral-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/mistral-color.svg",
+      "license": "MIT",
+      "source_sha256": "722f74b289d95486b43662fe24fa883b333701296f618406cd0ed502299170b6",
+      "sha256": "9211e602df8fa4ef3de4ed31a86d7b474f1dce2fab9cdb837165f80870922810",
+      "package": "lobe"
+    },
+    "moonshot": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/moonshot.svg",
+      "license": "MIT",
+      "source_sha256": "435f41b74e6a87639b6bf860e9628f20cbe7d6229bece412d548f4cea3081852",
+      "sha256": "378a049b43571822057b23945b725e271eb7bf35450877636ebf13f3f021b04d",
+      "package": "lobe"
+    },
+    "nomic": {
+      "source": "https://raw.githubusercontent.com/nomic-ai/gpt4all/b666d16db5aeab8b91aaf7963adcee9c643734d7/gpt4all-chat/icons/nomic_logo.svg",
+      "license": "MIT",
+      "source_sha256": "2d81ee79b0636878c3ab93372ab30658e4369fe8a6234c4b8fa387ce8867b16b",
+      "sha256": "1c1fd1c7878f942b56e2741e251a1d6399b35d9dc41551e17bc3821ca006b07f",
+      "license_file": "nomic-LICENSE.txt"
+    },
+    "nousresearch": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/nousresearch.svg",
+      "license": "MIT",
+      "source_sha256": "4dc3c7cdf13d2f0bdf16b872d76293f048010a00f580df68a85e1f9c4e500e5d",
+      "sha256": "4000a56bf8178bfc86eacc3339ad4a0b371165f37183d2acf99776a5e392cdb9",
+      "package": "lobe"
+    },
+    "nova": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/nova.svg",
+      "license": "MIT",
+      "source_sha256": "e40ce8c78056db1b0fe3ed2849a895b5bb8b9bba2fbc83fb8a5fcf915c24a37d",
+      "sha256": "90fd2a6e2181065592279a410d61dfdca18c56d6ec6c657183b61d388f99349b",
+      "package": "lobe",
+      "color": "nova-color"
+    },
+    "nova-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/nova-color.svg",
+      "license": "MIT",
+      "source_sha256": "be29ee23bbfb36cba87d8dee84d563f81f15290bfef8cef8c96a5996d2e7526c",
+      "sha256": "21b6aaf7d098f9e3f22e58104d32b921d1ee0fc8e62c18b6eca53fecaaf4e02d",
+      "package": "lobe"
+    },
+    "nvidia": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/nvidia.svg",
+      "license": "MIT",
+      "source_sha256": "5a419b99e0ffdbfbe8caa7ec25581054eae03024da59cb860c54ea55ac8e7e73",
+      "sha256": "7180cd8005a68846f7bcb07a875c986ad5e8d8d61c0798acdfd879b4069fd85e",
+      "package": "lobe",
+      "color": "nvidia-color"
+    },
+    "nvidia-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/nvidia-color.svg",
+      "license": "MIT",
+      "source_sha256": "8c941e4eb8b782eccaaea1240c059d20be33ab8eda28d7c9ed9b53ac802fe683",
+      "sha256": "c2c2a103945cb6c777b9b0c761e089cb8ea9f378d503ad9d9193d707e04f1118",
+      "package": "lobe"
+    },
+    "ollama": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/ollama.svg",
+      "license": "MIT",
+      "source_sha256": "3a268218fb2e6e81fa31df70f70b51331625047794db81db21d35359428fae7a",
+      "sha256": "651de85d18744a3407c226b791a8e26e5689409236c7c7ce23e2a101f0c903e2",
+      "package": "lobe"
+    },
+    "openai": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/openai.svg",
+      "license": "MIT",
+      "source_sha256": "a595df6b423920c67a7f8f73c063e4bfb72d415948097b6cac063a2366bb5186",
+      "sha256": "9c406c5d417fae4ac9dcfcaa33d4b6e4109b32ca775c17216cc805703f7c35a3",
+      "package": "lobe"
+    },
+    "openrouter": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/openrouter.svg",
+      "license": "MIT",
+      "source_sha256": "ae671cc83de9bd45db97a47ed5e38a4e1bd9f93a12be495ba4b4f8b284026bca",
+      "sha256": "16877d8bb2a1721a7ac7708f9bf1fcbe86f3b4af1ca9889b4590874c71e0ad5d",
+      "package": "lobe",
+      "color": "openrouter-color"
+    },
+    "openrouter-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/openrouter-color.svg",
+      "license": "MIT",
+      "source_sha256": "17bede1b89166f824ee06753dc526a3f5e18b769706deaab09d04a3a98de1a78",
+      "sha256": "3977ce663caa69760200529c87b8b833f8a82b5e10d2e912111c28a438c07d9b",
+      "package": "lobe"
+    },
+    "openwebui": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/openwebui.svg",
+      "license": "MIT",
+      "source_sha256": "9cbf7a1105e51029762678e6def27b2e95fb0ec83ff7827b2c75d11aa8c3c4d7",
+      "sha256": "a6818e5c84b7a0119b796eec85b278ecbb23634086d3bfec1b9910c73bf5d686",
+      "package": "lobe"
+    },
+    "perplexity": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/perplexity.svg",
+      "license": "MIT",
+      "source_sha256": "c66c64e9e3c273ef6c235f743808d67ffa7d482e8cbe4a79496a42b60333e1fe",
+      "sha256": "d87b72be84f8ea4884493645fc1ec36f6c48cd4f1c2ac5b8049033e3079a803f",
+      "package": "lobe",
+      "color": "perplexity-color"
+    },
+    "perplexity-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/perplexity-color.svg",
+      "license": "MIT",
+      "source_sha256": "8353f3ab20822f1a933224b0ea32cc39f0c32d5740f4af8c254b0f418e0a3a70",
+      "sha256": "291aa3b3e1beadc1bea9fc30fcc922417887c53b963ff69cb1d7823e9a3ba9ba",
+      "package": "lobe"
+    },
+    "poolside": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/poolside.svg",
+      "license": "MIT",
+      "source_sha256": "1765259d468c3e2f1ea0f1e24f3e4b26a9682ebe592611cac0c8be2f866711b8",
+      "sha256": "8269ba16a3f215532203f2252f4839705a1d24db2e182e5893ca05b7cb9c5f5d",
+      "package": "lobe",
+      "color": "poolside-color"
+    },
+    "poolside-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/poolside-color.svg",
+      "license": "MIT",
+      "source_sha256": "5df24fb33e364f9762952088b1ffd9b537dd3ddb6d3e1e5fec6893898eb29667",
+      "sha256": "e541a06cdb9e1a1795a104b6d9bd4df1c69547721104036429ff02cdebd51d7d",
+      "package": "lobe"
+    },
+    "qwen": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/qwen.svg",
+      "license": "MIT",
+      "source_sha256": "b2c16efc3bd32b88a941842d41222e1e1e0e40441222218b725afc0aef6d9a36",
+      "sha256": "10b7fde2e2faa96af2d4d0ed0a59211cbd917a4e244869d79391ebc38d23421d",
+      "package": "lobe",
+      "color": "qwen-color"
+    },
+    "qwen-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/qwen-color.svg",
+      "license": "MIT",
+      "source_sha256": "a158a0e3ed5b541e4f91384ece02c3acf0a0d81b7b11a46d77bafb248b09e32c",
+      "sha256": "acc5d71eaea4a86441f60ef437ba664d2c93d1b69104745dc5314c4e4403120f",
+      "package": "lobe"
+    },
+    "reka": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/reka.svg",
+      "license": "MIT",
+      "source_sha256": "533ae212f32db47ffc179c272fb6c7fb0cc71e516a68ad3b58c435b0e8f20063",
+      "sha256": "178ffda9c6566cc4c33711ae6a04c877bf3f20ab17b313c18f18f23864ec968d",
+      "package": "lobe"
+    },
+    "replicate": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/replicate.svg",
+      "license": "MIT",
+      "source_sha256": "ff02158db5bc4a693d7f690c36cd7d547b8ca3313accba0783b2d3af28dae1e6",
+      "sha256": "8ba4e4447ccaf5d3ebe63c253a1fc693802e4a01de41c040f77c71c6fc39ea71",
+      "package": "lobe"
+    },
+    "sakana": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/sakana.svg",
+      "license": "MIT",
+      "source_sha256": "329e703ef2014dce216172ff4aef9c226cb6c79dbd71fc5d76cc923b63b9e732",
+      "sha256": "ba5b63d0d0549dc27eb70e9ec043bbdf329b5373641db443ee8c93d2364ab137",
+      "package": "lobe",
+      "color": "sakana-color"
+    },
+    "sakana-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/sakana-color.svg",
+      "license": "MIT",
+      "source_sha256": "a635d8f584502c97d16b7682664c2420331c770445ae181f1c2673d6d97d0f38",
+      "sha256": "3b669c62ce650e65f37813f53d161d973ad7f54d146f66e21f3c05775060f11c",
+      "package": "lobe"
+    },
+    "sensenova": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/sensenova.svg",
+      "license": "MIT",
+      "source_sha256": "6dbe2705669ffb174bdb9dd3f489dfadec0018b6c6580794337378c9842cb621",
+      "sha256": "ad2cc8390138aa9ca5516232ce2c32dc6dd99eba40838c9fcc5b74198a5e9649",
+      "package": "lobe",
+      "color": "sensenova-color"
+    },
+    "sensenova-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/sensenova-color.svg",
+      "license": "MIT",
+      "source_sha256": "bd2e0f8e310ff6a5edcc56a85560221923262767ba76b660a193f45c40c123fa",
+      "sha256": "76e26350a6fbba8e420cd46e8a25d91fc5254ad41c2ab83a4278fe350f5bc22c",
+      "package": "lobe"
+    },
+    "snowflake": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/snowflake.svg",
+      "license": "MIT",
+      "source_sha256": "4e814ab515ea483f674946d39279da9b6400abf650c68dccbfe06c837e0e3ab6",
+      "sha256": "c90fc75b60490899c5c14336f9a838f064917a41ff674588b36fdbb12575ebea",
+      "package": "lobe",
+      "color": "snowflake-color"
+    },
+    "snowflake-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/snowflake-color.svg",
+      "license": "MIT",
+      "source_sha256": "f9e4d625d1563a0228fc738e3903c72a200da1aa75d156dac46c31067be0b314",
+      "sha256": "c09b8850525e0271be8dca4fa5b1d0084771dd999835397eab54ae6faeaf3360",
+      "package": "lobe"
+    },
+    "stability": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/stability.svg",
+      "license": "MIT",
+      "source_sha256": "6cf25e3b187754f804f8a2f54a5955a166f877d907c83517adfe95b432585562",
+      "sha256": "0b58d2c51459b26bbc8a8cd8715cd0b75aecd17675c359bfb62de84b93042c9a",
+      "package": "lobe",
+      "color": "stability-color"
+    },
+    "stability-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/stability-color.svg",
+      "license": "MIT",
+      "source_sha256": "61c4593effe20b4fa1f0811861bb6ac199348d955b21a5c3f719bc07c9d27d3a",
+      "sha256": "e59d6ba3b21f30d64ae534cd04822be6289d7a172e76cda5e9c90f2801dfa653",
+      "package": "lobe"
+    },
+    "tencent": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/tencent.svg",
+      "license": "MIT",
+      "source_sha256": "24f53f9f8195a04d0183e5ffa6b3e05e783e043d56b11ed65d066eb9211e5dc8",
+      "sha256": "a18f5a2e30929eab60ad919cdb3594d22b36aebb8b59dc1ccc8197fde5c9c819",
+      "package": "lobe",
+      "color": "tencent-color"
+    },
+    "tencent-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/tencent-color.svg",
+      "license": "MIT",
+      "source_sha256": "7c370ad4b75e3f30d0fa7da71f90466a0ee95a887189479aa9df414079b50eb6",
+      "sha256": "2de5c662f7bc648ea3368a40785dcb90009480eddecca2de78d872dee085845f",
+      "package": "lobe"
+    },
+    "tii": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/tii.svg",
+      "license": "MIT",
+      "source_sha256": "93030a4904ca3aa3535c08d115d579e9ada7f1bc02e3d57b6660558b87f975a3",
+      "sha256": "ef894f10a34cf052d5d3d01604d3f84ad1919635639924d1b5210184f0a8c4b5",
+      "package": "lobe",
+      "color": "tii-color"
+    },
+    "tii-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/tii-color.svg",
+      "license": "MIT",
+      "source_sha256": "9d44157df5d74cbccd44c183ab979d860e1b44c1b2ba90705622da44ca1500dd",
+      "sha256": "d24ad8e49451262f66bad66c57ab85d851e1c37fa1e83c5bb24a0702dcee62a5",
+      "package": "lobe"
+    },
+    "together": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/together.svg",
+      "license": "MIT",
+      "source_sha256": "b3ec218e7e0b0432a2ce07f5ec98a1dcd24f808c74d5fee624ab31e4947feef3",
+      "sha256": "79463506cdb173bcb8676652291bd9c0bb76b59e6985741067ca115c1f95ceb3",
+      "package": "lobe",
+      "color": "together-color"
+    },
+    "together-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/together-color.svg",
+      "license": "MIT",
+      "source_sha256": "27ccaf118a431c386b88418a34a4346afd9638dde10e3f2295db2eec1fa5898a",
+      "sha256": "c93e684e7bdb7d3d9001c70c8f22859333b1b39e2f07bdf7a1a8682e8a5ddb7a",
+      "package": "lobe"
+    },
+    "upstage": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/upstage.svg",
+      "license": "MIT",
+      "source_sha256": "2b740c9457fdbe4b0e7e3ff2e10f99882314a813e1e81f8d291b7b61d56a2416",
+      "sha256": "9f25a664d07867a3864de255b87b1cb64d35029580edc7ccc763cf9c2366d490",
+      "package": "lobe",
+      "color": "upstage-color"
+    },
+    "upstage-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/upstage-color.svg",
+      "license": "MIT",
+      "source_sha256": "206e23f9143cd308998cddae36b674651d7435eebc357c596dacb2b39228a485",
+      "sha256": "e4b9bc171e159373bc4fe4ed7775696592c12d20357e0c37a6ab19e216f6888c",
+      "package": "lobe"
+    },
+    "vllm": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/vllm.svg",
+      "license": "MIT",
+      "source_sha256": "5b025970b51c270775d0528a68ad96583372c94a2a94c4d92b40b74cbe9f7153",
+      "sha256": "e69a77db35e7574f52b540a5404dd9738735d682129ffd2f2b79ecb3d4044404",
+      "package": "lobe",
+      "color": "vllm-color"
+    },
+    "vllm-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/vllm-color.svg",
+      "license": "MIT",
+      "source_sha256": "3f837bad8d7f85d19e860a089639289ddd7492e67dc1ac7bd0f129f8f19b8ae6",
+      "sha256": "7dcc22c970dccd2774be73b76a3afcc77f6c30727f8af96afca064a72dcb3416",
+      "package": "lobe"
+    },
+    "wenxin": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/wenxin.svg",
+      "license": "MIT",
+      "source_sha256": "3624b6084ce8ebefcbbb90ae6ab6485c4df9083187ae6e4012e1aba9a4bcea04",
+      "sha256": "541dc2725c9f1977dcfcf8ff58863d8323d1ae25dd9a407985433579163d4dde",
+      "package": "lobe",
+      "color": "wenxin-color"
+    },
+    "wenxin-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/wenxin-color.svg",
+      "license": "MIT",
+      "source_sha256": "9fb88d8b6f7be470ddb07f0574ec276b08a35ba96d73ec5f2f3b6fc338da5cb6",
+      "sha256": "a2dec58ad7f7c5e6a0056dcb677b152fc547bcfa52cab1b46a4fc4db9fd6a8ae",
+      "package": "lobe"
+    },
+    "xai": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/xai.svg",
+      "license": "MIT",
+      "source_sha256": "89eb7de9f0d02a41cfecd9109e253d7fd3529e27467dee4254faa67f3ac21451",
+      "sha256": "9854149fa23549aece9fd46b0d4b291f454b176be45895ec20bea9723682fcb8",
+      "package": "lobe"
+    },
+    "xiaomi": {
+      "source": "simple-icons@16.35.0/package/icons/xiaomi.svg",
+      "license": "CC0-1.0",
+      "source_sha256": "8866d12a70d85ab43acd3b9c80f1b37792d91160d8273efffdf817af5fd608cb",
+      "sha256": "f173ef600ebb759b4af6687aca6c778d6af2ab467b9cd331c5b9e453b9a21f5c",
+      "package": "simple"
+    },
+    "xiaomimimo": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/xiaomimimo.svg",
+      "license": "MIT",
+      "source_sha256": "b04ad7dad52af2212c4567daf0ee6856f2c4625c92c680a27f9880295d558b71",
+      "sha256": "3b4df23e31fb46093093f1e375d4124d09e59f910fa797cb8dec569ab75e5cbd",
+      "package": "lobe"
+    },
+    "yi": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/yi.svg",
+      "license": "MIT",
+      "source_sha256": "c1975458cc94ee44306336215fdf64b1a25f60d7b3f4c01aee5a720eddea0e0a",
+      "sha256": "2fdd615259a4993fb2a6ddebc28b091e2e069afc794717a63bb0af1f41eb7d7b",
+      "package": "lobe",
+      "color": "yi-color"
+    },
+    "yi-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/yi-color.svg",
+      "license": "MIT",
+      "source_sha256": "d78b1ce0eeb7a7d1a6132785dfa0218be48d6d1ccd3751ca3f9240a2e3b38756",
+      "sha256": "f3e5589ecab8fb41deb16f444c7a0f9fc58515d153c642f4f4389507928ff6a2",
+      "package": "lobe"
+    },
+    "zai": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/zai.svg",
+      "license": "MIT",
+      "source_sha256": "e748cb5108ce37b116d7a5ba97d37e0ae97eadf6849b0de11afb248e244a01e1",
+      "sha256": "aa83c3d9f2e0e912fb662e8bf0332ec978bb204c5292579a17fd0c77133ae0ae",
+      "package": "lobe"
+    },
+    "zeroone": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/zeroone.svg",
+      "license": "MIT",
+      "source_sha256": "548126aabc59e4fcfbb773d40758ace786a8089397bcd1a135cfa6bed03b7d74",
+      "sha256": "2b468f16c70c5ba52037f3b7788817107b5764168e0f12a4a4c422f7dac868cf",
+      "package": "lobe",
+      "color": "zeroone-color"
+    },
+    "zeroone-color": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/zeroone-color.svg",
+      "license": "MIT",
+      "source_sha256": "d28b873a212c497e64aa555eb70383128e13570865f61a2f010c7a7cb8621ebd",
+      "sha256": "350cdb160657b7521600f1500b34134852c33866938a37c69a75c5b9e4713520",
+      "package": "lobe"
+    },
+    "gpt": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/openai.svg",
+      "license": "MIT",
+      "source_sha256": "a595df6b423920c67a7f8f73c063e4bfb72d415948097b6cac063a2366bb5186",
+      "sha256": "9c406c5d417fae4ac9dcfcaa33d4b6e4109b32ca775c17216cc805703f7c35a3",
+      "package": "lobe",
+      "alias_of": "openai"
+    },
+    "phi": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/microsoft.svg",
+      "license": "MIT",
+      "source_sha256": "0617d6111e99845e7ab06dd4ff1e16c2c1ad381575b3204ef02dd71b716ffa4b",
+      "sha256": "835400cdeb8be8720f18924ef726d8b3a008f03baac585518225005837485770",
+      "package": "lobe",
+      "color": "microsoft-color",
+      "alias_of": "microsoft"
+    },
+    "llama": {
+      "source": "@lobehub/icons-static-svg@1.98.0/package/icons/meta.svg",
+      "license": "MIT",
+      "source_sha256": "805ef9a35305393eb5a89be46b0708c9b119b3308ca44aaedd1457ff04857060",
+      "sha256": "9ce8bda65b94ddb881d87453ad7bbf671b0062d96e564798980eda8bf0e1f198",
+      "package": "lobe",
+      "color": "meta-color",
+      "alias_of": "meta"
+    },
+    "generic": {
+      "source": "Klaude existing generic model artwork",
+      "license": "MIT",
+      "license_file": "generic-LICENSE.txt",
+      "sha256": "3d23839f5870d2fa2464a3213d16d2b2aa9af5767be1bb42c31c28e156b1e79c"
+    }
+  }
+}

@@ -167,7 +167,7 @@ async def verify(host, root, service, chrome):
             await tab.command("Page.navigate", {"url": host.origin})
             await wait('typeof byId!=="undefined"&&!byId("local-access").hidden')
             await tab.js(
-                'byId("login-password").value='
+                'byId("login-username").value="admin";byId("login-password").value='
                 + json.dumps(host.accounts.initial_password())
                 + ';byId("account-login").requestSubmit()'
             )
@@ -380,7 +380,9 @@ async def exercise(tab, click, screenshot, service, checks):
     assert await tab.js(
         "byId('skill-items').querySelector('.skill-toggle').getAttribute('aria-ch"
         "ecked')==='true' && byId('skill-items').querySelector('.skill-toggle').d"
-        "isabled && !reviewDialog.open"
+        "isabled && !reviewDialog.open && "
+        "byId('skill-items').querySelector('.collection-metadata').textContent==='Updating…' && "
+        "!byId('skill-items').querySelector('.skill-row-status').textContent"
     )
     await tab.wait("!byId('skill-items').querySelector('.skill-toggle').disabled")
     assert await tab.js("installedSkills[0].enabled")

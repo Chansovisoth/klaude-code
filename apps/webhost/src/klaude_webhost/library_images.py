@@ -84,7 +84,7 @@ class LibraryImages:
                     raise ValueError("Stored content checksum failed")
             metadata, output = prepare_image(
                 data, thumbnail=size == "thumbnail", thumbnail_size=320,
-                detail="detailed", frame=0, cancelled=cancelled,
+                detail="detailed", frame=0, preserve_alpha=True, cancelled=cancelled,
             )
             # A concurrent tag/archive/delete or logout cannot publish an obsolete result.
             current = store.get(identity)

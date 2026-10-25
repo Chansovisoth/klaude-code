@@ -2904,16 +2904,24 @@ def test_message_menu_actions_are_controlled_exact_and_keep_original(tmp_path):
         app._active.finished.wait(5)
         assert app._active.finished.is_set()
         assert app.memory.load_session(source) == original
-        assert app.memory.load_session(branch) == original[:2]
-        history = app.public_history()
+        assert app.session_id == branch
+        assert app.memory.load_session(branch)[:2] == original[:2]
+        history = tuple(app.snapshot()["messages"])
         assert [item["content"] for item in history if item["role"] == "user"] == [
             "Original question"
         ]
+        assert history[1]["content"] == "Original answer"
+        assert history[1]["previous_response"] is True
+        assert history[-1]["retry_root"] == history[1]["id"]
+        assert history[-1]["previous_response"] is False
         assert history[-1]["content"] == "Ready."
         target = app.session_id
         assert _request(host, "POST", "/api/v1/messages/action", body=retry, **args)[0] == 200
         assert app.session_id == target
-        assert app.public_history() == history
+        assert tuple(app.snapshot()["messages"]) == history
+        host._message_receipts.clear()
+        assert _request(host, "POST", "/api/v1/messages/action", body=retry, **args)[0] == 200
+        assert tuple(app.snapshot()["messages"]) == history
     finally:
         host.stop()
         thread.join(3)

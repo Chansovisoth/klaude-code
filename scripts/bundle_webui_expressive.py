@@ -17,21 +17,25 @@ def bundle(check: bool = False) -> None:
     target = STATIC / "style.css"
     original = target.read_text()
     base = original
+    after = "\n"
     if START in base:
         assert base.count(START) == base.count(END) == 1
         before, owned = base.split(START, 1)
         after = owned.split(END, 1)[1]
-        assert not after.strip()
         base = before
     output = (
         base.rstrip()
         + "\n\n"
         + START
         + "\n"
+        + (STATIC / "vendor/material-progress.css").read_text().rstrip()
+        + "\n"
+        + (STATIC / "vendor/material-tabs.css").read_text().rstrip()
+        + "\n"
         + (STATIC / "expressive.css").read_text().rstrip()
         + "\n"
         + END
-        + "\n"
+        + after
     )
     if check:
         assert output == original, "Run python3 scripts/bundle_webui_expressive.py"

@@ -1,0 +1,34 @@
+{
+  "lobe.tgz": {
+    "url": "https://registry.npmjs.org/@lobehub/icons-static-svg/-/icons-static-svg-1.98.0.tgz",
+    "sha256": "ceea351dc1c4b8548dd20692152163b61a3a18f78cb0a7d130fa589bc2e624e6"
+  },
+  "simple.tgz": {
+    "url": "https://registry.npmjs.org/simple-icons/-/simple-icons-16.35.0.tgz",
+    "sha256": "20ebead4f6bc93464812a5e260d19fc4d84772e5eeff69a6fbea263ca2441c5f"
+  },
+  "llamacpp-svg.txt": {
+    "url": "https://raw.githubusercontent.com/ggml-org/llama.cpp/78a8ae14be559b45f5f13ddee82c188b683d5d8d/media/llama1-icon-transparent.svg",
+    "sha256": "611af871c3ba331afa3350d4c94e546607ccdd952c6dfd928dc94dc1e0f0b3ba"
+  },
+  "llamacpp-license.txt": {
+    "url": "https://raw.githubusercontent.com/ggml-org/llama.cpp/78a8ae14be559b45f5f13ddee82c188b683d5d8d/LICENSE",
+    "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
+  },
+  "gpt4all-svg.txt": {
+    "url": "https://raw.githubusercontent.com/nomic-ai/gpt4all/b666d16db5aeab8b91aaf7963adcee9c643734d7/gpt4all-chat/icons/gpt4all_transparent.svg",
+    "sha256": "e49a7fbae601a35a51934b3c27f4e7f207d8488e639aa34a26b975b80b79890d"
+  },
+  "gpt4all-license.txt": {
+    "url": "https://raw.githubusercontent.com/nomic-ai/gpt4all/b666d16db5aeab8b91aaf7963adcee9c643734d7/LICENSE.txt",
+    "sha256": "e06bec576945c1ab4cca000d6b2fe35987c2267a0eaf292bc58bd16a54000e1b"
+  },
+  "nomic-svg.txt": {
+    "url": "https://raw.githubusercontent.com/nomic-ai/gpt4all/b666d16db5aeab8b91aaf7963adcee9c643734d7/gpt4all-chat/icons/nomic_logo.svg",
+    "sha256": "2d81ee79b0636878c3ab93372ab30658e4369fe8a6234c4b8fa387ce8867b16b"
+  },
+  "lobe-license.txt": {
+    "url": "https://raw.githubusercontent.com/lobehub/lobe-icons/86b3f06ad9a4cc57011a56e5a7d3a5d4f1e8d835/LICENSE",
+    "sha256": "add9d7531d1b21646317a8958e38fc727506fa39d24bdecb44154d943c82753a"
+  }
+}

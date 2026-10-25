@@ -148,7 +148,7 @@ async def verify(host, profile, fixture):
                 'or("#local-access").hidden'
             )
             await js(
-                'byId("login-password").value='
+                'byId("login-username").value="admin";byId("login-password").value='
                 + json.dumps(host.accounts.initial_password())
                 + '; byId("account-login").requestSubmit()'
             )
@@ -602,16 +602,63 @@ async def verify(host, profile, fixture):
                 '!document.querySelector(`#message-options-menu [aria-label="Retry"]`).disabled'
             )
             await click('#message-options-menu [aria-label="Retry"]')
+            await wait('latest.active_turn_id&&messages.querySelector(".previous-response")!==null'
+                       '&&messages.querySelector("[data-id=partial] .code-block")!==null')
+            assert await js('''(() => {
+              const replies=[...messages.querySelectorAll(":scope > .message.assistant")];
+              return replies.length===2 && replies[0].querySelector("details") &&
+                !replies[0].querySelector("details").open && replies[1].dataset.id==="partial";
+            })()''')
+            fixture.retry_finish.set()
             await wait(
-                "latest.session_id!=="
+                "latest.session_id==="
                 + json.dumps(branch_id)
-                + '&&!latest.active_turn_id&&messages.querySelector("table")!==null'
+                + '&&!latest.active_turn_id&&messages.querySelector(".previous-response")!==null'
             )
             assert fixture.calls == 2
             assert host.application.memory.load_session(source_id) == original_history
-            assert host.application.memory.load_session(branch_id) == original_history
+            assert host.application.memory.load_session(branch_id)[:len(original_history)] == original_history
+            assert await js('messages.querySelector(".previous-response").open===false')
+            await click('.previous-response-summary')
+            assert await js('messages.querySelector(".previous-response").open')
+            assert await js('messages.querySelector(".previous-response table")!==null')
+            await click('.previous-response-summary')
+            assert await js('messages.querySelectorAll(".message.user").length===1')
+            for width in (1440, 768, 390, 320):
+                await viewport(width, 720)
+                await click('.previous-response-summary')
+                assert await js('messages.scrollWidth<=messages.clientWidth')
+                await click('.previous-response-summary')
+            await js('messages.querySelector(".previous-response").closest("article").scrollIntoView({block:"start"})')
+            await screenshot("retry-same-chat-320.png")
+            # Retrying an older answer keeps later exchanges and places the new
+            # version beside its response group, including while it streams.
+            host.application.memory.log_turn(branch_id, "user", "Later question retained")
+            host.application.memory.log_turn(branch_id, "assistant", "Later answer retained")
+            await js("snapshot()")
+            fixture.retry_finish.clear()
+            await js('''window.previousArticle=messages.querySelector(".previous-response").closest("article");
+              previousArticle.querySelector("summary").click();
+              previousArticle.querySelector('[aria-label="More options"]').click();''')
+            await click('#message-options-menu [aria-label="Retry"]')
+            await wait('latest.active_turn_id&&messages.querySelector("[data-id=partial]")!==null')
+            assert await js('''(() => {
+              const rows=[...messages.querySelectorAll(":scope > .message")];
+              const index=rows.findIndex(row=>row.dataset.id==="partial");
+              return !previousArticle.querySelector("details").open &&
+                rows[index+1].textContent.includes("Later question retained") &&
+                rows[index+2].textContent.includes("Later answer retained");
+            })()''')
+            fixture.retry_finish.set()
+            await wait('!latest.active_turn_id&&latest.messages.filter(m=>m.previous_response).length===2')
+            assert fixture.calls == 3
+            assert await js("latest.session_id") == branch_id
             retried_history = host.application.memory.load_session(host.application.session_id)
-            assert len([m for m in retried_history if m["role"] == "user"]) == 1
+            assert len([m for m in retried_history if m["role"] == "user"]) == 4
+            await cmd("Page.reload")
+            await wait('typeof messages!=="undefined"&&messages.querySelector(".previous-response")!==null&&latest?.session_id==='
+                       + json.dumps(branch_id))
+            assert await js('!messages.querySelector(".previous-response").open')
             # Fixture resume retains the shared service's exact runtime checks
             # without making an Ollama catalog request for the synthetic model.
             host.application.resume_local = host.application.resume
@@ -628,6 +675,8 @@ async def verify(host, profile, fixture):
                 'history.state?.klaudeLinkedSession===latest.session_id'
             )
             await wait('messages.querySelector(".linked-message")!==null')
+            await wait("document.documentElement.dataset.startup==='ready' && "
+                       "!document.querySelector('.shell').inert")
             assert await js(
                 'messages.querySelector(".linked-message").dataset.id==='
                 'new URL(location.href).searchParams.get("message")&&'
@@ -635,13 +684,16 @@ async def verify(host, profile, fixture):
                 '!latest.messages.some(m=>m.id===messages.querySelector(".linked-message").dataset.id)'
             )
             await js('window.linkTarget=messages.querySelector(".linked-message");snapshot()')
-            assert await js('''(() => {
+            linked_geometry = await js('''(() => {
               const target = messages.querySelector(".linked-message");
               const bounds = target.getBoundingClientRect();
               const viewport = messages.getBoundingClientRect();
-              return linkTarget === target && document.activeElement === target &&
-                bounds.top >= viewport.top - 1 && bounds.top < viewport.bottom;
+              return {same:linkTarget===target, focused:document.activeElement===target,
+                top:bounds.top, viewportTop:viewport.top, viewportBottom:viewport.bottom};
             })()''')
+            assert (linked_geometry["same"] and linked_geometry["focused"] and
+                    linked_geometry["top"] >= linked_geometry["viewportTop"] - 1 and
+                    linked_geometry["top"] < linked_geometry["viewportBottom"]), linked_geometry
             # Keep the arrival border for three seconds, then fade only that
             # border; focus and the message itself must remain intact.
             await js('window.highlightStart=performance.now();highlightLinkedMessage(linkTarget)')
@@ -677,7 +729,7 @@ async def verify(host, profile, fixture):
                 '===latest.session_id'
             )
             await js('document.querySelector(".message-dialog").close()')
-            assert fixture.calls == 2
+            assert fixture.calls == 3
             await js('showView("settings")')
             await cmd("Page.reload")
             await wait(
@@ -700,7 +752,7 @@ async def verify(host, profile, fixture):
             )
             assert host.application.session_id == source_id
             await js(
-                'byId("login-password").value='
+                'byId("login-username").value="admin";byId("login-password").value='
                 + json.dumps(host.accounts.initial_password())
                 + ';byId("account-login").requestSubmit()'
             )
@@ -713,8 +765,8 @@ async def verify(host, profile, fixture):
             assert await js('messages.querySelector(".linked-message").dataset.id') == (
                 f"stored:{branch_message}"
             )
-            assert fixture.calls == 2
-            assert host.application.memory.load_session(branch_id) == original_history
+            assert fixture.calls == 3
+            assert host.application.memory.load_session(branch_id) == retried_history
             await cmd("Page.navigate", {"url": host.origin + "/?session=" + branch_id
                                       + "&message=stored:9223372036854775807"})
             await wait('typeof latest!=="undefined"&&latest?.session_id&&'
@@ -754,7 +806,9 @@ async def verify(host, profile, fixture):
                             "social/email icons and Discord native sharing without copying",
                             "older linked messages, exact focus, sign-in and unavailable targets",
                             "private links reopen after sign-in and preserve the page on reload",
-                            "timestamp menu, Branch and Retry preserve original history",
+                            "timestamp menu and explicit Branch preserve source history",
+                            "same-session Retry preserves collapsed old responses above streaming replacements",
+                            "older-reply Retry retains later exchanges and groups repeated responses",
                             "chunked speech, stop and sign-out cleanup with API doubles",
                             "persisted history reload",
                             "320/390/768/1440 layouts and sixteen light/dark palette combinations",
@@ -785,6 +839,7 @@ class MarkdownFixture:
     def __init__(self):
         self.next_chunk = threading.Event()
         self.finish = threading.Event()
+        self.retry_finish = threading.Event()
         self.calls = 0
         self.code = (
             'def greet(name):\n    return f"Hello, {name}"\n# '
@@ -818,6 +873,8 @@ class MarkdownFixture:
 
         self.calls += 1
         yield AgentEvent("text_delta", {"content": self.prefix})
+        if self.calls > 1:
+            assert self.retry_finish.wait(30)
         assert self.next_chunk.wait(30)
         time.sleep(0.3)
         yield AgentEvent("text_delta", {"content": self.middle})
@@ -857,6 +914,7 @@ def main():
         finally:
             fixture.next_chunk.set()
             fixture.finish.set()
+            fixture.retry_finish.set()
             host.stop()
             thread.join(3)
 

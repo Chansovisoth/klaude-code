@@ -17,18 +17,39 @@ missing provider, runtime or billing information is invented.
 
 ## Behavior
 
+- AI Review's introduction shows the current model, context tokens and output
+  tokens. Review settings offers the configured Vision role or a temporary model
+  for the current conversation, using enabled connections and bounded catalogs.
+  Temporary choices survive image reopen in the current tab and clear on
+  sign-out/reload. They never update global model defaults. Unknown capabilities
+  remain labeled; worker execution still checks current image capabilities and
+  exact connection/credential bindings. Override requests use exactly one model,
+  while the Settings default retains its configured fallback order.
 - Details contains compact filename, file type, MIME, size, optional dimensions
   and Added rows, existing source management, manual/AI tags and Learn controls.
   AI controls live only in AI Review. Unsupported/archived files disable AI Review.
-- Source uses compact Add/Edit/Remove actions and an inline HTTP(S) editor. Long
-  links truncate visually, keep their complete stored value and open with
-  `noopener noreferrer`. Cancel restores the saved value; invalid inputs and
-  failed saves retain typed text. Removing a link still requires explicit review.
+- Source uses Add/Edit actions and an inline plain-text editor for notes or URLs. Add
+  source replaces the empty-state text in place; edits save on blur or Ctrl/Cmd+Enter
+  without buttons, helper text or a confirmation dialog. Escape restores the
+  saved value. Enter adds a line. Notes render as inert text; valid HTTP(S) URLs
+  within notes or a list of sources are clickable. Pending blur saves continue
+  after the viewer closes. Only safe HTTP(S) links
+  are clickable, retain their complete stored value and open with
+  `noopener noreferrer`.
+  The editor input stays in its form while the view text is rendered separately;
+  switching modes never detaches the input. `scripts/webui_source_editor_smoke.py`
+  covers repeated empty blur/reopen, Escape, direct saves, and image close/reopen
+  at 1440px and 390px. The focused regression passed with zero browser exceptions.
 - Tags uses a removable chip draft with Enter/+ additions, whitespace normalization,
   case-insensitive duplicate prevention and the existing 20-tag/40-character limits.
+  Add tags opens a compact editable chip in the tag row. Its text field stays
+  mounted while other chips render; Enter or blur adds the draft tag, and the
+  inline plus supports touch. There is no separate full-width tag input card.
   Unchanged/pending saves are disabled. Cancel discards the draft; rejected saves
-  retain it. Opening the editor never runs inference. Actual backend suggestions
-  add only to this draft and require explicit Save tags and the existing review.
+  retain it. Save tags submits the exact validated draft directly without a
+  confirmation dialog, retaining backend revision and receipt checks. Opening the
+  editor never runs inference. Actual backend suggestions
+  add only to this draft and require explicit Save tags.
 - Tabs use native buttons with linked tabpanels, selected state, roving tab stops
   and arrows/Home/End navigation. Tab changes preserve question/token/tag drafts
   and each panel's scroll position. Selecting another file checks its eligibility.
@@ -156,3 +177,144 @@ This is focused validation, not a full repository suite or physical-device /
 screen-reader certification. AI Review remains limited to current saved images;
 the existing 32,000-character stored-response bound, revision checks and up-to-24-
 hour availability remain authoritative. There is no persistent history feature.
+
+## Compact AI Review sidebar (2026-10-24)
+
+Inspector tabs use transparent faces, accent text and a 2px underline. The
+introduction retains its original centered 48px icon container, heading and
+description. Question, textarea and Review image remain together; the empty
+textarea shows a placeholder and submits the existing "Describe this image."
+default. The Review action uses an md3.io-inspired filled split button with a three-dot
+trailing action opening the native Review settings dialog.
+Tag generation is a ghost action with a tag icon; retention uses an info icon
+and the theme's on-surface text. Existing radius, color and motion tokens remain
+authoritative, with 44px minimum action targets and reduced-motion support.
+
+The Chrome inspector fixture checks transparent active tabs, underline geometry,
+icons, 320px overflow, native Enter dialog activation, Escape dismissal/focus return and visible keyboard
+focus. Computed foreground/background contrast checks require 4.5:1 for the
+active tab, tag action, primary action and retention notice in the tested theme.
+The broader fixture covers light/dark layouts at 320, 390, 768 and 1440px,
+review/tag workers, drafts, tab navigation, copy, errors and expiry. This is
+fixture validation, not a live deployment or an exhaustive custom-palette audit.
+
+
+### Split Review action (2026-10-24)
+
+Inspected material@3.2.4 split-button constants, factory, and styles from the
+local reference package. Adapted its small filled two-button geometry and 2px
+gap to Klaude's native form and live tokens; retained 44px targets. The trailing
+action uses the shared more icon at 16px, matching session row actions, and opens
+a dialog instead of the library's menu. No Solid runtime or dependency added.
+The existing context/output inputs keep their IDs, defaults, bounds and form
+association. Done validates; Enter in an input also validates and closes. Escape
+or Close retains the draft values; closing returns focus to the trigger.
+Invalid submission opens settings and focuses the invalid input. Auth reset
+resets the associated form and closes settings; viewer closure also closes it.
+Chrome fixture checks modal fit at 320/1440px, keyboard activation/dismissal,
+focus return, invalid budgets, retained drafts and real review/tag workers.
+
+The split action uses finite 22px outer radii and shared extra-small inner
+corners, avoiding CSS radius normalization flattening the inner corners when
+combined with a 9999px pill. Hover/focus softens the inner corners to the shared
+small radius, with themed hover/press color feedback and existing motion/press
+behavior. Browser checks exercise hover on both halves and require visible
+rounded corners. Inspector source styles precede the generated Expressive block;
+the bundle consistency check passes.
+
+Tag suggestion generation and Review image start directly from their buttons
+without a confirmation dialog. Backend model/capability checks and durable receipts remain in use. The
+focused source-editor browser regression verifies suggestions arrive in the open
+inspector without a modal and that saved AI tags remain unchanged.
+
+## Review clearing and generation presentation
+
+Copy and Read full review now share their action row with Clear. Clear removes
+analysis results through the exact displayed result from private local storage,
+including older reviews that could otherwise reappear. It retains newer results,
+tag suggestions, saved tags and image metadata. The authenticated POST uses the
+existing session/Origin/CSRF guards and artifact revision check; replaying the
+same clear cannot delete later work. A pre-clear read cannot restore stale UI.
+
+Loading saved AI Review data now reuses the centered generation introduction:
+the heading is “Loading AI Review…” and its 48px icon slot contains the shared
+normal circular loading indicator. It follows the user's normal loading style;
+the generating shape remains reserved for active AI work. The old inline loading
+row is absent. Inputs remain busy until the read succeeds or fails, and a failed
+or superseded read cannot leave the introductory loader stuck.
+
+The isolated `scripts/webui_review_loading_smoke.py` passed at 320/768/1440px in
+light and dark themes. It checks the shared introduction, a 48px normal loader,
+absence of the old inline loading row, busy inputs, the distinct generating
+indicator, read failure and late results after closing. No model generation was
+invoked and no browser exceptions occurred. Screenshots are under
+`/tmp/klaude-review-loading`. Focused Ruff, JavaScript syntax and whitespace checks
+passed.
+
+During analysis, the existing centered introduction shows the configured
+48px generating indicator and “Generating review”. Review image becomes Cancel
+review, using the existing owned-operation cancellation path. Other inputs remain
+locked while pending; the previous review returns after cancellation or failure.
+Tag-suggestion requests keep their separate presentation.
+
+Validation: 14 Vision HTTP tests passed, including exact/repeated clear, rejected
+unauthenticated/cross-site/stale/tag-result requests, retained newer results/tags
+and unchanged image metadata. The isolated 1440px/390px browser smoke passed real
+slow review generation, the primary Cancel review action and Clear surviving
+image reopen, with zero browser exceptions. JavaScript syntax, focused Ruff,
+result-service mypy and diff-whitespace checks passed. Existing unrelated host.py
+line 63 exceeds Ruff's line-length limit; it was not modified for this change.
+The new clear endpoint and pending-operation kind require restarting an older
+running host; validation used isolated fresh hosts, not the user's live host.
+
+
+### Escape in tag editing
+
+Escape invokes the existing Cancel tags path before preview dismissal or phone
+sheet dismissal: manual tag drafts and pending AI-tag removals are discarded,
+the pending input clears, saved tags return and focus moves to Edit tags. The
+preview and current details sheet remain open. Source editor Escape is unchanged.
+The source-editor Chrome fixture exercises a chip draft plus an uncommitted
+input at 1440px and 390px and checks focus, preserved preview and unchanged store.
+
+Tag generation also reuses the introduction: the generating indicator and
+Generating tag suggestions replace its idle icon/title, and the tag-generation
+button becomes Cancel tag suggestions. The existing cancellation ownership and
+pending locks remain authoritative. Previous suggestions return after a cancelled
+request. Completed suggestions sit immediately below Generate new tag suggestions;
+the chips precede selection actions and model metadata. Suggested chips share
+Details' 4px/12px face padding, 32px height and 8px row gaps, including selected
+states. Browser regression passed slow tag generation, actual cancellation,
+retained suggestions, DOM ordering and computed chip-spacing comparisons, with
+zero browser exceptions; review generation/cancellation and Clear still passed.
+
+
+AI Review tag selection uses compact Clear and Save buttons aligned to the right,
+matching Details' action row. Clear deselects draft suggestions; saved artifact
+tags are untouched. Save retains its selected-tag count in its accessible label
+and preserves Saving/Save unconfirmed states. Both actions disable when blocked
+or no tags are selected. The source-editor fixture checks labels, alignment and
+Clear selection behavior after real tag generation.
+
+
+## md3.io primary inspector tabs
+
+Details / AI Review now use material@3.2.4 primary-tabs CSS and its actual
+createTabIndicator runtime from the locally inspected package. The MIT license,
+upstream files and hashes are vendored under static/vendor/material-tabs-*.
+The component reference is https://md3.io/components/tabs/; both that page and
+its /docs variant failed to load during this run, so implementation was checked
+against the installed package source, constants and styles.
+
+The native buttons retain their IDs, ARIA relationships and existing state owner.
+Their adapter synchronizes the upstream active class and indicator. Primary
+geometry is 48px targets, 14px/20px labels, and a 3px rounded indicator measuring
+label width minus 4px (minimum 24px). Upstream CSS anchor positioning and its
+JavaScript fallback/resize update stay intact. Local roles supply colors/fonts;
+existing reduced-motion rules apply. No Solid/framework dependency added.
+
+scripts/bundle_webui_tabs.py embeds the indicator in the existing library.js
+route. The Expressive CSS bundler includes upstream tabs CSS before the local
+adapters. Browser fixture checks measure active label/indicator centers and
+widths at desktop/phone sizes and exercise keyboard selection, then run the
+existing editing, AI generation, clear/save and dismissal checks.

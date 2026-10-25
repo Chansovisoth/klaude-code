@@ -1,0 +1,1603 @@
+{
+  "schema_version": 1,
+  "reviewed": "2026-10-25",
+  "providers": [
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "aliases": [
+        "Open AI",
+        "openai_api",
+        "openai_codex"
+      ],
+      "namespaces": [
+        "openai"
+      ],
+      "icon": "openai",
+      "source": "https://openai.com/open-models/"
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "aliases": [],
+      "namespaces": [
+        "anthropic"
+      ],
+      "icon": "anthropic",
+      "source": "https://www.anthropic.com/claude"
+    },
+    {
+      "id": "google",
+      "name": "Google",
+      "aliases": [
+        "Google AI",
+        "Google DeepMind",
+        "gemini_api"
+      ],
+      "namespaces": [
+        "google"
+      ],
+      "icon": "google",
+      "source": "https://ai.google.dev/gemma"
+    },
+    {
+      "id": "xai",
+      "name": "xAI",
+      "aliases": [
+        "x.ai"
+      ],
+      "namespaces": [
+        "xai-org",
+        "x-ai"
+      ],
+      "icon": "xai",
+      "source": "https://huggingface.co/xai-org"
+    },
+    {
+      "id": "meta",
+      "name": "Meta",
+      "aliases": [
+        "Meta AI"
+      ],
+      "namespaces": [
+        "meta-llama"
+      ],
+      "icon": "meta",
+      "source": "https://huggingface.co/meta-llama"
+    },
+    {
+      "id": "alibaba",
+      "name": "Alibaba / Qwen",
+      "aliases": [
+        "Alibaba",
+        "Alibaba Cloud",
+        "Qwen",
+        "Tongyi Qianwen"
+      ],
+      "namespaces": [
+        "qwen",
+        "qwenlm"
+      ],
+      "icon": "alibaba",
+      "source": "https://huggingface.co/Qwen"
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "aliases": [
+        "DeepSeek AI"
+      ],
+      "namespaces": [
+        "deepseek-ai"
+      ],
+      "icon": "deepseek",
+      "source": "https://huggingface.co/deepseek-ai"
+    },
+    {
+      "id": "mistral",
+      "name": "Mistral AI",
+      "aliases": [
+        "Mistral"
+      ],
+      "namespaces": [
+        "mistralai"
+      ],
+      "icon": "mistral",
+      "source": "https://huggingface.co/mistralai"
+    },
+    {
+      "id": "moonshot",
+      "name": "Moonshot AI / Kimi",
+      "aliases": [
+        "Moonshot",
+        "Moonshot AI",
+        "Kimi"
+      ],
+      "namespaces": [
+        "moonshotai"
+      ],
+      "icon": "moonshot",
+      "source": "https://huggingface.co/moonshotai"
+    },
+    {
+      "id": "zai",
+      "name": "Z.ai / GLM",
+      "aliases": [
+        "Z.ai",
+        "Zhipu",
+        "Zhipu AI",
+        "GLM",
+        "ChatGLM"
+      ],
+      "namespaces": [
+        "zai-org",
+        "thudm",
+        "zhipuai"
+      ],
+      "icon": "zai",
+      "source": "https://huggingface.co/zai-org"
+    },
+    {
+      "id": "minimax",
+      "name": "MiniMax",
+      "aliases": [
+        "MiniMax AI"
+      ],
+      "namespaces": [
+        "minimaxai"
+      ],
+      "icon": "minimax",
+      "source": "https://huggingface.co/MiniMaxAI"
+    },
+    {
+      "id": "xiaomi",
+      "name": "Xiaomi",
+      "aliases": [
+        "Xiaomi MiMo"
+      ],
+      "namespaces": [
+        "xiaomimimo"
+      ],
+      "icon": "xiaomi",
+      "source": "https://huggingface.co/XiaomiMiMo"
+    },
+    {
+      "id": "microsoft",
+      "name": "Microsoft",
+      "aliases": [
+        "Microsoft AI"
+      ],
+      "namespaces": [
+        "microsoft"
+      ],
+      "icon": "microsoft",
+      "source": "https://huggingface.co/microsoft"
+    },
+    {
+      "id": "nvidia",
+      "name": "NVIDIA",
+      "aliases": [
+        "Nvidia AI"
+      ],
+      "namespaces": [
+        "nvidia"
+      ],
+      "icon": "nvidia",
+      "source": "https://huggingface.co/nvidia",
+      "derivativePublisher": true
+    },
+    {
+      "id": "cohere",
+      "name": "Cohere",
+      "aliases": [
+        "Cohere For AI"
+      ],
+      "namespaces": [
+        "coherelabs",
+        "cohereforai"
+      ],
+      "icon": "cohere",
+      "source": "https://huggingface.co/CohereLabs"
+    },
+    {
+      "id": "ibm",
+      "name": "IBM",
+      "aliases": [
+        "IBM Granite"
+      ],
+      "namespaces": [
+        "ibm-granite"
+      ],
+      "icon": "ibm",
+      "source": "https://huggingface.co/ibm-granite"
+    },
+    {
+      "id": "aws",
+      "name": "AWS",
+      "aliases": [
+        "Amazon",
+        "Amazon Web Services"
+      ],
+      "namespaces": [
+        "amazon",
+        "amazon-nova"
+      ],
+      "icon": "aws",
+      "source": "https://aws.amazon.com/ai/generative-ai/nova/"
+    },
+    {
+      "id": "apple",
+      "name": "Apple",
+      "aliases": [
+        "Apple AI"
+      ],
+      "namespaces": [
+        "apple"
+      ],
+      "icon": "apple",
+      "source": "https://huggingface.co/apple"
+    },
+    {
+      "id": "baidu",
+      "name": "Baidu",
+      "aliases": [
+        "Baidu AI"
+      ],
+      "namespaces": [
+        "baidu"
+      ],
+      "icon": "baidu",
+      "source": "https://huggingface.co/baidu"
+    },
+    {
+      "id": "tencent",
+      "name": "Tencent",
+      "aliases": [
+        "Tencent AI"
+      ],
+      "namespaces": [
+        "tencent",
+        "tencent-hunyuan"
+      ],
+      "icon": "tencent",
+      "source": "https://huggingface.co/tencent"
+    },
+    {
+      "id": "bytedance",
+      "name": "ByteDance",
+      "aliases": [
+        "ByteDance Seed"
+      ],
+      "namespaces": [
+        "bytedance",
+        "bytedance-seed"
+      ],
+      "icon": "bytedance",
+      "source": "https://huggingface.co/ByteDance-Seed"
+    },
+    {
+      "id": "huawei",
+      "name": "Huawei",
+      "aliases": [
+        "Huawei Noah"
+      ],
+      "namespaces": [
+        "huawei-noah"
+      ],
+      "icon": "huawei",
+      "source": "https://github.com/huawei-noah/Pretrained-Language-Model"
+    },
+    {
+      "id": "ai21",
+      "name": "AI21 Labs",
+      "aliases": [
+        "AI21",
+        "AI21Labs"
+      ],
+      "namespaces": [
+        "ai21labs"
+      ],
+      "icon": "ai21",
+      "source": "https://huggingface.co/ai21labs"
+    },
+    {
+      "id": "ai2",
+      "name": "Ai2",
+      "aliases": [
+        "Allen Institute for AI",
+        "AllenAI"
+      ],
+      "namespaces": [
+        "allenai"
+      ],
+      "icon": "ai2",
+      "source": "https://huggingface.co/allenai"
+    },
+    {
+      "id": "tii",
+      "name": "TII / Falcon",
+      "aliases": [
+        "TII",
+        "Technology Innovation Institute",
+        "Falcon"
+      ],
+      "namespaces": [
+        "tiiuae"
+      ],
+      "icon": "tii",
+      "source": "https://huggingface.co/tiiuae"
+    },
+    {
+      "id": "lg",
+      "name": "LG AI Research",
+      "aliases": [
+        "LG AI",
+        "LG AI Research",
+        "EXAONE"
+      ],
+      "namespaces": [
+        "lgai-exaone"
+      ],
+      "icon": "lg",
+      "source": "https://huggingface.co/LGAI-EXAONE"
+    },
+    {
+      "id": "upstage",
+      "name": "Upstage",
+      "aliases": [],
+      "namespaces": [
+        "upstage"
+      ],
+      "icon": "upstage",
+      "source": "https://huggingface.co/upstage"
+    },
+    {
+      "id": "01ai",
+      "name": "01.AI",
+      "aliases": [
+        "01.AI",
+        "01 AI",
+        "01-ai",
+        "Yi"
+      ],
+      "namespaces": [
+        "01-ai"
+      ],
+      "icon": "zeroone",
+      "source": "https://huggingface.co/01-ai"
+    },
+    {
+      "id": "baichuan",
+      "name": "Baichuan",
+      "aliases": [
+        "Baichuan AI"
+      ],
+      "namespaces": [
+        "baichuan-inc"
+      ],
+      "icon": "baichuan",
+      "source": "https://huggingface.co/baichuan-inc"
+    },
+    {
+      "id": "internlm",
+      "name": "Shanghai AI Lab / InternLM",
+      "aliases": [
+        "Shanghai AI Lab",
+        "InternLM"
+      ],
+      "namespaces": [
+        "internlm"
+      ],
+      "icon": "internlm",
+      "source": "https://huggingface.co/internlm"
+    },
+    {
+      "id": "sensetime",
+      "name": "SenseTime",
+      "aliases": [
+        "SenseTime",
+        "SenseNova"
+      ],
+      "namespaces": [
+        "sensetime",
+        "sensenova"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/SenseNova"
+    },
+    {
+      "id": "arcee",
+      "name": "Arcee AI",
+      "aliases": [
+        "Arcee"
+      ],
+      "namespaces": [
+        "arcee-ai"
+      ],
+      "icon": "arcee",
+      "source": "https://huggingface.co/arcee-ai",
+      "derivativePublisher": true
+    },
+    {
+      "id": "nous",
+      "name": "Nous Research",
+      "aliases": [
+        "Nous",
+        "NousResearch"
+      ],
+      "namespaces": [
+        "nousresearch"
+      ],
+      "icon": "nousresearch",
+      "source": "https://huggingface.co/NousResearch",
+      "derivativePublisher": true
+    },
+    {
+      "id": "cognitivecomputations",
+      "name": "Cognitive Computations / Dolphin",
+      "aliases": [
+        "Cognitive Computations",
+        "Dolphin",
+        "dphn",
+        "dphnAI"
+      ],
+      "namespaces": [
+        "cognitivecomputations",
+        "dphn"
+      ],
+      "icon": "dolphin",
+      "source": "https://huggingface.co/dphn/dolphin-2.9-llama3-8b",
+      "derivativePublisher": true
+    },
+    {
+      "id": "databricks",
+      "name": "Databricks",
+      "aliases": [],
+      "namespaces": [
+        "databricks"
+      ],
+      "icon": "databricks",
+      "source": "https://huggingface.co/databricks"
+    },
+    {
+      "id": "snowflake",
+      "name": "Snowflake",
+      "aliases": [
+        "Snowflake AI"
+      ],
+      "namespaces": [
+        "snowflake"
+      ],
+      "icon": "snowflake",
+      "source": "https://huggingface.co/Snowflake"
+    },
+    {
+      "id": "liquid",
+      "name": "Liquid AI",
+      "aliases": [
+        "Liquid AI",
+        "LiquidAI"
+      ],
+      "namespaces": [
+        "liquidai"
+      ],
+      "icon": "liquid",
+      "source": "https://huggingface.co/LiquidAI"
+    },
+    {
+      "id": "nomic",
+      "name": "Nomic AI",
+      "aliases": [
+        "Nomic",
+        "Nomic AI"
+      ],
+      "namespaces": [
+        "nomic-ai"
+      ],
+      "icon": "nomic",
+      "source": "https://huggingface.co/nomic-ai"
+    },
+    {
+      "id": "mixedbread",
+      "name": "Mixedbread",
+      "aliases": [
+        "mixedbread.ai",
+        "Mixedbread AI"
+      ],
+      "namespaces": [
+        "mixedbread-ai"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/mixedbread-ai"
+    },
+    {
+      "id": "jina",
+      "name": "Jina AI",
+      "aliases": [
+        "Jina",
+        "Jina AI"
+      ],
+      "namespaces": [
+        "jinaai"
+      ],
+      "icon": "jina",
+      "source": "https://huggingface.co/jinaai"
+    },
+    {
+      "id": "baai",
+      "name": "BAAI",
+      "aliases": [
+        "Beijing Academy of Artificial Intelligence"
+      ],
+      "namespaces": [
+        "baai"
+      ],
+      "icon": "baai",
+      "source": "https://huggingface.co/BAAI"
+    },
+    {
+      "id": "huggingface",
+      "name": "Hugging Face",
+      "aliases": [
+        "HuggingFace",
+        "Hugging Face"
+      ],
+      "namespaces": [
+        "huggingfacetb"
+      ],
+      "icon": "huggingface",
+      "source": "https://huggingface.co/HuggingFaceTB"
+    },
+    {
+      "id": "bigcode",
+      "name": "BigCode",
+      "aliases": [
+        "BigCode"
+      ],
+      "namespaces": [
+        "bigcode"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/bigcode/starcoder2-15b"
+    },
+    {
+      "id": "eleutherai",
+      "name": "EleutherAI",
+      "aliases": [
+        "Eleuther AI",
+        "EleutherAI"
+      ],
+      "namespaces": [
+        "eleutherai"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/EleutherAI"
+    },
+    {
+      "id": "stability",
+      "name": "Stability AI",
+      "aliases": [
+        "Stability",
+        "Stability AI"
+      ],
+      "namespaces": [
+        "stabilityai"
+      ],
+      "icon": "stability",
+      "source": "https://huggingface.co/stabilityai"
+    },
+    {
+      "id": "bfl",
+      "name": "Black Forest Labs",
+      "aliases": [
+        "Black Forest Labs",
+        "BFL"
+      ],
+      "namespaces": [
+        "black-forest-labs"
+      ],
+      "icon": "bfl",
+      "source": "https://huggingface.co/black-forest-labs"
+    },
+    {
+      "id": "reflection",
+      "name": "Reflection AI",
+      "aliases": [
+        "Reflection",
+        "Reflection AI"
+      ],
+      "namespaces": [
+        "reflection"
+      ],
+      "icon": null,
+      "source": "https://reflection.ai/blog/introducing-beam"
+    },
+    {
+      "id": "deepreinforce",
+      "name": "Deep Reinforce AI",
+      "aliases": [
+        "DeepReinforce",
+        "Deep Reinforce",
+        "Ornith AI"
+      ],
+      "namespaces": [],
+      "icon": null,
+      "source": "https://ornith.ai/"
+    },
+    {
+      "id": "poolside",
+      "name": "Poolside",
+      "aliases": [],
+      "namespaces": [
+        "poolside"
+      ],
+      "icon": "poolside",
+      "source": "https://poolside.ai/models"
+    },
+    {
+      "id": "perplexity",
+      "name": "Perplexity",
+      "aliases": [
+        "Perplexity AI"
+      ],
+      "namespaces": [
+        "perplexity-ai"
+      ],
+      "icon": "perplexity",
+      "source": "https://docs.perplexity.ai/getting-started/models"
+    },
+    {
+      "id": "sakana",
+      "name": "Sakana AI",
+      "aliases": [
+        "Sakana",
+        "Sakana AI"
+      ],
+      "namespaces": [
+        "sakanaai"
+      ],
+      "icon": "sakana",
+      "source": "https://huggingface.co/SakanaAI"
+    },
+    {
+      "id": "reka",
+      "name": "Reka AI",
+      "aliases": [
+        "Reka"
+      ],
+      "namespaces": [
+        "rekaai"
+      ],
+      "icon": "reka",
+      "source": "https://www.reka.ai/"
+    },
+    {
+      "id": "writer",
+      "name": "WRITER",
+      "aliases": [
+        "Writer AI",
+        "Writer"
+      ],
+      "namespaces": [
+        "writer"
+      ],
+      "icon": null,
+      "source": "https://writer.com/models/"
+    },
+    {
+      "id": "inflection",
+      "name": "Inflection AI",
+      "aliases": [
+        "Inflection",
+        "Inflection AI"
+      ],
+      "namespaces": [
+        "inflection-ai"
+      ],
+      "icon": "inflection",
+      "source": "https://inflection.ai/"
+    }
+  ],
+  "families": [
+    {
+      "id": "gpt",
+      "name": "GPT",
+      "creator": "openai",
+      "prefixes": [
+        "gpt",
+        "chatgpt"
+      ],
+      "icon": null,
+      "source": "https://openai.com/open-models/"
+    },
+    {
+      "id": "reasoning",
+      "name": "OpenAI reasoning",
+      "creator": "openai",
+      "prefixes": [
+        "o1",
+        "o3",
+        "o4"
+      ],
+      "icon": null,
+      "source": "https://openai.com/open-models/"
+    },
+    {
+      "id": "claude",
+      "name": "Claude",
+      "creator": "anthropic",
+      "prefixes": [
+        "claude"
+      ],
+      "icon": "claude",
+      "source": "https://www.anthropic.com/claude"
+    },
+    {
+      "id": "gemini",
+      "name": "Gemini",
+      "creator": "google",
+      "prefixes": [
+        "gemini"
+      ],
+      "icon": "gemini",
+      "source": "https://ai.google.dev/gemma"
+    },
+    {
+      "id": "gemma",
+      "name": "Gemma",
+      "creator": "google",
+      "prefixes": [
+        "gemma"
+      ],
+      "icon": "gemma",
+      "source": "https://ai.google.dev/gemma"
+    },
+    {
+      "id": "codegemma",
+      "name": "CodeGemma",
+      "creator": "google",
+      "prefixes": [
+        "codegemma"
+      ],
+      "icon": "gemma",
+      "source": "https://ai.google.dev/gemma"
+    },
+    {
+      "id": "paligemma",
+      "name": "PaliGemma",
+      "creator": "google",
+      "prefixes": [
+        "paligemma"
+      ],
+      "icon": "gemma",
+      "source": "https://ai.google.dev/gemma"
+    },
+    {
+      "id": "grok",
+      "name": "Grok",
+      "creator": "xai",
+      "prefixes": [
+        "grok"
+      ],
+      "icon": "grok",
+      "source": "https://huggingface.co/xai-org"
+    },
+    {
+      "id": "llama",
+      "name": "Llama",
+      "creator": "meta",
+      "prefixes": [
+        "llama",
+        "meta-llama"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/meta-llama"
+    },
+    {
+      "id": "qwen",
+      "name": "Qwen",
+      "creator": "alibaba",
+      "prefixes": [
+        "qwen",
+        "qwq",
+        "qvq"
+      ],
+      "icon": "qwen",
+      "source": "https://huggingface.co/Qwen"
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "creator": "deepseek",
+      "prefixes": [
+        "deepseek"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/deepseek-ai"
+    },
+    {
+      "id": "mistral",
+      "name": "Mistral",
+      "creator": "mistral",
+      "prefixes": [
+        "mistral",
+        "mixtral",
+        "ministral",
+        "magistral",
+        "codestral",
+        "devstral",
+        "pixtral",
+        "voxtral"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/mistralai"
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi",
+      "creator": "moonshot",
+      "prefixes": [
+        "kimi"
+      ],
+      "icon": "kimi",
+      "source": "https://huggingface.co/moonshotai"
+    },
+    {
+      "id": "moonshot",
+      "name": "Moonshot",
+      "creator": "moonshot",
+      "prefixes": [
+        "moonshot"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/moonshotai"
+    },
+    {
+      "id": "glm",
+      "name": "GLM",
+      "creator": "zai",
+      "prefixes": [
+        "glm"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/zai-org"
+    },
+    {
+      "id": "chatglm",
+      "name": "ChatGLM",
+      "creator": "zai",
+      "prefixes": [
+        "chatglm"
+      ],
+      "icon": "chatglm",
+      "source": "https://huggingface.co/zai-org"
+    },
+    {
+      "id": "glm-v",
+      "name": "GLM-V",
+      "creator": "zai",
+      "prefixes": [
+        "glm-v",
+        "glm-vision"
+      ],
+      "icon": "glmv",
+      "source": "https://huggingface.co/zai-org"
+    },
+    {
+      "id": "minimax",
+      "name": "MiniMax",
+      "creator": "minimax",
+      "prefixes": [
+        "minimax"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/MiniMaxAI"
+    },
+    {
+      "id": "mimo",
+      "name": "MiMo",
+      "creator": "xiaomi",
+      "prefixes": [
+        "mimo",
+        "xiaomi-mimo"
+      ],
+      "icon": "xiaomimimo",
+      "source": "https://huggingface.co/XiaomiMiMo"
+    },
+    {
+      "id": "phi",
+      "name": "Phi",
+      "creator": "microsoft",
+      "prefixes": [
+        "phi"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/microsoft"
+    },
+    {
+      "id": "nemotron",
+      "name": "Nemotron",
+      "creator": "nvidia",
+      "prefixes": [
+        "nemotron"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/nvidia"
+    },
+    {
+      "id": "command",
+      "name": "Command",
+      "creator": "cohere",
+      "prefixes": [
+        "command-r",
+        "command-a",
+        "command"
+      ],
+      "icon": "commanda",
+      "source": "https://huggingface.co/CohereLabs"
+    },
+    {
+      "id": "aya",
+      "name": "Aya",
+      "creator": "cohere",
+      "prefixes": [
+        "aya",
+        "c4ai-aya"
+      ],
+      "icon": "aya",
+      "source": "https://huggingface.co/CohereLabs"
+    },
+    {
+      "id": "granite",
+      "name": "Granite",
+      "creator": "ibm",
+      "prefixes": [
+        "granite"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/ibm-granite"
+    },
+    {
+      "id": "nova",
+      "name": "Amazon Nova",
+      "creator": "aws",
+      "prefixes": [
+        "nova"
+      ],
+      "icon": "nova",
+      "source": "https://aws.amazon.com/ai/generative-ai/nova/"
+    },
+    {
+      "id": "titan",
+      "name": "Amazon Titan",
+      "creator": "aws",
+      "prefixes": [
+        "titan"
+      ],
+      "icon": null,
+      "source": "https://aws.amazon.com/ai/generative-ai/nova/"
+    },
+    {
+      "id": "openelm",
+      "name": "OpenELM",
+      "creator": "apple",
+      "prefixes": [
+        "openelm"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/apple"
+    },
+    {
+      "id": "ernie",
+      "name": "ERNIE",
+      "creator": "baidu",
+      "prefixes": [
+        "ernie",
+        "wenxin"
+      ],
+      "icon": "wenxin",
+      "source": "https://huggingface.co/baidu"
+    },
+    {
+      "id": "hunyuan",
+      "name": "Hunyuan",
+      "creator": "tencent",
+      "prefixes": [
+        "hunyuan"
+      ],
+      "icon": "hunyuan",
+      "source": "https://huggingface.co/tencent"
+    },
+    {
+      "id": "doubao",
+      "name": "Doubao",
+      "creator": "bytedance",
+      "prefixes": [
+        "doubao"
+      ],
+      "icon": "doubao",
+      "source": "https://huggingface.co/ByteDance-Seed"
+    },
+    {
+      "id": "seed",
+      "name": "Seed",
+      "creator": "bytedance",
+      "prefixes": [
+        "seed-oss",
+        "seed-coder"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/ByteDance-Seed"
+    },
+    {
+      "id": "pangu",
+      "name": "PanGu",
+      "creator": "huawei",
+      "prefixes": [
+        "pangu",
+        "pan-gu"
+      ],
+      "icon": null,
+      "source": "https://github.com/huawei-noah/Pretrained-Language-Model"
+    },
+    {
+      "id": "jamba",
+      "name": "Jamba",
+      "creator": "ai21",
+      "prefixes": [
+        "jamba"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/ai21labs"
+    },
+    {
+      "id": "olmo",
+      "name": "OLMo",
+      "creator": "ai2",
+      "prefixes": [
+        "olmo",
+        "olmoe"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/allenai"
+    },
+    {
+      "id": "falcon",
+      "name": "Falcon",
+      "creator": "tii",
+      "prefixes": [
+        "falcon"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/tiiuae"
+    },
+    {
+      "id": "exaone",
+      "name": "EXAONE",
+      "creator": "lg",
+      "prefixes": [
+        "exaone"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/LGAI-EXAONE"
+    },
+    {
+      "id": "solar",
+      "name": "Solar",
+      "creator": "upstage",
+      "prefixes": [
+        "solar"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/upstage"
+    },
+    {
+      "id": "yi",
+      "name": "Yi",
+      "creator": "01ai",
+      "prefixes": [
+        "yi"
+      ],
+      "icon": "yi",
+      "source": "https://huggingface.co/01-ai"
+    },
+    {
+      "id": "baichuan",
+      "name": "Baichuan",
+      "creator": "baichuan",
+      "prefixes": [
+        "baichuan"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/baichuan-inc"
+    },
+    {
+      "id": "internlm",
+      "name": "InternLM",
+      "creator": "internlm",
+      "prefixes": [
+        "internlm"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/internlm"
+    },
+    {
+      "id": "sensenova",
+      "name": "SenseNova",
+      "creator": "sensetime",
+      "prefixes": [
+        "sensenova",
+        "sensenova-u1"
+      ],
+      "icon": "sensenova",
+      "source": "https://huggingface.co/SenseNova"
+    },
+    {
+      "id": "arcee",
+      "name": "Arcee",
+      "creator": "arcee",
+      "prefixes": [
+        "arcee"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/arcee-ai"
+    },
+    {
+      "id": "hermes",
+      "name": "Hermes",
+      "creator": "nous",
+      "prefixes": [
+        "hermes",
+        "nous-hermes"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/NousResearch"
+    },
+    {
+      "id": "dolphin",
+      "name": "Dolphin",
+      "creator": "cognitivecomputations",
+      "prefixes": [
+        "dolphin"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/dphn/dolphin-2.9-llama3-8b"
+    },
+    {
+      "id": "dbrx",
+      "name": "DBRX",
+      "creator": "databricks",
+      "prefixes": [
+        "dbrx"
+      ],
+      "icon": "dbrx",
+      "source": "https://huggingface.co/databricks"
+    },
+    {
+      "id": "dolly",
+      "name": "Dolly",
+      "creator": "databricks",
+      "prefixes": [
+        "dolly"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/databricks"
+    },
+    {
+      "id": "arctic",
+      "name": "Arctic",
+      "creator": "snowflake",
+      "prefixes": [
+        "arctic",
+        "snowflake-arctic"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/Snowflake"
+    },
+    {
+      "id": "lfm",
+      "name": "LFM",
+      "creator": "liquid",
+      "prefixes": [
+        "lfm"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/LiquidAI"
+    },
+    {
+      "id": "nomic",
+      "name": "Nomic",
+      "creator": "nomic",
+      "prefixes": [
+        "nomic"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/nomic-ai"
+    },
+    {
+      "id": "mxbai",
+      "name": "Mixedbread",
+      "creator": "mixedbread",
+      "prefixes": [
+        "mxbai"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/mixedbread-ai"
+    },
+    {
+      "id": "jina",
+      "name": "Jina",
+      "creator": "jina",
+      "prefixes": [
+        "jina"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/jinaai"
+    },
+    {
+      "id": "bge",
+      "name": "BGE",
+      "creator": "baai",
+      "prefixes": [
+        "bge"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/BAAI"
+    },
+    {
+      "id": "smollm",
+      "name": "SmolLM",
+      "creator": "huggingface",
+      "prefixes": [
+        "smollm",
+        "smolvlm"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/HuggingFaceTB"
+    },
+    {
+      "id": "starcoder",
+      "name": "StarCoder",
+      "creator": "bigcode",
+      "prefixes": [
+        "starcoder",
+        "starcoderbase",
+        "santacoder"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/bigcode/starcoder2-15b"
+    },
+    {
+      "id": "gpt-neox",
+      "name": "GPT-NeoX",
+      "creator": "eleutherai",
+      "prefixes": [
+        "gpt-neox"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/EleutherAI"
+    },
+    {
+      "id": "gpt-j",
+      "name": "GPT-J",
+      "creator": "eleutherai",
+      "prefixes": [
+        "gpt-j"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/EleutherAI"
+    },
+    {
+      "id": "gpt-neo",
+      "name": "GPT-Neo",
+      "creator": "eleutherai",
+      "prefixes": [
+        "gpt-neo"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/EleutherAI"
+    },
+    {
+      "id": "pythia",
+      "name": "Pythia",
+      "creator": "eleutherai",
+      "prefixes": [
+        "pythia"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/EleutherAI"
+    },
+    {
+      "id": "stablelm",
+      "name": "StableLM",
+      "creator": "stability",
+      "prefixes": [
+        "stablelm",
+        "stable-code",
+        "stable-diffusion",
+        "sdxl"
+      ],
+      "icon": null,
+      "source": "https://huggingface.co/stabilityai"
+    },
+    {
+      "id": "flux",
+      "name": "FLUX",
+      "creator": "bfl",
+      "prefixes": [
+        "flux"
+      ],
+      "icon": "flux",
+      "source": "https://huggingface.co/black-forest-labs"
+    },
+    {
+      "id": "beam",
+      "name": "Beam",
+      "creator": "reflection",
+      "prefixes": [
+        "beam"
+      ],
+      "icon": null,
+      "source": "https://reflection.ai/blog/introducing-beam"
+    },
+    {
+      "id": "laguna",
+      "name": "Laguna",
+      "creator": "poolside",
+      "prefixes": [
+        "laguna"
+      ],
+      "icon": null,
+      "source": "https://poolside.ai/models"
+    },
+    {
+      "id": "sonar",
+      "name": "Sonar",
+      "creator": "perplexity",
+      "prefixes": [
+        "sonar",
+        "pplx"
+      ],
+      "icon": null,
+      "source": "https://docs.perplexity.ai/getting-started/models"
+    },
+    {
+      "id": "reka",
+      "name": "Reka",
+      "creator": "reka",
+      "prefixes": [
+        "reka"
+      ],
+      "icon": null,
+      "source": "https://www.reka.ai/"
+    },
+    {
+      "id": "palmyra",
+      "name": "Palmyra",
+      "creator": "writer",
+      "prefixes": [
+        "palmyra"
+      ],
+      "icon": null,
+      "source": "https://writer.com/models/"
+    },
+    {
+      "id": "inflection",
+      "name": "Inflection",
+      "creator": "inflection",
+      "prefixes": [
+        "inflection"
+      ],
+      "icon": null,
+      "source": "https://inflection.ai/"
+    }
+  ],
+  "platforms": [
+    {
+      "id": "ollama",
+      "name": "Ollama",
+      "aliases": [
+        "Ollama"
+      ],
+      "kind": "runtime",
+      "icon": "ollama",
+      "source": "https://ollama.com/"
+    },
+    {
+      "id": "lmstudio",
+      "name": "LM Studio",
+      "aliases": [
+        "LMStudio",
+        "LM Studio",
+        "lm-studio"
+      ],
+      "kind": "runtime",
+      "icon": "lmstudio",
+      "source": "https://lmstudio.ai/"
+    },
+    {
+      "id": "huggingface",
+      "name": "Hugging Face",
+      "aliases": [
+        "HuggingFace",
+        "HF"
+      ],
+      "kind": "api",
+      "icon": "huggingface",
+      "source": "https://huggingface.co/docs/inference-providers"
+    },
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "aliases": [
+        "Open Router"
+      ],
+      "kind": "api",
+      "icon": "openrouter",
+      "source": "https://openrouter.ai/docs/overview/models"
+    },
+    {
+      "id": "together",
+      "name": "Together AI",
+      "aliases": [
+        "Together",
+        "together.ai"
+      ],
+      "kind": "api",
+      "icon": "together",
+      "source": "https://www.together.ai/"
+    },
+    {
+      "id": "fireworks",
+      "name": "Fireworks AI",
+      "aliases": [
+        "Fireworks"
+      ],
+      "kind": "api",
+      "icon": "fireworks",
+      "source": "https://fireworks.ai/"
+    },
+    {
+      "id": "groq",
+      "name": "Groq",
+      "aliases": [],
+      "kind": "api",
+      "icon": "groq",
+      "source": "https://groq.com/"
+    },
+    {
+      "id": "cerebras",
+      "name": "Cerebras",
+      "aliases": [],
+      "kind": "api",
+      "icon": "cerebras",
+      "source": "https://www.cerebras.ai/"
+    },
+    {
+      "id": "deepinfra",
+      "name": "DeepInfra",
+      "aliases": [
+        "Deep Infra"
+      ],
+      "kind": "api",
+      "icon": "deepinfra",
+      "source": "https://deepinfra.com/"
+    },
+    {
+      "id": "replicate",
+      "name": "Replicate",
+      "aliases": [],
+      "kind": "api",
+      "icon": "replicate",
+      "source": "https://replicate.com/"
+    },
+    {
+      "id": "baseten",
+      "name": "Baseten",
+      "aliases": [],
+      "kind": "api",
+      "icon": "baseten",
+      "source": "https://www.baseten.co/"
+    },
+    {
+      "id": "vllm",
+      "name": "vLLM",
+      "aliases": [
+        "vLLM"
+      ],
+      "kind": "runtime",
+      "icon": "vllm",
+      "source": "https://docs.vllm.ai/"
+    },
+    {
+      "id": "sglang",
+      "name": "SGLang",
+      "aliases": [
+        "SGLang"
+      ],
+      "kind": "runtime",
+      "icon": null,
+      "source": "https://github.com/sgl-project/sglang",
+      "icon_note": "Reviewed upstream SVG contains embedded raster content; generic mark until a suitable licensed vector is available."
+    },
+    {
+      "id": "llamacpp",
+      "name": "llama.cpp",
+      "aliases": [
+        "llama.cpp",
+        "llama-cpp",
+        "llamacpp",
+        "llama_cpp"
+      ],
+      "kind": "runtime",
+      "icon": "llamacpp",
+      "source": "https://github.com/ggml-org/llama.cpp"
+    },
+    {
+      "id": "openwebui",
+      "name": "Open WebUI",
+      "aliases": [
+        "Open WebUI",
+        "open-webui"
+      ],
+      "kind": "runtime",
+      "icon": "openwebui",
+      "source": "https://openwebui.com/"
+    },
+    {
+      "id": "jan",
+      "name": "Jan",
+      "aliases": [],
+      "kind": "runtime",
+      "icon": null,
+      "source": "https://github.com/janhq/jan",
+      "icon_note": "Reviewed upstream SVG contains embedded raster content; generic mark until a suitable licensed vector is available."
+    },
+    {
+      "id": "gpt4all",
+      "name": "GPT4All",
+      "aliases": [
+        "GPT4All"
+      ],
+      "kind": "runtime",
+      "icon": "gpt4all",
+      "source": "https://github.com/nomic-ai/gpt4all"
+    },
+    {
+      "id": "azure",
+      "name": "Microsoft Azure",
+      "aliases": [
+        "Azure",
+        "Azure OpenAI",
+        "azure_openai"
+      ],
+      "kind": "api",
+      "icon": "azure",
+      "source": "https://learn.microsoft.com/azure/ai-services/openai/"
+    },
+    {
+      "id": "bedrock",
+      "name": "AWS Bedrock",
+      "aliases": [
+        "Bedrock",
+        "Amazon Bedrock",
+        "aws_bedrock"
+      ],
+      "kind": "api",
+      "icon": "bedrock",
+      "source": "https://docs.aws.amazon.com/bedrock/"
+    }
+  ],
+  "policy": {
+    "unknown_model_icon": "generic",
+    "unknown_platform_icon": "generic",
+    "runtime_is_not_creator": true,
+    "not_an_availability_catalog": true
+  },
+  "source_index": [
+    "https://icons.lobehub.com/skills.md",
+    "https://github.com/lobehub/lobe-icons",
+    "https://agenticdriver.dev/icons",
+    "https://simpleicons.org/"
+  ]
+}
