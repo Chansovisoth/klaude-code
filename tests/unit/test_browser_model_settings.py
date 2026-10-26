@@ -474,6 +474,7 @@ def test_account_role_authorizes_model_management_on_both_listeners(native, role
         for path in (
             "/api/v1/models/cancel",
             "/api/v1/models/reconcile",
+            "/api/v1/models/dismiss",
             "/api/v1/settings/models/image-test",
         ):
             assert _request(host, "POST", path, body={}, **auth)[0] == 403

@@ -490,6 +490,8 @@ class LocalWebHost:
             "profile_management": self.library is not None,
             "media_management": self.library is not None,
             "model_store": self.library is not None,
+            "model_download_dismissal": self.library is not None,
+            "model_download_recovery": self.library is not None,
             "image_studio": self.library is not None,
             "model_settings": self.library is not None,
             "model_store_catalog": self.library is not None,
@@ -1244,14 +1246,15 @@ class _Handler(BaseHTTPRequestHandler):
                     if path.endswith("/store") and params:
                         from klaude_application.model_store_catalog import catalog
 
-                        if (set(params) - {"source", "query", "sort", "refresh"}
+                        if (set(params) - {"source", "query", "sort", "refresh", "page"}
                                 or params.get("source") != ["huggingface"]
                                 or any(len(v) != 1 for v in params.values())
                                 or params.get("refresh", ["0"])[0] not in {"0", "1"}):
                             raise ValueError("Unknown Model Store filter")
                         result = catalog(service.cfg, params.get("query", [""])[0],
                                          params.get("sort", ["downloads"])[0],
-                                         refresh=params.get("refresh") == ["1"])
+                                         refresh=params.get("refresh") == ["1"],
+                                         page=int(params.get("page", ["1"])[0]))
                     else:
                         if params:
                             raise ValueError("Unknown Model Store filter")
@@ -1525,26 +1528,29 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception:
                 self._error(HTTPStatus.BAD_REQUEST, "model_unavailable",
                             "Service test unavailable; check its address and credentials")
-        elif path in {"/api/v1/models/cancel", "/api/v1/models/reconcile"}:
+        elif path in {"/api/v1/models/cancel", "/api/v1/models/reconcile",
+                      "/api/v1/models/dismiss"}:
             if not self._admin_management_allowed():
                 self._error(HTTPStatus.FORBIDDEN, "forbidden",
                             "Model management requires an admin account")
                 return
             try:
-                from klaude_application import model_store
-
                 with self.owner._lock:
                     service = self.owner.library
                     if (service is None or set(body) != {"request_id"}
                             or not isinstance(body["request_id"], str)):
                         raise ValueError("Choose an exact model operation")
-                    result = (service.cancel_model(body["request_id"])
-                              if path.endswith("/cancel") else
-                              model_store.reconcile(service.cfg, service.journal,
-                                                    body["request_id"]))
+                    if path.endswith("/dismiss"):
+                        result = service.dismiss_model(body["request_id"])
+                    elif path.endswith("/cancel"):
+                        result = service.cancel_model(body["request_id"])
+                    else:
+                        result = service.reconcile_model(body["request_id"])
                     self._json(HTTPStatus.OK, result)
             except (ValueError, RuntimeError, OSError, sqlite3.Error):
                 self._error(HTTPStatus.CONFLICT, "model_unconfirmed",
+                            "Stop the active download before removing its history."
+                            if path.endswith("/dismiss") else
                             "Model outcome not confirmed. Check Downloads and the Ollama server.")
         elif path == "/api/v1/auth/logout":
             if body:

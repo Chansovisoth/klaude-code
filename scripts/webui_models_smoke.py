@@ -112,9 +112,9 @@ async def verify(host, root, state, *, legacy=False):
             })()""")
             await tab.click("#nav-models")
             if await tab.js("Boolean(window.ModelStoreUI)"):
-                await tab.click("#store-sections [data-section=connections]")
+                await tab.js("showView('settings', {section:'models'}); byId('models-configured').open=true")
             await tab.wait("byId('models-items').querySelectorAll('.models-model').length===20")
-            assert await tab.js("currentView==='models' && location.search.includes('view=models')")
+            assert await tab.js("currentView==='settings' && location.search.includes('settings=models')")
             assert await tab.js("byId('models-numbers').querySelectorAll('button').length===2")
             await tab.click("#models-next")
             assert await tab.js("byId('models-items').querySelectorAll('.models-model').length===5")
@@ -226,8 +226,8 @@ async def verify(host, root, state, *, legacy=False):
             await tab.wait("latest.plan_mode===false")
             await tab.click("#nav-models")
             if await tab.js("Boolean(window.ModelStoreUI)"):
-                await tab.click("#store-sections [data-section=connections]")
-            await tab.wait("!byId('models-refresh').disabled")
+                await tab.js("showView('settings', {section:'models'}); byId('models-configured').open=true")
+            await tab.wait("!byId('configured-models-refresh').disabled")
             await tab.js("byId('models-query').value='model-02';"
                          "byId('models-query').dispatchEvent(new Event('input'))")
             state["runtime_error"] = True
@@ -241,14 +241,14 @@ async def verify(host, root, state, *, legacy=False):
             await tab.js("byId('models-query').value='';"
                          "byId('models-query').dispatchEvent(new Event('input'))")
             state["catalog_error"] = True
-            await tab.click("#models-refresh")
-            await tab.wait("!byId('models-refresh').disabled && "
+            await tab.click("#configured-models-refresh")
+            await tab.wait("!byId('configured-models-refresh').disabled && "
                            "byId('models-status').textContent.includes('Previously loaded')")
             assert await tab.js("byId('models-items').querySelectorAll('.models-model')"
                                 ".length===20")
             state["catalog_error"] = False
             await tab.click("#models-connections [data-row-key=empty]")
-            await tab.wait("!byId('models-refresh').disabled && "
+            await tab.wait("!byId('configured-models-refresh').disabled && "
                            "byId('models-items').textContent.includes('No models available')")
             assert await tab.js("byId('models-connections')"
                                 ".querySelector('[data-row-key=disabled]').disabled")
@@ -271,7 +271,7 @@ async def verify(host, root, state, *, legacy=False):
                     })
                     await asyncio.sleep(.15)
                     layout = await tab.js("""(() => {
-                      const view=byId('models-view');
+                      const view=byId('models-settings');
                       return {width:innerWidth,fits:view.scrollWidth<=view.clientWidth &&
                         document.documentElement.scrollWidth<=innerWidth,
                         pairs:[...view.querySelectorAll('.models-model')].every(row=>{
@@ -281,6 +281,17 @@ async def verify(host, root, state, *, legacy=False):
                         }),phoneNav:innerWidth>560 ||
                           getComputedStyle(byId('nav-models')).display==='none'};
                     })()""")
+                    if not layout["fits"]:
+                        print(await tab.js("""(() => {
+                          const view=byId('models-settings'), bounds=view.getBoundingClientRect();
+                          return {view:{width:view.clientWidth,scroll:view.scrollWidth},
+                            doc:{width:innerWidth,scroll:document.documentElement.scrollWidth},
+                            outside:[...view.querySelectorAll('*')].filter(n=>{
+                              const r=n.getBoundingClientRect();
+                              return r.width>0 && r.right>bounds.right+1;
+                            }).map(n=>({id:n.id,tag:n.tagName,cls:n.className,
+                              right:n.getBoundingClientRect().right})).slice(0,12)};
+                        })()"""))
                     assert layout["fits"] and layout["pairs"] and layout["phoneNav"], layout
                     geometry.append({"theme": theme, **layout})
                     if width in (390, 1440):
@@ -294,13 +305,14 @@ async def verify(host, root, state, *, legacy=False):
                          "byId('models-query').dispatchEvent(new Event('input'))")
             await tab.click("#models-defaults")
             await tab.wait("currentView==='settings' && settingsSection==='models'")
+            await tab.click("#nav-chat")
             await tab.js("history.back()")
-            await tab.wait("currentView==='models'")
+            await tab.wait("currentView==='settings' && settingsSection==='models'")
             assert await tab.js("byId('models-query').value==='model-03'")
             await tab.command("Page.reload")
             try:
                 await tab.wait("typeof latest!=='undefined' && authenticated && "
-                               "currentView==='models' && "
+                               "currentView==='settings' && "
                                "Boolean(byId('models-items').querySelector('.models-model'))")
             except AssertionError as error:
                 raise AssertionError(await tab.js("({view:currentView,url:location.href,"
@@ -325,16 +337,19 @@ async def verify(host, root, state, *, legacy=False):
                     **({"text": "\r"} if kind == "keyDown" else {}),
                 })
             await tab.wait("currentView==='models' && !navigationMore.matches(':popover-open')")
-            await tab.wait("!byId('models-refresh').disabled")
+            await tab.wait("!byId('configured-models-refresh').disabled")
+
+            await tab.js("showView('settings', {section:'models'}); byId('models-configured').open=true")
+            await tab.wait("!byId('configured-models-refresh').disabled")
 
             # A late catalog response cannot restore private data after sign-out.
             await tab.js("""window.modelsFetch=fetch.bind(window);window.fetch=(input,options)=>
               String(input).includes('/models/catalog') ? new Promise(resolve=>{
                 window.releaseModels=()=>resolve(modelsFetch(input,options));
               }) : modelsFetch(input,options);""")
-            await tab.click("#models-refresh")
+            await tab.click("#configured-models-refresh")
             await tab.wait("typeof releaseModels==='function'")
-            assert await tab.js("byId('models-refresh').getAttribute('aria-busy')==='true' && "
+            assert await tab.js("byId('configured-models-refresh').getAttribute('aria-busy')==='true' && "
                                "byId('models-items').getAttribute('aria-busy')==='true'")
             await tab.click("#logout")
             await tab.wait("!authenticated")

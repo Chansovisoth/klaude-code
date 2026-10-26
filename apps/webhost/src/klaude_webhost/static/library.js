@@ -650,6 +650,7 @@ const fileIconPaths = {
   gallery: "M3 3h18v18H3ZM3 16l6-6 5 5 3-3 4 4M7 7h.01",
   previous: "m15 5-7 7 7 7", next: "m9 5 7 7-7 7",
   expand: "M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5",
+  openNew: "M14 4h6v6m0-6-9 9M18 13v6H5V6h6",
   sidebar: "M3 3h18v18H3ZM15 3v18",
   search: "M15 15a7 7 0 1 1 0-10 7 7 0 0 1 0 10Zm0 0 6 6",
   options: "M4 7h16M4 17h16M8 4v6m8 4v6",
@@ -731,7 +732,11 @@ function fileIcon(item) {
   return icon;
 }
 function fileSize(size) {
-  return size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KiB` : `${(size / 1024 / 1024).toFixed(1)} MiB`;
+  if (!Number.isFinite(size) || size < 0) return "Size unknown";
+  if (size > 0 && size < 10_000) return "<0.01 MB";
+  const gigabytes = size >= 1_000_000_000;
+  const value = gigabytes ? size / 1_000_000_000 : Math.min(size / 1_000_000, 999.99);
+  return `${value.toLocaleString(undefined, {maximumFractionDigits:2})} ${gigabytes ? "GB" : "MB"}`;
 }
 function fileDate(created, options = { year: "numeric", month: "short", day: "numeric" }) {
   return new Date(created * 1000).toLocaleDateString(undefined, options);
@@ -2372,7 +2377,7 @@ function discardStagedUpload(upload_id, epoch = authEpoch) {
   if (authenticated && epoch === authEpoch) jsonRequest("/api/v1/chat/attachments/discard", "POST",
     { upload_id }).catch(() => {});
 }
-async function prepareChange(draft, { current = () => true, beforeOpen = () => {}, onAccepted, onDiscard, filename = "" } = {}) {
+async function prepareChange(draft, { current = () => true, beforeOpen = () => {}, onAccepted, onDiscard, filename = "", downloadDestination = "" } = {}) {
   const result = await domainRequest("/api/v1/library/review", "POST", { draft });
   if (!current()) {
     domainRequest("/api/v1/library/discard", "POST", { review_id: result.review_id }).catch(() => {});
@@ -2381,23 +2386,37 @@ async function prepareChange(draft, { current = () => true, beforeOpen = () => {
   managementReview = { ...result, request_id: requestId(), onAccepted, onDiscard };
   const destructive = ["delete", "model-delete", "model-connection-remove", "skill-delete", "memory-delete", "mcp-remove", "session-delete", "knowledge-delete"].includes(draft.operation);
   const ai = ["vision-analyze", "vision-tags"].includes(draft.operation), tags = draft.operation === "vision-tags";
+  const download = draft.operation === "model-pull";
+  reviewDialog.classList.toggle("model-download-confirmation", download);
   reviewDialog.classList.toggle("ai-confirmation", ai);
-  byId("domain-review-title").textContent = ai ? tags ? "Suggest image tags?" : "Review image?" : destructive ?
+  byId("domain-review-title").textContent = download ? "Download model?" : ai ? tags ? "Suggest image tags?" : "Review image?" : destructive ?
     draft.operation === "knowledge-delete" ? draft.source ? "Delete this source?" : "Delete this knowledge?" : draft.operation === "delete" ? "Delete file permanently?" : "Remove this item?" : "Review change";
-  byId("domain-review-confirm").textContent = ai ? tags ? "Suggest tags" : "Review image" : destructive ? "Delete permanently" : "Confirm";
+  byId("domain-review-confirm").textContent = download ? "Download" : ai ? tags ? "Suggest tags" : "Review image" : destructive ? "Delete permanently" : "Confirm";
   byId("domain-review-confirm").classList.toggle("danger", destructive);
-  byId("domain-review-summary").textContent = ai ? tags ? "Klaude will analyze this image and suggest tags for you to review." :
+  byId("domain-review-summary").textContent = download ? "" : ai ? tags ? "Klaude will analyze this image and suggest tags for you to review." :
     "Klaude will analyze this image to answer your question." : result.summary;
-  byId("domain-review-target").hidden = !ai;
+  byId("domain-review-target").hidden = !ai && !download;
   byId("domain-review-target").textContent = ai ? filename : "";
   byId("domain-review-target").title = ai ? filename : "";
+  if (download) {
+    const target = byId("domain-review-target"), rows = document.createElement("dl");
+    const model = String(draft.model || ""), split = model.startsWith("hf.co/") ? model.lastIndexOf(":") : -1;
+    const fields = split > 0 ? [["Model", model.slice(0, split)], ["File", model.slice(split + 1)]] : [["Model", model]];
+    fields.push(["Server", downloadDestination || draft.connection]);
+    for (const [label, value] of fields) {
+      const term = document.createElement("dt"), description = document.createElement("dd");
+      term.textContent = label; description.textContent = value; rows.append(term, description);
+    }
+    target.replaceChildren(rows);
+  }
   byId("domain-review-notice").hidden = !ai;
   byId("domain-review-notice").textContent = ai ? "Image data will be sent to the configured model provider(s). Provider charges may apply." +
     (tags ? " Suggested tags are not saved automatically." : "") : "";
-  byId("domain-review-technical").hidden = !ai;
+  byId("domain-review-technical").hidden = !ai && !download;
+  byId("domain-review-technical").querySelector("summary").textContent = download ? "More details" : "Technical details";
   byId("domain-review-technical").open = false;
-  byId("domain-review-technical-summary").textContent = ai ? result.summary : "";
-  byId("domain-review-status").textContent = ai ? "" : "Changes begin only after confirmation. Accepted work continues if you leave this page.";
+  byId("domain-review-technical-summary").textContent = ai || download ? result.summary : "";
+  byId("domain-review-status").textContent = ai || download ? "" : "Changes begin only after confirmation. Accepted work continues if you leave this page.";
   byId("domain-review-confirm").disabled = false;
   beforeOpen();
   reviewDialog.showModal();

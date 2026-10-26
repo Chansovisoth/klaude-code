@@ -82,3 +82,8 @@ selection, Thinking preservation, search/pagination, failure, refresh and sign-o
 checks. Eight additional actual light/dark layouts passed at 320/390/850/1440px;
 desktop and 320px screenshots were inspected. See `hover-corners-validation.md`
 for the frame-sampled regression and its limits.
+
+The [V2 editorial layout](model_store/layout-v2-validation.md) moves this configured
+catalog to a collapsed Browse configured models disclosure in Settings → Models.
+Store navigation is Discover/Installed/Downloads; Chat keeps its own picker.
+The original catalog's selection, paging and compatibility contracts remain.

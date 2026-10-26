@@ -33,9 +33,10 @@ PULL_TIMEOUT = 1800
 
 
 class ManagerError(ValueError):
-    def __init__(self, status: str, message: str):
+    def __init__(self, status: str, message: str, *, terminal: bool = False):
         super().__init__(message)
         self.status = status
+        self.terminal = terminal
 
 
 def text(value: Any, limit: int = 160) -> str:
@@ -77,20 +78,30 @@ def _number(value: Any) -> int | None:
     return value if type(value) is int and 0 <= value < 2**63 else None
 
 
-def _failure(status: int, payload: Any = None) -> ManagerError:
+def _failure(status: int, payload: Any = None, *, terminal: bool = False) -> ManagerError:
     # Provider error prose may contain keys, local paths or terminal controls.
     message = str(payload.get("error", "")).casefold() if isinstance(payload, dict) else ""
     if status in {401, 403}:
         return ManagerError(
-            "authentication", "Ollama authentication failed; review endpoint access"
+            "authentication", "Ollama authentication failed; review endpoint access",
+            terminal=terminal,
         )
     if "no space left" in message or "disk full" in message:
-        return ManagerError("disk", "Ollama storage is full; free space on the selected server")
+        return ManagerError("disk", "Ollama storage is full; free space on the selected server",
+                            terminal=terminal)
     if status == 404 or "not found" in message:
-        return ManagerError("not_found", "Model or API operation unavailable on this Ollama server")
+        return ManagerError("not_found", "Model or API operation unavailable on this Ollama server",
+                            terminal=terminal)
     if status == 429:
-        return ManagerError("rate_limit", "Ollama request rate limited; retry later")
-    return ManagerError("service", "Ollama rejected the operation; inspect the server")
+        return ManagerError("rate_limit", "Ollama request rate limited; retry later",
+                            terminal=terminal)
+    if any(word in message for word in ("unexpected eof", "max retries", "timeout", "timed out")):
+        return ManagerError(
+            "transfer", "Ollama could not finish the transfer; check server network access",
+            terminal=terminal,
+        )
+    return ManagerError("service", "Ollama rejected the operation; inspect the server",
+                        terminal=terminal)
 
 
 class ManagerTransport(CancellableHTTPTransport):
@@ -157,7 +168,9 @@ class ManagerTransport(CancellableHTTPTransport):
             )
         return result
 
-    def pull(self, name: str, emit: Callable[[dict], None]) -> None:
+    def pull(self, name: str, emit: Callable[[dict], None], *, request_id: str = "") -> None:
+        if request_id and not re.fullmatch(r"[a-f0-9]{32}", request_id):
+            raise ManagerError("invalid", "Invalid model request identity")
         client = self._chat_client_factory()
         self._track_request(client)
         pending = b""
@@ -166,8 +179,9 @@ class ManagerTransport(CancellableHTTPTransport):
         try:
             with client.stream(
                 "POST",
-                "/api/pull",
+                "/api/pull" + (f"?klaude_request={request_id}" if request_id else ""),
                 json={"model": name, "stream": True},
+                timeout=httpx.Timeout(PULL_TIMEOUT, connect=10),
                 extensions={"trace": self._request_trace(client)},
             ) as response:
                 self._attach_response(client, response)
@@ -181,7 +195,8 @@ class ManagerTransport(CancellableHTTPTransport):
                         error_data = json.loads(error_body)
                     except (ValueError, UnicodeError):
                         error_data = None
-                    raise _failure(response.status_code, error_data)
+                    raise _failure(response.status_code, error_data,
+                                   terminal=response.status_code in {400, 401, 403, 404, 429})
                 for chunk in response.iter_bytes():
                     total_bytes += len(chunk)
                     if total_bytes > MAX_STREAM:
@@ -204,7 +219,11 @@ class ManagerTransport(CancellableHTTPTransport):
                         if not isinstance(item, dict):
                             raise ManagerError("malformed", "Ollama returned invalid progress")
                         if item.get("error"):
-                            raise _failure(200, item)
+                            if not isinstance(item["error"], str):
+                                raise ManagerError("malformed", "Ollama returned invalid progress")
+                            # The native server emits this as the terminal PullModel result.
+                            # Missing/truncated/erroring streams are deliberately different.
+                            raise _failure(200, item, terminal=True)
                         status = item.get("status")
                         if not isinstance(status, str) or len(status) > 256:
                             raise ManagerError(
@@ -302,10 +321,15 @@ def invalidate(cfg: Any, connection: Any) -> bool:
 def execute_manager(
     cfg: Any, request: dict, emit: Callable[[dict], None] = lambda _: None, *,
     before_effect: Callable[[], None] | None = None,
+    native_request_id: str = "",
 ) -> dict:
     """Fixed operations shared by CLI and TUI owned workers."""
     operation = request.get("operation")
+    attempted = False
+    outcome_confirmed = False
     try:
+        if native_request_id and not re.fullmatch(r"[a-f0-9]{32}", native_request_id):
+            raise ManagerError("invalid", "Invalid model request identity")
         if operation == "connections":
             return {
                 "connections": [
@@ -444,7 +468,22 @@ def execute_manager(
                         if before_effect is not None:
                             before_effect()
                         attempted = True
-                        client.pull(name, emit)
+                        from .ollama_activity import track_transfer
+
+                        try:
+                            with track_transfer(cfg, connection, name, emit) as report:
+                                client.pull(name, report, request_id=native_request_id)
+                        except ManagerError as exc:
+                            if exc.terminal:
+                                # A terminal server rejection plus a fresh exact prior
+                                # inventory confirms failure, not remote partial cleanup.
+                                try:
+                                    current = next((m for m in client.models()
+                                                    if m["name"] == name), None)
+                                    outcome_confirmed = current == existing
+                                except (ManagerError, httpx.HTTPError):
+                                    pass
+                            raise
                     after = client.models()
                     installed = any(m["name"] == name for m in after)
                     if installed != (operation == "pull"):
@@ -465,10 +504,12 @@ def execute_manager(
                 else "Model deletion verified",
             }
     except ManagerError as exc:
-        return {"status": exc.status, "message": str(exc)}
+        return {"status": exc.status, "message": str(exc),
+                "effect_started": attempted, "outcome_confirmed": outcome_confirmed}
     except httpx.TimeoutException:
         return {
             "status": "timeout",
+            "effect_started": attempted,
             "message": "Model discovery timed out"
             if operation == "search"
             else "Ollama request timed out; reload to check its outcome",
@@ -481,6 +522,7 @@ def execute_manager(
     except httpx.HTTPError:
         return {
             "status": "network",
+            "effect_started": attempted,
             "message": "Hugging Face discovery connection failed; review provider setup"
             if operation == "search"
             else "Ollama connection failed; check the selected endpoint",
@@ -488,5 +530,6 @@ def execute_manager(
     except (ValueError, OSError):
         return {
             "status": "unavailable",
+            "effect_started": attempted,
             "message": "Model Manager unavailable; reload or inspect server setup",
         }

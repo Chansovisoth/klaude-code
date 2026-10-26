@@ -769,7 +769,8 @@ window.MaterialProgress ??= (() => {
   // Fixed-phase translation of material@3.2.4 progress/features/linear.js
   // (MIT; notice in vendor/material-progress-LICENSE.txt). Recalculate only
   // when the bar's value or width changes, so the wave itself never moves.
-  function createMaterialStatic(preview, thickness, progressDuration, maxProgress) {
+  function createMaterialStatic(preview, thickness, progressDuration, maxProgress, actualValue, label) {
+    const controlled = Number.isFinite(actualValue);
     const strokeWidth = thickness === "thick" ? 8 : 4;
     const amplitude = 3 * strokeWidth / 4;
     const height = strokeWidth + 2 * amplitude;
@@ -782,7 +783,7 @@ window.MaterialProgress ??= (() => {
     if (preview) element.setAttribute("aria-hidden", "true");
     else {
       element.setAttribute("role", "progressbar");
-      element.setAttribute("aria-label", "Loading Klaude");
+      element.setAttribute("aria-label", label);
       element.setAttribute("aria-valuemin", "0");
       element.setAttribute("aria-valuemax", "100");
     }
@@ -798,7 +799,7 @@ window.MaterialProgress ??= (() => {
     stop.classList.add("md3-linear-progress-stop");
     stop.setAttribute("r", String(Math.min(4, height) / 2)); stop.setAttribute("cy", String(height / 2));
     svg.append(track, indicator, stop); element.append(svg);
-    let value = preview ? 51 : 0, frame = 0, done = false;
+    let value = controlled ? actualValue : preview ? 51 : 0, frame = 0, done = false;
     const observer = typeof ResizeObserver === "function" ? new ResizeObserver(render) : null;
     function render() {
       const width = Math.max(10, element.getBoundingClientRect().width || 240);
@@ -821,7 +822,7 @@ window.MaterialProgress ??= (() => {
       if (!preview) element.setAttribute("aria-valuenow", String(Math.round(value)));
     }
     render(); observer?.observe(element);
-    if (!preview) {
+    if (!preview && !controlled) {
       const started = performance.now();
       const update = now => {
         if (done || !element.isConnected) return;
@@ -831,24 +832,30 @@ window.MaterialProgress ??= (() => {
       };
       frame = requestAnimationFrame(update);
     }
-    return { element, complete: () => { done = true; cancelAnimationFrame(frame); value = 100; render(); },
+    return { element, setValue: next => { value = Math.max(0, Math.min(100, next)); render(); },
+      complete: () => { done = true; cancelAnimationFrame(frame); value = 100; render(); },
       destroy: () => { done = true; cancelAnimationFrame(frame); observer?.disconnect(); } };
   }
   function create({ preview = false, thickness, style: requestedStyle,
-    duration: progressDuration = duration, maxProgress = 100 } = {}) {
+    duration: progressDuration = duration, maxProgress = 100, value: actualValue,
+    label = "Loading Klaude" } = {}) {
+    const controlled = Number.isFinite(actualValue);
+    actualValue = controlled ? Math.max(0, Math.min(100, actualValue)) : undefined;
     const style = requestedStyle || document.documentElement.dataset.loadingBarStyle || "material";
     thickness = thickness === "thick" ? "thick" : "thin";
     if (style === "material-static")
-      return createMaterialStatic(preview, thickness, progressDuration, maxProgress);
+      return createMaterialStatic(preview, thickness, progressDuration, maxProgress, actualValue, label);
     if (style === "material" && window.KlaudeMD3?.createProgress) {
-      const progress = window.KlaudeMD3.createProgress({ variant: "linear", value: preview ? 51 : 0,
-        max: 100, shape: "wavy", thickness, ariaLabel: "Loading Klaude" });
+      const progress = window.KlaudeMD3.createProgress({ variant: "linear", value: controlled ? actualValue : preview ? 51 : 0,
+        max: 100, shape: "wavy", thickness, ariaLabel: label });
       if (preview) progress.element.setAttribute("aria-hidden", "true");
       if (document.documentElement.dataset.motion === "reduced") {
         progress.hide(); progress.element.removeAttribute("hidden");
       }
       if (preview) return { element: progress.element, destroy: () => progress.destroy(),
         freeze: () => { progress.hide(); progress.element.removeAttribute("hidden"); } };
+      if (controlled) return { element: progress.element, setValue: next => progress.setValue(next, false),
+        complete: () => progress.setValue(100, false), destroy: () => progress.destroy() };
       const started = performance.now();
       const update = now => {
         if (!progress.element.isConnected) return;
@@ -868,7 +875,7 @@ window.MaterialProgress ??= (() => {
       element.setAttribute("aria-hidden", "true");
     } else {
       element.setAttribute("role", "progressbar");
-      element.setAttribute("aria-label", "Loading Klaude");
+      element.setAttribute("aria-label", label);
       element.setAttribute("aria-valuemin", "0");
       element.setAttribute("aria-valuemax", "100");
       element.setAttribute("aria-valuenow", "0");
@@ -898,18 +905,25 @@ window.MaterialProgress ??= (() => {
       indicators.push(indicator);
     }
     element.append(svg);
-    if (!preview) {
+    let frame = 0;
+    function setValue(next) {
+      const value = Math.max(0, Math.min(100, next));
+      element.setAttribute("aria-valuenow", String(Math.round(value)));
+      for (const indicator of indicators) indicator.style.strokeDashoffset = String(360 - value * 3.6);
+    }
+    if (controlled) setValue(actualValue);
+    if (!preview && !controlled) {
       const started = performance.now();
       const update = now => {
         if (!element.isConnected) return;
         const value = Math.min(maxProgress, ((now - started) / progressDuration) * maxProgress);
         element.setAttribute("aria-valuenow", String(Math.round(value)));
         for (const indicator of indicators) indicator.style.strokeDashoffset = String(360 - value * 3.6);
-        if (value < maxProgress) requestAnimationFrame(update);
+        if (value < maxProgress) frame = requestAnimationFrame(update);
       };
-      requestAnimationFrame(update);
+      frame = requestAnimationFrame(update);
     }
-    return { element, complete: () => {
+    return { element, setValue, destroy: () => cancelAnimationFrame(frame), complete: () => {
       if (preview) return;
       element.setAttribute("aria-valuenow", "100");
       for (const indicator of indicators) indicator.style.strokeDashoffset = "0";

@@ -370,16 +370,16 @@ class HeadlessApplication:
             if self.memory.session_archived(session_id):
                 raise ValueError("session is archived")
             turns = self.memory.load_session(session_id)
-            if not turns:
-                raise ValueError("session does not exist")
+            binding = self.turns.workspace(session_id)
             saved = self.memory.session_runtime(session_id)
+            if not turns and (binding is None or saved is None):
+                raise ValueError("session does not exist")
             current = capture(self.agent)
             if saved is None or current is None or any(
                 saved[key] != current[key]
                 for key in ("model", "mode", "effort", "definition", "credentials")
             ):
                 raise ValueError("explicit model/runtime selection required")
-            binding = self.turns.workspace(session_id)
             if binding is not None and binding[0] != str(self.agent.workdir.resolve()):
                 raise ValueError("session is bound to another workspace")
             self.turns.recover_session(session_id)

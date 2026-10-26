@@ -7,7 +7,7 @@ tools for models, datasets, and Spaces while keeping the integration optional.
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 
@@ -53,6 +53,9 @@ def _compact_repo(base_url: str, item: dict[str, Any], repo_type: str) -> dict[s
         "last_modified": item.get("lastModified") or item.get("last_modified", ""),
         "tags": tags[:12],
         "summary": item.get("description") or item.get("pipeline_tag") or "",
+        "pipeline_tag": item.get("pipeline_tag")
+        if isinstance(item.get("pipeline_tag"), str)
+        else "",
     }
 
 
@@ -65,7 +68,9 @@ def hub_repo_search(
     sort: str = "downloads",
     *,
     filter_tag: str = "",
-) -> list[dict[str, Any]]:
+    cursor: str = "",
+    with_cursor: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], str]:
     endpoint, _ = _repo_type(repo_type)
     params: dict[str, Any] = {"limit": max(1, min(limit, 50))}
     if query:
@@ -77,6 +82,10 @@ def hub_repo_search(
             raise ValueError("Unsupported model discovery filter")
         params["filter"] = filter_tag
         params["direction"] = -1
+        if cursor:
+            if len(cursor) > 2048 or any(not c.isprintable() for c in cursor):
+                raise ValueError("Invalid Hugging Face page cursor")
+            params["cursor"] = cursor
         import json
 
         with httpx.Client(
@@ -95,13 +104,16 @@ def hub_repo_search(
                     if len(body) > 1_000_000:
                         raise ValueError("Hugging Face discovery response exceeded its bound")
                 data = json.loads(body)
+                next_url = response.links.get("next", {}).get("url", "")
+                next_cursor = parse_qs(urlsplit(next_url).query).get("cursor", [""])[0]
                 if (
                     not isinstance(data, list)
                     or len(data) > 50
                     or any(not isinstance(item, dict) for item in data)
                 ):
                     raise ValueError("Invalid Hugging Face model inventory")
-                return [_compact_repo(base_url, item, endpoint) for item in data]
+                results = [_compact_repo(base_url, item, endpoint) for item in data]
+                return (results, next_cursor) if with_cursor else results
     r = httpx.get(
         f"{base_url.rstrip('/')}/api/{endpoint}",
         headers=_headers(api_key),
@@ -250,6 +262,9 @@ def hub_gguf_files(base_url: str, api_key: str, repo_id: str) -> dict[str, Any]:
     return {
         "id": repo_id,
         "files": files,
+        "pipeline_tag": value.get("pipeline_tag")
+        if isinstance(value.get("pipeline_tag"), str)
+        else "",
         "license": license_name
         if isinstance(license_name, str) and len(license_name) < 100
         else None,

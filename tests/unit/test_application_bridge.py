@@ -16,6 +16,7 @@ from klaude_core import AgentEvent, PermissionGate, Tool
 from klaude_core.config import Config
 from klaude_core.memory import Memory
 from klaude_core.model_runtime import ModelInfo
+from klaude_core.session_runtime import capture
 from klaude_tools import Workspace
 
 
@@ -136,6 +137,37 @@ def test_public_stream_and_session_resume_hide_private_payload(tmp_path) -> None
     with pytest.raises(ValueError, match="explicit model/runtime selection required"):
         wrong_model.resume(session_id)
     asyncio.run(wrong_model.close())
+
+
+@pytest.mark.parametrize("case", ["matching", "wrong_workspace", "wrong_model",
+                                 "missing_binding", "missing_choice"])
+def test_empty_resume_requires_saved_runtime_and_matching_workspace(tmp_path, case):
+    runtime = ScriptedRuntime()
+    app = _application(tmp_path, runtime)
+    app.agent.workdir = tmp_path
+    sid = app.session_id
+    try:
+        if case != "missing_binding":
+            app.turns.bind_workspace(
+                sid, str(tmp_path / "other" if case == "wrong_workspace" else tmp_path),
+                expected_revision=0,
+            )
+        if case != "missing_choice":
+            choice = capture(app.agent)
+            assert choice is not None
+            app.turns.set_runtime_choice(
+                sid, choice, choice, expected_revision=0, request_id="save-empty-runtime",
+            )
+        if case == "wrong_model":
+            app.agent.model_info = ModelInfo("ollama", "different", "different")
+        if case == "matching":
+            app.resume(sid)
+            assert app.session_id == sid and app.public_history() == () and runtime.calls == 0
+        else:
+            with pytest.raises(ValueError):
+                app.resume(sid)
+    finally:
+        asyncio.run(app.close())
 
 
 def test_detaching_event_consumer_does_not_cancel_accepted_turn(tmp_path) -> None:

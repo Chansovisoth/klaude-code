@@ -12,6 +12,7 @@ import json
 import os
 import re
 import stat
+import time
 from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
@@ -19,6 +20,7 @@ from typing import Any
 from klaude_core.config import Config
 from klaude_core.library_artifacts import regular_path
 from klaude_core.model_connections import connection_key
+from klaude_core.ollama_activity import local_request_ended, local_server_generation
 from klaude_core.ollama_manager import ManagerTransport, endpoint, execute_manager, model_name
 from klaude_core.settings_store import atomic_write_private, settings_lock
 
@@ -229,8 +231,26 @@ def witness(fields: dict[str, Any], installed: bool) -> dict[str, Any]:
 
 
 def save_message(cfg: Config, identity: str, message: str) -> None:
-    target = read_record(target_path(cfg, identity), limit=16_384)
-    atomic_write_private(target_path(cfg, identity), json.dumps({**target, "message": message}))
+    path = target_path(cfg, identity)
+    with settings_lock(path):
+        target = read_record(path, limit=16_384)
+        atomic_write_private(path, json.dumps({**target, "message": message}))
+
+
+def dismiss(cfg: Config, journal: OperationJournal, identity: str) -> dict[str, Any]:
+    """Dismiss history only. Unknown receipts and their admission fences survive."""
+    path = target_path(cfg, identity)
+    with settings_lock(path):
+        receipt = journal.status(identity, OWNER)
+        if receipt is None or receipt.kind not in OPERATIONS:
+            raise ValueError("Choose an exact model operation")
+        if receipt.state not in {"completed", "failed", "cancelled", "unknown"}:
+            raise OperationConflict("Stop the active download before removing its history")
+        target = read_record(path, limit=16_384)
+        if not target:
+            raise ValueError("Model operation target unavailable")
+        atomic_write_private(path, json.dumps({**target, "dismissed": True}))
+        return {"request_id": identity, "dismissed": True, "state": receipt.state}
 
 
 def jobs(cfg: Config, journal: OperationJournal) -> dict[str, Any]:
@@ -243,12 +263,16 @@ def jobs(cfg: Config, journal: OperationJournal) -> dict[str, Any]:
         if receipt.kind not in OPERATIONS:
             continue
         target = read_record(target_path(cfg, receipt.request_id), limit=16_384)
+        dismissed = target.get("dismissed") is True
+        if dismissed and receipt.state in {"completed", "failed", "cancelled"}:
+            continue
         items.append(
             {
                 **asdict(receipt),
                 "model": target.get("model", "Unknown model"),
                 "connection": target.get("endpoint", ""),
                 "message": target.get("message", ""),
+                "dismissed": dismissed,
             }
         )
         if len(items) == 30:
@@ -275,15 +299,19 @@ def run(cfg: Config, request: dict[str, Any], progress: Callable | None = None) 
         command.worker_request(),
         progress or (lambda _: None),
         before_effect=lambda: journal.check_effect(request["request_id"], OWNER, request["fence"]),
+        native_request_id=request["request_id"],
     )
     return {
         "ok": result.get("status") == "ok",
-        "rejected": result.get("status") in {"invalid", "changed", "busy", "bound"},
+        "rejected": (result.get("effect_started") is False
+                     or result.get("outcome_confirmed") is True),
         "message": result.get("message", "Model operation unconfirmed"),
     }
 
 
-def reconcile(cfg: Config, journal: OperationJournal, identity: str) -> dict[str, Any]:
+def reconcile(
+    cfg: Config, journal: OperationJournal, identity: str, *, require_end_proof: bool = False,
+) -> dict[str, Any]:
     receipt = journal.status(identity, OWNER)
     if receipt is None or receipt.kind not in OPERATIONS or receipt.state != "unknown":
         raise OperationConflict("Only an unconfirmed model operation can be checked")
@@ -291,17 +319,43 @@ def reconcile(cfg: Config, journal: OperationJournal, identity: str) -> dict[str
     connection, _ = endpoint(cfg, target.get("endpoint", ""), target)
     lock = cfg.data_dir / "model-manager" / hashlib.sha256(connection.base_url.encode()).hexdigest()
     with settings_lock(lock):
+        generation = local_server_generation(connection.base_url)
+        ended = local_request_ended(connection.base_url, identity, generation=generation)
+        newer = bool(generation
+                     and time.time() - time.monotonic() + generation[1] / 1e6
+                     > receipt.updated_at + 5)
+        if require_end_proof and not (newer or ended):
+            raise OperationConflict("The native request end is not confirmed")
         client = ManagerTransport(connection, connection_key(cfg, connection))
         try:
-            installed = any(row["name"] == target["model"] for row in client.models())
+            current_model = next((row for row in client.models()
+                                  if row["name"] == target["model"]), None)
+            installed = current_model is not None
         finally:
             client.close()
         endpoint(cfg, connection.id, target)
         current = witness(target, installed)
-        if (installed != (receipt.kind == "model-pull")
-                or not journal.witness_after_matches(identity, OWNER, candidate=current)):
+        desired = installed == (receipt.kind == "model-pull")
+        # A missing model alone cannot prove a remote pull stopped. A newer
+        # verified local daemon cannot still own the old request, however, so
+        # its fresh exact prior inventory can safely reconcile as Failed.
+        stable = bool(generation and local_server_generation(connection.base_url) == generation)
+        stopped = newer and stable
+        ended = ended and stable
+        if (not desired and not (stopped or ended)
+                or receipt.kind == "model-delete" and current_model is not None
+                and current_model["digest"] != target["digest"]):
             raise OperationConflict(
-                "The reviewed final inventory is not confirmed. The operation remains fenced; "
+                ("The model is not currently installed. " if receipt.kind == "model-pull"
+                 and not installed else "The reviewed final inventory is not confirmed. ")
+                + "An earlier request may still be active. The operation remains fenced; "
                 "check the Ollama server before trying again."
             )
-        return asdict(journal.reconcile_witness(identity, OWNER, current=current))
+        result = journal.reconcile_witness(identity, OWNER, current=current)
+        if result.state == "failed":
+            try:
+                save_message(cfg, identity,
+                             "The Ollama request ended; the reviewed change did not complete.")
+            except (OSError, ValueError):
+                pass
+        return asdict(result)

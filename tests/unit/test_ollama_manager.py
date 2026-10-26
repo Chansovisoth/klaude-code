@@ -219,6 +219,7 @@ def test_stale_definition_credentials_and_digest_never_mutate(cfg, service):
         (b'{"error":"no space left on device private-key"}\n', "disk"),
         (b'{"status":"pulling abc","total":1,"completed":2}\n', "malformed"),
         (b"not-json\n", "malformed"),
+        (b'{"error":{"untrusted":"not a terminal result"}}\n', "malformed"),
         (b'{"status":"success"}\n', "unconfirmed"),
         (b"x" * 8200, "malformed"),
     ],
@@ -228,6 +229,8 @@ def test_pull_failures_do_not_claim_success_or_expose_provider_text(cfg, service
     result = execute_manager(cfg, review(cfg, "pull", "new", ""))
     assert result["status"] == status
     assert "private-key" not in json.dumps(result)
+    if status in {"malformed", "incomplete", "unconfirmed"}:
+        assert result["outcome_confirmed"] is False
 
 
 def test_mutation_timeout_invalidates_cache_without_claiming_rollback(cfg, service):
@@ -251,6 +254,40 @@ def test_http_disk_error_is_classified_without_provider_diagnostics(cfg, service
     )
     result = execute_manager(cfg, review(cfg, "pull", "new", ""))
     assert result["status"] == "disk" and "private" not in result["message"]
+
+
+def test_terminal_pull_error_verifies_prior_inventory_without_retry(cfg, service):
+    service.failure["/api/pull"] = lambda _: httpx.Response(
+        200, content=b'{"error":"unexpected EOF private-token"}\n'
+    )
+    result = execute_manager(cfg, review(cfg, "pull", "new", ""))
+    assert result["effect_started"] is True and result["outcome_confirmed"] is True
+    assert result["status"] == "transfer" and "private" not in json.dumps(result)
+    assert [r.url.path for r in service.requests].count("/api/pull") == 1
+    assert service.requests[-1].url.path == "/api/tags"
+
+
+def test_missing_terminal_event_and_unavailable_inventory_remain_unknown(cfg, service):
+    service.failure["/api/pull"] = lambda _: httpx.Response(
+        200, content=b'{"status":"pulling manifest"}\n'
+    )
+    result = execute_manager(cfg, review(cfg, "pull", "new", ""))
+    assert result["effect_started"] is True and result["outcome_confirmed"] is False
+
+    def reject(_):
+        service.failure["/api/tags"] = lambda _: httpx.Response(503)
+        return httpx.Response(200, content=b'{"error":"unexpected EOF"}\n')
+
+    service.failure["/api/pull"] = reject
+    result = execute_manager(cfg, review(cfg, "pull", "new", ""))
+    assert result["effect_started"] is True and result["outcome_confirmed"] is False
+
+
+def test_preflight_network_failure_reports_no_effect(cfg, service):
+    service.failure["/api/ps"] = lambda _: httpx.Response(503)
+    result = execute_manager(cfg, review(cfg, "pull", "new", ""))
+    assert result["effect_started"] is False
+    assert not any(r.method == "POST" for r in service.requests)
 
 
 def test_real_owned_worker_delivers_progress_then_cancels_its_http_stream(cfg):

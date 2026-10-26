@@ -5,6 +5,7 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import pytest
 from klaude_application import model_store
@@ -48,10 +49,17 @@ def native(profile_browser):
 
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            state["calls"].append(("POST", self.path))
-            assert self.path == "/api/pull"
+            state["calls"].append(("POST", self.path.split("?", 1)[0]))
+            state.setdefault("pull_targets", []).append(self.path)
+            assert self.path.split("?", 1)[0] == "/api/pull"
             self.send_response(200)
             self.end_headers()
+            if state.get("pull_error"):
+                self.wfile.write(json.dumps({"error": state["pull_error"]}).encode() + b"\n")
+                return
+            if state.get("truncate"):
+                self.wfile.write(b'{"status":"pulling manifest"}\n')
+                return
             try:
                 self.wfile.write(b'{"status":"pulling manifest"}\n')
                 self.wfile.flush()
@@ -66,12 +74,14 @@ def native(profile_browser):
                 )
                 self.wfile.write(b'{"status":"success"}\n')
             except (BrokenPipeError, ConnectionResetError):
+                state["handler_closed"] = True
                 pass
 
         def do_DELETE(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state["calls"].append(("DELETE", self.path))
-            state["models"][:] = [r for r in state["models"] if r["name"] != body["model"]]
+            if not state.get("delete_unchanged"):
+                state["models"][:] = [r for r in state["models"] if r["name"] != body["model"]]
             self.reply({})
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Server)
@@ -91,6 +101,216 @@ def native(profile_browser):
 
 def draft(endpoint, operation="model-pull", model="fresh:1b"):
     return {"operation": operation, "connection": endpoint, "model": model}
+
+
+@pytest.mark.parametrize("failure", ["terminal", "preflight", "truncated"])
+def test_pull_failure_receipt_distinguishes_confirmed_failure_from_lost_outcome(native, failure):
+    host, service, auth, state, identity = native
+    review = _review(host, auth, draft(identity))
+    if failure == "terminal":
+        state["pull_error"] = "unexpected EOF secret private server path"
+    elif failure == "preflight":
+        state["offline"] = True
+    else:
+        state["truncate"] = True
+    receipt, _ = _submit(host, service, auth, review)
+    assert receipt["state"] == ("unknown" if failure == "truncated" else "failed")
+    assert service.model_busy() == (failure == "truncated")
+    assert state["calls"].count(("POST", "/api/pull")) == (failure != "preflight")
+    jobs = _request(host, "GET", "/api/v1/models/downloads", **auth)[2]
+    assert "secret" not in json.dumps(jobs)
+
+
+def test_external_shared_pull_appears_without_creating_browser_job_or_second_pull(native):
+    from klaude_core.ollama_manager import endpoint, execute_manager
+
+    host, service, auth, state, identity = native
+    connection, credential = endpoint(service.cfg, identity)
+    state["slow"] = True
+    result = {}
+
+    def run():
+        result.update(execute_manager(service.cfg, {
+            "operation": "pull", "endpoint": identity, "model": "external:1b", "digest": "",
+            "revision": connection.revision, "credential_revision": credential,
+        }))
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        for _ in range(100):
+            jobs = _request(host, "GET", "/api/v1/models/downloads", **auth)[2]
+            if jobs["observed"] and state["calls"].count(("POST", "/api/pull")) == 1:
+                break
+            time.sleep(0.03)
+        assert jobs["items"] == []
+        assert jobs["observed"][0]["model"] == "external:1b"
+        assert jobs["observed"][0]["source"] == "klaude"
+        assert "request_id" not in jobs["observed"][0]
+        assert state["calls"].count(("POST", "/api/pull")) == 1
+    finally:
+        state["slow"] = False
+        worker.join(5)
+    assert result["status"] == "ok"
+    assert _request(host, "GET", "/api/v1/models/downloads", **auth)[2]["observed"] == []
+
+
+def test_failed_download_history_removal_is_durable_idempotent_and_local_only(native):
+    host, service, auth, state, identity = native
+    state["pull_error"] = "unexpected EOF"
+    receipt, _ = _submit(host, service, auth, _review(host, auth, draft(identity)))
+    assert receipt["state"] == "failed"
+    body = {"request_id": receipt["request_id"]}
+    before = state["calls"][:]
+    bad_auth = {**auth, "csrf": "invalid"}
+    assert _request(host, "POST", "/api/v1/models/dismiss", body=body, **bad_auth)[0] == 403
+    assert _request(host, "GET", "/api/v1/models/downloads", **auth)[2]["items"]
+    for _ in range(2):
+        assert _request(host, "POST", "/api/v1/models/dismiss", body=body, **auth)[0] == 200
+    assert _request(host, "GET", "/api/v1/models/downloads", **auth)[2]["items"] == []
+    assert service.journal.status(body["request_id"], "web-admin").state == "failed"
+    assert state["calls"] == before
+    reopened = LibraryManagement(service.cfg, service.workspace)
+    try:
+        assert reopened.model_jobs()["items"] == []
+    finally:
+        reopened.close()
+
+
+def test_removing_unknown_history_retains_exact_recovery_and_resource_fence(native):
+    host, service, auth, state, identity = native
+    state["truncate"] = True
+    receipt, _ = _submit(host, service, auth, _review(host, auth, draft(identity)))
+    body = {"request_id": receipt["request_id"]}
+    assert receipt["state"] == "unknown"
+    before = state["calls"][:]
+    assert _request(host, "POST", "/api/v1/models/dismiss", body=body, **auth)[0] == 200
+    item = _request(host, "GET", "/api/v1/models/downloads", **auth)[2]["items"][0]
+    assert item["dismissed"] is True and item["state"] == "unknown"
+    assert item["request_id"] == body["request_id"] and service.model_busy()
+    assert state["calls"] == before
+    assert _request(host, "POST", "/api/v1/models/reconcile", body=body, **auth)[0] == 409
+    assert service.model_busy()
+    state["models"] = [{"name": "fresh:1b", "digest": "a" * 64, "size": 100}]
+    assert _request(host, "POST", "/api/v1/models/reconcile", body=body, **auth)[0] == 200
+    assert not service.model_busy()
+    assert _request(host, "GET", "/api/v1/models/downloads", **auth)[2]["items"] == []
+    assert state["calls"].count(("POST", "/api/pull")) == 1
+
+
+@pytest.mark.parametrize("proof", ["new", "old", "missing", "changing", "offline", "tampered"])
+def test_prior_inventory_recovery_requires_stable_newer_daemon_and_exact_witness(
+    native, monkeypatch, proof,
+):
+    host, service, auth, state, identity = native
+    state["truncate"] = True
+    receipt, _ = _submit(host, service, auth, _review(host, auth, draft(identity)))
+    body = {"request_id": receipt["request_id"]}
+    assert receipt["state"] == "unknown"
+    assert _request(host, "POST", "/api/v1/models/dismiss", body=body, **auth)[0] == 200
+    # Simulate checking a minute later, after a daemon restart. Keep the actual
+    # journal clock untouched; only the domain's generation-age calculation moves.
+    now = time.time()
+    monkeypatch.setattr(model_store, "time", SimpleNamespace(
+        time=lambda: now + 60, monotonic=time.monotonic,
+    ))
+    started = int((time.monotonic() - (120 if proof == "old" else 0)) * 1e6)
+    generation = (123, started, "start-ticks")
+    reads = []
+
+    def daemon(_):
+        reads.append(1)
+        if proof == "missing":
+            return None
+        if proof == "changing" and len(reads) > 1:
+            return 456, started, "other-ticks"
+        return generation
+
+    monkeypatch.setattr(model_store, "local_server_generation", daemon)
+    if proof == "offline":
+        state["offline"] = True
+    if proof == "tampered":
+        path = model_store.target_path(service.cfg, body["request_id"])
+        path.write_text(json.dumps({**json.loads(path.read_text()), "model": "different:1b"}))
+    response = _request(host, "POST", "/api/v1/models/reconcile", body=body, **auth)
+    assert response[0] == (200 if proof == "new" else 409)
+    if proof == "new":
+        assert response[2]["state"] == "failed" and response[2]["outcome"] == "reconciled"
+        assert _request(host, "GET", "/api/v1/models/downloads", **auth)[2]["items"] == []
+    assert service.model_busy() == (proof != "new")
+    assert state["calls"].count(("POST", "/api/pull")) == 1
+
+
+@pytest.mark.parametrize("digest", ["a", "b"])
+def test_restarted_daemon_delete_recovery_requires_original_digest(native, monkeypatch, digest):
+    host, service, auth, state, identity = native
+    state["models"] = [{"name": "fresh:1b", "digest": "a" * 64, "size": 100}]
+    state["delete_unchanged"] = True
+    receipt, _ = _submit(host, service, auth, _review(host, auth, draft(identity, "model-delete")))
+    assert receipt["state"] == "unknown"
+    now = time.time()
+    monkeypatch.setattr(model_store, "time", SimpleNamespace(
+        time=lambda: now + 60, monotonic=time.monotonic,
+    ))
+    generation = (123, int(time.monotonic() * 1e6), "new-start")
+    monkeypatch.setattr(model_store, "local_server_generation", lambda _: generation)
+    state["models"][0]["digest"] = digest * 64
+    response = _request(host, "POST", "/api/v1/models/reconcile",
+                        body={"request_id": receipt["request_id"]}, **auth)
+    assert response[0] == (200 if digest == "a" else 409)
+    assert service.model_busy() == (digest != "a")
+    assert state["calls"].count(("DELETE", "/api/delete")) == 1
+
+
+@pytest.mark.parametrize("action", ["reconcile", "dismiss"])
+def test_ended_tagged_pull_releases_prior_inventory_without_daemon_restart(
+    native, monkeypatch, action,
+):
+    host, service, auth, state, identity = native
+    state["truncate"] = True
+    receipt, _ = _submit(host, service, auth, _review(host, auth, draft(identity)))
+    rid = receipt["request_id"]
+    assert receipt["state"] == "unknown"
+    assert state["pull_targets"] == [f"/api/pull?klaude_request={rid}"]
+    generation = (123, 1, "old-daemon-still-running")
+    monkeypatch.setattr(model_store, "local_server_generation", lambda _: generation)
+    monkeypatch.setattr(model_store, "local_request_ended",
+                        lambda _, token, **kwargs: token == rid)
+    response = _request(host, "POST", f"/api/v1/models/{action}",
+                        body={"request_id": rid}, **auth)
+    assert response[0] == 200
+    assert service.journal.status(rid, "web-admin").state == "failed"
+    assert not service.model_busy()
+    if action == "dismiss":
+        assert _request(host, "GET", "/api/v1/models/downloads", **auth)[2]["items"] == []
+    assert state["calls"].count(("POST", "/api/pull")) == 1
+
+
+def test_stop_rechecks_delayed_handler_end_without_restarting_pull(native, monkeypatch):
+    host, service, auth, state, identity = native
+    state["slow"] = True
+    generation = (123, 1, "same-daemon")
+    monkeypatch.setattr(model_store, "local_server_generation", lambda _: generation)
+    monkeypatch.setattr(model_store, "local_request_ended",
+                        lambda *args, **kwargs: bool(state.get("handler_closed")))
+    review = _review(host, auth, draft(identity))
+    rid = uuid.uuid4().hex
+    assert _request(host, "POST", "/api/v1/library/submit", body={
+        "review_id": review["review_id"], "request_id": rid, "control_epoch": 0,
+    }, **auth)[0] == 202
+    for _ in range(100):
+        if state.get("pull_targets"):
+            break
+        time.sleep(0.03)
+    assert _request(host, "POST", "/api/v1/models/cancel",
+                    body={"request_id": rid}, **auth)[0] == 200
+    for _ in range(200):
+        if service.status(rid)["state"] == "failed":
+            break
+        time.sleep(0.05)
+    assert state["handler_closed"] and service.status(rid)["state"] == "failed"
+    assert not service.model_busy()
+    assert state["calls"].count(("POST", "/api/pull")) == 1
 
 
 def test_store_catalog_is_dated_exact_and_read_only(native):
@@ -225,6 +445,8 @@ def test_cancel_is_unknown_progress_and_no_automatic_retry(native):
         **auth,
     )
     assert status == 202
+    assert _request(host, "POST", "/api/v1/models/dismiss",
+                    body={"request_id": request_id}, **auth)[0] == 409
     for _ in range(100):
         if service.model_jobs()["items"][0]["progress"]:
             break

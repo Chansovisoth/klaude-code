@@ -3,6 +3,10 @@
 Date: 2026-10-25. Continues the [original implementation](implementation-validation.md)
 and [handoff](klaude-model-store-image-studio-codex-handoff.md).
 
+The subsequent [V2 layout](layout-v2-validation.md) replaces the six-destination
+Store layout with Discover/Installed/Downloads and moves the configured catalog
+into Settings. The shared backend contracts below remain unchanged.
+
 ## Delivered behavior
 
 Models retains Discover, Top charts, Categories, Installed, Downloads and

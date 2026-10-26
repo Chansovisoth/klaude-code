@@ -7,7 +7,7 @@ window.BrowserModelsUI = (() => {
   let reading = null, generation = 0, loading = false, choosing = "", page = 1;
   let ready;
   const pageSize = 20;
-  const active = () => authenticated && currentView === "models";
+  const active = () => authenticated && currentView === "settings" && settingsSection === "models" && byId("models-configured").open;
   const backendLabel = value => ({ ollama: "Ollama", openai_compatible: "OpenAI compatible", openai_codex: "OpenAI Codex", openai_api: "OpenAI", openrouter: "OpenRouter", gemini_api: "Google", deepseek: "DeepSeek", anthropic: "Anthropic" }[value] || value);
   function render() {
     if (!active() || !latest) return;
@@ -15,8 +15,8 @@ window.BrowserModelsUI = (() => {
     byId("models-current-name").title = latest.model_ref || latest.model;
     byId("models-current-status").textContent = choosing ? "Changing model…" : latest.active_turn_id || latest.queue?.length ?
       "Models can be changed when this conversation is idle." : latest.requires_model_selection ? "Select a model to start chatting." : "";
-    byId("models-refresh").disabled = loading;
-    byId("models-refresh").setAttribute("aria-busy", String(loading));
+    byId("configured-models-refresh").disabled = loading;
+    byId("configured-models-refresh").setAttribute("aria-busy", String(loading));
     const nodes = connections.map(item => {
       const button = domainButton("", () => { selected = item.id; page = 1; load(false); }, "models-connection quiet");
       button.append(domainText("span", item.name, "models-connection-name"), domainText("small", `${item.source} · ${backendLabel(item.backend)}${item.enabled ? "" : " · Disabled"}`, "muted"));
@@ -118,9 +118,15 @@ window.BrowserModelsUI = (() => {
       if (loadId === generation) { loading = false; render(); }
     }
   }
+  decorateDisclosure(byId("models-configured").querySelector("summary"));
+  byId("models-configured").open = readNavigationChoice("configured-catalog", ["open", "closed"], "closed") === "open";
+  byId("models-configured").addEventListener("toggle", () => {
+    saveNavigationChoice("configured-catalog", byId("models-configured").open ? "open" : "closed");
+    if (active()) load(); else { generation++; reading?.abort(); loading = false; }
+  });
   byId("models-previous").append(libraryIcon("previous"));
   byId("models-next").append(libraryIcon("next"));
-  byId("models-refresh").addEventListener("click", () => load());
+  byId("configured-models-refresh").addEventListener("click", () => load());
   byId("models-defaults").addEventListener("click", () => {
     showView("settings", { section: "models" });
     const heading = byId('model-default-heading'); heading.tabIndex = -1;
@@ -140,7 +146,7 @@ window.BrowserModelsUI = (() => {
   });
   document.addEventListener("klaude-auth-reset", () => {
     generation += 1; reading?.abort(); loading = false; choosing = "";
-    connections = []; catalog = []; selected = catalogConnection = ""; ready = undefined; page = 1;
+    connections = []; catalog = []; selected = catalogConnection = ""; ready = undefined; page = 1; byId("models-configured").open = false; saveNavigationChoice("configured-catalog", "closed");
     byId("models-query").value = "";
     for (const id of ["models-connections", "models-items", "models-status", "models-count", "models-current-status", "models-numbers"]) byId(id).replaceChildren();
     byId("models-current-name").textContent = "Choose a model";
@@ -953,41 +959,74 @@ window.BrowserVision = (() => {
 // The store owns discovery/navigation only. Effects use the shared reviewed
 // operation owner, and activation stays in chooseRuntime.
 window.ModelStoreUI = (() => {
-  const sections = ['discover', 'charts', 'categories', 'installed', 'downloads', 'connections'];
-  const labels = ['Discover', 'Top charts', 'Categories', 'Installed', 'Downloads', 'Connections'];
+  const sections = ['discover', 'installed', 'downloads'];
+  const labels = ['Discover', 'Installed', 'Downloads'];
   const categories = ['Coding', 'Reasoning', 'Vision', 'General-purpose', 'Lightweight'];
-  let section = 'discover', category = '', catalog = null, connections = [], endpoint = '', inventory = null;
-  let liveCatalog = null, liveSerial = 0, liveReading = null, searchTimer = null, detailReading = '', liveLoading = false;
+  let section = 'discover', collection = '', category = '', catalog = null, connections = [], endpoint = '', inventory = null;
+  let liveCatalog = null, livePage = 1, liveSerial = 0, liveReading = null, searchTimer = null, detailReading = '', liveLoading = false;
   const liveDetails = new Map();
-  const hub = () => section === 'charts' || byId('store-source').value === 'huggingface';
-  let jobs = [], serial = 0, allowed = false, pending = false, timer = null, reading = null, busyRead = false;
+  const hub = () => collection === 'charts' || byId('store-source').value === 'huggingface';
+  const liveLanding = () => hub() && !byId('store-query').value.trim() && !category && !collection && byId('store-sort').value === 'downloads';
+  let popularCatalog = null, recentCatalog = null, popularReading = null, popularSerial = 0;
+  let jobs = [], observedTransfers = [], jobsLoaded = false, serial = 0, allowed = false, pending = false, timer = null, reading = null, busyRead = false;
+  const downloadBars = new Map();
+  function removeDownloadBar(key) { const bar = downloadBars.get(key); bar?.destroy?.(); bar?.element.remove(); downloadBars.delete(key); }
+  function clearDownloadBars() { for (const key of downloadBars.keys()) removeDownloadBar(key); }
   const active = () => authenticated && currentView === 'models';
   const supported = () => latest?.model_store === true;
-  const restartMessage = 'Restart the WebUI host, then reload this page to use Model Store. Configured models remain available in Connections.';
+  const restartMessage = 'Restart the WebUI host, then reload this page to use Model Store. Connection settings remain available in Settings → Models.';
   const dialog = byId('store-detail'), downloadDialog = byId('store-download-dialog');
+  const storeFilterMenus = ['store-source','store-sort','store-capability','store-size'].map(id => createTrailingFilterChip(byId(id))).filter(Boolean);
+  const closeStoreFilters = () => storeFilterMenus.forEach(menu => menu.close());
+  const downloadInfo = byId('store-download-info');
+  let downloadInfoKey = '', downloadInfoSource = '', downloadInfoError = '';
+  let variantPageSelection = '';
+  let shownDetail = '', detailSignature = '', variantPage = 1;
+  let browseContext = null, detailsOpen = new Set();
   let detail = '', variant = '', returnFocusId = '', inventoryRead = 0, installedPage = 1, observedCapability;
   const message = text => { byId('store-status').textContent = text; };
   const urlState = () => {
     const p = new URLSearchParams(location.search);
-    section = sections.includes(p.get('models-section')) ? p.get('models-section') : 'discover';
+    const oldSection = p.get('models-section');
+    if (oldSection === 'connections') {
+      const url = new URL(location.href); for (const key of [...url.searchParams.keys()]) if (key.startsWith('models-')) url.searchParams.delete(key);
+      url.searchParams.set('view','settings'); url.searchParams.set('settings','models');
+      history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+      showView('settings', {section:'models', restore:true}); return false;
+    }
+    section = sections.includes(oldSection) ? oldSection : 'discover';
+    collection = oldSection === 'charts' || p.get('models-collection') === 'charts' ? 'charts' : '';
     category = categories.includes(p.get('models-category')) ? p.get('models-category') : '';
     byId('store-query').value = (p.get('models-query') || '').slice(0, 200);
     detail = (p.get('models-detail') || '').slice(0, 200);
-    byId('store-source').value = p.get('models-source') === 'huggingface' ? 'huggingface' : 'curated';
+    variant = (p.get('models-variant') || '').slice(0, 200);
+    const saved = history.state?.klaudeStoreBrowse;
+    if (saved && typeof saved.scroll === 'number') { browseContext = saved; installedPage = Math.max(1, Math.min(1000, Number(saved.page) || 1)); returnFocusId = typeof saved.focus === 'string' ? saved.focus : ''; }
+    byId('store-source').value = p.get('models-source') === 'offline' || category || ['tools','vision','thinking'].includes(p.get('models-capability')) ? 'curated' : 'huggingface';
     byId('store-sort').value = p.get('models-sort') === 'lastModified' ? 'lastModified' : 'downloads';
+    livePage = Math.max(1, Math.min(500, Number(p.get('models-page')) || 1));
+    byId('store-size').value = ['8','16','32'].includes(p.get('models-size')) ? p.get('models-size') : 'all';
+    byId('store-capability').value = ['tools','vision','thinking'].includes(p.get('models-capability')) ? p.get('models-capability') : 'all';
+    return true;
   };
-  function navigate(next, cat = '', id = '', replace = false) {
-    section = next; category = cat; detail = id;
-    if (next === 'categories' && cat) byId('store-source').value = 'curated';
+  function navigate(next, cat = '', id = '', replace = false, group = collection) {
+    const enteringDiscover = next === 'discover' && section !== next;
+    if (next !== section) { collection = ''; category = ''; livePage = 1; }
+    if (group !== collection) livePage = 1;
+    section = next; category = cat; detail = id; collection = section === 'discover' ? group : '';
+    if (cat) { collection = ''; byId('store-source').value = 'curated'; }
     const url = new URL(location.href);
     for (const [key, value] of Object.entries({'models-section': section, 'models-category': category,
-      'models-detail': detail, 'models-query': byId('store-query').value, 'models-source': byId('store-source').value, 'models-sort': byId('store-sort').value})) {
-      if (value) url.searchParams.set(key, value); else url.searchParams.delete(key);
+      'models-collection': collection, 'models-page': livePage > 1 ? String(livePage) : '', 'models-detail': detail, 'models-variant': detail ? variant : '', 'models-query': byId('store-query').value,
+      'models-source': byId('store-source').value === 'curated' ? 'offline' : 'huggingface', 'models-sort': byId('store-sort').value,
+      'models-size': byId('store-size').value, 'models-capability': byId('store-capability').value})) {
+      if (value && value !== 'all') url.searchParams.set(key, value); else url.searchParams.delete(key);
     }
     history[replace ? 'replaceState' : 'pushState'](history.state, '', url.pathname + url.search + url.hash);
     render();
     if (section === 'downloads') loadJobs();
-    if (hub() && ['discover','charts','categories'].includes(section)) loadLive();
+    if (section === 'discover' && liveLanding()) loadPopular(enteringDiscover);
+    else if (section === 'discover' && hub()) loadLive(enteringDiscover);
   }
   function icon(name, size = 32) {
     const node = domainText('span', '', 'model-brand-icon'); node.setAttribute('aria-hidden', 'true');
@@ -997,80 +1036,276 @@ window.ModelStoreUI = (() => {
     const a = domainText('a', label); a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer'; return a;
   }
   function openDetail(id, trigger) {
-    returnFocusId = trigger?.dataset.storeModel || id; variant = ''; navigate(section, category, id);
+    returnFocusId = trigger?.dataset.storeModel || id;
+    browseContext = {scroll:byId('models-view').scrollTop, focus:returnFocusId, page:installedPage, section, url:location.href};
+    history.replaceState({...history.state, klaudeStoreBrowse:browseContext}, '', location.href);
+    message(''); variant = ''; variantPageSelection = ''; variantPage = 1; detailsOpen.clear(); detailSignature = '';
+    navigate(section, category, id);
   }
   function restoreDetailFocus() {
     const target = [...byId('store-content').querySelectorAll('[data-store-model]')].find(node => node.dataset.storeModel === returnFocusId);
-    (target || byId('store-query')).focus();
+    (target || byId('store-query')).focus({preventScroll:true});
   }
-  function modelRow(item, featured = false) {
-    const button = domainButton('', () => openDetail(item.id, button), featured ? 'store-feature quiet' : 'store-row quiet');
+  function sectionHeading(title, action = '', onClick = null) {
+    const header = domainText('div', '', 'store-section-heading');
+    header.append(domainText('h2', title));
+    if (action) header.append(domainButton(action, onClick, 'quiet'));
+    return header;
+  }
+  function runtimeBadge() {
+    const runtime = domainText('span', '', 'store-runtime-badge');
+    const runtimeIcon = domainText('span', '', 'model-brand-icon store-runtime-icon');
+    runtimeIcon.setAttribute('aria-hidden', 'true');
+    window.AIIcons?.setPlatformIcon(runtimeIcon, 'ollama', {size:16});
+    const server = connections.find(connection => connection.id === endpoint);
+    const runtimeLabel = connections.length > 1 && server ? `Ollama · ${server.name}` : 'Ollama';
+    runtime.append(runtimeIcon, domainText('span', runtimeLabel));
+    runtime.title = server ? `Install via Ollama on ${server.name}` : 'Install via Ollama. Configure a server in Model settings.';
+    runtime.setAttribute('aria-label', runtime.title);
+    return runtime;
+  }
+  function modelTask(item) {
+    if (!item || typeof item.id !== 'string') return '';
+    // Older hosts put the Hub pipeline tag in summary; retain that metadata too.
+    const known = new Set(['text-generation','text2text-generation','text-to-speech','text-to-audio','text-to-image','text-to-video','image-text-to-text','image-to-text','image-to-image','image-to-video','automatic-speech-recognition','audio-text-to-text','feature-extraction','sentence-similarity','image-classification','object-detection','visual-question-answering']);
+    const source = [item, ...(popularCatalog?.models || []), ...(recentCatalog?.models || []), ...(liveCatalog?.models || [])].find(row => row && row.id === item.id && (row.task || known.has(row.summary)));
+    const task = source?.task || (known.has(source?.summary) ? source.summary : '');
+    return /^[a-z][a-z0-9-]{0,79}$/.test(task) ? task.charAt(0).toUpperCase() + task.slice(1) : '';
+  }
+  function modelRow(item, rank = 0) {
+    const button = domainButton('', () => openDetail(item.id, button), 'store-row quiet');
     button.dataset.storeModel = item.id;
     const content = domainText('span', '', 'store-card-content');
-    content.append(domainText('small', featured ? item.categories[0] : item.publisher, 'store-eyebrow'),
-      domainText('strong', item.name), domainText('span', item.summary, 'muted'));
-    if (item.modified) content.append(domainText('small', `Updated ${item.modified}`, 'muted'));
-    if (Number.isInteger(item.downloads)) content.append(domainText('small', `${item.downloads.toLocaleString()} Hub downloads`, 'muted'));
-    button.append(icon(item.id, featured ? 48 : 32), content, domainText('span', 'View', 'store-cta'));
+    content.append(domainText('strong', item.name));
+    const purpose = Number.isInteger(item.downloads) ? `${item.downloads.toLocaleString()} Hub downloads` : item.categories?.join(' · ') || item.publisher || item.summary;
+    if (Number.isInteger(item.downloads)) {
+      const downloads = domainText('small', '', 'store-download-count muted');
+      downloads.title = purpose; downloads.setAttribute('aria-label', purpose);
+      downloads.append(libraryIcon('download'), domainText('span', item.downloads.toLocaleString()));
+      content.append(downloads);
+    } else content.append(domainText('small', purpose, 'muted'));
+    const task = modelTask(item);
+    if (task) content.append(domainText('small', task, 'store-task-label muted'));
+    content.append(runtimeBadge());
+
+    if (item.modified && byId('store-sort').value === 'lastModified') content.append(domainText('small', `Updated ${item.modified}`, 'muted'));
+    if (rank) { button.classList.add('store-ranked-row'); button.append(domainText('span', String(rank), 'store-rank')); }
+    const installed = inventory?.models?.some(local => item.variants?.some(v => v.tag === local.name));
+    button.append(icon(item.id, 40), content, domainText('span', installed ? 'Installed' : 'View', 'store-cta'));
+    button.title = `${item.name} · ${item.summary || purpose}`;
     return button;
   }
+  function modelGrid(items, ranked = false) {
+    const grid = domainText('div', '', 'store-model-grid');
+    items.forEach((item, index) => grid.append(modelRow(item, ranked ? index + 1 : 0)));
+    return grid;
+  }
   function filtered() {
-    const query = byId('store-query').value.trim().toLocaleLowerCase();
-    if (hub()) return liveCatalog?.models || [];
+    const query = byId('store-query').value.trim().toLocaleLowerCase(), capability = byId('store-capability').value;
     return (catalog?.models || []).filter(item => (!category || item.categories.includes(category)) &&
+      (capability === 'all' || item.capabilities.includes(capability)) &&
       `${item.name} ${item.summary} ${item.categories.join(' ')} ${item.capabilities.join(' ')}`.toLocaleLowerCase().includes(query));
   }
+  function emptyState(target, title, description, icon) {
+    collectionEmpty(target, title, description, icon); target.classList.add('is-empty');
+    target.querySelector('.collection-empty').setAttribute('role', 'status');
+  }
+  function settingsLink(target) {
+    target.append(domainButton('Open model settings', () => {
+      showView('settings', {section:'models'}); byId('model-connections-heading').scrollIntoView({block:'start'});
+    }, 'quiet'));
+  }
+  function detailSection(title, identity) {
+    const node = domainText('section', '', 'model-detail-section');
+    const heading = domainText('h2', title); heading.id = identity;
+    node.setAttribute('aria-labelledby', identity); node.append(heading); return node;
+  }
+  function focusVariants() {
+    const group = byId('store-variants-section');
+    group.scrollIntoView({block:'start', behavior:'instant'});
+    (group.querySelector('input:checked') || group.querySelector('input') || group.querySelector('h2')).focus({preventScroll:true});
+  }
+  function selectVariant(tag) {
+    variant = tag;
+    const url = new URL(location.href); url.searchParams.set('models-variant', tag);
+    history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+    renderDetail();
+  }
   function renderDetail() {
-    const item = liveDetails.get(detail) || catalog?.models.find(item => item.id === detail) || liveCatalog?.models?.find(item => item.id === detail);
+    if (!active() || !detail || dialog.hidden) return;
+    const item = liveDetails.get(detail) || catalog?.models.find(item => item.id === detail) || liveCatalog?.models?.find(item => item.id === detail) || popularCatalog?.models?.find(item => item.id === detail) || recentCatalog?.models?.find(item => item.id === detail);
     const local = inventory?.models?.find(item => item.name === detail);
-    if (detail.startsWith('hf:') && !item && !local) {
-      byId('store-detail-title').textContent = 'Model details'; byId('store-detail-body').replaceChildren(domainText('p', 'Loading model details…'));
-      if (!dialog.open) dialog.showModal(); if (detailReading !== detail) loadLiveDetail(detail); return;
+    const variants = item?.variants || (local ? [{tag:local.name,...local}] : []);
+    const loading = detail.startsWith('hf:') && !item?.detailLoaded;
+    if (!variants.some(row => row.tag === variant) && !loading && (item || local || catalog)) variant = local ? local.name : '';
+    const selectedIndex = variants.findIndex(row => row.tag === variant);
+    if (variant && selectedIndex >= 0 && variantPageSelection !== variant) { variantPage = Math.floor(selectedIndex / 20) + 1; variantPageSelection = variant; }
+    const metadata = variants.find(row => row.tag === variant);
+    const installed = metadata && inventory?.models?.find(row => row.name === variant);
+    const destination = connections.find(c => c.id === endpoint)?.name || '';
+    const current = Boolean(installed && !latest?.requires_model_selection && (latest?.model_ref === `ollama@${endpoint}/${variant}` || endpoint === 'default-ollama' && [variant,`ollama/${variant}`].includes(latest?.model_ref || latest?.model)));
+    const useAllowed = Boolean(installed && !inventory.stale && !current && !pending && !runtimeChoiceInFlight && !latest?.active_turn_id && !latest?.queue?.length && (latest?.model_providers || endpoint === 'default-ollama'));
+    const signature = JSON.stringify([detail,variant,variantPage,item,modelTask(item),local,inventory?.stale,inventory?.checked_at,connections,endpoint,pending,allowed,latest?.active_turn_id,latest?.queue?.length,jobs.map(job=>job.state),canWrite(),useAllowed,current,byId('store-status').textContent]);
+    if (signature === detailSignature) return;
+    detailSignature = signature;
+    const focused = document.activeElement, focusId = dialog.contains(focused) ? focused.id : '';
+    const focusPage = focused?.closest('#store-variants-pages') ? focused.dataset.page : '';
+    for (const disclosure of dialog.querySelectorAll('details')) {
+      if (disclosure.open) detailsOpen.add(disclosure.id); else detailsOpen.delete(disclosure.id);
     }
-    if (!detail || (!item && !local)) { if (dialog.open) dialog.close(); return; }
-    if (item && !item.variants.length) {
-      byId('store-detail-title').textContent = item.name;
-      const body = byId('store-detail-body'); body.replaceChildren(domainText('p', item.detailLoaded ? item.error || 'No supported top-level GGUF files are available. Split files and projector-only files are not offered by this integration.' : 'Loading exact GGUF files…'), link('Read model card and license', item.source_url));
-      if (!dialog.open) dialog.showModal();
-      if (!item.detailLoaded && detailReading !== detail) loadLiveDetail(detail);
-      return;
-    }
-    const variants = item?.variants || [{tag: local.name, ...local}];
-    if (!variants.some(v => v.tag === variant)) variant = variants[0].tag;
-    byId('store-detail-title').textContent = item?.name || local.name;
     const body = byId('store-detail-body'); body.replaceChildren();
-    body.append(icon(detail, 48), domainText('p', item?.summary || 'Installed on the selected Ollama server.'));
-    if (item) body.append(domainText('p', `${item.publisher} · ${item.license || 'License not specified; read the model card'}`), link('Official model & license', item.source_url),
-      domainText('p', item.capabilities.length ? `Catalog capabilities: ${item.capabilities.join(', ')}. Checked ${catalog.verified}; activation checks the installed variant again.` : 'Tool, Vision and Thinking support are not verified. Activation checks the installed variant.', 'muted'));
-    const label = domainText('label', 'Variant'); const select = document.createElement('select'); select.id = 'store-variant';
-    for (const v of variants) select.append(new Option(v.name || v.tag, v.tag));
-    select.value = variant; select.disabled = pending; label.append(select); body.append(label);
-    select.addEventListener('change', () => { variant = select.value; renderDetail(); byId('store-variant').focus(); });
-    const metadata = variants.find(v => v.tag === variant);
-    const installed = inventory?.models?.find(row => row.name === variant);
-    body.append(domainText('p', `${metadata.parameters || 'Parameters unknown'} · ${metadata.quantization || 'Quantization unknown'} · ${installed?.size != null ? fileSize(installed.size) : metadata.size != null ? fileSize(metadata.size) : metadata.size_label || 'Size unknown'}`),
-      domainText('p', 'Context limit and device fit: not verified. Runtime memory also depends on context and concurrency; download size is not a RAM requirement.', 'muted'));
-    if (metadata.source_url) body.append(link('Exact variant details', metadata.source_url));
-    const endpointLabel = connections.find(c => c.id === endpoint)?.name || 'No enabled native Ollama endpoint';
-    body.append(domainText('p', `Destination: ${endpointLabel}`));
-    const actions = domainText('div', '', 'management-actions');
-    if (installed) {
-      const use = domainButton('Use model', async () => {
-        if (pending) return; pending = true; renderDetail();
-        try { await chooseRuntime('model', latest.model_providers ? `ollama@${endpoint}/${variant}` : variant, {onError: error => message(error.message)}); }
+    const identity = domainText('header', '', 'model-detail-identity'); identity.id = 'store-detail-identity';
+    const logo = domainText('div', '', 'model-detail-logo'); logo.append(icon(item?.id || detail, 88));
+    const summary = domainText('div', '', 'model-detail-summary');
+    const title = domainText('h1', item?.name || local?.name || detail); title.id = 'store-detail-title'; title.tabIndex = -1;
+    const byline = domainText('p', '', 'model-detail-byline muted');
+    if (item?.publisher) {
+      byline.append(document.createTextNode('By '));
+      if (detail.startsWith('hf:')) {
+        const author = link(item.publisher, `https://huggingface.co/${encodeURIComponent(item.publisher)}`);
+        author.setAttribute('aria-label', `Open ${item.publisher} author profile in a new tab`);
+        byline.append(author);
+      } else byline.append(document.createTextNode(item.publisher));
+    } else byline.textContent = destination ? `Installed on ${destination}` : 'Model details';
+    summary.append(title, byline);
+    summary.append(runtimeBadge());
+    if (item?.stale) summary.append(domainText('p', 'Cached metadata', 'model-detail-source muted'));
+    const actionArea = domainText('div', '', 'model-detail-actions');
+    const install = domainButton(current ? 'Current model' : 'Use model', async () => {
+      if (!installed) { focusVariants(); return; }
+      if (installed) {
+        if (!useAllowed) return; pending = true; renderDetail();
+        try { await chooseRuntime('model', latest.model_providers ? `ollama@${endpoint}/${variant}` : variant, {onError:error => message(error.message)}); }
         finally { pending = false; renderDetail(); }
-      });
-      use.disabled = pending || (!latest.model_providers && endpoint !== 'default-ollama') || runtimeChoiceInFlight || Boolean(latest?.active_turn_id) || Boolean(latest?.queue?.length);
-      const remove = domainButton('Delete model', () => review('model-delete', variant), 'quiet danger');
-      remove.disabled = !canWrite(); actions.append(use, remove);
-    } else {
-      const get = domainButton('Get', () => review('model-pull', variant)); get.disabled = !canWrite() || !inventory?.models || inventory.stale;
-      actions.append(get);
+      }
+    }, installed ? 'model-detail-install' : 'secondary model-detail-choose'); install.id = 'store-detail-install';
+    install.disabled = installed ? !useAllowed : !variants.length;
+    if (installed) actionArea.append(install);
+    let blocker = '';
+    if (loading) blocker = 'Loading exact variants…';
+    else if (!variants.length) blocker = item?.error || 'No supported variants are available.';
+    else if (!endpoint) blocker = 'Choose an enabled native Ollama connection in Model settings.';
+    else if (!allowed && !installed) blocker = 'Installation requires an admin account.';
+    else if (latest?.active_turn_id || latest?.queue?.length) blocker = 'Finish the conversation and queue before model work.';
+    else if (!inventory?.models || inventory.stale) blocker = 'Refresh the native endpoint to verify its installed inventory.';
+    else if (!canWrite() && !installed) blocker = 'Model work is active or unconfirmed. Check Downloads.';
+
+    if (byId('store-status').textContent && !inventory?.stale) blocker = byId('store-status').textContent;
+    const notice = domainText('p', blocker, 'model-detail-blocker muted'); notice.id = 'store-detail-blocker'; notice.setAttribute('role','status'); actionArea.append(notice);
+    if (jobs.some(job => ['accepted','running','cancelling','unknown'].includes(job.state))) actionArea.append(domainButton('View downloads', () => navigate('downloads'), 'quiet'));
+    if (!endpoint) settingsLink(actionArea);
+    else if (!inventory?.models || inventory.stale) actionArea.append(domainButton('Refresh inventory', () => loadInventory(), 'quiet'));
+    if (item?.error && detail.startsWith('hf:')) actionArea.append(domainButton('Retry source details', () => { liveDetails.delete(detail); detailSignature = ''; loadLiveDetail(detail); }, 'quiet'));
+    identity.append(logo,summary,actionArea); body.append(identity);
+    if (item?.source_url) {
+      const cardLink = link('', item.source_url); cardLink.className = 'icon-button quiet model-card-link';
+      cardLink.setAttribute('aria-label', 'Open model card in a new tab'); cardLink.title = 'Open model card in a new tab';
+      cardLink.append(libraryIcon('openNew')); summary.append(cardLink);
     }
-    body.append(actions, domainText('p', byId('store-status').textContent, 'domain-status'));
-    if (!allowed) body.append(domainText('p', 'Downloads and deletion require an admin account.', 'muted'));
-    if (!inventory?.models) body.append(domainText('p', 'Refresh the selected endpoint to verify installed models before downloading.', 'muted'));
-    if (!dialog.open) dialog.showModal();
+    const stats = domainText('dl', '', 'model-detail-stats'); stats.id = 'store-detail-stats';
+    const size = metadata ? installed?.size != null ? fileSize(installed.size) : metadata.size != null ? fileSize(metadata.size) : metadata.size_label || 'Unknown' : 'Choose variant';
+    const capabilities = item?.capabilities?.length ? item.capabilities.join(' · ') : 'Unknown';
+    const facts = [];
+    const task = modelTask(item);
+    if (task) facts.push(['Task', task]);
+    if (Number.isInteger(item?.downloads)) facts.push(['Hub downloads', new Intl.NumberFormat(undefined, {notation:'compact', maximumFractionDigits:1}).format(item.downloads)]);
+    if (variants.length) facts.push(['Available variants', String(variants.length)]);
+    if (metadata?.parameters) facts.push(['Parameters', metadata.parameters]);
+    if (detail.startsWith('hf:') && variants.length) facts.push(['Format', 'GGUF']);
+    if (item?.license) facts.push(['License', item.license]);
+    for (const [label,value] of facts) {
+      const stat = domainText('div', '', 'model-detail-stat'), term = domainText('dt', label);
+      if (label === 'Hub downloads') {
+        term.replaceChildren(libraryIcon('download'), domainText('span','Hub downloads','visually-hidden'));
+        term.title = 'Hugging Face downloads';
+      }
+      stat.append(term,domainText('dd',value)); stats.append(stat);
+    }
+    stats.hidden = !facts.length;
+    body.append(stats);
+    const reading = domainText('div', '', 'model-detail-reading');
+    const about = detailSection('About this model','store-detail-about');
+    const description = item?.summary || (local ? 'This exact model is installed on the selected native Ollama endpoint.' : 'Source metadata is not available for this model.');
+    if (description.length > 360) {
+      const preview = domainText('p',description.slice(0,360) + '…'); about.append(preview);
+      const more = domainText('details', '', 'model-about-more'); more.id = 'store-detail-more'; more.open = detailsOpen.has(more.id);
+      const summary = domainText('summary',''), label = domainText('span',more.open ? 'Show less' : 'Show more'); summary.id = 'store-detail-more-summary'; summary.append(label);
+      more.append(decorateDisclosure(summary),domainText('p',description)); preview.hidden = more.open;
+      more.addEventListener('toggle', () => { preview.hidden = more.open; label.textContent = more.open ? 'Show less' : 'Show more'; }); about.append(more);
+    } else about.append(domainText('p',description));
+    const genericAbout = modelTask(item).toLowerCase() === description || ['Community GGUF model. Capabilities and device fit are not verified.', 'Community GGUF. Read its model card and choose an exact file.'].includes(description);
+    if (!genericAbout) reading.append(about);
+    const variantSection = detailSection('Choose your download','store-variants-heading'); variantSection.id = 'store-variants-section'; variantSection.querySelector('h2').tabIndex = -1;
+    const variantCount = domainText('p', loading ? 'Finding available files…' : `${variants.length} ${variants.length === 1 ? 'file' : 'files'} available`, 'model-variant-count muted');
+    variantCount.id = 'store-variant-count'; variantSection.append(variantCount);
+    if (connections.length > 1) {
+      const label = domainText('label','Download to'), select = document.createElement('select'); select.id = 'store-detail-endpoint';
+      select.replaceChildren(...connections.map(c=>new Option(c.name,c.id))); select.value = endpoint; select.disabled = pending;
+      select.addEventListener('change', () => changeEndpoint(select.value)); label.append(select); variantSection.append(label);
+    } else if (destination) variantSection.append(domainText('p',`Download to ${destination}`,'model-download-destination muted'));
+    const fieldset = document.createElement('fieldset'); fieldset.id = 'store-variant-list'; fieldset.className = 'model-variant-list'; fieldset.setAttribute('aria-describedby','store-variant-count');
+    const legend = domainText('legend','Exact variant'); legend.className = 'visually-hidden'; fieldset.append(legend);
+    variantPage = Math.max(1,Math.min(variantPage,Math.ceil(variants.length / 20) || 1));
+    variants.slice((variantPage - 1)*20,variantPage*20).forEach((row,index) => {
+      const label = domainText('label','','model-variant-row');
+      const input = document.createElement('input'); input.type = 'radio'; input.name = 'store-variant'; input.value = row.tag; input.checked = variant === row.tag; input.disabled = pending;
+      input.id = `store-variant-${(variantPage - 1)*20+index}`;
+      input.addEventListener('change', () => { if (input.checked) selectVariant(row.tag); });
+      const copy = domainText('span','','model-variant-copy'); copy.append(domainText('strong',row.name || row.tag)); label.title = row.tag;
+      const actual = inventory?.models?.find(local=>local.name===row.tag);
+      const info = [row.quantization, row.parameters].filter(Boolean);
+      if (info.length) copy.append(domainText('small',info.join(' · '),'muted'));
+      const state = domainText('span', '', 'model-variant-state');
+      state.append(domainText('strong', actual?.size != null ? fileSize(actual.size) : row.size != null ? fileSize(row.size) : row.size_label || 'Size unknown'));
+      if (actual || input.checked) state.append(domainText('small',actual ? inventory.stale ? 'Cached' : 'Installed' : 'Selected'));
+      label.append(input,copy,state); fieldset.append(label);
+    });
+    variantSection.append(fieldset);
+    let variantFooter = null;
+    if (variants.length && !installed) {
+      const downloadLabel = metadata && size !== 'Unknown' ? `Download · ${size}` : 'Download';
+      const choose = domainButton(variant ? downloadLabel : 'Choose variant', () => {
+        if (!variant) focusVariants(); else review('model-pull', variant);
+      }, 'model-detail-install');
+      choose.id = 'store-variant-install';
+      choose.disabled = variant ? !canWrite() || !inventory?.models || inventory.stale : false;
+      if (variant) choose.prepend(libraryIcon('download'));
+      variantFooter = domainText('div', '', 'model-variant-footer');
+      variantFooter.append(choose);
+    }
+    if (!variants.length) variantSection.append(domainText('p',loading ? 'Loading supported exact files…' : item?.error || 'No supported single-file variants are available. Open the source to inspect alternatives.','muted'));
+    if (variants.length > 20) {
+      const nav = domainText('nav','','pagination'); nav.id = 'store-variants-pages'; nav.setAttribute('aria-label','Variant pages');
+      for (const [name,delta] of [['previous',-1],['next',1]]) {
+        const button = domainButton('', () => { variantPage += delta; renderDetail(); },'quiet'); button.id = `store-variants-${name}`; button.setAttribute('aria-label',`${name} variant page`); button.append(libraryIcon(name));
+        if (name === 'next') { const numbers = domainText('span','','page-numbers'); numbers.id = 'store-variants-numbers'; numbers.addEventListener('click',event=>{const button=event.target.closest('button[data-page]');if(button){variantPage=Number(button.dataset.page);renderDetail();}});nav.append(numbers); }
+        nav.append(button);
+      }
+      const status = domainText('span','','visually-hidden'); status.id = 'store-variants-page'; status.setAttribute('role','status'); nav.append(status);variantSection.append(nav);
+    }
+    if (variantFooter) variantSection.append(variantFooter);
+    reading.append(variantSection);
+    const details = detailSection('Details','store-model-details');
+    const disclosure = (id,title,text) => {
+      const node = document.createElement('details'); node.id = id; node.className = 'model-detail-disclosure'; node.open = detailsOpen.has(id);
+      const summary = domainText('summary',title); summary.id = `${id}-summary`;
+      node.append(decorateDisclosure(summary),domainText('p',text)); return node;
+    };
+    if (variant) details.append(disclosure('store-exact-variant','Exact model reference',variant));
+    details.append(disclosure('store-compatibility','Compatibility and technical information',`${metadata?.parameters || 'Parameter count unknown'}. Context and device fit are not verified. Runtime memory depends on context and concurrency; download size is not a RAM requirement. ${item?.capabilities?.length ? 'Dated catalog declarations: ' + capabilities + '. Activation checks the installed variant again.' : 'Tool use, image input and Thinking are not verified for this exact variant.'}`));
+    details.append(disclosure('store-source-license','Source and license',`${item?.checked_at ? 'Source checked ' + new Date(item.checked_at * 1000).toLocaleString() + '. ' : ''}${item?.license ? 'Catalog license: ' + item.license + '. Inspect the source and exact artifact terms.' : 'License is unknown. Inspect the source terms before installation.'} ${detail.startsWith('hf:') ? 'Only top-level single-file GGUF weights are offered. Split weights, projector-only files and subdirectory files are unsupported by this integration.' : catalog?.verified && item ? 'Curated source facts checked ' + catalog.verified + '.' : 'Source metadata is not recorded in the installed inventory.'}`));
+    if (installed) {
+      const remove = domainButton('Delete model',()=>review('model-delete',variant),'quiet danger'); remove.disabled = !canWrite() || inventory.stale; details.append(remove);
+    }
+    reading.append(details);
+    const links = detailSection('Links','store-detail-links');
+    if (metadata?.source_url) links.append(link('Exact variant source',metadata.source_url));
+    if (!item?.source_url && !metadata?.source_url) links.append(domainText('p','No verified external source is recorded for this installed model.','muted'));
+    if (links.querySelector('a, p')) reading.append(links); body.append(reading);
+    if (variants.length > 20) updateDomainPager('store-variants',(variantPage-1)*20,{items:variants.slice((variantPage-1)*20,variantPage*20),total:variants.length,page_size:20,more:variantPage*20<variants.length});
+    const previousFocus = (focusId ? byId(focusId) : null) || (focusPage ? byId('store-variants-numbers')?.querySelector(`[data-page="${focusPage}"]`) : null);
+    previousFocus?.focus({preventScroll:true});
+    if (loading && detailReading !== detail) loadLiveDetail(detail);
   }
   const canWrite = () => supported() && allowed && endpoint && !pending && !latest?.active_turn_id && !latest?.queue?.length &&
     !jobs.some(job => ['accepted', 'running', 'cancelling', 'unknown'].includes(job.state));
@@ -1079,8 +1314,9 @@ window.ModelStoreUI = (() => {
     pending = true; const epoch = authEpoch, selectedEndpoint = endpoint;
     try {
       const opened = await prepareChange({operation, connection: endpoint, model}, {
-        current: () => active() && epoch === authEpoch && selectedEndpoint === endpoint && (manual ? downloadDialog.open : variant === model && dialog.open),
-        beforeOpen: () => { detail = ''; dialog.close(); downloadDialog.close(); navigate('downloads'); },
+        downloadDestination: connections.find(connection => connection.id === endpoint)?.name || endpoint,
+        current: () => active() && epoch === authEpoch && selectedEndpoint === endpoint && (manual ? downloadDialog.open : variant === model && !dialog.hidden),
+        beforeOpen: () => { detail = ''; dialog.hidden = true; downloadDialog.close(); navigate('downloads'); },
         onAccepted: () => { if (epoch === authEpoch) { pending = false; loadJobs(); } },
         onDiscard: () => { if (epoch === authEpoch) { pending = false; loadJobs(); } },
       });
@@ -1091,124 +1327,339 @@ window.ModelStoreUI = (() => {
   async function jobAction(path, id) {
     if (pending) return; pending = true;
     const epoch = authEpoch;
-    try { await domainRequest(path, 'POST', {request_id: id}); }
-    catch (error) { if (epoch === authEpoch) message(error.message); }
+    renderDownloadInfo();
+    try {
+      await domainRequest(path, 'POST', {request_id: id});
+      if (path.endsWith('/reconcile')) loadInventory();
+    }
+    catch (error) { if (epoch === authEpoch) { openDownloadInfo('owned', id); downloadInfoError = error.message; renderDownloadInfo(); } }
     finally { if (epoch === authEpoch) { pending = false; await loadJobs(); } }
   }
-  function renderJobs(target) {
-    if (!jobs.length) target.append(domainText('p', 'No model downloads or deletions yet.', 'muted'));
-    for (const job of jobs) {
-      const row = domainText('article', '', 'management-row');
-      const state = {accepted: 'Queued', running: 'Downloading', completed: 'Complete', failed: 'Failed',
-        cancelled: 'Cancelled', cancelling: 'Stopping request', unknown: 'Outcome unknown'}[job.state] || job.state;
-      const content = domainText('div', '', 'management-content');
-      content.append(domainText('strong', job.model), domainText('small', connections.find(c => c.id === job.connection)?.name || job.connection, 'muted'), domainText('p', `${job.kind === 'model-delete' ? 'Deletion' : 'Download'} · ${state}`));
-      if (job.message) content.append(domainText('p', job.message, 'muted'));
-      if (job.progress?.stage && ['running','cancelling'].includes(job.state)) {
-        content.append(domainText('p', job.progress.stage));
-        if (Number.isFinite(job.progress.total) && job.progress.total > 0 && Number.isFinite(job.progress.completed)) {
-          content.append(domainText('p', `Current file: ${fileSize(job.progress.completed)} / ${fileSize(job.progress.total)}`));
-          const progress = document.createElement('progress'); progress.max = job.progress.total; progress.value = job.progress.completed;
-          progress.setAttribute('aria-label', 'Current file download'); content.append(progress);
-        }
-      }
-      const actions = domainText('div', '', 'management-actions');
-      if (job.cancellable && job.kind === 'model-pull') actions.append(domainButton('Cancel request', () => jobAction('/api/v1/models/cancel', job.request_id)));
-      if (job.state === 'unknown') {
-        content.append(domainText('p', 'Remote transfer or cleanup is unconfirmed. Check the exact installed state without restarting the download.', 'muted'));
-        actions.append(domainButton('Check outcome', () => jobAction('/api/v1/models/reconcile', job.request_id)));
-      }
-      for (const b of actions.children) b.disabled = pending || !allowed;
-      row.append(content, actions); target.append(row);
+  function downloadProgress(content, progress, label, key) {
+    let bar = downloadBars.get(key);
+    if (!Number.isFinite(progress?.total) || progress.total <= 0 || !Number.isFinite(progress.completed)) {
+      removeDownloadBar(key); return;
     }
+    const value = progress.completed / progress.total * 100;
+    if (bar) { bar.setValue(value); return; }
+    bar = MaterialProgress.create({thickness:'thin', value, label});
+    bar.element.classList.add('model-download-progress'); bar.element.dataset.thickness = 'thin';
+    downloadBars.set(key, bar); content.append(bar.element);
+  }
+  function downloadName(item) {
+    if (item.source === 'ollama') return 'Ollama transfer';
+    const model = item.model || 'Model download', tag = model.split(':').at(-1);
+    return model.startsWith('hf.co/') && /\.gguf$/i.test(tag) ? tag : model.split('/').at(-1);
+  }
+  function downloadState(item) {
+    if (item.source === 'ollama') return item.state === 'quiet' ? 'No recent activity' : 'Downloading';
+    const stage = {'Checking manifest':'Preparing…', 'Preparing download':'Preparing…',
+      'Downloading file':'Downloading', 'Verifying download':'Verifying…', 'Saving model':'Installing…', 'Complete':'Finishing…'};
+    return {accepted:'Queued', running:item.kind === 'model-delete' ? 'Removing…' : stage[item.progress?.stage] || 'Downloading',
+      completed:item.kind === 'model-delete' ? 'Removed' : 'Complete', failed:'Failed', cancelled:'Stopped',
+      cancelling:'Stopping…', unknown:'Needs check'}[item.state] || item.state;
+  }
+  function infoRecord() {
+    return downloadInfoSource === 'owned' ? jobs.find(job => job.request_id === downloadInfoKey)
+      : observedTransfers.find(item => item.id === downloadInfoKey);
+  }
+  function openDownloadInfo(source, key) {
+    if (!active() || section !== 'downloads' || detail) return;
+    downloadInfoKey = key; downloadInfoSource = source; downloadInfoError = '';
+    renderDownloadInfo();
+    if (infoRecord()) { if (!downloadInfo.open) downloadInfo.showModal(); byId('store-download-info-close').focus(); }
+  }
+  function renderDownloadInfo() {
+    if (!downloadInfoKey) return;
+    const item = infoRecord();
+    if (!item) { downloadInfo.close(); return; }
+    const exactName = byId('store-download-info-name');
+    if (exactName.textContent !== item.model) exactName.textContent = item.model;
+    const metadata = byId('store-download-info-metadata'); metadata.replaceChildren();
+    const rows = [['Status', downloadState(item)], ['Connection', connections.find(c => c.id === item.connection)?.name || item.connection]];
+    if (item.kind === 'model-delete') rows.push(['Action', 'Remove model']);
+    const progress = item.progress;
+    if (Number.isFinite(progress?.total) && progress.total > 0 && Number.isFinite(progress.completed))
+      rows.push(['Current file', `${fileSize(progress.completed)} / ${fileSize(progress.total)}`]);
+    for (const [label, value] of rows) metadata.append(domainText('dt', label), domainText('dd', value));
+    let note = downloadInfoError || item.message || '';
+    if (downloadInfoSource === 'observed') note = item.source === 'ollama'
+      ? 'Detected from local file activity. The model name, exact progress and final outcome are unavailable. Manage the transfer in the client that started it.'
+      : 'Started in another Klaude client. Manage the download there.';
+    else if (item.state === 'unknown') note = [note, 'The server has not confirmed the result. Check status before starting another model operation.'].filter(Boolean).join(' ');
+    const message = byId('store-download-info-note');
+    if (message.textContent !== note) message.textContent = note;
+    message.hidden = !note;
+    const check = byId('store-download-info-check'), remove = byId('store-download-info-remove');
+    check.hidden = downloadInfoSource !== 'owned' || item.state !== 'unknown'; check.disabled = pending || !allowed;
+    remove.hidden = downloadInfoSource !== 'owned' || item.cancellable || item.dismissed || !latest?.model_download_dismissal || !['completed','failed','cancelled','unknown'].includes(item.state);
+    remove.disabled = pending || !allowed;
+    downloadInfo.querySelector('.dialog-actions').hidden = check.hidden && remove.hidden;
+  }
+  function downloadAction(label, glyph, action, key) {
+    const button = domainButton('', action, 'quiet icon-button');
+    button.setAttribute('aria-label', label); button.title = label; button.dataset.downloadAction = key;
+    button.append(libraryIcon(glyph)); return button;
+  }
+  function renderJobs(target) {
+    if (!jobs.length && !observedTransfers.length) {
+      clearDownloadBars(); target.replaceChildren();
+      emptyState(target, 'No downloads yet', '', 'download');
+      target.querySelector('.collection-empty p')?.remove();
+      target.append(domainButton('Discover models', () => { byId('store-query').value = ''; navigate('discover', '', '', false, ''); }, 'secondary'));
+      renderDownloadInfo();
+      return;
+    }
+    const existing = new Map([...target.querySelectorAll('.store-download-row')].map(row => [row.dataset.downloadId, row]));
+    for (const child of [...target.children]) if (!child.classList.contains('store-download-row')) child.remove();
+    const retained = new Set();
+    let position = 0;
+    for (const item of [...observedTransfers, ...jobs]) {
+      const observed = !item.request_id;
+      if (item.dismissed && item.state !== 'unknown') continue;
+      const key = item.request_id || item.id, source = observed ? 'observed' : 'owned', name = downloadName(item);
+      const row = existing.get(key) || domainText('article', '', 'store-download-row'); row.dataset.downloadId = key; retained.add(key);
+      if (observed) row.classList.add('model-observed-transfer');
+      if (item.dismissed) row.classList.add('model-dismissed-notice');
+      row.setAttribute('aria-label', `${name}: ${downloadState(item)}`);
+      const mark = domainText('div', '', 'store-download-icon'); mark.append(icon(item.model, 32));
+      const content = domainText('div', '', 'store-download-content');
+      const title = domainText('strong', name, 'store-download-name'); title.title = item.model;
+      const progress = item.progress;
+      const bytes = ['running','cancelling'].includes(item.state) && Number.isFinite(progress?.total) && progress.total > 0 && Number.isFinite(progress.completed);
+      const status = domainText('span', bytes ? `${fileSize(progress.completed)} / ${fileSize(progress.total)}` : downloadState(item), 'store-download-status');
+      status.dataset.state = item.state; content.append(title, status);
+      const actions = domainText('div', '', 'store-download-actions');
+      if (!observed && item.cancellable && item.kind === 'model-pull' && ['accepted','running'].includes(item.state))
+        actions.append(downloadAction('Stop download', 'close', () => jobAction('/api/v1/models/cancel', key), 'stop'));
+      else if (!observed && item.state === 'unknown')
+        actions.append(downloadAction('Check download status', 'refresh', () => jobAction('/api/v1/models/reconcile', key), 'check'));
+      else if (!observed && !item.cancellable && ['completed','failed','cancelled'].includes(item.state) && latest?.model_download_dismissal)
+        actions.append(downloadAction('Remove download', 'close', () => jobAction('/api/v1/models/dismiss', key), 'remove'));
+      for (const button of actions.children) button.disabled = pending || !allowed;
+      const info = downloadAction('Download details', 'info', () => openDownloadInfo(source, key), 'info');
+      info.id = `store-download-info-${source}-${key}`; info.setAttribute('aria-haspopup', 'dialog');
+      actions.append(info);
+      if (existing.has(key)) {
+        row.querySelector('.store-download-icon').replaceWith(mark);
+        row.querySelector('.store-download-content').replaceWith(content);
+        row.querySelector('.store-download-actions').replaceWith(actions);
+      } else row.append(mark, content, actions);
+      if (['running','cancelling'].includes(item.state)) downloadProgress(row, progress, `Current file progress for ${name}`, key);
+      else { removeDownloadBar(key); }
+      if (target.children[position] !== row) target.insertBefore(row, target.children[position] || null);
+      position++;
+
+    }
+    for (const [key, row] of existing) if (!retained.has(key)) { removeDownloadBar(key); row.remove(); }
+    renderDownloadInfo();
   }
   function render() {
     if (!active()) return;
-    for (const b of byId('store-sections').children) {
-      b.setAttribute('aria-pressed', String(b.dataset.section === section));
-      b.disabled = !supported() && b.dataset.section !== 'connections';
+    const before = shownDetail || (!dialog.hidden ? '__visible' : ''), focused = document.activeElement, key = focused?.dataset?.storeModel;
+    const fullPage = Boolean(detail && supported());
+    if (fullPage || section !== 'downloads') downloadInfo.close();
+    if (fullPage) clearDownloadBars();
+    byId('models-view').classList.toggle('has-model-detail', fullPage);
+    byId('models-view').querySelector(':scope > .view-heading').hidden = fullPage;
+    byId('store-sections').hidden = fullPage; byId('store-panel').hidden = fullPage;
+    dialog.hidden = !fullPage;
+    byId('models-view').setAttribute('aria-labelledby', fullPage ? 'store-detail-title' : 'models-title');
+    if (fullPage) renderDetail(); else renderContent();
+    shownDetail = fullPage ? detail : '';
+    if (shownDetail && before !== shownDetail) {
+      byId('models-view').scrollTop = 0;
+      byId('store-detail-title')?.focus({preventScroll:true});
+    } else if (!shownDetail && before) {
+      detailSignature = '';
+      const sameSection = !browseContext?.section || browseContext.section === section;
+      const restore = () => {
+        byId('models-view').scrollTop = sameSection ? Math.max(0, Number(browseContext?.scroll) || 0) : 0;
+        if (sameSection) restoreDetailFocus();
+      };
+      restore(); requestAnimationFrame(() => { if (active() && !detail) restore(); });
+    } else if (key && dialog.hidden && !byId('store-content').contains(focused)) {
+      const row = [...byId('store-content').querySelectorAll('[data-store-model]')].find(node => node.dataset.storeModel === key);
+      row?.focus({preventScroll:true});
     }
-    byId('models-configured').hidden = section !== 'connections';
-    byId('store-content').hidden = section === 'connections';
-    byId('store-search').hidden = ['connections','downloads','charts'].includes(section);
-    byId('store-endpoint-label').hidden = section === 'connections';
+  }
+  function renderStoreCounts() {
+    const counts = {
+      installed: inventory?.models?.length,
+      downloads: jobsLoaded ? observedTransfers.length + jobs.filter(job => !job.dismissed || job.state === 'unknown').length : undefined,
+    };
+    for (const name of ['installed', 'downloads']) {
+      const button = byId(`store-tab-${name}`), total = counts[name];
+      let badge = button.querySelector('.tab-count');
+      if (!Number.isSafeInteger(total)) { badge?.remove(); continue; }
+      if (!badge) { badge = domainText('span', '', 'tab-count'); button.prepend(badge); }
+      const text = total.toLocaleString();
+      if (badge.textContent !== text) badge.textContent = text;
+    }
+  }
+  function renderContent() {
+    if (!active()) return;
+    const focusedRow = document.activeElement?.closest('.store-download-row');
+    const downloadFocus = focusedRow ? {key:focusedRow.dataset.downloadId, action:document.activeElement.dataset.downloadAction} : null;
+    if (section !== 'downloads') clearDownloadBars();
+    renderStoreCounts();
+    for (const button of byId('store-sections').children) {
+      const selected = button.dataset.section === section;
+      button.setAttribute('aria-pressed', String(selected));
+      button.disabled = !supported();
+    }
+    byId('store-panel').setAttribute('aria-labelledby', `store-tab-${section}`);
+    byId('store-search-row').hidden = section === 'downloads' || !supported();
+    byId('store-query').placeholder = section === 'installed' ? 'Search installed models…' : 'Search models or a use case…';
+    byId('store-endpoint-label').hidden = !supported() || connections.length < 2 || section === 'discover' || section === 'downloads' && !jobs.length;
     byId('store-download-open').disabled = !canWrite() || !inventory?.models || inventory.stale;
-    byId('store-discovery-filters').hidden = ['connections','downloads'].includes(section);
-    byId('store-source').disabled = !latest?.model_store_catalog || section === 'installed' || section === 'charts';
-    byId('store-sort').disabled = !hub() || section === 'installed' || section === 'charts';
+    byId('store-source').disabled = !latest?.model_store_catalog || section !== 'discover' || collection === 'charts';
+    byId('store-sort').disabled = section !== 'discover' || !hub() || collection === 'charts';
+    byId('store-capability').disabled = section !== 'discover' || hub();
     byId('store-size').disabled = section !== 'installed';
-    const target = byId('store-content'); target.replaceChildren();
+    byId('store-filter-chips').hidden = section === 'downloads' || !supported();
+    for (const id of ['store-source','store-sort','store-capability','store-size']) {
+      const select = byId(id), field = select.closest('.file-filter-field, label');
+      field.hidden = section === 'installed' ? id !== 'store-size' : id === 'store-size' || id === 'store-capability' && hub();
+    }
+    storeFilterMenus.forEach(menu => menu.sync());
+    const target = byId('store-content'); if (section !== 'downloads' || !supported()) target.replaceChildren(); target.classList.remove('is-empty');
     byId('store-installed-pages').hidden = section !== 'installed' || !supported();
     if (!supported()) {
-      allowed = false; dialog.close(); downloadDialog.close();
-      byId('store-search').hidden = true; byId('store-endpoint-label').hidden = true; byId('store-discovery-filters').hidden = true;
-      message(restartMessage);
-      if (section !== 'connections') target.append(domainText('p', 'Model Store needs the updated host.', 'muted'));
+      allowed = false; dialog.hidden = true; downloadDialog.close(); closeStoreFilters(); message(restartMessage);
+      emptyState(target, 'Model Store needs the updated host', 'Restart the host and reload this page.', 'models'); settingsLink(target); return;
+    }
+    if (section === 'downloads') {
+      renderJobs(target); renderDetail();
+      if (downloadFocus && !downloadInfo.open) {
+        const row = [...target.querySelectorAll('.store-download-row')].find(row => row.dataset.downloadId === downloadFocus.key);
+        (row?.querySelector(`[data-download-action="${downloadFocus.action}"]`) || row?.querySelector('[data-download-action=info]') || byId('store-tab-downloads')).focus({preventScroll:true});
+      }
       return;
     }
-    if (section === 'connections') { renderDetail(); return; }
-    if (section === 'downloads') renderJobs(target);
-    else if (section === 'installed') {
-      target.append(domainText('h2', 'Installed models'));
-      if (inventory?.checked_at) target.append(domainText('p', `Last checked ${new Date(inventory.checked_at * 1000).toLocaleString()}${inventory.stale ? ' · Cached; server unavailable' : ''}`, 'muted'));
-      const query = byId('store-query').value.trim().toLocaleLowerCase();
-      const sizeLimit = byId('store-size').value;
+    if (section === 'installed') {
+      if (inventory?.checked_at) target.append(domainText('p', `${inventory.stale ? 'Cached · ' : ''}Checked ${new Date(inventory.checked_at * 1000).toLocaleString()}`, 'store-source-note muted'));
+      const query = byId('store-query').value.trim().toLocaleLowerCase(), sizeLimit = byId('store-size').value;
       const rows = (inventory?.models || []).filter(row => row.name.toLocaleLowerCase().includes(query) && (sizeLimit === 'all' || Number.isFinite(row.size) && row.size <= Number(sizeLimit) * 1e9));
-      if (!rows.length) target.append(domainText('p', inventory?.models ? 'No matching installed models.' : 'Installed inventory unavailable. Choose an enabled native Ollama endpoint and refresh.', 'muted'));
+      if (!rows.length) {
+        emptyState(target, inventory?.models ? query || sizeLimit !== 'all' ? 'No matching models' : 'No installed models' : 'Installed models unavailable', inventory?.models ? 'Discover a model or adjust your search and filters.' : 'Check an enabled native Ollama connection in Model settings, then refresh.', 'models');
+        if (!endpoint || !inventory?.models) settingsLink(target);
+      }
       installedPage = Math.max(1, Math.min(installedPage, Math.ceil(rows.length / 20)));
       for (const row of rows.slice((installedPage - 1) * 20, installedPage * 20)) {
-        const b = domainButton('', () => openDetail(row.name, b), 'store-row quiet');
-        b.dataset.storeModel = row.name;
-        b.append(icon(row.name), domainText('strong', row.name), domainText('span', `${row.parameters || 'Parameters unknown'} · ${row.size != null ? fileSize(row.size) : 'Size unknown'}`, 'muted'), domainText('span', 'Manage', 'store-cta')); target.append(b);
+        const button = domainButton('', () => openDetail(row.name, button), 'store-row quiet'); button.dataset.storeModel = row.name;
+        const copy = domainText('span', '', 'store-card-content');
+        copy.append(domainText('strong', row.name), domainText('small', `${row.parameters || 'Parameters unknown'} · ${row.size != null ? fileSize(row.size) : 'Size unknown'}`, 'muted'));
+        button.append(icon(row.name, 40), copy, domainText('span', 'Manage', 'store-cta')); target.append(button);
       }
-      updateDomainPager('store-installed', (installedPage - 1) * 20, {
-        items: rows.slice((installedPage - 1) * 20, installedPage * 20),
-        total: rows.length, page_size: 20, more: installedPage * 20 < rows.length,
-      });
+      updateDomainPager('store-installed', (installedPage - 1) * 20, {items:rows.slice((installedPage - 1) * 20, installedPage * 20), total:rows.length, page_size:20, more:installedPage * 20 < rows.length});
       byId('store-installed-pages').hidden = rows.length <= 20;
-    } else if (hub() && ['discover','charts','categories'].includes(section)) {
-      target.append(domainText('h2', section === 'charts' ? 'Top GGUF models on Hugging Face' : byId('store-sort').value === 'lastModified' ? 'Recently updated GGUF models' : 'GGUF models to explore'));
-      target.append(domainText('p', 'Public queries are sent to Hugging Face. Download counts describe Hub repositories, not Ollama usage. Capabilities and device fit are not inferred.', 'muted'));
-      if (!latest?.model_store_catalog) target.append(domainText('p', 'Restart the WebUI host and reload to browse the live catalog.', 'muted'));
-      else {
-        if (liveCatalog?.checked_at) target.append(domainText('p', `${liveCatalog.stale ? 'Cached' : 'Checked'} ${new Date(liveCatalog.checked_at * 1000).toLocaleString()} · up to 20 results`, 'muted'));
-        if (liveCatalog?.error) target.append(domainText('p', liveCatalog.error, 'domain-status'));
-        if (liveLoading) target.append(domainText('p', 'Loading catalog…', 'muted'));
-        const rows = (liveCatalog?.models || []).filter(item => section !== 'charts' || Number.isInteger(item.downloads));
-        rows.forEach((item, index) => { const row = modelRow(item); if (section === 'charts') row.prepend(domainText('span', String(index + 1), 'store-rank')); target.append(row); });
-        if (!liveLoading && !rows.length) target.append(domainText('p', 'No matching catalog models. Curated and Installed models remain available.', 'muted'));
+      renderDetail(); return;
+    }
+    const landing = liveLanding();
+    if (landing) {
+      byId('store-live-pages').hidden = true;
+      const popular = (popularCatalog?.models || []).filter(item => Number.isInteger(item.downloads));
+      target.append(sectionHeading('Popular models', 'See all', () => navigate('discover', '', '', false, 'charts')));
+      target.append(domainText('p', 'By Hugging Face downloads' + (popularCatalog?.stale ? ' · Cached' : ''), 'store-source-note muted'));
+      if (popular.length) target.append(modelGrid(popular, true));
+      else target.append(domainText('p', popularCatalog?.error ? 'Catalog unavailable. Try Refresh.' : latest?.model_store_catalog ? 'Loading models…' : 'Update the host to explore more models.', 'muted'));
+      const popularIds = new Set(popular.map(item => item.id));
+      const recent = (recentCatalog?.models || []).filter(item => !popularIds.has(item.id));
+      if (recent.length) {
+        target.append(sectionHeading('Recently updated', 'See all', () => {
+          byId('store-source').value = 'huggingface'; byId('store-sort').value = 'lastModified';
+          navigate('discover', '', '', false, '');
+        }), modelGrid(recent));
+        if (recentCatalog.stale) target.append(domainText('p', 'Cached collection', 'store-source-note muted'));
       }
+      if (!popular.length && popularCatalog?.error) {
+        target.append(sectionHeading('Available offline'), modelGrid(catalog?.models || []));
+      }
+
     } else {
-      if (!catalog) target.append(domainText('p', 'Loading curated models…', 'muted'));
-      else {
-        target.append(domainText('p', `Curated collection · verified ${catalog.verified} · available offline. Tags and sizes can change.`, 'muted'));
-        const matches = filtered();
-        if (section === 'discover' && !category && !byId('store-query').value) {
-          const features = domainText('div', '', 'store-features');
-          for (const item of matches) features.append(modelRow(item, true));
-          target.append(features, domainText('h2', 'Models to explore'));
-        } else target.append(domainText('h2', category || (section === 'categories' ? 'Explore by category' : 'Search results')));
-        if (section === 'categories' || section === 'discover') {
-          const tiles = domainText('div', '', 'store-categories');
-          for (const name of categories) {
-            const b = domainButton(name, () => navigate('categories', name), 'secondary');
-            b.setAttribute('aria-pressed', String(name === category)); tiles.append(b);
-          }
-          if (category) tiles.append(domainButton('All categories', () => navigate('categories'), 'quiet'));
-          target.append(tiles);
-        }
-        for (const item of matches) target.append(modelRow(item));
-        if (!matches.length) target.append(domainText('p', 'No matches in the curated collection. Browse more models on Ollama.', 'muted'));
-        target.append(link('Browse all models on Ollama', 'https://ollama.com/search'));
+      const back = sectionHeading(category || (!hub() ? 'Offline collection' : collection === 'charts' ? 'Top GGUF models' : hub() && byId('store-sort').value === 'lastModified' ? 'Recently updated' : 'Search results'), 'Discover', () => {
+        byId('store-query').value = ''; byId('store-source').value = 'huggingface'; byId('store-sort').value = 'downloads'; byId('store-capability').value = 'all'; navigate('discover', '', '', false, '');
+      }); target.append(back);
+      if (hub()) {
+        target.append(domainText('p', 'Hugging Face public catalog · repository downloads, not Ollama usage. Capabilities and device fit are not verified.', 'store-source-note muted'));
+        if (liveCatalog?.checked_at) target.append(domainText('p', `${liveCatalog.stale ? 'Cached' : 'Checked'} ${new Date(liveCatalog.checked_at * 1000).toLocaleString()} · up to 20 results`, 'store-source-note muted'));
+        if (liveCatalog?.error) target.append(domainText('p', liveCatalog.error, 'domain-status'));
+        const rows = (liveCatalog?.models || []).filter(item => collection !== 'charts' || Number.isInteger(item.downloads));
+        target.append(modelGrid(rows, collection === 'charts'));
+        if (collection === 'charts' || byId('store-sort').value === 'lastModified') renderLivePager(liveCatalog);
+        else byId('store-live-pages').hidden = true;
+        if (liveLoading) target.append(domainText('p', 'Loading catalog…', 'muted'));
+        else if (!rows.length) target.append(domainText('p', 'No matching catalog models. Curated and Installed remain available.', 'muted'));
+      } else {
+        const matches = filtered(); matches.forEach(item => target.append(modelRow(item)));
+        if (!matches.length) emptyState(target, 'No matching curated models', 'Try another use case or choose the Hugging Face catalog in Filters.', 'models');
       }
     }
     renderDetail();
   }
+  async function loadPopular(force = false) {
+    if (!active() || !latest?.model_store_catalog || popularReading) return;
+    const id = ++popularSerial, epoch = authEpoch, request = new AbortController(); popularReading = request;
+    try {
+      await Promise.allSettled(['downloads', 'lastModified'].map(async sort => {
+        let result;
+        try {
+          const url = `/api/v1/models/store?source=huggingface&sort=${sort}`;
+          const previous = sort === 'downloads' ? popularCatalog : recentCatalog;
+          if (!previous && force) {
+            const cached = await domainRequest(`${url}&refresh=0`, 'GET', undefined, {signal:request.signal});
+            if (!active() || epoch !== authEpoch || id !== popularSerial) return;
+            if (sort === 'downloads') popularCatalog = cached; else recentCatalog = cached;
+            render();
+          }
+          result = await domainRequest(`${url}&refresh=${force ? '1' : '0'}`, 'GET', undefined, {signal:request.signal});
+        } catch (error) {
+          if (error.name === 'AbortError') return;
+          const previous = sort === 'downloads' ? popularCatalog : recentCatalog;
+          result = {...previous, error:error.message, stale:true};
+        }
+        if (!active() || epoch !== authEpoch || id !== popularSerial) return;
+        if (sort === 'downloads') popularCatalog = result; else recentCatalog = result;
+        render();
+      }));
+    } finally { if (popularReading === request) popularReading = null; }
+  }
+
+  function renderLivePager(data) {
+    const rows = data?.models || [];
+    const pager = byId('store-live-pages');
+    pager.setAttribute('aria-label', byId('store-sort').value === 'lastModified' ? 'Recently updated model pages' : 'Top GGUF model pages');
+    if (!data || !rows.length) { pager.hidden = true; return; }
+    pager.hidden = false;
+    const known = (livePage - 1) * 20 + rows.length + Number(Boolean(data.more));
+    updateDomainPager('store-live', (livePage - 1) * 20, {
+      items: rows, total: known, page_size: 20, more: Boolean(data.more),
+    });
+    byId('store-live-page').textContent = `Page ${livePage}`;
+  }
+  function moveLivePage(next) {
+    if (next < 1 || next > 500 || next === livePage) return;
+    livePage = next; liveCatalog = null;
+    const url = new URL(location.href);
+    if (livePage > 1) url.searchParams.set('models-page', String(livePage));
+    else url.searchParams.delete('models-page');
+    history.pushState(history.state, '', url.pathname + url.search + url.hash);
+    loadLive();
+  }
+  byId('store-live-previous').append(libraryIcon('previous'));
+  byId('store-live-next').append(libraryIcon('next'));
+  byId('store-live-numbers').addEventListener('click', event => {
+    const button = event.target.closest('button[data-page]');
+    if (button) moveLivePage(Number(button.dataset.page));
+  });
+  byId('store-live-previous').addEventListener('click', () => moveLivePage(livePage - 1));
+  byId('store-live-next').addEventListener('click', () => moveLivePage(livePage + 1));
   async function loadLive(force = false) {
-    if (!active() || !latest?.model_store_catalog || !hub()) return;
+    if (!active() || !latest?.model_store_catalog || section !== 'discover' || !hub()) return;
     const current = ++liveSerial, epoch = authEpoch;
     liveReading?.abort(); liveReading = new AbortController(); liveLoading = true; render();
-    const parameters = new URLSearchParams({source: 'huggingface', query: byId('store-query').value.trim(), sort: section === 'charts' ? 'downloads' : byId('store-sort').value, refresh: force ? '1' : '0'});
+    const parameters = new URLSearchParams({source: 'huggingface', query: byId('store-query').value.trim(), sort: collection === 'charts' ? 'downloads' : byId('store-sort').value, page: livePage, refresh: force ? '1' : '0'});
     try {
       const result = await domainRequest(`/api/v1/models/store?${parameters}`, 'GET', undefined, {signal: liveReading.signal});
       if (!active() || current !== liveSerial || epoch !== authEpoch) return;
@@ -1221,11 +1672,11 @@ window.ModelStoreUI = (() => {
     try {
       const result = await domainRequest(`/api/v1/models/store/detail?id=${encodeURIComponent(id)}`);
       if (!active() || epoch !== authEpoch || detail !== id) return;
-      const base = liveCatalog?.models?.find(item => item.id === id) || {id, name: id.slice(3), source_url: 'https://huggingface.co/' + id.slice(3)};
-      liveDetails.set(id, {...base, ...result, variants: result.variants || [], detailLoaded: true});
+      const base = liveCatalog?.models?.find(item => item.id === id) || popularCatalog?.models?.find(item => item.id === id) || recentCatalog?.models?.find(item => item.id === id) || {id, name: id.slice(3), source_url: 'https://huggingface.co/' + id.slice(3)};
+      liveDetails.set(id, {...base, ...result, task:result.task || base.task || '', summary:result.summary === 'Community GGUF model. Capabilities and device fit are not verified.' ? base.summary || result.summary : result.summary || base.summary, variants: result.variants || [], detailLoaded: true});
       while (liveDetails.size > 20) liveDetails.delete(liveDetails.keys().next().value);
       renderDetail();
-    } catch (error) { if (active() && epoch === authEpoch && detail === id) { byId('store-detail-body').replaceChildren(domainText('p', error.message)); } }
+    } catch (error) { if (active() && epoch === authEpoch && detail === id) { liveDetails.set(id, {id, name:id.slice(3), publisher:id.slice(3).split('/')[0], summary:'Community GGUF model.', source_url:'https://huggingface.co/' + id.slice(3), capabilities:[], variants:[], detailLoaded:true, error:error.message}); detailSignature = ''; renderDetail(); } }
     finally { if (detailReading === id) detailReading = ''; }
   }
   async function loadInventory() {
@@ -1250,9 +1701,9 @@ window.ModelStoreUI = (() => {
       const result = await domainRequest('/api/v1/models/downloads');
       if (!active() || epoch !== authEpoch) return;
       const completed = jobs.some(old => ['running','accepted','unknown'].includes(old.state) && result.items.some(j => j.request_id === old.request_id && j.state === 'completed'));
-      jobs = result.items; allowed = result.management_allowed;
+      jobs = result.items; observedTransfers = result.observed || []; jobsLoaded = true; allowed = result.management_allowed; renderStoreCounts();
       if (completed) loadInventory();
-      if (section === 'downloads') render();
+      if (section === 'downloads') render(); else if (detail) renderDetail();
     } catch (error) { if (active() && epoch === authEpoch) message(error.message); }
     finally { busyRead = false; }
   }
@@ -1273,14 +1724,25 @@ window.ModelStoreUI = (() => {
       if (!connections.length) select.append(new Option('No native Ollama endpoint configured', ''));
       select.value = endpoint;
     }
-    render(); await Promise.allSettled([loadInventory(), loadJobs(), ...(hub() ? [loadLive()] : [])]);
+    render(); await Promise.allSettled([loadInventory(), loadJobs(), ...(section === 'discover' && hub() && !liveLanding() ? [loadLive(true)] : []), ...(section === 'discover' && liveLanding() ? [loadPopular(true)] : [])]);
   }
-  sections.forEach((name, i) => { const b = domainButton(labels[i], () => navigate(name), 'quiet'); b.dataset.section = name; byId('store-sections').append(b); });
-  byId('store-sections').addEventListener('keydown', event => {
-    const buttons = [...byId('store-sections').children], index = buttons.indexOf(document.activeElement);
-    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : event.key === 'ArrowRight' ? (index + 1) % buttons.length : event.key === 'ArrowLeft' ? (index + buttons.length - 1) % buttons.length : null;
-    if (index >= 0 && next !== null) { event.preventDefault(); buttons[next].focus(); buttons[next].click(); }
+  for (const id of ['store-download-info-close', 'store-download-close']) byId(id).append(libraryIcon('close'));
+  byId('store-download-info-close').addEventListener('click', () => downloadInfo.close());
+  byId('store-download-info-check').addEventListener('click', () => jobAction('/api/v1/models/reconcile', downloadInfoKey));
+  byId('store-download-info-remove').addEventListener('click', () => jobAction('/api/v1/models/dismiss', downloadInfoKey));
+  downloadInfo.addEventListener('close', () => {
+    const origin = byId(`store-download-info-${downloadInfoSource}-${downloadInfoKey}`);
+    downloadInfoKey = downloadInfoSource = downloadInfoError = '';
+    byId('store-download-info-name').textContent = ''; byId('store-download-info-metadata').replaceChildren();
+    byId('store-download-info-note').textContent = '';
+    if (active() && section === 'downloads' && !detail) (origin || byId('store-tab-downloads')).focus({preventScroll:true});
   });
+  downloadInfo.addEventListener('click', event => {
+    if (event.target !== downloadInfo) return;
+    const rect = downloadInfo.getBoundingClientRect();
+    if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) downloadInfo.close();
+  });
+  sections.forEach((name, i) => { const b = domainButton(labels[i], () => navigate(name, '', '', false, ''), ''); b.replaceChildren(domainText('span', labels[i])); b.dataset.section = name; b.id = `store-tab-${name}`; b.setAttribute('aria-pressed', String(name === section)); b.setAttribute('aria-controls','store-panel'); byId('store-sections').append(b); });
   compactDomainPages.addEventListener('change', () => {
     const numbers = byId('store-installed-numbers');
     if (active() && section === 'installed' && numbers.dataset.current)
@@ -1296,40 +1758,57 @@ window.ModelStoreUI = (() => {
     const button = event.target.closest('button[data-page]');
     if (button) { installedPage = Number(button.dataset.page); render(); }
   });
-  byId('store-query').addEventListener('input', () => { installedPage = 1; if (hub()) { clearTimeout(searchTimer); searchTimer = setTimeout(() => navigate(section, category, '', true), 350); } else navigate(section, category, '', true); });
-  byId('store-endpoint').addEventListener('change', () => { endpoint = byId('store-endpoint').value; installedPage = 1; inventory = null; detail = ''; loadInventory(); });
-  byId('store-download-open').addEventListener('click', () => { if (!byId('store-download-open').disabled) { byId('store-download-status').textContent = ''; downloadDialog.showModal(); byId('store-download-tag').focus(); } });
+  byId('store-query').addEventListener('input', () => { installedPage = 1; livePage = 1; if (section === 'discover' && hub()) { clearTimeout(searchTimer); searchTimer = setTimeout(() => navigate(section, category, '', true), 350); } else navigate(section, category, '', true); });
+  function changeEndpoint(value) { endpoint = value; byId('store-endpoint').value = value; byId('store-download-destination').textContent = connections.find(c => c.id === endpoint)?.name || ''; installedPage = 1; inventory = null; loadInventory(); }
+  byId('store-endpoint').addEventListener('change', () => changeEndpoint(byId('store-endpoint').value));
+  byId('store-download-open').append(libraryIcon('plus'));
+  byId('store-download-open').addEventListener('click', () => { if (!byId('store-download-open').disabled) { closeStoreFilters(); byId('store-download-status').textContent = ''; byId('store-download-destination').textContent = connections.find(c => c.id === endpoint)?.name || ''; const picker = byId('store-download-endpoint'); picker.replaceChildren(...connections.map(c => new Option(c.name,c.id))); picker.value = endpoint; byId('store-download-endpoint-label').hidden = connections.length < 2; downloadDialog.showModal(); byId('store-download-tag').focus(); } });
+  byId('store-download-endpoint').addEventListener('change', () => changeEndpoint(byId('store-download-endpoint').value));
   byId('store-download-close').addEventListener('click', () => downloadDialog.close());
   downloadDialog.addEventListener('close', () => byId('store-download-open').focus());
   byId('store-download-form').addEventListener('submit', event => { event.preventDefault(); review('model-pull', byId('store-download-tag').value.trim(), true); });
-  byId('store-source').addEventListener('change', () => { category = ''; liveCatalog = null; navigate(section, '', '', true); });
-  byId('store-sort').addEventListener('change', () => { liveCatalog = null; navigate(section, category, '', true); });
-  byId('store-size').addEventListener('change', () => { installedPage = 1; render(); });
-  byId('models-refresh').addEventListener('click', async () => { await load(); if (hub()) loadLive(true); });
-  byId('store-detail-close').addEventListener('click', () => { navigate(section, category); restoreDetailFocus(); });
-  dialog.addEventListener('cancel', event => { event.preventDefault(); navigate(section, category); restoreDetailFocus(); });
+  byId('store-source').addEventListener('change', () => { category = ''; livePage = 1; liveCatalog = null; navigate(section, '', '', true, ''); });
+  byId('store-sort').addEventListener('change', () => { livePage = 1; liveCatalog = null; navigate(section, category, '', true); });
+  byId('store-size').addEventListener('change', () => { installedPage = 1; navigate(section, category, '', true); });
+  byId('store-capability').addEventListener('change', () => navigate(section, category, '', true));
+  byId('models-refresh').addEventListener('click', () => load());
+  byId('store-detail-back').prepend(libraryIcon('previous'));
+  byId('store-detail-back').addEventListener('click', () => {
+    if (browseContext?.url && history.length > 1) history.back();
+    else navigate(section, category, '', true);
+  });
   document.addEventListener('klaude-view', () => {
     clearInterval(timer); timer = null;
-    if (active()) { urlState(); render(); load(); if (supported()) timer = setInterval(loadJobs, 2000); }
-    else { serial++; reading?.abort(); liveReading?.abort(); clearTimeout(searchTimer); dialog.close(); downloadDialog.close(); }
+    if (active()) { if (urlState() === false) return; render(); load(); if (supported()) timer = setInterval(loadJobs, 2000); }
+    else { clearDownloadBars(); serial++; reading?.abort(); liveReading?.abort(); clearTimeout(searchTimer); popularSerial++; popularReading?.abort(); popularReading = null; dialog.hidden = true; downloadDialog.close(); closeStoreFilters(); downloadInfo.close(); }
   });
   document.addEventListener('klaude-snapshot', () => {
     const capability = supported();
-    if (observedCapability === capability) return;
+    if (observedCapability === capability) { if (active() && detail) renderDetail(); return; }
     observedCapability = capability;
     if (!active()) return;
     clearInterval(timer); timer = null;
     render(); load();
     if (capability) timer = setInterval(loadJobs, 2000);
   });
-  window.addEventListener('popstate', () => { if (active()) { urlState(); render(); } });
+  window.addEventListener('popstate', () => { if (active() && urlState() !== false) { render(); if (liveLanding()) loadPopular(); else if (hub()) loadLive(); } });
   document.addEventListener('klaude-auth-reset', () => {
-    clearInterval(timer); clearTimeout(searchTimer); liveSerial++; liveReading?.abort(); liveDetails.clear(); liveCatalog = null; serial++; reading?.abort(); dialog.close(); downloadDialog.close(); byId('store-download-tag').value = ''; catalog = inventory = null; jobs = []; connections = [];
+    downloadInfo.close(); downloadInfoKey = downloadInfoSource = downloadInfoError = '';
+    clearDownloadBars();
+    shownDetail = detailSignature = variantPageSelection = ''; browseContext = null; detailsOpen.clear();
+    clearInterval(timer); clearTimeout(searchTimer); popularSerial++; popularReading?.abort(); popularReading = null; popularCatalog = recentCatalog = null; closeStoreFilters(); byId('store-live-pages').hidden = true; livePage = 1; liveSerial++; liveReading?.abort(); liveDetails.clear(); liveCatalog = null; serial++; reading?.abort(); dialog.hidden = true; downloadDialog.close(); byId('store-download-tag').value = ''; catalog = inventory = null; jobs = []; connections = [];
+    observedTransfers = []; jobsLoaded = false; renderStoreCounts();
     byId('store-installed-pages').hidden = true;
     byId('store-installed-numbers').replaceChildren(); byId('store-installed-page').textContent = ''; installedPage = 1;
-    endpoint = detail = variant = ''; observedCapability = undefined; pending = false; allowed = false; byId('store-query').value = ''; byId('store-content').replaceChildren(); byId('store-detail-body').replaceChildren(); message('');
+    endpoint = detail = variant = collection = category = ''; observedCapability = undefined; pending = false; allowed = false; byId('store-query').value = ''; byId('store-content').replaceChildren(); byId('store-detail-body').replaceChildren(); message('');
   });
-  return {render};
+  function restoreFromLocation() {
+    if (!active() || urlState() === false) return;
+    render();
+    if (detail && supported() && detail.startsWith('hf:') &&
+        !liveDetails.has(detail) && detailReading !== detail) loadLiveDetail(detail);
+  }
+  return {render, restoreFromLocation};
 })();
 
 window.RoleModelPicker = (() => {
@@ -1484,7 +1963,7 @@ window.ModelConnectionsUI = (() => {
     try {
       const result = await prepareChange(draft, {
         current: () => epoch === authEpoch && active() && settingsSection === 'models' && (!hasDialog || dialog.open && version === formVersion),
-        beforeOpen: () => { if (dialog.open) dialog.close(); },
+        beforeOpen: () => { byId('model-credential-value').value = ''; if (dialog.open) dialog.close(); },
         onAccepted: () => { if (epoch === authEpoch) { pending = false; load(); } },
         onDiscard: result => { if (epoch === authEpoch) { pending = false; if (result.uncertain) message('Save unconfirmed. Check saved state before retrying.'); load(); } },
       });

@@ -47,6 +47,7 @@ from .browser_vision import prepare_vision_operation, run_vision_operation
 from .library_inventory import knowledge_inventory, knowledge_search
 from .library_knowledge import KnowledgeAction, knowledge_worker_request, source_inventory
 from .mcp_inventory import read_mcp_inventory
+from .model_activity import ModelActivity
 from .operation_journal import OperationConflict, OperationFenceLost, OperationJournal
 
 OWNER = "web-admin"
@@ -112,6 +113,8 @@ class LibraryManagement:
         self._journal: OperationJournal | None = None
         self._jobs = OwnedBackgroundJobs(self._event)
         self._model_progress: dict[str, dict[str, Any]] = {}
+        self._model_recovery: dict[str, float] = {}
+        self._model_activity = ModelActivity()
         self._closed = False
         self._stop = threading.Event()
         self._keeper: threading.Thread | None = None
@@ -603,6 +606,7 @@ class LibraryManagement:
             for item in result["items"]:
                 item["progress"] = self._model_progress.get(item["request_id"], {})
                 item["cancellable"] = item["request_id"] in self._active
+        result.update(self._model_activity.read(self.cfg, result["items"]))
         return result
 
     def cancel_model(self, identity: str) -> dict[str, Any]:
@@ -617,6 +621,30 @@ class LibraryManagement:
             self.journal.request_cancel(identity, OWNER)
             self._jobs.cancel(identity)
             return self.status(identity)
+
+    def dismiss_model(self, identity: str) -> dict[str, Any]:
+        with self._lock:
+            if identity in self._active:
+                raise OperationConflict("Stop the active download before removing its history")
+            self._reconcile_stopped_model(identity)
+            return model_store.dismiss(self.cfg, self.journal, identity)
+
+    def _reconcile_stopped_model(self, identity: str) -> bool:
+        # A tagged local handler completion can verify a stopped request without
+        # another mutation. Missing proof leaves the normal unknown fence intact.
+        try:
+            receipt = self.status(identity)
+            if receipt["kind"] == "model-pull" and receipt["state"] == "unknown":
+                model_store.reconcile(self.cfg, self.journal, identity, require_end_proof=True)
+            return True
+        except Exception:
+            return False
+
+    def reconcile_model(self, identity: str) -> dict[str, Any]:
+        with self._lock:
+            if identity in self._active:
+                raise OperationConflict("Stop the active model request before checking its outcome")
+            return model_store.reconcile(self.cfg, self.journal, identity)
 
     def reviewed_connection(self, owner: str, token: str) -> dict[str, Any] | None:
         with self._lock:
@@ -753,6 +781,10 @@ class LibraryManagement:
                     except Exception:
                         self._jobs.cancel(identity)
                         self._finish(identity, False)
+                for identity, deadline in tuple(self._model_recovery.items()):
+                    if (time.monotonic() >= deadline
+                            or self._reconcile_stopped_model(identity)):
+                        self._model_recovery.pop(identity, None)
 
     def _event(self, kind: str, value: object) -> None:
         if kind == "background_progress" and isinstance(value, tuple):
@@ -771,6 +803,10 @@ class LibraryManagement:
                 active = self._active.get(identity)
                 if active is not None and active[1].operation in model_store.OPERATIONS:
                     self._finish(identity, False)
+                    if not self._reconcile_stopped_model(identity):
+                        # journald may publish the handler-end entry just after
+                        # the worker exits. Recheck evidence only; never replay.
+                        self._model_recovery[identity] = time.monotonic() + 30
                     return
                 if active is not None and active[1].operation in VISION_READ_OPERATIONS:
                     self._active.pop(identity)

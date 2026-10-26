@@ -50,18 +50,33 @@ def _cache(cfg, key, read, refresh):
         return {**data, "stale": False}
 
 
-def catalog(cfg, query="", sort="downloads", *, refresh=False):
+def catalog(cfg, query="", sort="downloads", *, refresh=False, page=1):
     if (
         not isinstance(query, str)
         or len(query) > 200
         or any(not c.isprintable() for c in query)
         or sort not in {"downloads", "lastModified"}
+        or type(page) is not int
+        or not 1 <= page <= 500
     ):
         raise ValueError("Choose a bounded catalog query and ordering")
 
     def read():
-        rows = hub_repo_search(
-            cfg.huggingface_base_url, "", "model", query, 20, sort, filter_tag="gguf"
+        cursor = ""
+        if page > 1:
+            previous_key = "list:" + sort + ":" + query + ":page:" + str(page - 1)
+            previous_digest = hashlib.sha256(
+                (cfg.huggingface_base_url + ":" + previous_key).encode()
+            ).hexdigest()
+            previous = read_record(
+                cfg.data_dir / "model-manager" / "discovery" / f"{previous_digest}.json"
+            )
+            if not previous or not previous.get("next_cursor"):
+                raise ValueError("No further catalog page is available")
+            cursor = previous["next_cursor"]
+        rows, next_cursor = hub_repo_search(
+            cfg.huggingface_base_url, "", "model", query, 20, sort, filter_tag="gguf",
+            cursor=cursor, with_cursor=True,
         )
         models = []
         for row in rows:
@@ -76,6 +91,7 @@ def catalog(cfg, query="", sort="downloads", *, refresh=False):
                     "id": "hf:" + identity,
                     "name": identity.split("/")[-1],
                     "publisher": identity.split("/")[0],
+                    "task": _text(row.get("pipeline_tag"), 80),
                     "summary": _text(row["summary"], 240)
                     or "Community GGUF. Read its model card and choose an exact file.",
                     "categories": [],
@@ -89,9 +105,10 @@ def catalog(cfg, query="", sort="downloads", *, refresh=False):
                     "license": None,
                 }
             )
-        return {"models": models, "sort": sort, "query": query}
+        return {"models": models, "sort": sort, "query": query, "page": page,
+                "page_size": 20, "more": bool(next_cursor), "next_cursor": next_cursor}
 
-    return _cache(cfg, "list:" + sort + ":" + query, read, refresh)
+    return _cache(cfg, "list:" + sort + ":" + query + ":page:" + str(page), read, refresh)
 
 
 def detail(cfg, identity, *, refresh=False):
@@ -108,6 +125,7 @@ def detail(cfg, identity, *, refresh=False):
             "summary": "Community GGUF model. Capabilities and device fit are not verified.",
             "source_url": "https://huggingface.co/" + repo,
             "license": data["license"],
+            "task": _text(data.get("pipeline_tag"), 80),
             "categories": [],
             "capabilities": [],
             "variants": [

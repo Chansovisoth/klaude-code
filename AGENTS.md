@@ -135,6 +135,9 @@ Workspace layout:
   help is available for all Web pages and Research budgets settings, plus
   Execution limits. Search results
   has no help button.
+- Dialog header close actions use the shared cross icon with an accessible Close
+  label and tooltip. Model download/details dialogs follow the same top-right
+  control; confirmation footer actions retain their explicit action wording.
 - WebUI bundles Noto Sans Khmer locally as the Khmer fallback for UI, chat,
   readers and code, retaining the existing Latin fonts and offline font delivery.
 - Assistant Markdown supports inline/display LaTeX with `$…$`, `$$…$$`,
@@ -182,14 +185,68 @@ Workspace layout:
   choices share typed revisioned runtime controls, and exact saved-runtime resume
   checks definition/credential revisions without catalog or generation calls.
   Model selection remains separate from connection definitions and default roles.
+  An empty conversation can resume when it has an exact saved runtime and matching
+  workspace binding; no dialogue is fabricated. Unknown sessions, missing choices,
+  changed runtime identities and mismatched workspaces remain rejected.
   Browser snapshots declare Model Store, live catalog, Model settings and Image studio capabilities. Updated
-  assets served by an older host show restart/reload guidance, keep Connections
-  available and avoid unsupported endpoint polling or endless loading states.
-  Models now includes a Model Store with Discover, Categories, Installed,
-  Downloads and retained configured Connections. Discovery defaults to a dated,
-  bundled three-family/four-variant collection with official sources. An explicit
-  Hugging Face GGUF source uses bounded public Hub APIs, real repository download
-  counts/recent updates and exact single-file GGUF variants supported by Ollama.
+  assets served by an older host show restart/reload guidance, link to Model
+  settings and avoid unsupported endpoint polling or endless loading states.
+  Model Store has Discover, Installed and Downloads navigation, using the exact
+  Library/Integrations section-chips component: native aria-pressed buttons, shared
+  keyboard navigation, responsive layout, selected colors and animated positional
+  corner shapes. There are no Store-specific tab sizing or grid overrides. Installed and
+  Downloads show shared count badges for the selected endpoint inventory and
+  visible download entries, including observed transfers; unknown counts stay hidden.
+  Discover defaults to the live Hugging Face GGUF catalog, with responsive Popular
+  and Recently updated cards (20 per page, deduplicated across the landing
+  collections). Their See all lists use shared numbered pagination backed by the
+  Hub continuation cursor and retain the selected page in Store history.
+  Entering the Store or refreshing requests fresh metadata; cached cards stay
+  available during refresh and provider failures. Search uses the live catalog
+  by default. The bundled collection is an explicit offline filter and fallback
+  when live discovery is unavailable; fixed editorial promotions are no longer
+  shown on the default Discover page.
+  Charts remains a Discover drill-down; legacy category URLs open the offline collection. Catalog/order/capability
+  and installed-size choices use Library's shared dropdown filter chips beneath
+  Search. Discover cards include a separate Ollama runtime badge using the shared
+  platform icon; multiple enabled endpoints additionally show the selected server
+  name. Creator/family icons remain separate. A Library-style plus button opens the exact-model download dialog
+  with Escape/focus return. Endpoint selection appears only for multiple
+  enabled native connections on inventory/job views and operation/detail dialogs.
+  Downloads has a centered empty state with Discover models and no unused toolbar.
+  Connections and the collapsed configured cloud/local catalog live in Settings →
+  Models; the Store header omits Current chat/Model Defaults. Chat retains its model
+  picker and the command palette's Switch model opens it directly. The configured
+  catalog preserves activation, filters, shared paging and tab-local disclosure
+  choice; sign-out clears private state. Old Connections URLs migrate to Settings.
+  Discovery retains a dated, bundled three-family/four-variant collection with
+  official sources. Popular reads a bounded anonymous fixed Hub query; user search
+  text is sent to Hugging Face only when its catalog is selected. That source uses
+  real repository download counts/recent updates and exact single-file GGUF
+  variants supported by Ollama.
+  Model details use a full Store page with Back: large local identity/logo,
+  separate Ollama destination badge, model-card link and
+  compact icon/text strip of known facts (unknown
+  metadata is not padded with placeholder tiles). About precedes compact file
+  choices with right-aligned sizes and a footer button that says Choose variant
+  until selection, then Download with the formatted size. Generic placeholder About text is omitted; substantive source
+  descriptions remain available. Hub pipeline/task labels are retained across
+  discovery/detail reads and shown as Task metadata, separately from verified
+  runtime capabilities. The footer owns the reviewed download action. Exact
+  model references remain in the technical disclosure and install review. It retains lower
+  technical/source links. The image carousel and its artwork, controls and layout
+  observers are removed.
+  Details retains one page scroll owner and the full-page reference composition.
+  Choose variant focuses the exact selector; after a choice the footer changes to
+  Download. Only explicit selection can lead to the existing review. Installed activation and
+  reviewed deletion remain separate. Variants reuse shared 20-row pagination;
+  URL state retains the selected exact tag and History retains Store scroll,
+  filters, selected page and focus. Unknown metadata stays unknown; source errors
+  disable installation and offer an explicit read-only retry. Refreshing a detail URL
+  restores the Store after the authenticated snapshot and reloads source details.
+  Detail caches and
+  DOM clear on sign-out. Evidence:
+  `docs/webui/model_store/model_details/implementation-validation.md`.
   Charts describes Hub downloads, never Ollama usage. Metadata has a one-hour,
   timestamped private cache with visible stale/offline fallback. Split/projector
   files are excluded; unknown capabilities, size, license and device fit stay
@@ -199,8 +256,43 @@ Workspace layout:
   Signed-in administrators on local or LAN browsers can review exact native-endpoint pulls
   and protected deletion through the existing operation journal and owned worker.
   Downloads retain real file progress, durable targets and uncertain outcomes;
+  shared native-manager pulls started in other Klaude clients appear as read-only
+  observations. On a local standard Linux Ollama system service, bounded partial-file
+  metadata checks also show recent external transfer activity, without guessing
+  its model identity, byte progress or final outcome. Sparse preallocated file size
+  is never progress. Observations cannot cancel, replay or reconcile a journaled
+  request. Remote Ollama has no active-transfer-list API; inaccessible local
+  monitoring is explicitly unavailable. Definite pre-effect failures and terminal
+  native pull errors with fresh unchanged inventory now fail normally; transport
+  loss, missing final events and failed verification remain unknown and fenced.
+  Downloads uses compact rows: model/file name, one status or byte-count line,
+  the shared thin progress bar and 44px icon actions. Connection names, exact
+  references, errors and external-transfer explanations live behind an Info
+  button in a shared native details dialog. Escape/outside dismissal returns
+  focus; polling preserves dialog and row-control focus; sign-out clears it.
+  There is no explanatory empty-state paragraph or permanent monitoring prose.
+  Owned live downloads offer Stop. Finished/error entries offer Remove, which
+  persistently dismisses history without deleting model weights or journal
+  receipts. Dismissing an unknown entry leaves a compact Needs check row
+  and its resource fence intact. Other clients' observed transfers stay read-only.
+  Download byte progress uses the shared thin loading bar in the selected Theme
+  preset, with explicit determinate values and observer/animation cleanup.
   Check outcome verifies the exact endpoint and private target witness without
-  resubmitting. Cancellation stops the owned request and keeps an unconfirmed
+  resubmitting. A stable standard local daemon generation newer than the unknown
+  request proves the original server request ended: fresh exact prior inventory
+  can then reconcile as Failed and release its fence. Replaced deletion digests,
+  active workers, same/unknown daemon generations and unreachable endpoints do
+  not provide this restart proof. Tagged native pulls also support exact HTTP
+  handler-end evidence from the matching local daemon journal, allowing fresh
+  prior inventory to resolve a stopped request without restarting Ollama. Stop
+  rechecks delayed handler-end evidence for up to 30 seconds through the existing
+  owner keeper; Remove also attempts this bounded read-only recovery. Missing or
+  mismatched evidence keeps the unknown fence. No mutation is replayed. Native
+  pull streaming uses its 1800-second read budget, independently of short metadata
+  reads. Removed failed history stays gone.
+  Transfer-monitoring details stay in the Info dialog rather than as permanent
+  explanatory paragraphs in Downloads.
+  Cancellation stops the owned request and keeps an unconfirmed
   fence until the requested inventory is witnessed. Model mutations are gated
   against hosted conversations and browser profile operations. Account role,
   rather than listener address, authorizes model management. Downloads never
@@ -229,7 +321,8 @@ Workspace layout:
   compares exact local configuration/credential state without provider requests
   or replay. Secrets never enter public responses or plaintext journal records.
   Evidence: `docs/webui/model_store/implementation-validation.md` and
-  `docs/webui/model_store/completion-validation.md`.
+  `docs/webui/model_store/completion-validation.md` and
+  `docs/webui/model_store/layout-v2-validation.md`.
   AI creator/model/platform icons use a centralized JSON registry in
   static/icons/ai/registry.json, bundled by scripts/bundle_ai_icons.py into
   ai-icons.js. LobeHub, Simple Icons and pinned first-party vectors are sanitized,

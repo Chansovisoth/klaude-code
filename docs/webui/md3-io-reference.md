@@ -60,6 +60,12 @@ appearance choices. Splash explicitly requests Thick; ordinary progress uses
 Thin unless its caller requests otherwise. The saved `material-static` value is distinct from the
 animated `material` value and works offline before the main app bundle loads.
 
+`MaterialProgress.create({value, thickness: 'thin', label})` accepts an explicit
+0–100 percentage for determinate work, including Model Store download bytes.
+All four bar presets retain that value until updated; caller-controlled progress
+does not use the splash screen's elapsed-time animation. `setValue()` updates it
+and `destroy()` releases its observers/animations when its view is replaced.
+
 Source: npm `material@3.2.4`, progress factory and its transitive core imports,
 bundled with esbuild 0.25.12 from
 `node_modules/material/dist/components/progress/index.js` as a minified IIFE

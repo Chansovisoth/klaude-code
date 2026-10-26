@@ -171,6 +171,18 @@ async def verify(host, root):
                 "textContent.includes('Browser native')&&r.textContent.includes('"
                 "Enabled'))"
             )
+            await tab.js("showView('models')")
+            await tab.wait("byId('store-endpoint').options.length===2")
+            assert await tab.js("byId('store-endpoint-label').hidden")
+            await tab.click(".store-feature[data-store-model=qwen3]")
+            await tab.wait("!byId('store-detail').hidden && Boolean(byId('store-detail-endpoint'))")
+            assert await tab.js("byId('store-detail-endpoint').options.length===2")
+            await tab.click("#store-detail-back")
+            await tab.wait("byId('store-detail').hidden")
+            await tab.click("#store-tab-installed")
+            assert await tab.js("!byId('store-endpoint-label').hidden")
+            await tab.js("showView('settings', {section:'models'})")
+            await tab.wait("!byId('model-connection-add').disabled")
             await action("Test")
             await tab.wait(
                 "byId('model-connections-status').textContent.includes('Connection reached')"
