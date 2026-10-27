@@ -1,4 +1,4 @@
-"""Reviewed native stable-diffusion.cpp jobs; no chat, installers or model selection."""
+"""Reviewed image generation through explicit native services."""
 
 from __future__ import annotations
 
@@ -60,9 +60,14 @@ def read(cfg: Any) -> dict:
     if data["endpoint"]:
         data["endpoint"] = endpoint(data["endpoint"])
     text(data["model"], 200, empty=True)
+    provider = data.get("provider", "sdcpp")
+    if provider not in {"sdcpp", "ollama"}:
+        raise ValueError("Choose stable-diffusion.cpp or Ollama")
     if data["enabled"] and not (data["endpoint"] and data["model"]):
         raise ValueError("Test and save an image server/model before enabling generation")
-    return {key: data[key] for key in DEFAULTS}
+    # Preserve the canonical old settings/witness shape for existing SD jobs.
+    return {**{key: data[key] for key in DEFAULTS},
+            **({"provider": provider} if provider != "sdcpp" else {})}
 
 
 def save(
@@ -76,6 +81,11 @@ def save(
         if before["revision"] != expected:
             raise ValueError("Image generation settings changed; Reload before saving")
         value = {key: candidate[key] for key in DEFAULTS if key != "revision"}
+        provider = candidate.get("provider", "sdcpp")
+        if provider not in {"sdcpp", "ollama"}:
+            raise ValueError("Choose stable-diffusion.cpp or Ollama")
+        if provider != "sdcpp":
+            value["provider"] = provider
         if type(value["enabled"]) is not bool:
             raise ValueError("Invalid generation enable switch")
         value["endpoint"] = endpoint(value["endpoint"]) if value["endpoint"] else ""
@@ -120,7 +130,13 @@ def packet(
     return result
 
 
-def inspect(url: str) -> dict:
+def inspect(url: str, provider: str = "sdcpp", model: str = "") -> dict:
+    if provider == "ollama":
+        from .ollama_images import inspect_model
+
+        return inspect_model(endpoint(url), model)
+    if provider != "sdcpp":
+        raise ValueError("Choose stable-diffusion.cpp or Ollama")
     url = endpoint(url)
     data = packet(url, "/sdcpp/v1/capabilities")
     if "img_gen" not in data.get("supported_modes", []) or "png" not in data.get(
@@ -164,7 +180,16 @@ def inspect(url: str) -> dict:
     return evidence
 
 
+def inspect_settings(settings: dict) -> dict:
+    if settings.get("provider", "sdcpp") == "sdcpp":
+        return inspect(settings["endpoint"])
+    return inspect(settings["endpoint"], settings["provider"], settings["model"])
+
+
 def cancellation_notice(evidence: dict) -> str:
+    if evidence.get("provider") == "ollama":
+        return ("Stop closes this generation's stream. Server cleanup is unconfirmed; "
+                "Ollama cannot recover a lost image or look up its outcome by job ID.")
     if evidence["cancel_generating"]:
         return "Cancel targets this job only. Lost replies can leave its outcome unknown."
     return (
@@ -186,12 +211,12 @@ def prepare(
     settings = read(cfg)
     if not settings["enabled"]:
         raise ValueError("Image generation is OFF; configure Model Defaults → Image generation")
-    evidence = inspect(settings["endpoint"])
+    evidence = inspect_settings(settings)
     if evidence["model"] != settings["model"]:
         raise ValueError(
             "The server's loaded model changed; test and save the new model explicitly"
         )
-    if not evidence["cancel_queued"]:
+    if not evidence["cancel_queued"] and settings.get("provider") != "ollama":
         raise ValueError("This adapter requires declared cancellation of queued jobs")
     prompt = text(prompt, 2000)
     for name, number in (("width", width), ("height", height)):
@@ -272,6 +297,16 @@ def cancel(cfg: Any, identity: str) -> dict:
     stored = saved_output(cfg, record)
     if stored:
         return stored
+    if record["settings"].get("provider") == "ollama":
+        if record["status"] == "failed":
+            return {"status": "failed", "job": identity, "cleanup": "Confirmed",
+                    "recoverable": False, "message": "Generation failed; no output saved"}
+        record.update(status="unknown", cleanup="Unconfirmed")
+        publish(cfg, record)
+        return {"status": "unknown", "job": identity, "cleanup": "Unconfirmed",
+                "recoverable": False,
+                "message": "Local stream stopped. Ollama cleanup is unconfirmed; "
+                           "lost output cannot be recovered. No retry was sent."}
     remote = record.get("remote_id")
     outcome, terminal, observed = "Unconfirmed", "", ""
     if isinstance(remote, str) and REMOTE_ID.fullmatch(remote):
@@ -345,7 +380,7 @@ def store_output(cfg: Any, spec: dict, remote: str, result: dict) -> dict:
         or (width, height) != (spec["width"], spec["height"])
     ):
         raise ValueError("Generated PNG does not match the reviewed size")
-    if read(cfg) != spec["settings"] or inspect(spec["settings"]["endpoint"]) != spec["evidence"]:
+    if read(cfg) != spec["settings"] or inspect_settings(spec["settings"]) != spec["evidence"]:
         raise ValueError("Image service changed during generation; output was not saved")
     with settings_lock(cfg.config_dir / "image-generation.json"):
         if read(cfg) != spec["settings"]:
@@ -361,6 +396,8 @@ def store_output(cfg: Any, spec: dict, remote: str, result: dict) -> dict:
 
 def recovery_review(cfg: Any, identity: str) -> dict:
     record = job(cfg, identity)
+    if record["settings"].get("provider") == "ollama":
+        raise ValueError("Ollama cannot recover lost streamed output; no retry was sent")
     if record.get("id") != identity:
         raise ValueError("Image-generation receipt identity changed")
     remote = record.get("remote_id")
@@ -417,6 +454,8 @@ def history(cfg: Any, offset: int = 0) -> dict:
                 "created": created, "model": text(record["settings"]["model"], 200),
                 "endpoint": endpoint(record["settings"]["endpoint"]),
                 "artifact": record.get("artifact", ""),
+                "recoverable": record["settings"].get("provider") != "ollama"
+                               and bool(record.get("remote_id")),
             })
         except (ValueError, OSError, KeyError, TypeError):
             invalid += 1
@@ -429,6 +468,8 @@ def refresh(cfg: Any, identity: str) -> dict:
     record = job(cfg, identity)
     if stored := saved_output(cfg, record):
         return stored
+    if record["settings"].get("provider") == "ollama":
+        raise ValueError("Ollama has no generation job lookup; no retry was sent")
     remote = record.get("remote_id")
     if not isinstance(remote, str) or not REMOTE_ID.fullmatch(remote):
         raise ValueError("No acknowledged server ID; its outcome cannot be checked safely")
@@ -476,6 +517,10 @@ def run(cfg: Any, spec: dict, progress=lambda _: None) -> dict:
         record = {**spec, "status": "submitting", "created": time.time()}
         atomic_write_private(path, json.dumps(record) + "\n")
     url, remote = spec["settings"]["endpoint"], ""
+    if spec["settings"].get("provider") == "ollama":
+        from .ollama_images import generate
+
+        return generate(cfg, record, progress)
     try:
         response = packet(
             url,
@@ -545,11 +590,12 @@ def execute(request: dict) -> dict:
         if op == "read":
             return {"settings": read(cfg)}
         if op == "inspect":
-            return {"evidence": inspect(request["endpoint"])}
+            return {"evidence": inspect(request["endpoint"], request.get("provider", "sdcpp"),
+                                        request.get("model", ""))}
         if op == "save":
             candidate = request["settings"]
             if candidate["enabled"]:
-                evidence = inspect(candidate["endpoint"])
+                evidence = inspect_settings(candidate)
                 if evidence["model"] != candidate["model"]:
                     raise ValueError("Loaded model changed; Test again")
             return {"settings": save(cfg, candidate, request["revision"])}

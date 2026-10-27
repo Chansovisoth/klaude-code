@@ -20,7 +20,7 @@ OPERATIONS = frozenset({"read", "inspect", "save", "prepare", "run", "recovery_r
                         "recover", "history", "review_job", "refresh", "forget",
                         "cancel", "status"})
 FIELDS = frozenset({"endpoint", "settings", "revision", "prompt", "options", "spec",
-                    "id", "offset", "abandon", "request_id", "owner_id"})
+                    "id", "offset", "abandon", "request_id", "owner_id", "provider", "model"})
 
 
 @dataclass(frozen=True)
@@ -79,7 +79,7 @@ class ImageGenerationCommand:
 
     def execute(self) -> dict:
         if self.operation == "save":
-            from klaude_core.image_generation import inspect
+            from klaude_core.image_generation import inspect_settings
 
             cfg = SimpleNamespace(config_dir=self.config_dir, data_dir=self.data_dir)
             try:
@@ -87,7 +87,7 @@ class ImageGenerationCommand:
                 if type(candidate.get("enabled")) is not bool:
                     raise ValueError("Invalid generation enable switch")
                 if candidate["enabled"]:
-                    evidence = inspect(candidate["endpoint"])
+                    evidence = inspect_settings(candidate)
                     if evidence["model"] != candidate["model"]:
                         raise ValueError("Loaded model changed; Test again")
                 journal = OperationJournal(self.data_dir / "operations.db")

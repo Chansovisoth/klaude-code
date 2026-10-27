@@ -9,7 +9,7 @@ from typing import Any
 from klaude_core.ai_defaults import DefaultsChange, defaults_from_preferences, read_defaults
 from klaude_core.config import Config
 from klaude_core.image_content import IMAGE_BACKENDS
-from klaude_core.image_generation import endpoint, inspect, read
+from klaude_core.image_generation import endpoint, inspect, inspect_settings, read
 from klaude_core.model_management import reference_parts
 from klaude_core.vision import inspect_model
 
@@ -138,7 +138,8 @@ def prepare_media_setting(
         ), ("Check the exact prior or saved settings. "
             "This does not replay a save or contact a model.")
     if operation == "image-settings-save":
-        if (set(draft) != {"operation", "endpoint", "enabled", "revision"}
+        if (set(draft) - {"operation", "endpoint", "enabled", "revision", "provider", "model"}
+                or not {"operation", "endpoint", "enabled", "revision"} <= set(draft)
                 or type(draft["enabled"]) is not bool or not isinstance(draft["revision"], str)
                 or not isinstance(draft["endpoint"], str)):
             raise ValueError("Invalid image-service settings")
@@ -146,9 +147,14 @@ def prepare_media_setting(
         if image_current["revision"] != draft["revision"]:
             raise ValueError("Image-service settings changed; refresh before reviewing")
         url = endpoint(draft["endpoint"]) if draft["endpoint"] else ""
-        evidence = inspect(url) if draft["enabled"] else None
+        provider = draft.get("provider", "sdcpp")
+        if provider not in {"sdcpp", "ollama"}:
+            raise ValueError("Choose stable-diffusion.cpp or Ollama")
+        evidence = inspect(url, provider, draft.get("model", "")) if draft["enabled"] else None
         image_candidate = {"enabled": draft["enabled"], "endpoint": url,
-                           "model": evidence["model"] if evidence else image_current["model"]}
+                           "model": (evidence["model"] if evidence else
+                                     draft.get("model", image_current["model"])),
+                           **({"provider": provider} if provider != "sdcpp" else {})}
         return {"candidate": image_candidate, "revision": image_current["revision"],
                 "evidence": evidence}, image_settings_resource(cfg.config_dir), (
             f"{'Enable' if image_candidate['enabled'] else 'Disable'} image generation.\n"
@@ -197,7 +203,7 @@ def run_media_setting(cfg: Config, request: dict[str, Any]) -> dict[str, bool]:
         return {"ok": True}
     if request["operation"] == "image-settings-save":
         candidate = request["candidate"]
-        if candidate["enabled"] and inspect(candidate["endpoint"]) != request["evidence"]:
+        if candidate["enabled"] and inspect_settings(candidate) != request["evidence"]:
             return {"rejected": True}
         save_image_settings(cfg, candidate, request["revision"], journal,
                             request["request_id"], "web-admin", admitted=True)

@@ -160,6 +160,8 @@ Workspace layout:
   `language-`/`lang-` prefixes are recognized. `jar` is a Java-source fence alias;
   binary JAR archives are not treated as text. JSX/PHP tokenize hooks restore
   embedded-language tokens before the existing bounded DOM-only span renderer.
+  Slate alone maps Prism tokens to VS Code's current Dark+/Light+ syntax colors;
+  the other palettes keep their Material role-based token colors.
   Vendor refresh resolves required, selected optional and modified grammar order
   from Prism's pinned metadata; its local manifest records all 80 components and
   bundle hashes. Unknown languages and oversized blocks retain literal source.
@@ -167,7 +169,15 @@ Workspace layout:
   admin account, owner cookie/CSRF/Origin checks, public snapshot/SSE replay and a
   minimal chat and workspace page. Its shared Agent begins with only
   read/list/search/status/diff tools, lazy Knowledge/Skills/web reads and
-  reviewed configured MCP calls. M5 adds browser queue/steer/cancel,
+  configured MCP calls with per-server Auto, Ask first and Deny controls in
+  Integrations → MCP connection details. These update the same discovered-tool
+  permission fields as the terminal, atomically with exact-definition and
+  field-revision checks. New tools retain their own default (normally Ask first),
+  mixed policies remain visible, and changes apply to future turns. Browser MCP
+  calls honor saved Auto/Ask/Deny while preserving definition rechecks and fences;
+  changing a setting never answers an already pending review. File edits retain
+  their exact-review guard. Evidence: `docs/webui/mcp-permissions-validation.md`.
+  M5 adds browser queue/steer/cancel,
   structured question replies, per-tab control handles and bounded workspace
   browsing, same-workspace session list/new/resume with exact saved-runtime
   checks, a live local Ollama model picker, and idle-boundary Standard/Thinking
@@ -185,6 +195,16 @@ Workspace layout:
   choices share typed revisioned runtime controls, and exact saved-runtime resume
   checks definition/credential revisions without catalog or generation calls.
   Model selection remains separate from connection definitions and default roles.
+  Model changes are accepted during a hosted response and apply to the next prompt,
+  including queued/paused prompts with the previous exact runtime binding. The
+  current worker retains its original model/transport through completion, tool
+  calls and cancellation. Revisioned desired selection is saved immediately;
+  installation and credential/definition revalidation occur at the next idle
+  boundary. Starting/submitted and already mismatched queue entries are not
+  retargeted. Thinking/Plan retain their idle guards. Other worker leases remain
+  fenced. Browser snapshots expose the next selected model and pending status;
+  mobile/desktop pickers stay usable during generation, with an older-host fallback.
+  Evidence: `docs/webui/deferred-model-selection.md`.
   An empty conversation can resume when it has an exact saved runtime and matching
   workspace binding; no dialogue is fabricated. Unknown sessions, missing choices,
   changed runtime identities and mismatched workspaces remain rejected.
@@ -198,17 +218,24 @@ Workspace layout:
   Downloads show shared count badges for the selected endpoint inventory and
   visible download entries, including observed transfers; unknown counts stay hidden.
   Discover defaults to the live Hugging Face GGUF catalog, with responsive Popular
-  and Recently updated cards (20 per page, deduplicated across the landing
+  and Recently updated cards (complete rows near twenty items, deduplicated across the landing
   collections). Their See all lists use shared numbered pagination backed by the
   Hub continuation cursor and retain the selected page in Store history.
   Entering the Store or refreshing requests fresh metadata; cached cards stay
   available during refresh and provider failures. Search uses the live catalog
-  by default. The bundled collection is an explicit offline filter and fallback
+  by default, including cursor-backed pagination beyond the first 20 results.
+  Changing a search cancels obsolete reads and clears results from the previous
+  query immediately. Placeholders distinguish community, offline and installed
+  searches. The bundled collection is an explicit offline filter and fallback
   when live discovery is unavailable; fixed editorial promotions are no longer
   shown on the default Discover page.
   Charts remains a Discover drill-down; legacy category URLs open the offline collection. Catalog/order/capability
   and installed-size choices use Library's shared dropdown filter chips beneath
-  Search. Discover cards include a separate Ollama runtime badge using the shared
+  Search. Search uses the shared domain-toolbar field styling, 48px controls and
+  4px action gap; filter-chip padding and alignment match Library.
+  The Model Store heading links back to Discover, clearing drill-down, search,
+  filter and paging state, including Popular/Recently updated See all views.
+  Discover cards include a separate Ollama runtime badge using the shared
   platform icon; multiple enabled endpoints additionally show the selected server
   name. Creator/family icons remain separate. A Library-style plus button opens the exact-model download dialog
   with Escape/focus return. Endpoint selection appears only for multiple
@@ -220,7 +247,17 @@ Workspace layout:
   catalog preserves activation, filters, shared paging and tab-local disclosure
   choice; sign-out clears private state. Old Connections URLs migrate to Settings.
   Discovery retains a dated, bundled three-family/four-variant collection with
-  official sources. Popular reads a bounded anonymous fixed Hub query; user search
+  official sources. Popular and Recently updated preview grids adapt their card
+  counts to complete rows near twenty items using the shared CSS minimum/gap and
+  actual available width, including fractional widths. Bounded cursor reads fill
+  missing slots after filtering/deduplication; Recent excludes only displayed
+  Popular entries. At most four pages per collection are read, with retained pools
+  reused across resize. Older hosts retain their supported 20-row cursor reads;
+  See all and search grids request a complete-row page size near twenty items
+  (bounded to fifty), with cursor caches isolated by size. Short/invalid/duplicate
+  provider batches are topped up with at most four metadata reads. Unknown
+  download counts stay visible without a fabricated rank. Page URLs retain their
+  page size; a column-count change starts a new cursor chain at page one. User search
   text is sent to Hugging Face only when its catalog is selected. That source uses
   real repository download counts/recent updates and exact single-file GGUF
   variants supported by Ollama.
@@ -228,8 +265,8 @@ Workspace layout:
   separate Ollama destination badge, model-card link and
   compact icon/text strip of known facts (unknown
   metadata is not padded with placeholder tiles). About precedes compact file
-  choices with right-aligned sizes and a footer button that says Choose variant
-  until selection, then Download with the formatted size. Generic placeholder About text is omitted; substantive source
+  choices with right-aligned sizes and a right-aligned footer button that says Choose model
+  until selection, then Download with the formatted size. The hero action also includes the selected size. While exact files load, the disabled footer button says Loading. Generic placeholder About text is omitted; substantive source
   descriptions remain available. Hub pipeline/task labels are retained across
   discovery/detail reads and shown as Task metadata, separately from verified
   runtime capabilities. The footer owns the reviewed download action. Exact
@@ -237,7 +274,7 @@ Workspace layout:
   technical/source links. The image carousel and its artwork, controls and layout
   observers are removed.
   Details retains one page scroll owner and the full-page reference composition.
-  Choose variant focuses the exact selector; after a choice the footer changes to
+  Choose model focuses the exact selector; the count reports available variants. After a choice the footer changes to
   Download. Only explicit selection can lead to the existing review. Installed activation and
   reviewed deletion remain separate. Variants reuse shared 20-row pagination;
   URL state retains the selected exact tag and History retains Store scroll,
@@ -247,15 +284,27 @@ Workspace layout:
   Detail caches and
   DOM clear on sign-out. Evidence:
   `docs/webui/model_store/model_details/implementation-validation.md`.
-  Charts describes Hub downloads, never Ollama usage. Metadata has a one-hour,
+  Charts describes Hub downloads, never Ollama usage. Cards place Updated
+  beside download counts and repeat it in details, using the repository's actual
+  timestamp or Unknown. Catalog requests explicitly expand lastModified; older
+  metadata caches refresh on read while retaining their offline fallback.
+  Metadata has a one-hour,
   timestamped private cache with visible stale/offline fallback. Split/projector
   files are excluded; unknown capabilities, size, license and device fit stay
   unknown. No model weights are fetched while browsing. Installed inventory uses
   the existing native Ollama manager and a revision-scoped, timestamped private
-  offline cache. Installed uses the shared numbered pagination and chevrons.
+  offline cache. Installed uses shared rounded collection cards, with compact
+  truncated names/full-name tooltips, plus shared numbered pagination and chevrons.
   Signed-in administrators on local or LAN browsers can review exact native-endpoint pulls
   and protected deletion through the existing operation journal and owned worker.
-  Downloads retain real file progress, durable targets and uncertain outcomes;
+  Downloads use the shared rounded collection-card backgrounds, corner shapes
+  and row spacing, retaining real file progress, durable targets and uncertain outcomes;
+  cards show parameter count and size from exact cached catalog/installed metadata.
+  Missing metadata stays unknown; a current layer total is labeled File rather
+  than model size. Active transfers show estimated decimal MB/s from successive
+  reported byte samples, resetting on stage/total/counter changes or stale gaps.
+  Missing comparable progress shows an unavailable rate; no browsing weight fetch
+  or model-name inference supplies these fields.
   shared native-manager pulls started in other Klaude clients appear as read-only
   observations. On a local standard Linux Ollama system service, bounded partial-file
   metadata checks also show recent external transfer activity, without guessing
@@ -293,8 +342,19 @@ Workspace layout:
   Transfer-monitoring details stay in the Info dialog rather than as permanent
   explanatory paragraphs in Downloads.
   Cancellation stops the owned request and keeps an unconfirmed
-  fence until the requested inventory is witnessed. Model mutations are gated
-  against hosted conversations and browser profile operations. Account role,
+  fence until the requested inventory is witnessed. Starting model mutations is
+  gated against hosted conversations and browser profile operations. Unrelated
+  model pulls, including unknown stopped pulls, do not block chat or selecting
+  another runtime. Admission verifies the private target against its journal
+  witness before establishing independence; matching native pull targets and
+  native deletion remain protected. Cloud chat is independent of native weights.
+  The snapshot exposes actual chat blocking before submission and the composer
+  keeps drafts with a direct Downloads or new-chat action when attention is needed.
+  Capability-gated automatic turn admission chooses start/queue under the shared
+  application lock, preserving one durable request ID across stale tab state,
+  completion and removed/submitted queue history. Explicit start/queue callers
+  retain their existing contracts. Evidence: `docs/webui/chat-admission-validation.md`.
+  Account role,
   rather than listener address, authorizes model management. Downloads never
   select a chat/default model.
   Generated's Create image tab now contains a roomy Image studio with an explicit
@@ -303,8 +363,23 @@ Workspace layout:
   the existing generation review, receipts, cancellation, output recovery and
   Library storage. Generate again reuses at most twenty in-memory browser drafts;
   after reload, Generate another starts from the current draft without exposing
-  historical private prompts. Sign-out clears these drafts. Ollama image output
-  remains unavailable; the verified consumer is stable-diffusion.cpp.
+  historical private prompts. Sign-out clears these drafts. Chat's attachment dialog
+  and mobile menu also open this same Image studio without leaving Chat.
+  Settings → Models selects stable-diffusion.cpp or experimental Ollama with an
+  exact installed image-model name. Ollama requires `/api/show` capability `image`
+  and pins its `/api/tags` digest across review/submission/save; Vision alone is
+  insufficient. It submits one bounded `/api/generate` NDJSON stream and saves
+  only a validated PNG through the existing Library boundary. Stop closes the
+  owned stream; cleanup remains unconfirmed, and lost Ollama output has no job-ID
+  recovery or automatic retry. SD native jobs retain scoped cancellation/recovery.
+  See `docs/webui/image-provider-support.md` for setup and validation.
+  Settings → Models uses shared tonal Settings cards, grouped Library-style
+  connection/model rows, a 48px Search/Add toolbar and icon refresh controls.
+  Connection actions use the same icon context-menu treatment as Chat, with
+  keyboard navigation, Escape/focus return and native outside dismissal.
+  Configured models has a matching collapsible Settings card. Search stays local;
+  existing connection/credential reviews, locks and saves remain authoritative.
+  Evidence: `docs/webui/model-settings-components-validation.md`.
   Settings → Models keeps staged Apply/Discard for default roles and fallbacks,
   using a searchable native model picker with role-capability labels and shared
   numbered pagination. Enabled Vision requires a primary model. Image service
@@ -335,15 +410,88 @@ Workspace layout:
   SVG names; unrelated files in static/icons are not published. Provider/family
   additions change registry data rather than selector rendering. Verified icon
   gaps and extension instructions live in docs/webui/ai-model-icons.md.
-  Chat Model and Thinking use filled XS split controls with 32px faces and
-  extended 44px hit areas. Either Model half opens the existing model picker;
-  Thinking's main action toggles its mode and its trailing selector owns effort.
+  Desktop Chat places its quiet Model split control in a compact header, with 32px faces
+  and extended 44px hit areas. Either Model half opens the existing model picker.
+  The centered conversation/composer column is bounded to 800px. Attachment plus,
+  Thinking and Plan sit below the full-width input. Thinking retains XS split controls:
+  its main action toggles the mode and its trailing selector owns effort.
+  The effort selector directly lists supported levels as icon-bearing radio menu
+  items with a selected check, using the header menu's tonal styling; there is
+  no nested visible select. Keyboard navigation and Escape focus return remain.
   Thinking is hidden when the current runtime declares no non-off effort.
   Plan also uses an XS 32px face. Thinking and Plan share a tonal off state
   and filled primary on state, including both halves of Thinking.
   These controls preserve idle/queue fencing, revision checks and private model
   selection. Their top-layer selectors escape chat/sidebar clipping, track the
   visual viewport and support outside dismissal and Escape focus return.
+  Stop occupies the composer's primary corner during a reply; entering a draft
+  reveals Queue and Steer beside it. Narrow active composers omit their unavailable
+  mode controls until idle. A passive native Conversation details popover retains
+  permissions, status, current Thinking/Plan state and session identity, with
+  Escape/focus return and navigation/session/sign-out cleanup. Transient errors
+  use the shared toast stack. The welcome screen uses compact prompt shortcuts.
+  Evidence: `docs/webui/chat-layout-validation.md`.
+  Completed assistant replies include Worked for in their three-dot options menu,
+  beside the timestamp and Branch/Retry actions, using the successful turn's recorded
+  acceptance-to-completion duration; older records without timing stay unlabeled.
+  The reply footer shows Avg tokens/s from the turn's reported output-token sum
+  divided by total generation time. Provider eval timing is preferred; otherwise
+  a measured model-request duration is used and identified in the tooltip. Tool
+  waits are excluded. Incomplete token accounting omits the rate; no character
+  estimate is used. Only numeric counters/timing persist in the completion event,
+  so new replies retain the metric on reload without exposing provider payloads.
+  Conversation search ranks names and full saved user/assistant dialogue before
+  the workspace/archive result limit, with matching snippets and debounced reads.
+  Tool records and private model content are excluded. This is local text ranking;
+  conversation embedding/semantic indexing remains deferred. Older hosts retain
+  the recent-title/preview fallback until restarted.
+  Canvas opens code blocks or assistant writing into editable tab-local drafts,
+  using a local request/output policy adapted from official ChatGPT/Claude guidance.
+  Requested reusable drafts (including short emails), substantial writing and
+  standalone code qualify. Tiny unnamed examples and ordinary Q&A stay inline.
+  Revision follow-ups inherit the prior artifact context until an unrelated request;
+  explicit use Canvas overrides size gates, while keep inline/no Canvas opts out.
+  Header/menu Canvas opens an existing draft or the latest eligible artifact and appears only
+  when eligible content or an existing draft is present. Sources appears only
+  for parsed HTTP(S) references, including as replies update during streaming.
+  Canvas docks beside Chat on desktop and uses a fullscreen native dialog on smaller
+  screens. It supports multiple documents, syntax/Markdown and passive HTML/SVG
+  previews, Download, Discard and Ask Klaude, which appends a revision request to
+  the unsent composer. It does not automatically submit or edit workspace files.
+  Drafts clear on session change/sign-out. The bundled chat-canvas.js uses the
+  existing authenticated preview route and opaque sandbox without script access.
+  Evidence: `docs/webui/chat-canvas-search-validation.md`.
+  Trigger rationale and focused checks: `docs/webui/canvas-trigger-research.md`.
+  `KlaudeToast.show` supports top (default) and bottom notifications, selected
+  info/success/error appearance, a close button and a five-second fade-out.
+  Hover/focus pauses dismissal; active duplicates coalesce and each position is
+  bounded to five notifications. Toasts remain operable above native dialogs,
+  honor reduced motion and clear on session change/sign-out. Chat and domain
+  errors use this feedback; contextual form/recovery states keep their existing
+  inline details. `static/toast.js` is bundled into app.js. Evidence:
+  `docs/webui/toast-validation.md`.
+  Busy conversation rows reuse the shared Generating indicator, retaining its
+  node across list refreshes and its existing hidden/reduced-motion lifecycle.
+  At widths up to 850px, Chat instead has one 56px app bar: tapping the Klaude
+  title/model/mode subtitle opens a native searchable model sheet with connection
+  selection, shared pagination and the existing revisioned runtime action. There
+  is a shared compact brand across pages: its circular paw and title keep their
+  horizontal positions while Chat raises the title and fades in the subtitle;
+  leaving Chat reverses the motion, respecting reduced-motion settings. There
+  is no separate model row. The empty composer is 104px and grows with its input.
+  Mobile Send uses an XS 32px face and 18px icon with a 44px touch target.
+  Search, context and conversation details move into the header menu, with tonal
+  icon tiles, 48px targets and a divider before the user's account entry
+  (circular initial, signed-in username and Account label); mobile
+  sign-out lives in Account settings. At phone widths up to 560px, actual viewport
+  contraction while editing hides bottom navigation and keeps the composer above
+  the keyboard; focus alone leaves navigation visible. Desktop model selection
+  uses the same searchable, paginated model list in a centered native dialog;
+  mobile retains its bottom sheet. Both Model halves and command-palette Switch
+  model open this picker. It stays open when resizing between layouts and retains
+  existing revision/queue safeguards. `static/mobile-chat.js` is bundled into the existing app asset by
+  `scripts/bundle_webui_loading.py`. Evidence:
+  `docs/webui/mobile-chat-layout-validation.md`.
   Loopback clients may explicitly
   activate file edits only after the
   existing clean-worktree/branch check; `write_file` and `edit_file` then use
@@ -363,6 +511,7 @@ Workspace layout:
   token, plan-progress and subagent diagnostics remain unavailable. Pending
   approvals retain their single chat decision path. The panel preserves the
   user's open/closed choice across viewport changes and supports a phone drawer.
+  Tapping its outside scrim on mobile closes it and returns focus to the header menu.
   Docked panel space is adjustable from the chat surface's two edges, with
   invisible resize zones and hover/focus grips instead of permanent dividers.
   Widths are saved locally, constrained to keep chat at least 400px wide, and
@@ -480,7 +629,8 @@ Workspace layout:
   sidebar actions stay in the inspector; a Details button below the picture
   reopens it when collapsed.
   There is no separate Expand image preview button or duplicate details Close button. Compact controls offer
-  download, fit and 1–8x zoom relative to fit; the derivative remains bounded to
+  download and 1–8x zoom relative to fit; tapping the zoom percentage fits the
+  image to screen, without a separate Fit button. The derivative remains bounded to
   2048px. Pointer pinch/pan, double-tap and fit-only swipe navigation complement
   keyboard zoom/pan/previous/next. Details gestures never navigate the image.
   Escape dismisses a menu/sheet before the viewer; closing restores Uploads focus
@@ -1179,7 +1329,7 @@ Material Color Utilities 0.4.0 roles drive all sixteen presets, light/dark/syste
 nine palette variants, custom accents and local image-derived palettes. Theme
 retains versioned appearance preferences, live preview and Discard / Apply changes;
 image pixels never leave the browser and only the extracted accent is saved.
-Surface transparency is bounded to 0–20%; original files are not persisted as
+Surface transparency is bounded to 0–50%; original files are not persisted as
 wallpaper. The shared shell background uses a subtle 10% theme tint at the bottom
 edge, fading to 4% within the bottom quarter so the lighter glow stays localized.
 Phone section-navigation rows in Library and Integrations fill the available
@@ -1263,7 +1413,9 @@ Settings → Theme. System/Light/Dark and sixteen palettes
 Indigo, Emerald, Lime, Sky, Cocoa) preview before Apply
 and persist under a versioned localStorage key with same-origin tab updates.
 Fresh or invalid browser preferences use Fidelity, Dark and Cocoa. Existing
-saved selections remain authoritative. Material shapes and animated Material
+saved selections remain authoritative. The live Theme preview contains a
+scrollable, long syntax-highlighted Python example so palette token colors are
+visible while changing themes. Material shapes and animated Material
 wavy are the Generating indicator and Loading bar defaults. Theme's bottom Reset default action
 previews all appearance defaults through the existing Apply changes / Discard
 workflow, clearing any obsolete image preparation without changing other settings.
@@ -1743,12 +1895,13 @@ Top-level commands currently include:
   catalogs; stale connections require new selection before sending. Fork retains
   state, archive keeps it, permanent deletion removes it. Historical sessions may
   recover Klaude's own model-setting events; dialogue never authorizes a selection.
-- `klaude library image-service [--endpoint URL] [--enable|--disable] [--yes]`,
+- `klaude library image-service [--endpoint URL] [--provider sdcpp|ollama]
+  [--model MODEL] [--enable|--disable] [--yes]`,
   `library generate PROMPT [--width N] [--height N] [--steps N] [--seed N] [--yes]`
   `library generation-jobs [--offset N]` and
   `library generation-status JOB_ID [--cancel|--recover|--refresh|--forget]
   [--abandon] [--yes]`:
-  S6b1 connects an
+  The native SD adapter connects an
   existing unauthenticated stable-diffusion.cpp native HTTP server. Settings →
   Model Defaults → Image generation owns the separate draft enable/endpoint/Test/
   observed loaded-model pin/Save/Reload controls. Library → Media → Generate image

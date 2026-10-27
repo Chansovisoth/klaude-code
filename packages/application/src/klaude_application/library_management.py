@@ -30,6 +30,9 @@ from klaude_core.library_artifacts import (
     manual_tags,
     source_link,
 )
+from klaude_core.model_connections import DEFAULT_IDS
+from klaude_core.model_runtime import ModelInfo
+from klaude_core.ollama_manager import endpoint, model_name
 
 from . import browser_model_settings, model_store
 from .background_jobs import OwnedBackgroundJobs
@@ -578,7 +581,10 @@ class LibraryManagement:
         with self._lock:
             review = self._reviews.get(token)
             return bool(review is not None and review.owner == owner
-                        and review.operation.startswith("mcp-"))
+                        and (review.operation.startswith("mcp-") or
+                             review.operation == "setting-save" and
+                             str(review.fields.get("setting_id", "")).startswith(
+                                 "mcp_permissions.")))
 
     def model_review(self, owner: str, token: str) -> bool:
         with self._lock:
@@ -599,6 +605,39 @@ class LibraryManagement:
         if self._journal is None and not (self.data / "operations.db").exists():
             return False
         return self.journal.resource_busy(model_store.RESOURCE)
+
+    def model_chat_blocked(self, info: ModelInfo) -> bool:
+        """Keep model maintenance fenced without stopping unrelated chat models."""
+        if self._journal is None and not (self.data / "operations.db").exists():
+            return False
+        pending = self.journal.fenced_operation(model_store.RESOURCE)
+        if pending is None:
+            return False
+        if pending.owner_id != OWNER or pending.receipt.kind not in model_store.OPERATIONS:
+            return True
+        # Native weight operations cannot change a cloud runtime. Deletion stays
+        # conservative across native aliases; pulls only affect their exact tag.
+        if info.backend != "ollama":
+            return False
+        if pending.receipt.kind == "model-delete":
+            return True
+        try:
+            target = model_store.read_record(
+                model_store.target_path(self.cfg, pending.receipt.request_id), limit=16_384,
+            )
+            if not self.journal.witness_after_matches(
+                pending.receipt.request_id, OWNER,
+                candidate=model_store.witness(target, True), include_active=True,
+            ):
+                return True
+            if model_name(info.model_id) != target["model"]:
+                return False
+            selected, _ = endpoint(self.cfg, info.connection_id or DEFAULT_IDS["ollama"])
+            downloading, _ = endpoint(self.cfg, target["endpoint"])
+            return selected.base_url == downloading.base_url
+        except (KeyError, ValueError, OSError, OperationConflict):
+            # Missing, changed or unwitnessed targets cannot establish independence.
+            return True
 
     def model_jobs(self) -> dict[str, Any]:
         result = model_store.jobs(self.cfg, self.journal)

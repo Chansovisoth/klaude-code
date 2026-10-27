@@ -180,6 +180,13 @@ async def verify(host, root, chrome):
                 assert waiting[1].entered.is_set() and first.active_turn_id()
                 await tab.js("refreshSessions()")
                 assert await tab.js("document.querySelectorAll('.session-running').length===2")
+                assert await tab.js("document.querySelectorAll("
+                                    "'.session-running > .material-loading').length===2")
+                await tab.js("window.busySessionIndicator="
+                             "document.querySelector('.session-running')")
+                await tab.js("refreshSessions()")
+                assert await tab.js("busySessionIndicator==="
+                                    "document.querySelector('.session-running')")
                 await tab.js("toggleSessions(true)")
                 await tab.click(f'[data-session-open="{first.session_id}"]')
                 await tab.wait("latest.session_id===" + json.dumps(first.session_id))

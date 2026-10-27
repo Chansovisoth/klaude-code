@@ -343,7 +343,9 @@ def delete_artifact(identity: ArtifactID) -> None:
 
 @app.command("image-service")
 def image_service(
-    endpoint: str = typer.Option("", help="Existing stable-diffusion.cpp native server root"),
+    endpoint: str = typer.Option("", help="Existing image server root"),
+    provider: str = typer.Option("", help="sdcpp or ollama (experimental)"),
+    model: str = typer.Option("", help="Exact installed Ollama image model"),
     enable: bool = typer.Option(False, help="Enable this tested service explicitly"),
     disable: bool = typer.Option(False, help="Disable generation; retain endpoint/model"),
     yes: bool = typer.Option(False, help="Confirm saving this exact service and model"),
@@ -353,7 +355,7 @@ def image_service(
 
     cfg = load_config()
     saved = checked(cfg, "read")["settings"]
-    if not endpoint and not enable and not disable:
+    if not endpoint and not provider and not model and not enable and not disable:
         for key, value in saved.items():
             if key != "revision":
                 console.print(Text(f"{key}: {value}"))
@@ -361,13 +363,16 @@ def image_service(
     if enable and disable:
         raise typer.BadParameter("Choose --enable or --disable")
     candidate = dict(saved)
+    selected_provider = provider or saved.get("provider", "sdcpp")
+    candidate["provider"] = selected_provider
     if not disable:
-        evidence = checked(cfg, "inspect", endpoint=endpoint or saved["endpoint"])["evidence"]
+        evidence = checked(cfg, "inspect", endpoint=endpoint or saved["endpoint"],
+                           provider=selected_provider, model=model or saved["model"])["evidence"]
         candidate.update(endpoint=evidence["endpoint"], model=evidence["model"])
     candidate["enabled"] = False if disable else enable
     state = "ON" if candidate["enabled"] else "OFF"
     console.print(Text(
-        f"stable-diffusion.cpp · {candidate['endpoint']}\n"
+        f"{selected_provider} · {candidate['endpoint']}\n"
         f"Loaded model: {candidate['model']}\nGeneration: {state}\nNo chat/default model changes."
     ))
     if not yes and not typer.confirm("Save this image service?", default=False):

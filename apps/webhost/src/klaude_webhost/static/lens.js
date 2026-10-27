@@ -80,7 +80,7 @@ window.BrowserLens = (() => {
     if (active()) { reset(true); return; }
     const image = byId("artifact-preview").querySelector("img");
     if (!authenticated || !selectedArtifact || !image?.naturalWidth) return;
-    byId("image-fit").click();
+    byId("image-zoom-value").click();
     owner = selectedArtifact; session = latest.session_id; epoch = authEpoch; generation += 1;
     source = document.createElement("canvas");
     const scale = Math.min(1, 2048 / Math.max(image.naturalWidth, image.naturalHeight));

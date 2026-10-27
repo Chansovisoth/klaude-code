@@ -143,8 +143,10 @@ async def verify_races(tab):
     })()""")
 
 
-async def verify_floating_controls(tab):
-    """Real active controls keep the viewport and scroll end usable at phone sizes."""
+async def verify_composer_controls(tab):
+    """Real active controls stay in the composer and leave the transcript readable."""
+    draft = await tab.js("prompt.value")
+    await tab.js('prompt.value="Guide this turn";resizePrompt()')
     for theme in ("light", "dark"):
         await tab.js("document.documentElement.dataset.theme=" + json.dumps(theme))
         for width, height in ((320, 844), (390, 844), (768, 844), (1440, 900), (390, 420)):
@@ -156,41 +158,38 @@ async def verify_floating_controls(tab):
                          "()=>requestAnimationFrame(resolve)))")
             state = await tab.js("""(()=>{
               const cancel=byId('cancel'),steer=byId('steer'),latest=byId('scroll-to-latest');
+              const send=byId('send');
               const nodes=[...messages.childNodes],scroll=messages.scrollTop,hidden=latest.hidden;
               try {
                 const article=ChatMarkdown.create('assistant',
-                  'A readable message.\\n\\n'.repeat(80)+'Last visible line.','floating-fixture');
+                  'A readable message.\\n\\n'.repeat(80)+'Last visible line.','composer-fixture');
                 messages.replaceChildren(article);messages.scrollTop=0;latest.hidden=false;
-                const before=messages.getBoundingClientRect();
-                cancel.hidden=steer.hidden=true;
-                const idle=messages.getBoundingClientRect();
-                cancel.hidden=steer.hidden=false;
-                const rects=[latest,steer,cancel].map(button=>button.getBoundingClientRect());
-                const hits=[latest,steer,cancel].every((button,i)=>button.contains(
+                const rects=[latest,steer,cancel,send].map(button=>button.getBoundingClientRect());
+                const hits=[latest,steer,cancel,send].every((button,i)=>button.contains(
                   document.elementFromPoint(rects[i].left+22,rects[i].top+22)));
                 const composer=byId('composer').getBoundingClientRect();
-                const [jump,direction,stop]=rects;
-                const gapTarget=document.elementFromPoint((jump.right+direction.left)/2,
-                  direction.top+22);
+                const [jump,direction,stop,queue]=rects;
                 messages.scrollTop=messages.scrollHeight;
                 const last=article.querySelector('.message-body').getBoundingClientRect();
-                return {noRow:before.top===idle.top && before.height===idle.height &&
-                    document.querySelector('.chat-scroll-control').getBoundingClientRect().height===0,
+                return {inComposer:byId('composer').contains(cancel) &&
+                    byId('composer').contains(steer) &&
+                    getComputedStyle(cancel.parentElement).position==='static',
                   fits:document.documentElement.scrollWidth<=innerWidth && rects.every(r=>
                     r.width>=44 && r.height>=44 && r.left>=0 && r.right<=innerWidth &&
-                    r.top>=0 && r.bottom<=composer.top),
-                  separate:jump.right+8<=direction.left && direction.right+8<=stop.left,
-                  hits,clearGap:!gapTarget?.closest('.turn-actions,.chat-scroll-control'),
-                  readableEnd:last.bottom<=direction.top,
+                    r.top>=0 && r.bottom<=composer.bottom),
+                  separate:jump.bottom<=composer.top && queue.right<=direction.left &&
+                    direction.right<=stop.left,
+                  hits,readableEnd:last.bottom<=composer.top,
                   names:cancel.getAttribute('aria-label')==='Cancel turn' &&
                     steer.getAttribute('aria-label')==='Steer'};
               } finally {
-                cancel.hidden=steer.hidden=false;latest.hidden=hidden;
+                latest.hidden=hidden;
                 messages.replaceChildren(...nodes);messages.scrollTop=scroll;
               }
             })()""")
             assert all(state.values()), (theme, width, height, state)
     await tab.command("Emulation.clearDeviceMetricsOverride")
+    await tab.js("prompt.value=" + json.dumps(draft) + ";resizePrompt()")
     await tab.js("applyAppearance(appearance,true);snapshot()")
 
 
@@ -223,7 +222,8 @@ async def verify(host, controller, fixture, profile, chrome):
 
             first = await open_tab()
             await first.wait('typeof byId !== "undefined" && !byId("local-access").hidden')
-            await first.js('byId("login-password").value=' + json.dumps(
+            await first.js('byId("login-username").value="admin";'
+                           'byId("login-password").value=' + json.dumps(
                 host.accounts.initial_password()
             ) + ';byId("account-login").requestSubmit()')
             await first.wait('latest?.session_id')
@@ -278,7 +278,7 @@ async def verify(host, controller, fixture, profile, chrome):
             await first.wait('latest.active_turn_id && !pending')
             await second.js("snapshot()")
             assert await second.js('!byId("cancel").hidden && !byId("steer").hidden')
-            await verify_floating_controls(second)
+            await verify_composer_controls(second)
             await second.click("#cancel")
             await second.wait('!pending && latest.has_control')
             assert host.application._active.cancelled.is_set()
@@ -343,7 +343,7 @@ async def verify(host, controller, fixture, profile, chrome):
             print("PASS: two tabs share reviews, questions, Cancel/Steer, Library and navigation;")
             print("watching preserves control; terminal review/cancel acquire automatically;")
             print("competing claims, lost acknowledgements and auth/session races stay bounded.")
-            print("PASS: floating controls in 10 light/dark responsive layouts.")
+            print("PASS: composer turn controls in 10 light/dark responsive layouts.")
     finally:
         process.terminate()
         try:

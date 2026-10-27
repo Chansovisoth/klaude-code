@@ -1,5 +1,15 @@
 # Chat XS split runtime controls
 
+The 2026-10-26 chat layout refinement moves Model into a quiet header and keeps
+Thinking/Plan below the input. The model faces use transparent header styling;
+the same selectors, sizes, hit extensions and runtime contracts remain. During
+active replies, narrow composers temporarily omit unavailable mode controls;
+Conversation details retains their current values. See `chat-layout-validation.md`.
+
+Desktop Model halves now open the shared searchable model dialog used on mobile,
+instead of the older native-select popover. Existing runtime state and actions
+are reused; see `mobile-chat-layout-validation.md` for focused UI evidence.
+
 The model picker and Thinking use the same filled two-part design as AI Review,
 adapted to md3.io's XS 32px faces, 2px gap and finite 16px outer corners. Shared
 radius, state and motion tokens provide hover/press/focus behavior. Invisible

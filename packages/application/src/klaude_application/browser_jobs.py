@@ -16,22 +16,26 @@ OPERATIONS = frozenset({"research-create", "research-run", "research-stop",
 def image_capabilities(cfg: Config) -> dict[str, Any]:
     """Explicit studio check, using only the saved opt-in service, never chat/Vision."""
     import httpx
-    from klaude_core.image_generation import inspect, read
+    from klaude_core.image_generation import cancellation_notice, inspect_settings, read
 
     settings = read(cfg)
-    result: dict[str, Any] = {"backend": "stable-diffusion.cpp", "model": settings["model"],
+    backend = ("Ollama (experimental)" if settings.get("provider") == "ollama"
+               else "stable-diffusion.cpp")
+    result: dict[str, Any] = {"backend": backend, "model": settings["model"],
                               "enabled": settings["enabled"], "available": False}
     if not settings["enabled"]:
         return {**result, "message": "Enable and test an image service in Settings → Models."}
     try:
-        observed = inspect(settings["endpoint"])
-        if observed["model"] != settings["model"] or not observed["cancel_queued"]:
+        observed = inspect_settings(settings)
+        if (observed["model"] != settings["model"]
+                or not observed["cancel_queued"] and settings.get("provider") != "ollama"):
             return {**result, "message": "Service capabilities changed; test and save in Settings."}
     except (ValueError, OSError, httpx.HTTPError):
         return {**result, "message": "Image service unavailable. Check the server, then retry."}
     return {**result, "available": True, "limits": observed["limits"],
             "cancel_generating": observed["cancel_generating"],
-            "sampler": observed["sampler"], "scheduler": observed["scheduler"]}
+            "sampler": observed["sampler"], "scheduler": observed["scheduler"],
+            "cancellation_notice": cancellation_notice(observed)}
 
 
 def generated_jobs(cfg: Config) -> dict[str, Any]:
@@ -53,7 +57,7 @@ def generated_jobs(cfg: Config) -> dict[str, Any]:
         "research_defaults": read_research_defaults(cfg).public(),
         "research_model": read_defaults(cfg).research,
         "images": [{key: item.get(key, "") for key in ("job", "status", "created",
-                                                        "model", "artifact")}
+                                                        "model", "artifact", "recoverable")}
                    for item in images["items"][:20]],
         "images_more": images["more"] or len(images["items"]) > 20,
         "image_settings": {"enabled": settings["enabled"], "model": settings["model"]},
@@ -108,7 +112,7 @@ def prepare_generated_operation(
             f"Stop Research: {item['question']}. Stops at the next bounded work boundary."
         )
     if operation == "image-generate":
-        from klaude_core.image_generation import prepare
+        from klaude_core.image_generation import cancellation_notice, prepare
 
         if set(draft) not in ({"operation", "prompt", "width", "height", "steps"},
                               {"operation", "prompt", "width", "height", "steps", "seed"}):
@@ -118,7 +122,8 @@ def prepare_generated_operation(
         return {"spec": spec}, f"image:{spec['id']}", (
             f"Generate one image with {spec['settings']['model']}:\n{spec['prompt']}\n"
             f"{spec['width']} × {spec['height']}, {spec['steps']} steps, seed {spec['seed']}. "
-            "Saves the output in Generated. Generation can take up to five minutes."
+            "Saves the output in Generated. Generation can take up to five minutes. "
+            + cancellation_notice(spec["evidence"])
         )
     if set(draft) != {"operation", "target"}:
         raise ValueError("Choose an exact image job")

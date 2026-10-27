@@ -373,7 +373,8 @@ function activeDomainStatus() {
 function domainError(error, target = activeDomainStatus()) {
   if (error.name === "AbortError" || error.authEpoch !== undefined && error.authEpoch !== authEpoch) return;
   if (error.status === 401) { showLocalAccess(); return; }
-  if (["connections-status", "skills-status", "knowledge-status"].includes(target)) {
+  window.KlaudeToast.show(error.message || String(error), { variant: "error" });
+  if (target === activeDomainStatus() || ["connections-status", "skills-status", "knowledge-status"].includes(target)) {
     byId(target).textContent = "";
     return;
   }
@@ -1026,7 +1027,7 @@ function renderFileToolbar() {
   if (outputs) window.BrowserManagement?.loadJobs();
   byId("file-add").hidden = outputs;
   byId("image-add").hidden = !outputs;
-  if (!outputs) byId("image-generate-panel").close();
+  if (!outputs && currentView === "library") byId("image-generate-panel").close();
   byId("artifact-query").placeholder = outputs ? "Search generated files…" : "Search uploads…";
   byId("artifact-filter").querySelector(".file-search-label span").textContent = outputs ? "Find generated files" : "Find uploads";
   const available = latest?.library_images === true;
@@ -1710,6 +1711,7 @@ const artifactViewer = (() => {
     image.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
     preview.dataset.zoom = String(scale);
     byId("image-zoom-value").textContent = `${Math.round(scale * 100)}%`;
+    byId("image-zoom-value").setAttribute("aria-label", `${Math.round(scale * 100)}% zoom. Fit image to screen`);
     byId("image-zoom-in").disabled = scale >= 8;
     byId("image-zoom-out").disabled = scale <= 1;
   }
@@ -1728,6 +1730,7 @@ const artifactViewer = (() => {
     scale = 1; panX = panY = 0; pointers.clear(); gesture = pinch = lastTap = null;
     preview.dataset.zoom = "1";
     byId("image-zoom-value").textContent = "100%";
+    byId("image-zoom-value").setAttribute("aria-label", "100% zoom. Fit image to screen");
     transform();
   }
   function review(operation, value) {
@@ -1968,7 +1971,7 @@ const artifactViewer = (() => {
     byId("artifact-learn-library").value = byId("knowledge-library").value || "";
     byId("artifact-tags").hidden = chat;
     byId("image-toolbar").hidden = false;
-    for (const id of ["image-fit", "image-lens"]) byId(id).hidden = !image;
+    byId("image-lens").hidden = !image;
     byId("artifact-download").hidden = chat && !data.download_url;
     artifactDialog.querySelector(".preview-zoom-controls").hidden = !image;
     byId("artifact-download").href = chat ? data.download_url || "" : artifactUrl(item);
@@ -1998,11 +2001,11 @@ const artifactViewer = (() => {
     byId("image-toolbar").hidden = true;
     if (opening) { setDetails(phone.matches ? "closed" : "partial"); }
   }
-  for (const [id, icon] of [["artifact-close", "close"], ["artifact-more", "more"], ["image-zoom-out", "minus"], ["image-zoom-in", "plus"], ["image-fit", "fit"], ["artifact-download", "download"], ["image-details", "info"], ["preview-sidebar-toggle", "sidebar"]]) byId(id).append(libraryIcon(icon));
+  for (const [id, icon] of [["artifact-close", "close"], ["artifact-more", "more"], ["image-zoom-out", "minus"], ["image-zoom-in", "plus"], ["artifact-download", "download"], ["image-details", "info"], ["preview-sidebar-toggle", "sidebar"]]) byId(id).append(libraryIcon(icon));
   byId("image-details").append(domainText("span", "Details"));
   byId("image-zoom-in").onclick = () => zoom(scale * 1.5);
   byId("image-zoom-out").onclick = () => zoom(scale / 1.5);
-  byId("image-fit").onclick = resetZoom;
+  byId("image-zoom-value").onclick = resetZoom;
   byId("image-details").onclick = () => setDetails(artifactDialog.dataset.details === "closed" ? "partial" : "closed", true);
   byId("preview-sidebar-toggle").onclick = () => setDetails("closed", true);
   byId("preview-sheet-scrim").onclick = () => setDetails("closed", true);

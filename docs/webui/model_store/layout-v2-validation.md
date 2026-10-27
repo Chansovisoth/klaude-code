@@ -150,3 +150,118 @@ session/model/mode changes or host restart. Evidence:
 `/tmp/klaude-store-tabs-live-result.json` and
 `/tmp/klaude-store-tabs-live-evidence/`. Reload suffices for this static change.
 Both static bundle consistency checks, focused Ruff and `git diff --check` pass.
+
+2026-10-26 control consistency: Model Store Search now uses the same domain-toolbar
+field styling as Library/Integrations, with a 48px field/action, 4px action gap,
+and matching filter-row padding. Focused isolated Chromium comparisons at 320px,
+390px and 1440px verified identical Library/Store search computed styles and chip
+geometry, viewport fit, and no browser errors. This does not replace full Store
+workflow validation.
+
+The Model Store title is a keyboard-accessible Discover link. Focused Chromium
+checks at 390px/1440px verified return from Popular (Charts) and Recently updated
+See all URL states, with drill-down/sort/page reset and scroll returned to top.
+
+2026-10-26 community search: ordinary Hugging Face searches now expose the shared
+cursor-backed pager, alongside Popular/Recently updated paging. Search input
+immediately cancels superseded reads and clears the previous query's results.
+Community/offline/installed placeholders identify the active catalog; network
+errors are not reported as zero matches. Live owner-browser verification returned
+20 public GGUF repositories for qwen, 20 distinct second-page entries, and 20
+results for a fresh gemma query at page one. No browser errors, host restart,
+model activation or weight requests. The host runtime/session was preserved.
+Six focused catalog/Hugging Face unit tests passed. This is not full-suite or
+physical-device validation.
+
+2026-10-26 Installed/card metadata: Installed rows now use shared collection-card
+backgrounds/corners and compact model names (full names remain in tooltips and
+Details). Existing Manage actions and pagination retain their original paths.
+Discover cards show Updated alongside download counts, and Details includes
+the same date. Invalid/missing timestamps remain Unknown. The catalog explicitly
+requests Hugging Face's lastModified field; metadata version 2 refreshes older
+cached records without discarding their offline fallback. Source reference:
+https://huggingface.co/docs/huggingface_hub/package_reference/cli
+
+Seven focused catalog/Hugging Face tests passed, including cache upgrades and
+offline fallback. Scoped Ruff, JavaScript syntax and diff whitespace checks pass.
+Live Chromium checks passed at 320px/390px/1440px for Installed card backgrounds,
+rounded corners and no horizontal overflow, plus Updated beside downloads
+and in Details. No browser errors. The metadata change was activated after an
+idle preflight; the original conversation was explicitly restored afterward,
+including Mistral, Standard, Plan and revision 6. Workspace, LAN and account mode
+remain unchanged. No weights were downloaded or generated. These are focused
+checks, not a full repository suite.
+
+### Downloads cards — 2026-10-26
+
+Downloads now reuse `collection-row library-card` for the shared tonal background,
+row spacing and positional corner shapes, with 12px content padding. Their grid
+rule explicitly overrides the shared Library row's zero-padding/flex defaults.
+A focused isolated browser check passed at 1440/390/320px: completed, running and
+unknown cards have no overflow, retain Stop/Remove/Check/Info controls, and retain
+the existing progress node across refresh. No model operation was submitted and
+no browser exceptions were recorded. CSS bundle, JS syntax and diff checks passed.
+
+### Downloads metadata and transfer speed — 2026-10-26
+
+Cards and their Info dialog show exact catalog/installed parameter count and size.
+Missing values remain unknown. If the only available size is the active layer's
+reported total, it is labeled File. MB/s is decimal bytes/1,000,000 per second,
+estimated from successive monotonic browser samples of reported byte progress.
+The first sample, counter decreases, stage/total changes and gaps over 15 seconds
+reset the estimate; inactive or removed jobs discard samples. Sign-out and leaving
+Model Store clear the sampling state. No model name is parsed for metadata, no
+weights are fetched, and observed transfers without byte counters have no rate.
+
+The isolated `/tmp/klaude_download_metadata_check.py` passed at 1440/390/320px:
+known 4.02B/2.5 GB metadata, explicit unknowns, positive MB/s from simulated byte
+updates, counter-reset handling, preserved actions/progress-node identity, no
+overflow and zero browser exceptions. No model download was submitted.
+
+### Complete Popular/Recent preview rows — 2026-10-27
+
+The previews now choose a complete-row capacity near twenty cards from the
+available fractional width and the same CSS minimum-card width/gap used by the
+grid. Three columns show 21 cards, four show 20, six show 18 and eight show 24.
+A width observer reflows the previews only when that geometry changes.
+
+Bounded cursor reads retain up to four metadata pages per collection. Popular
+fills after excluding records without download counts; Recent fills after
+removing duplicates of the displayed Popular cards. Extra results remain in the
+browser pool for later resize, avoiding repeated reads for already-filled sizes.
+Modern 21-row and legacy 20-row routes both retain their actual cursor chain;
+unsupported limit filters fall back once per collection. Discovery errors retain
+available cached rows without fabricating cards. Finite/failed sources may show
+fewer complete preview rows; See all retains the full collection's browser path.
+
+`/tmp/klaude_discovery_rows_check.py` passed against modern and older-host response
+shapes at 320/390/768/1000/1200/1440/1920/2200/2400/2560/3840px, including repeated
+resize cycles and fractional width boundaries. Both collections reached complete
+rows, missing-count records and overlapping Recent entries were replaced, no
+card appeared twice, cached resize needed no repeat catalog fetch, every cursor
+page had a previous page, and no browser overflow or exceptions were recorded.
+JS syntax, CSS bundle and diff checks passed. No weights/model operations or live
+host restart were involved.
+
+
+## See all responsive rows (2026-10-27)
+
+Top GGUF and Recently updated drill-downs now use the shared measured column
+count to choose a complete-row page size near twenty, rather than fixed twenty.
+The catalog accepts bounded 1–50 result requests and isolates continuation caches
+by query/order/page size. Short or filtered batches are topped up through the Hub
+cursor, at most four metadata calls, without skipping valid results. Unknown
+download counts remain visible without an invented rank. Genuine source exhaustion
+can still leave a partial final page.
+
+Next/Previous and numbered paging use the actual capacity, and page URLs retain
+the size. Changing columns starts at page one because the Hub cursor chain belongs
+to the prior size; it never reuses a cursor with another size or drops overflow
+models. The visible results-per-page label follows capacity.
+
+Isolated Chromium verified both actual See all entry points at 320, 390, 1200,
+1440, 1920, 2200, 2400, 2560 and 3840px: complete rows, no overflow, ordered distinct
+second-page results, correct Previous behavior and URL size, no browser errors.
+Focused catalog tests cover bounded adaptive sizes and short/duplicate/invalid
+batch continuation with a disjoint second page. No live-host restart is claimed;
+the expanded catalog limit requires the updated backend.

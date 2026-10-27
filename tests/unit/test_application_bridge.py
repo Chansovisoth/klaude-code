@@ -82,6 +82,55 @@ def test_headless_construction_has_no_terminal_or_network_startup(tmp_path, monk
     assert runtime.closed
 
 
+def test_auto_admission_keeps_one_receipt_before_during_and_after_reply(tmp_path) -> None:
+    entered, release = threading.Event(), threading.Event()
+
+    class HeldRuntime(ScriptedRuntime):
+        def chat(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                entered.set()
+                assert release.wait(5)
+            return {"role": "assistant", "content": "Ready."}
+
+    runtime = HeldRuntime()
+    app = _application(tmp_path, runtime)
+    try:
+        first = app.submit_or_enqueue("First", request_id="first", creator_id="browser")
+        assert entered.wait(2)
+        assert app.submit_or_enqueue("First", request_id="first", creator_id="browser") is first
+        queued = app.submit_or_enqueue("Second", request_id="second", creator_id="browser")
+        assert queued.state == "queued"
+        assert app.submit_or_enqueue("Second", request_id="second", creator_id="browser") == queued
+        with pytest.raises(ValueError, match="request ID already used"):
+            app.submit_or_enqueue("Changed", request_id="second", creator_id="browser")
+        with pytest.raises(ValueError, match="request ID already used"):
+            app.submit_or_enqueue("Second", request_id="second", creator_id="other")
+        release.set()
+        for _ in range(300):
+            receipt = app.receipt("second")
+            if receipt is not None and receipt.state == "completed" and not app.active_turn_id():
+                break
+            time.sleep(.01)
+        else:
+            pytest.fail("Queued turn did not finish")
+        assert app.submit_or_enqueue("Second", request_id="second",
+                                     creator_id="browser").state == "submitted"
+        assert runtime.calls == 2
+        assert app.turns.queue_receipt("second").id == queued.id
+        # A removed receipt also stays removed on a repeated send; it cannot
+        # become a new immediate turn when the session later becomes idle.
+        item = app.enqueue("Removed", request_id="removed", creator_id="browser")
+        assert app.turns.remove_queue_item(app.session_id, item.id, "browser",
+                                          expected_revision=item.revision)
+        assert app.submit_or_enqueue("Removed", request_id="removed",
+                                     creator_id="browser").state == "removed"
+        assert runtime.calls == 2
+    finally:
+        release.set()
+        asyncio.run(app.close())
+
+
 def test_session_turn_releases_lease_when_admission_write_fails(tmp_path, monkeypatch) -> None:
     app = _application(tmp_path, ScriptedRuntime())
     turn = SessionTurn(app.memory, app.agent, app.session_id, app.client_id, "failure")

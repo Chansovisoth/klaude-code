@@ -31,7 +31,14 @@ router, framework, gesture dependency or competing file-operation owner.
   opens a flexible partial sheet, expands fully and closes through the outside
   scrim, handle gestures or Escape. Its own scroll container holds long filenames,
   metadata and tag collections; the covered image controls become inert.
-- Compact controls provide zoom in/out, fit, download and details. Desktop also
+- Compact controls provide zoom in/out, download and details; clicking or tapping
+  the zoom percentage fits the image to screen. The percentage is a keyboard
+  accessible button with the current zoom and Fit action announced together.
+  Focused Chromium checks at 320px, 390px and 1440px verified percentage clicks,
+  Enter activation and Google Lens resetting to fit, with no browser errors.
+  The broader viewer smoke currently stops at its separate tag-count assertion;
+  it is not a passing full-suite result for this change.
+  Desktop also
   offers expanded image presentation. The top bar has a truncated filename,
   image position and one Close cross on the right. The overflow menu sits beside
   the Details title in place of the duplicate Close button. Archive/Restore and

@@ -64,7 +64,9 @@ def bundle(check: bool = False) -> None:
     quote_data = json.loads((STATIC / "lockscreen-quotes.json").read_text())
     quote_source = ("window.KlaudeLockQuoteCollection = "
                     + json.dumps(quote_data, ensure_ascii=True, separators=(",", ":")) + ";")
-    dependencies = [STATIC / "loading-indicator.js", STATIC / "expressive.js"]
+    dependencies = [STATIC / "loading-indicator.js", STATIC / "expressive.js",
+                    STATIC / "mobile-chat.js", STATIC / "toast.js", STATIC / "canvas-policy.js",
+                    STATIC / "chat-canvas.js"]
     lockscreen = [STATIC / "lockscreen-quotes.js", STATIC / "lockscreen.js"]
     output = ('"use strict";\n\n' + START + "\n" +
               "\n".join(path.read_text().rstrip() for path in dependencies) +

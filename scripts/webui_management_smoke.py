@@ -233,9 +233,54 @@ async def verify_connections(tab, host):
     assert await tab.js(
         "byId('connection-items').querySelector('.connection-toggle')"
         ".getAttribute('aria-checked') === 'false' && !reviewDialog.open && "
-        "byId('connections-status').textContent.includes('Fixture toggle rejected')"
+        "document.querySelector('.toast-stack')?.textContent.includes('Fixture toggle rejected')"
     )
     await tab.js("window.fetch=toggleFetch")
+
+    # Exercise the actual reviewed, atomic policy writer without contacting an MCP server.
+    from klaude_core.mcp_client import MCPRegistry
+
+    registry = MCPRegistry(host.library.cfg.mcp_servers_file)
+    servers = registry.load()
+    servers["fixture"].tools = [{"name": "lookup"}, {"name": "write"}]
+    registry.save(servers)
+    await tab.click("#nav-chat")
+    await tab.click("#nav-integrations")
+    await tab.wait("!byId('connection-items').querySelector('.connection-toggle').disabled")
+    for width in (320, 390, 768, 1440):
+        await tab.command("Emulation.setDeviceMetricsOverride", {
+            "width": width, "height": 820, "deviceScaleFactor": 1, "mobile": width < 768,
+        })
+        for policy in ("allow", "deny", "ask"):
+            await tab.click("#connection-items .collection-open")
+            await tab.wait("byId('connection-detail').open && "
+                           "!byId('connection-detail-permission').disabled")
+            await tab.js("Promise.all(byId('connection-detail').getAnimations()"
+                         ".map(a=>a.finished.catch(()=>{})))")
+            assert await tab.js("""(()=>{
+              const dialog=byId('connection-detail'), group=byId('connection-detail-permission');
+              const boxes=[...group.querySelectorAll('label')].map(n=>n.getBoundingClientRect());
+              return dialog.scrollWidth<=dialog.clientWidth && boxes.every(r=>r.height>=44) &&
+                boxes.every(r=>Math.abs(r.top-boxes[0].top)<1) &&
+                group.getBoundingClientRect().width>=dialog.clientWidth-64 &&
+                [...group.querySelectorAll('label span')].every(n=>n.clientHeight===44);
+            })()"""), width
+            await tab.click(f'#connection-detail-permission input[value="{policy}"]')
+            await tab.wait("byId('domain-review').open")
+            assert await tab.js("!byId('connection-detail').open")
+            await tab.click("#domain-review-confirm")
+            await tab.wait("!BrowserManagement.hasPending()")
+            await tab.click("#connection-items .collection-open")
+            await tab.wait("byId('connection-detail').open")
+            await tab.wait("byId('connection-detail-permission').querySelector('input:checked')"
+                           f"?.value === '{policy}'")
+            if width in (390, 1440) and policy == "ask":
+                await tab.js("Promise.all(byId('connection-detail').getAnimations()"
+                             ".map(a=>a.finished.catch(()=>{})))")
+                shot = await tab.command("Page.captureScreenshot", {"format": "png"})
+                Path(f"/tmp/klaude-mcp-permissions-{width}.png").write_bytes(
+                    base64.b64decode(shot["data"]))
+            await tab.click("#connection-detail-close")
 
 
 async def verify(host, root, chrome, session, image_url):
@@ -282,7 +327,9 @@ async def verify(host, root, chrome, session, image_url):
                 await tab.wait("!authenticated")
                 assert not tab.errors, tab.errors
                 print(json.dumps({"connections": "add remains reviewed; direct toggle rejection "
-                                  "retains confirmed state without a modal", "console_errors": 0}))
+                                  "retains confirmed state without a modal",
+                                  "permissions": "Auto/Ask first/Deny reviewed saves and reload "
+                                  "passed at 320/390/768/1440px", "console_errors": 0}))
                 return
             if os.environ.get("KLAUDE_TEST_INTEGRATIONS_ONLY") == "1":
                 await verify_integration_forms(tab)

@@ -55,7 +55,10 @@ cannot release a fence. A missing requested final state remains fenced.
 
 Profile operation admission atomically excludes native model mutations from
 other browser operations. Hosted active/queued conversations block model writes;
-new hosted turns/runtime changes block while model work is active or unknown.
+The original gate blocked new hosted turns/runtime changes during any active or
+unknown model work. The 2026-10-26 refinement scopes chat independently of unrelated
+pulls while retaining mutation fences and native deletion protection; see
+`../chat-admission-validation.md` for current behavior and validation.
 The shared terminal manager adapter also rejects new mutations behind the browser
 fence, and the existing endpoint lock continues to serialize native effects.
 These additions do not claim atomic coordination with every legacy/direct caller

@@ -12,6 +12,7 @@ from klaude_application import model_store
 from klaude_application.browser_jobs import image_capabilities, prepare_generated_operation
 from klaude_application.library_management import LibraryManagement
 from klaude_core.model_connections import legacy_connections
+from klaude_core.model_runtime import ModelInfo
 from klaude_core.settings_store import update_settings
 
 from .test_image_generation import enable
@@ -101,6 +102,45 @@ def native(profile_browser):
 
 def draft(endpoint, operation="model-pull", model="fresh:1b"):
     return {"operation": operation, "connection": endpoint, "model": model}
+
+
+@pytest.mark.parametrize("operation", ["model-pull", "model-delete"])
+@pytest.mark.parametrize("state", ["accepted", "running", "unknown"])
+def test_chat_model_gate_keeps_exact_witness_and_mutation_fence(native, operation, state):
+    from klaude_core.ollama_manager import endpoint
+
+    host, service, auth, _, identity = native
+    connection, credential = endpoint(service.cfg, identity)
+    fields = {"endpoint": identity, "model": "fresh:1b", "revision": connection.revision,
+              "credential_revision": credential, "digest": ""}
+    rid = uuid.uuid4().hex
+    receipt = service.journal.admit(request_id=rid, owner_id="web-admin", kind=operation,
+                                    resource=model_store.RESOURCE, payload=fields)
+    final = operation == "model-pull"
+    service.journal.record_witness(rid, "web-admin", receipt.fence,
+                                   before=model_store.witness(fields, not final),
+                                   after=model_store.witness(fields, final))
+    model_store.save_target(service.cfg, rid, fields)
+    if state != "accepted":
+        service.journal.start(rid, "web-admin", receipt.fence)
+    if state == "unknown":
+        service.journal.mark_unknown(rid, "web-admin", receipt.fence)
+    same = ModelInfo("ollama", "fresh:1b", "Fresh", connection_id=identity)
+    other = ModelInfo("ollama", "mistral:7b", "Mistral", connection_id=identity)
+    cloud = ModelInfo("openai_api", "fixture", "Cloud fixture")
+    assert service.model_chat_blocked(same)
+    assert service.model_chat_blocked(other) == (operation == "model-delete")
+    assert not service.model_chat_blocked(cloud)
+    assert service.model_busy()
+    assert service.journal.status(rid, "web-admin").state == state
+    snapshot = _request(host, "GET", "/api/v1/session", **auth)[2]
+    assert snapshot["chat_auto_queue"] is True
+    assert snapshot["chat_model_blocked"] == (operation == "model-delete")
+    # A private target edit cannot make a matching download look unrelated.
+    if operation == "model-pull":
+        model_store.save_target(service.cfg, rid, {**fields, "model": "different:1b"})
+        assert service.model_chat_blocked(other)
+        assert service.journal.status(rid, "web-admin").state == state
 
 
 @pytest.mark.parametrize("failure", ["terminal", "preflight", "truncated"])
@@ -471,16 +511,21 @@ def test_cancel_is_unknown_progress_and_no_automatic_retry(native):
             host,
             "POST",
             "/api/v1/turns",
-            body={"request_id": "during-download", "text": "hello"},
+            body={"request_id": "during-download", "text": "hello", "disposition": "auto"},
             **auth,
         )[0]
-        == 409
+        == 202
     )
     assert (
         _request(host, "POST", "/api/v1/models/cancel", body={"request_id": request_id}, **auth)[0]
         == 200
     )
     assert _wait(service, request_id)["state"] == "unknown"
+    assert _request(host, "GET", "/api/v1/session", **auth)[2]["chat_model_blocked"] is False
+    assert _request(host, "POST", "/api/v1/turns", body={
+        "request_id": "after-stopped-download", "text": "still usable", "disposition": "auto",
+    }, **auth)[0] == 202
+    assert service.model_busy()
     assert (
         _request(host, "POST", "/api/v1/models/reconcile", body={"request_id": request_id}, **auth)[
             0

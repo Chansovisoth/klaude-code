@@ -135,8 +135,10 @@ a backend restart.
 
 ## Details flow refinement — 2026-10-26
 
-The variant footer says Choose variant before selection, then Download with the
-formatted size. The reviewed download action stays beside the file choices. Installed models
+The variant footer says Choose model before selection, then Download with the
+formatted size; it stays right-aligned on desktop and mobile. The hero Download
+action includes the same selected size. While exact files load, a disabled footer
+button says Loading. The reviewed download action stays beside the file choices. Installed models
 retain explicit Use model. Shared Ollama runtime/server badges distinguish the
 destination from creator identity. Known facts use a compact strip with the Hub
 download icon; generic placeholder About copy and repeated source links are omitted.

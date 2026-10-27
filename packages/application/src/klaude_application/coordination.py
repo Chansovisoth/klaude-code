@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from hashlib import sha256
 from typing import Any, get_args
 
+from klaude_core.generation_stats import public_generation_stats
 from klaude_core.memory import Memory
 from klaude_core.session_runtime import decode
 
@@ -645,8 +646,9 @@ class DurableTurns:
     def set_runtime_choice(
         self, session_id: str, runtime: dict[str, Any], previous_runtime: dict[str, Any],
         *, expected_revision: int, request_id: str | None = None,
+        next_turn_worker: str | None = None,
     ) -> int:
-        """Persist an idle model/mode choice with a session settings revision."""
+        """CAS a runtime choice; an owning worker may select its next-turn model."""
         from klaude_core.session_runtime import decode
 
         selected = decode(runtime)
@@ -665,7 +667,8 @@ class DurableTurns:
                 "SELECT owner_client_id,owner_lease_until FROM session_live "
                 "WHERE session_id=?", (session_id,),
             ).fetchone()
-            if live and live[0] and float(live[1]) > time.time():
+            if (live and live[0] and float(live[1]) > time.time()
+                    and live[0] != next_turn_worker):
                 raise RuntimeError("session already has an active worker")
             row = self.memory.db.execute(
                 "SELECT revision,plan_mode FROM application_session_options "
@@ -681,6 +684,23 @@ class DurableTurns:
                 selected["at"] = max(float(selected["at"]), float(saved["at"]) + 0.000001)
             revision = current + 1
             self.memory._store_session_runtime(session_id, selected)
+            if next_turn_worker is not None:
+                queued = self.memory.db.execute(
+                    "SELECT id,text,scope,runtime FROM application_queue "
+                    "WHERE session_id=? AND state IN ('queued','paused')", (session_id,),
+                ).fetchall()
+                for identity, text, scope, encoded in queued:
+                    if not self._same_runtime(json.loads(encoded), previous):
+                        continue
+                    self.memory.db.execute(
+                        "UPDATE application_queue SET runtime=?,fingerprint=?,"
+                        "revision=revision+1,updated_at=? WHERE id=?",
+                        (json.dumps(selected), self.fingerprint(session_id, text, scope, selected),
+                         time.time(), identity),
+                    )
+                if queued:
+                    self._append(session_id, "", "application", "queue.changed",
+                                 {"status": "model_changed"})
             self.memory.db.execute(
                 "INSERT INTO application_session_options "
                 "(session_id,revision,plan_mode,updated_at) VALUES (?,?,?,?) "
@@ -798,6 +818,15 @@ class DurableTurns:
             except BaseException:
                 self.memory.db.rollback()
                 raise
+
+    def queue_receipt(self, request_id: str) -> QueuedTurn | None:
+        """Read one durable queue receipt, including removed/submitted history."""
+        with self.memory._db_lock:
+            row = self.memory.db.execute(
+                "SELECT id,request_id,session_id,creator_id,text,scope,revision,state "
+                "FROM application_queue WHERE request_id=?", (request_id,),
+            ).fetchone()
+        return QueuedTurn(*row) if row else None
 
     def queue(
         self, session_id: str, viewer_id: str, *, include_submitted: bool = True,
@@ -1289,6 +1318,17 @@ class DurableTurns:
                     "r.session_id=turns.session_id AND r.user_row_id=turns.rowid) "
                     "ORDER BY rowid DESC LIMIT 500", (session_id,),
                 ).fetchall()
+                timings = memory.db.execute(
+                    "SELECT accepted_at,completed_at,turn_id FROM application_turns "
+                    "WHERE session_id=? AND state='completed' AND completed_at IS NOT NULL "
+                    "ORDER BY accepted_at DESC LIMIT 500", (session_id,),
+                ).fetchall()
+                generation_rows = memory.db.execute(
+                    "SELECT turn_id,json_extract(payload,'$.generation_stats') FROM session_events "
+                    "WHERE session_id=? AND kind='turn_done' AND json_valid(payload) "
+                    "AND json_type(payload,'$.generation_stats')='object' "
+                    "ORDER BY id DESC LIMIT 500", (session_id,),
+                ).fetchall()
                 retries = memory.db.execute(
                     "SELECT source_row_id,assistant_row_id,turn_id "
                     "FROM application_message_retries "
@@ -1321,6 +1361,24 @@ class DurableTurns:
                     messages[-1]["previous_response"] = row_id != newest[root]
                 if role == "user" and attachments:
                     messages[-1]["attachments"] = json.loads(attachments)
+        labelled = set()
+        generation = {}
+        for turn, raw_stats in generation_rows:
+            if turn not in generation and isinstance(raw_stats, str):
+                stats = public_generation_stats(json.loads(raw_stats))
+                if stats is not None:
+                    generation[turn] = stats
+        for message in reversed(messages):
+            if message["role"] != "assistant":
+                continue
+            for started, completed, turn in timings:
+                if started <= message["created_at"] <= completed:
+                    if (started, completed) not in labelled:
+                        message["worked_seconds"] = max(0, round(completed - started))
+                        if turn in generation:
+                            message["generation_stats"] = generation[turn]
+                        labelled.add((started, completed))
+                    break
         return {
             "session_id": session_id, "messages": messages, "inspector": inspector,
             "activity": (ActivityState(**json.loads(activity_row[0])).public(timeline=True)

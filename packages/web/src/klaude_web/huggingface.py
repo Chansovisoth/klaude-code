@@ -82,6 +82,7 @@ def hub_repo_search(
             raise ValueError("Unsupported model discovery filter")
         params["filter"] = filter_tag
         params["direction"] = -1
+        params["expand"] = ["downloads", "lastModified", "pipeline_tag", "tags"]
         if cursor:
             if len(cursor) > 2048 or any(not c.isprintable() for c in cursor):
                 raise ValueError("Invalid Hugging Face page cursor")

@@ -245,8 +245,6 @@ class BrowserTools:
             self.mcp_names = frozenset(tool.name for tool in external)
             for tool in external:
                 agent.tools[tool.name] = tool
-                if agent.gate.policies.get(tool.name) != "deny":
-                    agent.gate.policies[tool.name] = "ask"
                 agent.gate.process_grants.discard(tool.name)
             preferences = read_settings(self.cfg.data_dir / "chat-preferences.json")
             routing = {name: preferences.get(name, {})
@@ -273,7 +271,7 @@ class BrowserTools:
                 policy = policies.get(name, self.cfg.permissions.get(name, "ask"))
                 if not isinstance(policy, str) or policy not in {"ask", "allow", "deny"}:
                     policy = "ask"
-                if name in self.mcp_names | {"write_file", "edit_file"} and policy != "deny":
+                if name in {"write_file", "edit_file"} and policy != "deny":
                     policy = "ask"
                 agent.gate.policies[name] = policy
         inventory = read_memory_inventory(self.memory.sessions_db, self.memory.memory_file)

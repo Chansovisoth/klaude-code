@@ -697,3 +697,50 @@ def test_session_workspace_is_rechecked_inside_the_effect_transaction(
                                                 {"operation": operation, **fields})
     assert memory.load_session(identity)
     assert memory.session_title(identity) == "Preserve this conversation"
+
+
+def test_mcp_permission_controls_review_save_and_receipts(profile_browser):
+    from klaude_core.mcp_client import namespaced_tool_name
+    from klaude_core.settings_store import read_settings
+
+    host, service, _, auth = profile_browser
+    registry = MCPRegistry(service.cfg.mcp_servers_file)
+    registry.save({name: MCPServerConfig(name, "http", True, url="https://example.test/mcp",
+                                       tools=[{"name": "lookup"}])
+                   for name in ("one", "two")})
+    route = "/api/v1/integrations/connections"
+    for policy in ("allow", "deny", "ask"):
+        inventory = _request(host, "GET", route, **auth)[2]
+        one, two = sorted(inventory["servers"], key=lambda item: item["name"])
+        assert two["permission"] == "ask"
+        assert "expected" not in one
+        draft = {"operation": "setting-save", "id": "mcp_permissions.one", "value": policy,
+                 "revision": one["permission_revision"]}
+        review = _review(host, auth, draft)
+        operation, body = _submit(host, service, auth, review)
+        assert operation["state"] == "completed", operation
+        # The same request receipt cannot repeat a mutation.
+        assert _request(host, "POST", "/api/v1/library/submit", body=body, **auth)[0] == 202
+        saved = read_settings(service.cfg.data_dir / "chat-preferences.json")["permissions"]
+        assert saved == {namespaced_tool_name("one", "lookup"): policy}
+        fresh = _request(host, "GET", route, **auth)[2]
+        assert next(item for item in fresh["servers"] if item["name"] == "one")[
+            "permission"] == policy
+        assert _request(host, "POST", "/api/v1/library/review",
+                        body={"draft": draft}, **auth)[0] == 400
+
+
+def test_mcp_policy_requires_admin_at_review_and_submission(profile_browser):
+    host, service, _, auth = profile_browser
+    MCPRegistry(service.cfg.mcp_servers_file).save({"fixture": MCPServerConfig(
+        "fixture", "http", True, url="https://example.test/mcp", tools=[{"name": "lookup"}],
+    )})
+    item = _request(host, "GET", "/api/v1/integrations/connections", **auth)[2]["servers"][0]
+    draft = {"operation": "setting-save", "id": "mcp_permissions.fixture", "value": "allow",
+             "revision": item["permission_revision"]}
+    review = _review(host, auth, draft)
+    host.http.host_lan = True  # No password-backed administrator on this fixture.
+    assert _request(host, "POST", "/api/v1/library/review", body={"draft": draft},
+                    **auth)[0] == 403
+    body = {"review_id": review["review_id"], "request_id": uuid.uuid4().hex, "control_epoch": 0}
+    assert _request(host, "POST", "/api/v1/library/submit", body=body, **auth)[0] == 403

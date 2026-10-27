@@ -174,7 +174,10 @@ async def verify(host, root):
             await tab.js("showView('models')")
             await tab.wait("byId('store-endpoint').options.length===2")
             assert await tab.js("byId('store-endpoint-label').hidden")
-            await tab.click(".store-feature[data-store-model=qwen3]")
+            await tab.js("byId('store-source').value='curated';"
+                         "byId('store-source').dispatchEvent(new Event('change'))")
+            await tab.wait("Boolean(document.querySelector('.store-row[data-store-model=qwen3]'))")
+            await tab.click(".store-row[data-store-model=qwen3]")
             await tab.wait("!byId('store-detail').hidden && Boolean(byId('store-detail-endpoint'))")
             assert await tab.js("byId('store-detail-endpoint').options.length===2")
             await tab.click("#store-detail-back")

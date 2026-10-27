@@ -24,6 +24,7 @@ window.ChatMarkdown = (() => {
     copy: ["M9 9h11v11H9z", "M5 15H3V3h12v2"],
     download: ["M12 3v12", "m7 10 5 5 5-5", "M4 16v5h16v-5"],
     preview: ["M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12Z", "M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0"],
+    canvas: ["M4 3h16v18H4zM8 7h8M8 11h8M8 15h5"],
     check: ["m5 12 4 4L19 6"],
     speaker: ["M11 4 6 8H3v8h3l5 4V4Z", "M15 8a6 6 0 0 1 0 8", "M18 5a10 10 0 0 1 0 14"],
     stop: ["M6 6h12v12H6z"],
@@ -444,6 +445,21 @@ window.ChatMarkdown = (() => {
     const below = bounds.bottom + 6;
     messageMenu.style.top = `${Math.max(12, below + menu.height <= innerHeight - 12 ? below : bounds.top - menu.height - 6)}px`;
   }
+  function workedLabel(value) {
+    if (!Number.isFinite(value) || value < 0) return '';
+    const seconds = Math.floor(value), minutes = Math.floor(seconds / 60), hours = Math.floor(minutes / 60);
+    return `Worked for ${[hours ? `${hours}h` : '', minutes ? `${minutes % 60}m` : '', `${seconds % 60}s`].filter(Boolean).join(' ')}`;
+  }
+  function updateMenuWorked(state) {
+    const label = workedLabel(state.workedSeconds);
+    let worked = messageMenu.querySelector('.message-menu-worked');
+    if (!label) { worked?.remove(); return; }
+    if (!worked) {
+      worked = node('p', undefined, 'message-menu-worked');
+      messageMenu.querySelector('.message-menu-time').after(worked);
+    }
+    worked.textContent = label;
+  }
   function showMessageMenu(state) {
     if (menuState === state) { closeMenu(true); return; }
     closeMenu();
@@ -481,6 +497,7 @@ window.ChatMarkdown = (() => {
     const separator = node("div", undefined, "message-menu-divider");
     separator.setAttribute("role", "separator");
     messageMenu.replaceChildren(timestamp, separator);
+    updateMenuWorked(state);
     for (const [action, label] of [["branch", "Branch in new chat"], ["retry", "Retry"]]) {
       const button = actionButton(action, label, label);
       button.setAttribute("role", "menuitem");
@@ -516,10 +533,14 @@ window.ChatMarkdown = (() => {
     more.setAttribute("aria-expanded", "false");
     more.setAttribute("aria-controls", "message-options-menu");
     more.addEventListener("click", () => showMessageMenu(state));
-    const sources = actionButton("book", "Sources", "Sources");
+    const sources = state.sources = actionButton("book", "Sources", "Sources");
+    sources.hidden = true;
     sources.setAttribute("aria-haspopup", "dialog");
     sources.addEventListener("click", () => showSources(state));
-    row.append(state.copy, state.speak, share, more, sources);
+    const canvas = state.canvas = actionButton("canvas", "Open response in Canvas");
+    canvas.hidden = true; canvas.dataset.canvasEntry = 'response';
+    canvas.addEventListener("click", () => window.ChatCanvas?.open({source:state.canvasSource || state.source, name:state.canvasIntent?.name || 'Draft.md', language:'markdown', trigger:canvas}));
+    row.append(state.copy, state.speak, share, canvas, more, sources);
     state.actions = row;
     return row;
   }
@@ -870,6 +891,15 @@ window.ChatMarkdown = (() => {
       preview.addEventListener("click", () => previewImage(imageData, name, name, preview));
       actions.append(preview);
     }
+    if (!imageData && !invalidRaster) {
+      const canvas = actionButton("canvas", `Open ${name} in Canvas`);
+      canvas.hidden = true;
+      canvas.dataset.canvasEntry = 'code';
+      canvas.canvasCode = token.content; canvas.canvasNamedFile = Boolean(explicitName || fileLanguage);
+      canvas.addEventListener("click", () => window.ChatCanvas?.open({source:token.content, name,
+        language:['html','htm','svg'].includes(language) ? language === 'htm' ? 'html' : language : canonical || 'text', trigger:canvas}));
+      actions.append(canvas);
+    }
     actions.append(download, copyButton(() => token.content, "Copy code", true));
     toolbar.append(node("span", explicitName || fileLanguage ? name : language || "Code", "code-language"), actions);
     const pre = node("pre");
@@ -989,6 +1019,21 @@ window.ChatMarkdown = (() => {
     }
     return false;
   }
+  function syncCanvasActions(state) {
+    const policy = window.KlaudeCanvasPolicy;
+    const intent = state.canvasIntent || policy?.intent(state.userRequest);
+    const code = [...state.body.querySelectorAll('[data-canvas-entry="code"]')];
+    const onlyCode = code.length === 1 && state.body.querySelectorAll('p').length <= 1 && !state.body.querySelector('h2,h3,h4,h5,h6');
+    state.canvasSource = policy?.documentSource(state.source) || state.source;
+    const writing = !onlyCode && !!policy?.document(state.source, intent);
+    if (state.canvas) state.canvas.hidden = !writing;
+    for (const button of code) button.hidden = writing || !policy?.codeBlock(button.canvasCode, intent, button.canvasNamedFile);
+    const candidate = writing || code.some(button => !button.hidden);
+    if (state.canvasCandidate !== candidate) {
+      state.canvasCandidate = candidate;
+      document.dispatchEvent(new Event('klaude-canvas-availability'));
+    }
+  }
   function render(state) {
     clearTimeout(state.timer);
     state.timer = null;
@@ -1026,6 +1071,8 @@ window.ChatMarkdown = (() => {
     for (const element of [...state.body.children]) if (!retained.has(element)) element.remove();
     state.blocks = blocks;
     state.renderedSource = state.source;
+    if (state.sources) state.sources.hidden = references(state).size === 0;
+    syncCanvasActions(state);
   }
   function schedule(state) {
     if (state.timer !== null) return;
@@ -1073,12 +1120,31 @@ window.ChatMarkdown = (() => {
     const state = states.get(article);
     if (!state) return;
     Object.assign(state, options);
+    if (Object.hasOwn(options, 'userRequest') && !Object.hasOwn(options, 'canvasIntent'))
+      state.canvasIntent = window.KlaudeCanvasPolicy?.intent(options.userRequest);
+    if (state.role === "assistant") {
+      syncCanvasActions(state);
+      const captions = [], stats = options.generationStats;
+      if (Number.isFinite(stats?.average_tokens_per_second) && stats.average_tokens_per_second >= 0)
+        captions.push(`Avg ${stats.average_tokens_per_second.toLocaleString(undefined, {minimumFractionDigits:1, maximumFractionDigits:1})} tokens/s`);
+      if (captions.length) {
+        if (!state.worked) {
+          state.worked = node("p", undefined, "message-worked muted");
+          state.body.after(state.worked);
+        }
+        state.worked.textContent = captions.join(' · ');
+        state.worked.title = stats ? stats.timing === 'provider' ?
+          'Average reported output tokens per second of model generation across this turn.' :
+          'Average reported output tokens per second of model requests; includes prompt and transport time.' : '';
+      } else { state.worked?.remove(); state.worked = null; }
+    }
     if (state.role === "assistant" && options.previousResponse === true && !state.previousDetails) {
       const wasFocused = article.contains(document.activeElement);
       const disclosure = node("details", undefined, "previous-response");
       const summary = node("summary", undefined, "previous-response-summary");
       summary.append(icon("chevron"), node("span", "Previous response"));
       disclosure.append(summary, state.body);
+      if (state.worked) disclosure.append(state.worked);
       if (state.actions) disclosure.append(state.actions);
       article.classList.add("previous-response-message");
       article.append(disclosure);
@@ -1086,12 +1152,15 @@ window.ChatMarkdown = (() => {
       if (wasFocused) summary.focus({ preventScroll: true });
     } else if (options.previousResponse === false && state.previousDetails) {
       article.append(state.body);
+      if (state.worked) article.append(state.worked);
       if (state.actions) article.append(state.actions);
       state.previousDetails.remove();
       state.previousDetails = null;
       article.classList.remove("previous-response-message");
     }
     if (menuState === state && messageMenu) {
+      updateMenuWorked(state);
+      positionMenu();
       for (const button of messageMenu.querySelectorAll("[role=menuitem]")) button.disabled =
         !state.canAct || !state.onAction || button.dataset.messageAction === "retry" && state.canRetry === false;
     }

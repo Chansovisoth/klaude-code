@@ -152,11 +152,11 @@ async def verify(host, root, chrome, images):
             await tab.command("Page.navigate", {"url": host.origin})
             await tab.wait('typeof byId!=="undefined" && !byId("local-access").hidden')
             await tab.js(
-                'byId("login-password").value='
+                'byId("login-username").value="admin";byId("login-password").value='
                 + json.dumps(host.accounts.initial_password())
                 + ';byId("account-login").requestSubmit()'
             )
-            await tab.wait("latest?.session_id && pollTimer!==null")
+            await tab.wait('latest?.session_id && document.documentElement.dataset.startup==="ready"')
             await tab.js(
                 "window.detailReads=[];window.originalFetch=fetch;"
                 'window.fetch=(input,options)=>{if(String(input).includes("/lib'
@@ -266,7 +266,7 @@ async def verify(host, root, chrome, images):
             assert await tab.js('Number(byId("artifact-preview").dataset.zoom)>1')
             await key("ArrowRight")
             assert await tab.js("selectedArtifact.id") == first
-            await tab.click("#image-fit")
+            await tab.click("#image-zoom-value")
             assert await tab.js('byId("artifact-preview").dataset.zoom==="1"')
 
             layouts = []
@@ -387,7 +387,7 @@ async def verify(host, root, chrome, images):
                 },
             )
             await tab.command("Emulation.setTouchEmulationEnabled", {"enabled": True})
-            await tab.js('byId("preview-sheet-scrim").click();byId("image-fit").click()')
+            await tab.js('byId("preview-sheet-scrim").click();byId("image-zoom-value").click()')
             rect = await tab.js(
                 'JSON.stringify(byId("artifact-preview").getBoundingClientRect().toJSON())'
             )
@@ -414,7 +414,7 @@ async def verify(host, root, chrome, images):
             await touch("touchMove", [(x - 110, y)])
             await touch("touchEnd", [])
             assert await tab.js("selectedArtifact.id") == first
-            await tab.click("#image-fit")
+            await tab.click("#image-zoom-value")
             await touch("touchStart", [(x + 90, y)])
             await touch("touchMove", [(x - 90, y)])
             await touch("touchEnd", [])
@@ -429,7 +429,7 @@ async def verify(host, root, chrome, images):
                 await touch("touchStart", [(x, y)])
                 await touch("touchEnd", [])
             assert await tab.js('Number(byId("artifact-preview").dataset.zoom)>1')
-            await tab.click("#image-fit")
+            await tab.click("#image-zoom-value")
             await screenshot("touch-portrait-fit.png")
             await tab.click("#image-next")
             await tab.wait(

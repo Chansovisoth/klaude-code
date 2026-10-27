@@ -741,7 +741,7 @@ window.KlaudeAppearance ??= (() => {
           colorSource: ["preset", "custom", "image"].includes(data.colorSource) ? data.colorSource : "preset",
           accent: /^#[a-f0-9]{6}$/i.test(data.accent) ? data.accent : defaults.accent,
           variant: ["tonal-spot", "expressive", "fidelity", "content", "monochrome", "neutral", "vibrant", "rainbow", "fruit-salad"].includes(data.variant) ? data.variant : defaults.variant,
-          transparency: Number.isInteger(data.transparency) && data.transparency >= 0 && data.transparency <= 20 ? data.transparency : 0,
+          transparency: Number.isInteger(data.transparency) && data.transparency >= 0 && data.transparency <= 50 ? data.transparency : 0,
           loadingStyle: ["expressive", "classic"].includes(data.loadingStyle) ? data.loadingStyle : defaults.loadingStyle,
           loadingBarStyle: (() => {
             const style = typeof data.loadingBarStyle === "string" ? data.loadingBarStyle.replace(/-thick$/, "") : "";
@@ -1309,7 +1309,7 @@ window.KlaudeExpressive = (() => {
     const range = document.getElementById('theme-transparency');
     if (range) {
       const amount = Number(value.transparency) || 0;
-      const maximum = Number(range.max) || 20;
+      const maximum = Number(range.max) || 50;
       const minimum = Number(range.min) || 0;
       const track = range.parentElement;
       track.style.setProperty('--range-progress', `${Math.max(0, Math.min(100, (amount - minimum) / (maximum - minimum) * 100))}%`);
@@ -1667,7 +1667,7 @@ window.KlaudeExpressive = (() => {
       const pages = [['chat', 'Chat'], ['workspace', 'Workspaces'], ['library', 'Library'], ['models', 'Models'],
         ['integrations', 'Integrations'], ['activity', 'Activity'], ['settings', 'Settings']];
       const available = pages.map(([page, label]) => ({ group: 'Navigate', label: `Open ${label}`, run: () => showView(page) }));
-      available.push({ group: 'Chat', label: 'Switch model', run: () => { showView('models'); byId('models-query').focus(); } },
+      available.push({ group: 'Chat', label: 'Switch model', run: () => { showView('chat'); window.MobileChatUI?.openModels(); } },
         { group: 'Chat', label: 'Find a conversation', run: () => { toggleSessions(true); byId('session-search').focus(); } },
         { group: 'Chat', label: 'Toggle Context Panel', run: () => byId('inspector-toggle').click() },
         { group: 'Help', label: 'Show keyboard shortcuts', run: () => open('shortcuts') });
@@ -1798,6 +1798,612 @@ window.KlaudeExpressive = (() => {
   }
   document.addEventListener('DOMContentLoaded', setup, { once: true });
   return Object.freeze({ shape, themePreview, reduced, workspace });
+})();
+/* Mobile presentation over the existing chat catalog, runtime actions and menus.
+ * Bundled into app.js; no additional route or provider discovery path. */
+window.MobileChatUI = (() => {
+  let initialized = false, sheet, title, menu, more;
+  let page = 1, error = '', reading = false, listKey = '', connectionKey = '';
+  let viewportFrame = 0;
+  const viewportHeights = new Map();
+  const text = (tag, value, className = '') => {
+    const node = document.createElement(tag); node.textContent = value; node.className = className; return node;
+  };
+  const infoTrigger = () => narrowScreen.matches ? more : byId('chat-info-toggle');
+  function render() {
+    if (!initialized) return;
+    const model = latest?.requires_model_selection ? 'Choose a model' : latest?.model || 'Choose a model';
+    const modes = [latest?.mode === 'thinking' ? 'Thinking' : '', latest?.plan_mode ? 'Plan' : ''].filter(Boolean);
+    const label = [model, ...modes].join(' · ');
+    const chat = currentView === 'chat';
+    byId('chat-create-image').hidden = !chat || !latest?.profile_management;
+    byId('attach-create-image').disabled = !latest?.profile_management;
+    byId('mobile-chat-subtitle').textContent = label;
+    byId('mobile-chat-subtitle').setAttribute('aria-hidden', String(!chat));
+    title.tabIndex = chat ? 0 : -1;
+    title.setAttribute('aria-disabled', String(!chat));
+    title.setAttribute('aria-label', chat ? `Choose chat model · ${label}` : 'Klaude');
+    if (chat) title.title = label; else title.removeAttribute('title');
+    if (!sheet.open || !latest) return;
+    const connection = byId('model-connection-choice'), mobileConnection = byId('mobile-model-connection');
+    const options = [...connection.options];
+    const nextConnectionKey = JSON.stringify(options.map(option => [option.value, option.textContent, option.disabled, option.dataset.backend, option.dataset.source]));
+    if (nextConnectionKey !== connectionKey) {
+      connectionKey = nextConnectionKey;
+      mobileConnection.replaceChildren(...options.map(option => option.cloneNode(true)));
+    }
+    mobileConnection.value = connection.value; mobileConnection.disabled = connection.disabled || reading;
+    byId('mobile-model-connection-label').hidden = !latest.model_providers || options.length < 2;
+    const selected = connection.selectedOptions[0];
+    const source = latest.model_providers ? selected?.dataset.source : 'Local';
+    const backend = latest.model_providers ? selected?.dataset.backend : 'ollama';
+    byId('mobile-model-group').textContent = source === 'Local' ? 'Local models' : source === 'Cloud' ? 'Cloud models' : 'Models';
+    const current = latest.model_providers ? latest.model_ref : latest.model;
+    const sameConnection = !latest.model_providers || connection.value === latest.model_connection;
+    const choices = [...localModels];
+    if (sameConnection && !latest.requires_model_selection && !choices.some(item => item.id === current)) choices.unshift({id: current, name: latest.model});
+    choices.sort((a, b) => Number(b.id === current) - Number(a.id === current));
+    const query = byId('mobile-model-search').value.trim().toLocaleLowerCase();
+    const filtered = choices.filter(item => `${item.name} ${item.id}`.toLocaleLowerCase().includes(query));
+    page = Math.max(1, Math.min(page, Math.ceil(filtered.length / 20) || 1));
+    const offset = (page - 1) * 20, items = filtered.slice(offset, offset + 20);
+    const deferred = latest.chat_deferred_model_selection === true;
+    const locked = runtimeChoiceInFlight || !deferred && (Boolean(latest.active_turn_id) || Boolean(latest.queue?.length));
+    const status = error || (reading ? 'Loading models…' : locked ?
+      'Finish the current reply and queued messages before changing models.' : !filtered.length ?
+        query ? 'No matching models.' : byId('model-status').textContent || 'No models available.' : deferred && (latest.active_turn_id || latest.queue?.length) ? 'Your selection applies to the next prompt, including queued messages.' : '');
+    byId('mobile-model-status').textContent = status;
+    byId('mobile-model-status').dataset.error = String(Boolean(error));
+    byId('mobile-model-refresh').disabled = reading;
+    byId('mobile-model-list').setAttribute('aria-busy', String(reading));
+    const nextListKey = JSON.stringify([items, filtered.length, current, locked, backend, source, page]);
+    if (nextListKey === listKey) return;
+    listKey = nextListKey;
+    const list = byId('mobile-model-list');
+    const focused = list.contains(document.activeElement) ? document.activeElement.dataset.modelId : null;
+    list.replaceChildren(...items.map(item => {
+      const row = text('div', '', 'collection-row library-card');
+      const button = text('button', '', 'collection-open mobile-model-row'); button.type = 'button';
+      button.dataset.modelId = item.id; button.disabled = locked;
+      if (item.id === current && !latest.requires_model_selection) button.setAttribute('aria-current', 'true');
+      const icon = text('span', '', 'model-brand-icon'); icon.setAttribute('aria-hidden', 'true');
+      setModelBrandIcon(icon, item.id, backend || '');
+      const copy = text('span', '', 'mobile-model-copy'), name = text('strong', item.name);
+      const identity = window.AIIcons?.resolveModel(item.id, {provider: backend || ''});
+      const platform = identity?.runtime?.name || identity?.apiProvider?.name || selected?.textContent?.replace(/ · (Local|Cloud)$/, '') || 'Model';
+      const active = item.id === current && !latest.requires_model_selection;
+      const state = active ? latest.model_selection_pending ? 'Next prompt' : 'Active' : source === 'Local' && backend === 'ollama' ? 'Installed' : 'Available';
+      const caption = text('small', '');
+      caption.append(text('span', platform, 'mobile-model-platform'), text('span', `· ${state}`, 'mobile-model-state'));
+      copy.append(name, caption); button.append(icon, copy); row.append(button);
+      button.addEventListener('click', async () => {
+        if (active) { closeModels(); return; }
+        const epoch = authEpoch, session = latest.session_id;
+        error = '';
+        const applied = await chooseRuntime('model', item.id, {onError: failure => {
+          if (epoch === authEpoch && latest?.session_id === session && sheet.open) error = failure.message;
+        }});
+        if (epoch !== authEpoch || latest?.session_id !== session || !sheet.open) return;
+        if (applied) closeModels();
+        else {
+          render();
+          const status = byId('mobile-model-status'); status.tabIndex = -1;
+          status.focus({preventScroll: true}); status.scrollIntoView({block: 'nearest'});
+        }
+      });
+      return row;
+    }));
+    if (focused) focusModel(focused);
+    if (typeof updateDomainPager === 'function') updateDomainPager('mobile-model', offset, {
+      items, total: filtered.length, page_size: 20, more: offset + items.length < filtered.length,
+    });
+    byId('mobile-model-pages').hidden = filtered.length <= 20;
+  }
+  function focusModel(id) {
+    [...byId('mobile-model-list').querySelectorAll('button')].find(node => node.dataset.modelId === id)?.focus({preventScroll: true});
+  }
+  function positionModels() {
+    if (!sheet.open) return;
+    const view = window.visualViewport, height = view?.height || innerHeight;
+    sheet.style.maxHeight = `${Math.max(80, Math.min(narrowScreen.matches ? height * .85 : 720, height - (narrowScreen.matches ? 16 : 32)))}px`;
+    sheet.style.bottom = narrowScreen.matches ? `${Math.max(0, innerHeight - height - (view?.offsetTop || 0))}px` : '';
+  }
+  function closeModels() { if (sheet.open) sheet.close(); }
+  function closeMenu() { if (menu.matches(':popover-open')) menu.hidePopover(); }
+  function openModels() {
+    if (!initialized || !authenticated || !latest || currentView !== 'chat') return;
+    for (const id of ['model-menu', 'thinking-menu']) byId(id).open = false;
+    closeChatInfo(); closeMenu();
+    error = ''; page = 1; byId('mobile-model-search').value = '';
+    if (!sheet.open) sheet.showModal();
+    byId('model-picker').setAttribute('aria-expanded', 'true');
+    byId('model-menu').querySelector('summary').setAttribute('aria-expanded', 'true');
+    positionModels(); render();
+    // Phones inspect models first; desktop can focus search without a soft keyboard.
+    byId(narrowScreen.matches ? 'mobile-model-close' : 'mobile-model-search').focus({preventScroll: true});
+    const connection = byId('model-connection-choice');
+    if (latest.model_providers && latest.model_connection && connection.value !== latest.model_connection &&
+        [...connection.options].some(option => option.value === latest.model_connection)) {
+      connection.value = latest.model_connection; connection.dispatchEvent(new Event('change'));
+    }
+    if (!localModels.length && !reading) refreshModels();
+  }
+  function positionMenu() {
+    if (!menu.matches(':popover-open')) return;
+    const anchor = more.getBoundingClientRect(), view = window.visualViewport;
+    const left = (view?.offsetLeft || 0) + 8, top = (view?.offsetTop || 0) + 8;
+    const right = left + (view?.width || innerWidth) - 16, bottom = top + (view?.height || innerHeight) - 16;
+    menu.style.maxHeight = `${bottom - top}px`;
+    const bounds = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(left, Math.min(anchor.right - bounds.width, right - bounds.width))}px`;
+    menu.style.top = `${Math.max(top, Math.min(anchor.bottom + 4, bottom - bounds.height))}px`;
+  }
+  function viewport() {
+    viewportFrame = 0;
+    const view = window.visualViewport, root = document.documentElement;
+    const width = Math.round(innerWidth), height = view?.height || innerHeight;
+    const field = document.activeElement;
+    const editable = field?.matches('textarea, input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="button"]):not([type="submit"]), [contenteditable="true"]');
+    const baseline = !editable && root.dataset.chatKeyboard !== 'true' ?
+      Math.max(innerHeight, height) : Math.max(viewportHeights.get(width) || 0, innerHeight, height);
+    viewportHeights.set(width, baseline);
+    if (viewportHeights.size > 8) viewportHeights.delete(viewportHeights.keys().next().value);
+    const shrunk = baseline - height > 120;
+    const keyboard = authenticated && currentView === 'chat' && width <= 560 &&
+      (!view || Math.abs(view.scale - 1) < .05) && shrunk &&
+      (editable || root.dataset.chatKeyboard === 'true');
+    root.dataset.chatKeyboard = String(Boolean(keyboard));
+    root.style.setProperty('--chat-viewport-height', `${height}px`);
+    root.style.setProperty('--chat-viewport-top', `${view?.offsetTop || 0}px`);
+    positionModels(); positionMenu();
+  }
+  function scheduleViewport() { if (!viewportFrame) viewportFrame = requestAnimationFrame(viewport); }
+  function reset() {
+    closeModels(); closeMenu(); error = ''; reading = false; page = 1; listKey = connectionKey = '';
+    byId('mobile-model-search').value = ''; byId('mobile-model-list').replaceChildren();
+    byId('mobile-model-connection').replaceChildren(); byId('mobile-model-status').textContent = '';
+    byId('mobile-chat-subtitle').textContent = 'Choose a model';
+    title.setAttribute('aria-label', 'Choose chat model'); title.removeAttribute('title');
+    scheduleViewport();
+  }
+  function init() {
+    if (initialized) return;
+    initialized = true;
+    sheet = byId('mobile-model-sheet'); title = byId('mobile-chat-title');
+    menu = byId('mobile-chat-menu'); more = byId('mobile-chat-more');
+    title.addEventListener('click', openModels);
+    byId('mobile-model-close').addEventListener('click', closeModels);
+    sheet.addEventListener('close', () => {
+      byId('model-picker').setAttribute('aria-expanded', 'false');
+      byId('model-menu').querySelector('summary').setAttribute('aria-expanded', 'false');
+      if (authenticated && currentView === 'chat') {
+        const trigger = narrowScreen.matches ? title : byId('model-picker');
+        (trigger.disabled ? byId('messages') : trigger).focus({preventScroll: true});
+      }
+    });
+    byId('mobile-model-search').addEventListener('input', () => {
+      page = 1; error = ''; render(); sheet.querySelector('.mobile-model-body').scrollTop = 0;
+    });
+    byId('mobile-model-connection').addEventListener('change', () => {
+      page = 1; error = ''; byId('model-connection-choice').value = byId('mobile-model-connection').value;
+      byId('model-connection-choice').dispatchEvent(new Event('change'));
+    });
+    byId('mobile-model-refresh').addEventListener('click', () => { error = ''; refreshModels(); });
+    byId('mobile-model-previous').addEventListener('click', () => { page--; render(); });
+    byId('mobile-model-next').addEventListener('click', () => { page++; render(); });
+    byId('mobile-model-numbers').addEventListener('click', event => {
+      const target = event.target.closest('button[data-page]'); if (target) { page = Number(target.dataset.page); render(); }
+    });
+    byId('mobile-model-store').addEventListener('click', () => { closeModels(); showView('models'); });
+    menu.addEventListener('toggle', () => {
+      const open = menu.matches(':popover-open'); more.setAttribute('aria-expanded', String(open));
+      if (open) { positionMenu(); menu.querySelector('button').focus({preventScroll: true}); }
+    });
+    menu.addEventListener('keydown', event => {
+      const buttons = [...menu.querySelectorAll('button:not([hidden])')], index = buttons.indexOf(document.activeElement);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 :
+        event.key === 'ArrowDown' ? (index + 1) % buttons.length : event.key === 'ArrowUp' ? (index - 1 + buttons.length) % buttons.length : null;
+      if (next !== null) { event.preventDefault(); buttons[next].focus(); }
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeMenu(); more.focus(); }
+    });
+    menu.addEventListener('click', event => {
+      const action = event.target.closest('button[data-mobile-chat-action]')?.dataset.mobileChatAction;
+      if (!action) return;
+      closeMenu();
+      if (action === 'details') byId('chat-info-panel').showPopover();
+      else if (action === 'context') byId('inspector-toggle').click();
+      else if (action === 'search') { more.focus({preventScroll: true}); byId('command-open')?.click(); }
+      else if (action === 'account') byId('account-shortcut').click();
+    });
+    byId('account-sign-out').addEventListener('click', () => byId('logout').click());
+    document.addEventListener('klaude-view', () => { closeMenu(); if (currentView !== 'chat') closeModels(); render(); scheduleViewport(); });
+    for (const name of ['klaude-chat-session-changed', 'klaude-auth-reset']) document.addEventListener(name, reset);
+    narrowScreen.addEventListener('change', () => { closeMenu(); scheduleViewport(); });
+    for (const name of ['resize', 'orientationchange']) window.addEventListener(name, scheduleViewport);
+    for (const name of ['resize', 'scroll']) window.visualViewport?.addEventListener(name, scheduleViewport);
+    for (const name of ['focusin', 'focusout']) document.addEventListener(name, scheduleViewport);
+    render(); scheduleViewport();
+  }
+  return Object.freeze({init, render, openModels, infoTrigger,
+    loading: value => { reading = value; if (value) error = ''; render(); },
+    catalogError: message => { error = message; render(); }});
+})();
+/* Transient feedback, bundled into app.js without a new static route. */
+window.KlaudeToast = (() => {
+  const stacks = new Map(), entries = new Set();
+  const make = (tag, className, value) => {
+    const node = document.createElement(tag); node.className = className;
+    if (value !== undefined) node.textContent = value;
+    return node;
+  };
+  function mount(stack) {
+    const parent = [...document.querySelectorAll('dialog[open]')].at(-1) || document.body;
+    if (stack.parentElement !== parent) parent.append(stack);
+    if (stack.childElementCount && !stack.matches(':popover-open')) stack.showPopover();
+  }
+  function stackFor(position) {
+    if (!stacks.has(position)) {
+      const stack = make('section', 'toast-stack');
+      stack.dataset.position = position; stack.setAttribute('popover', 'manual');
+      stack.setAttribute('aria-label', `${position === 'top' ? 'Top' : 'Bottom'} notifications`);
+      stacks.set(position, stack);
+    }
+    return stacks.get(position);
+  }
+  function remove(entry) {
+    clearTimeout(entry.timer); clearTimeout(entry.exitTimer);
+    entries.delete(entry); entry.node.remove();
+    if (!entry.stack.childElementCount && entry.stack.matches(':popover-open')) entry.stack.hidePopover();
+  }
+  function dismiss(entry) {
+    if (entry.closing || !entries.has(entry)) return;
+    entry.closing = true; clearTimeout(entry.timer);
+    if (entry.node.contains(document.activeElement) && entry.origin?.isConnected) entry.origin.focus({ preventScroll: true });
+    entry.node.classList.add('toast-closing');
+    const reduced = document.documentElement.dataset.motion === 'reduced' || matchMedia('(prefers-reduced-motion: reduce)').matches;
+    entry.exitTimer = setTimeout(() => remove(entry), reduced ? 0 : 200);
+  }
+  function resume(entry) {
+    clearTimeout(entry.timer);
+    if (entry.closing || entry.hovered || entry.node.contains(document.activeElement)) return;
+    entry.started = performance.now();
+    entry.timer = setTimeout(() => dismiss(entry), entry.remaining);
+  }
+  function pause(entry) {
+    if (entry.timer) entry.remaining = Math.max(0, entry.remaining - (performance.now() - entry.started));
+    clearTimeout(entry.timer); entry.timer = null;
+  }
+  function show(message, { variant = 'info', position = 'top' } = {}) {
+    message = String(message || '').trim();
+    if (!message) return;
+    position = position === 'bottom' ? 'bottom' : 'top';
+    variant = ['error', 'success'].includes(variant) ? variant : 'info';
+    const duplicate = [...entries].find(entry => !entry.closing && entry.message === message && entry.variant === variant && entry.position === position);
+    if (duplicate) return () => dismiss(duplicate);
+    const stack = stackFor(position), node = make('article', 'toast');
+    node.dataset.variant = variant;
+    const icon = make('span', 'toast-icon', variant === 'error' ? '!' : variant === 'success' ? '✓' : 'i');
+    icon.setAttribute('aria-hidden', 'true');
+    const content = make('div', 'toast-message', message);
+    content.setAttribute('role', variant === 'error' ? 'alert' : 'status');
+    content.setAttribute('aria-atomic', 'true');
+    const close = make('button', 'toast-close quiet');
+    close.type = 'button'; close.setAttribute('aria-label', 'Dismiss notification');
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('aria-hidden', 'true');
+    const path = document.createElementNS(svg.namespaceURI, 'path'); path.setAttribute('d', 'm6 6 12 12M18 6 6 18');
+    svg.append(path); close.append(svg); node.append(icon, content, close);
+    const entry = { node, stack, message, position, variant, remaining: 5000, origin: document.activeElement };
+    entries.add(entry);
+    close.addEventListener('click', () => dismiss(entry));
+    node.addEventListener('pointerenter', () => { pause(entry); entry.hovered = true; });
+    node.addEventListener('pointerleave', () => { entry.hovered = false; resume(entry); });
+    node.addEventListener('focusin', () => pause(entry));
+    node.addEventListener('focusout', () => queueMicrotask(() => resume(entry)));
+    if (position === 'top') stack.prepend(node); else stack.append(node);
+    const siblings = [...entries].filter(item => item.position === position);
+    if (siblings.length > 5) remove(siblings[0]);
+    mount(stack); resume(entry);
+    return () => dismiss(entry);
+  }
+  function clear() { for (const entry of [...entries]) remove(entry); }
+  // Keep notifications operable above native modal viewers and reviews.
+  new MutationObserver(records => {
+    if (records.some(record => record.target.tagName === 'DIALOG')) {
+      for (const stack of stacks.values()) if (stack.childElementCount) mount(stack);
+    }
+  }).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['open'] });
+  for (const event of ['klaude-auth-reset', 'klaude-chat-session-changed']) document.addEventListener(event, clear);
+  return Object.freeze({ show, clear });
+})();
+"use strict";
+
+// Local presentation policy: explicit intent plus reusable work, never reply length alone.
+// Research and adaptation notes: docs/webui/canvas-trigger-research.md.
+window.KlaudeCanvasPolicy = (() => {
+  const none = () => ({kind:'none', explicit:false, reusable:false, name:'Draft.md'});
+  const lead = '(?:^|[.!?\\n]\\s*|\\b(?:please help|please|can you|could you|would you|help me|help|i want you to|i need you to)\\s+)';
+  const action = new RegExp(lead + '(write|draft|compose|author|rewrite|revise|reword|polish|edit|expand|translate|create|generate|make|prepare|give me|turn|convert|transform|refactor|debug|fix)\\b', 'i');
+  const documents = /\b(?:essay|article|blog(?: post)?|email|letter|story|poem|report|document|proposal|speech|tutorial|guide|draft|paragraphs?|social post|slack update|announcement|resume|cover letter|readme|checklist|outline|plan)\b|\.md\b/i;
+  const codeFile = /\b[\w-]+\.(?:py|js|ts|jsx|tsx|html?|svg|css|json|sh|rs|go|java|c|cpp|cs|rb|php|sql|ya?ml|toml|swift|kt)\b/i;
+  const code = /\b(?:code|script|program|function|class|component|website|web page|app|html|svg|module|configuration|config|sql|stylesheet|diagram|flowchart|mermaid)\b/i;
+  const reusableCode = /\b(?:script|program|component|website|web page|app|html|svg|module|file|configuration|stylesheet|diagram|flowchart|mermaid)\b/i;
+  const revision = /\b(?:rewrite|revise|reword|polish|edit|expand|translate|refactor|debug|fix)\b/i;
+  const followup = /^(?:(?:please|can you|could you|would you)\s+)?(?:(?:make|keep)\s+(?:it|this|the draft|the article|the essay|the code)\s+(?:shorter|longer|clearer|simpler|more|less)|(?:add|remove|change|replace)\b.{0,60}\b(?:paragraph|section|heading|introduction|conclusion|tone|function|comments?)\b|(?:continue|expand|shorten|lengthen|polish|revise|rewrite|refactor|debug|fix)\b)/i;
+  function intent(value, previous = null) {
+    if (typeof value !== 'string') return none();
+    const request = value.slice(0, 8000).replace(/```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)/g, '')
+      .replace(/^\s*>.*$/gm, '').trim();
+    if (/\b(?:no|without)\s+(?:a\s+)?canvas\b|\b(?:do not|don't|dont|never|avoid)\s+(?:use|open|show|write|draft|compose|rewrite|create|generate)\b|\b(?:keep|leave)\b.{0,30}\b(?:in chat|inline)\b/i.test(request)) return none();
+    const explicit = /(?:^|\s)\/canvas\b|\b(?:use|open|show)\s+(?:(?:a|the)\s+)?canvas\b|\b(?:in|using|with)\s+(?:(?:a|the)\s+)?canvas\b/i.test(request);
+    if (!explicit && previous && previous.kind !== 'none' && followup.test(request) &&
+        !documents.test(request) && !code.test(request) && !codeFile.test(request)) return {...previous, explicit:false};
+    const match = action.exec(request);
+    if (!match && !explicit) {
+      return previous && previous.kind !== 'none' && followup.test(request) ? {...previous, explicit:false} : none();
+    }
+    const verb = match?.[1]?.toLowerCase() || '';
+    const wantsDocument = documents.test(request), namedFile = codeFile.test(request), wantsCode = code.test(request) || namedFile;
+    const isRevision = revision.test(verb);
+    if (!explicit && !wantsDocument && !wantsCode && /^(?:create|generate|make|prepare|give me|turn|convert|transform|fix|debug|refactor)$/.test(verb)) return none();
+    if (isRevision && !wantsDocument && !wantsCode && previous?.kind && previous.kind !== 'none')
+      return {...previous, explicit};
+    const kind = wantsCode && !wantsDocument ? 'code' : 'writing';
+    const label = /\bessay\b/i.test(request) ? 'Essay' : /\bemail\b/i.test(request) ? 'Email draft' :
+      /\bletter\b/i.test(request) ? 'Letter' : /\barticle|blog\b/i.test(request) ? 'Article' : 'Draft';
+    return {kind, explicit, namedFile, reusable:kind === 'code' ? reusableCode.test(request) || namedFile : wantsDocument,
+      name:`${label}.md`};
+  }
+  function documentSource(value) {
+    const parts = String(value || '').trim().split(/\n\s*\n/);
+    if (parts[0]?.length < 240 && /^(?:(?:sure|certainly)[!,.]?\s*)?(?:here(?:'s| is| are)|below is)\b[\s\S]*\b(?:draft|essay|article|email|letter|document|report|story)\b[\s\S]*:\s*$/i.test(parts[0])) parts.shift();
+    if (parts.at(-1)?.length < 240 && /^(?:let me know if|would you like me to)\b/i.test(parts.at(-1))) parts.pop();
+    return parts.join('\n\n').trim();
+  }
+  function document(value, request) {
+    if (!request || request.kind === 'none' || request.kind === 'code') return false;
+    const source = documentSource(value);
+    if (!source || /^\s*(```|~~~)/.test(source)) return false;
+    if (request.explicit) return true;
+    if (/^(?:sorry\b|i (?:cannot|can't|am unable)\b|(?:what|which|could you|would you|can you)\b[\s\S]{0,160}\?$)/i.test(source)) return false;
+    if (request.reusable) return source.length >= 40;
+    const paragraphs = source.split(/\n\s*\n/).length, lines = source.split('\n').filter(line => line.trim()).length;
+    return source.length >= 450 && (paragraphs >= 2 || lines >= 12 || source.split(/\s+/).length >= 90);
+  }
+  function codeBlock(value, request, namedFile = false) {
+    if (!request || request.kind === 'none' || typeof value !== 'string' || !value.trim()) return false;
+    if (request.explicit) return true;
+    if (request.kind !== 'code') return false;
+    const lines = value.split('\n').filter(line => line.trim()).length;
+    return namedFile || request.namedFile || lines >= 15 || (request.reusable && (lines >= 3 || value.length >= 120)) ||
+      /^\s*(?:<!doctype html|<html\b|<svg\b)/i.test(value);
+  }
+  return Object.freeze({intent, document, documentSource, codeBlock});
+})();
+"use strict";
+
+// Canvas drafts stay in this tab and session. Document previews reuse the passive viewer.
+window.ChatCanvas = (() => {
+  const drafts = new Map(), mobile = matchMedia('(max-width: 1100px)');
+  let panel, editor, documents, name, language, preview, status, editTab, previewTab;
+  let current, trigger, restoreContext = false, generation = 0, serial = 0;
+  let launch, menuItem;
+  function refreshLaunchers() {
+    const available = authenticated && currentView === 'chat' && (drafts.size > 0 ||
+      !!document.querySelector('#messages [data-canvas-entry]:not([hidden])'));
+    if (launch) launch.hidden = !available;
+    if (menuItem) menuItem.hidden = !available;
+  }
+  function openAvailable() {
+    if (current || drafts.size) { open(); return; }
+    const entries = document.querySelectorAll('#messages [data-canvas-entry]:not([hidden])');
+    entries[entries.length - 1]?.click();
+  }
+  const element = (tag, text, className) => {
+    const node = document.createElement(tag);
+    if (text !== undefined) node.textContent = text;
+    if (className) node.className = className;
+    return node;
+  };
+  const icon = (shape = 'M4 3h16v18H4zM8 7h8M8 11h8M8 15h5') => {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.classList.add('icon');
+    for (const [key, value] of Object.entries({viewBox:'0 0 24 24', fill:'none', stroke:'currentColor', 'stroke-width':'1.7', 'aria-hidden':'true'})) svg.setAttribute(key, value);
+    const path = document.createElementNS(svg.namespaceURI, 'path');
+    path.setAttribute('d', shape); svg.append(path); return svg;
+  };
+  function button(text, action, className = 'quiet') {
+    const node = element('button', text, className); node.type = 'button';
+    node.addEventListener('click', action); return node;
+  }
+  const notice = text => window.KlaudeToast?.show(text, {variant:'info'});
+  function persist() {
+    if (!current) return;
+    current.source = editor.value; current.name = name.value; current.language = language.value;
+    status.textContent = `${current.source.split('\n').length} lines · Draft`;
+    const selected = documents.selectedOptions[0]; if (selected) selected.textContent = current.name || 'Untitled';
+  }
+  function select(draft) {
+    persist(); generation++; current = draft;
+    editor.value = draft.source; name.value = draft.name;
+    if (![...language.options].some(option => option.value === draft.language)) language.append(new Option(draft.language, draft.language));
+    language.value = draft.language;
+    documents.replaceChildren(...[...drafts.values()].map(item => new Option(item.name || 'Untitled', item.id)));
+    documents.value = draft.id; showEditor(); persist();
+  }
+  function showEditor() {
+    generation++; preview.replaceChildren(); preview.hidden = true; editor.hidden = false;
+    const writing = language.value === 'markdown' || language.value === 'text';
+    editor.wrap = writing ? 'soft' : 'off'; editor.spellcheck = writing;
+    editor.style.whiteSpace = writing ? 'pre-wrap' : 'pre'; editor.classList.toggle('canvas-writing', writing);
+    editTab.setAttribute('aria-selected', 'true'); previewTab.setAttribute('aria-selected', 'false');
+    editTab.tabIndex = 0; previewTab.tabIndex = -1;
+  }
+  async function showPreview() {
+    persist(); const version = ++generation, draft = current;
+    editor.hidden = true; preview.hidden = false; preview.replaceChildren();
+    editTab.setAttribute('aria-selected', 'false'); previewTab.setAttribute('aria-selected', 'true');
+    editTab.tabIndex = -1; previewTab.tabIndex = 0;
+    if (draft.language === 'markdown') {
+      preview.classList.add('markdown-body');
+      preview.append(ChatMarkdown.renderDocument(draft.source)); return;
+    }
+    preview.classList.remove('markdown-body');
+    if (['html', 'svg'].includes(draft.language)) {
+      const loading = element('p', 'Loading preview…', 'muted'); preview.append(loading);
+      try {
+        const result = await jsonRequest('/api/v1/chat-previews', 'POST', {source:draft.source});
+        if (version !== generation || !panel.open || current !== draft) return;
+        if (!/^\/api\/v1\/chat-previews\/[a-f0-9]{32}$/.test(result.url)) throw Error('Invalid preview');
+        const frame = element('iframe'); frame.title = `Preview of ${draft.name}`;
+        frame.setAttribute('sandbox', ''); frame.referrerPolicy = 'no-referrer'; frame.src = result.url;
+        preview.replaceChildren(frame);
+      } catch (error) {
+        if (version === generation && panel.open) loading.textContent = error.status === 404 ?
+          'Restart Web UI to enable document previews.' : 'Preview unavailable. Your draft is still available in the editor.';
+      }
+    } else {
+      const pre = element('pre'), code = element('code');
+      ChatMarkdown.highlight(code, draft.source, draft.language); pre.append(code); preview.append(pre);
+    }
+  }
+  function download() {
+    persist();
+    const safeName = (current.name || 'canvas.txt').replace(/[\\/\u0000-\u001f\u007f]/g, '_').slice(0, 160);
+    const url = URL.createObjectURL(new Blob([current.source], {type:'text/plain;charset=utf-8'}));
+    const link = element('a'); link.href = url; link.download = safeName;
+    document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  function ask() {
+    persist(); const selected = editor.value.slice(editor.selectionStart, editor.selectionEnd) || current.source;
+    if (selected.length > 16000) { notice('Select a smaller section to discuss in chat.'); return; }
+    const prompt = document.getElementById('prompt');
+    const request = `Please help revise ${current.name || 'this draft'}:\n\n${selected}`;
+    if (prompt.value.length + request.length > 32000) { notice('Make room in your chat draft first.'); return; }
+    prompt.value += `${prompt.value ? '\n\n' : ''}${request}`;
+    prompt.dispatchEvent(new Event('input', {bubbles:true}));
+    if (mobile.matches) { trigger = prompt; panel.close(); }
+    prompt.focus(); notice('Added to your chat draft. Add instructions, then send.');
+  }
+  function closed() {
+    if (panel.open) return;
+    persist(); generation++; preview.replaceChildren();
+    if (restoreContext) { restoreContext = false; setContextPanel(true); }
+    if (trigger?.isConnected && !trigger.closest('[hidden]')) trigger.focus({preventScroll:true});
+  }
+  function open(options = {}) {
+    if (!authenticated || !latest?.session_id) return;
+    initialize();
+    if (options.source !== undefined && (typeof options.source !== 'string' || options.source.length > 128000)) {
+      notice('This document is too large for Canvas.'); return;
+    }
+    let draft;
+    if (options.source !== undefined) {
+      draft = [...drafts.values()].find(item => item.original === options.source && item.originalName === options.name);
+      if (!draft) {
+        if (drafts.size >= 20) { notice('Close a canvas with Discard before opening another.'); return; }
+        const value = options.source;
+        draft = {id:String(++serial), source:value, original:value, originalName:options.name,
+          name:options.name || 'Untitled.md', language:options.language || 'markdown'};
+        drafts.set(draft.id, draft);
+      }
+    } else draft = current || [...drafts.values()].at(-1);
+    if (!draft) {
+      draft = {id:String(++serial), source:'', original:'', name:'Untitled.md', language:'markdown'};
+      drafts.set(draft.id, draft);
+    }
+    trigger = options.trigger || document.activeElement;
+    if (currentView !== 'chat') showView('chat');
+    if (!panel.open) {
+      restoreContext = contextPanelOpen; if (restoreContext) setContextPanel(false);
+      if (mobile.matches) panel.showModal(); else panel.show();
+    }
+    select(draft); editor.focus(); refreshLaunchers();
+  }
+  function reset() {
+    generation++; drafts.clear(); current = null; trigger = null;
+    if (restoreContext) { restoreContext = false; setContextPanel(true); }
+    if (panel?.open) panel.close();
+    if (panel) { editor.value = ''; name.value = ''; documents.replaceChildren(); preview.replaceChildren(); }
+    if (launch) launch.hidden = true;
+    if (menuItem) menuItem.hidden = true;
+  }
+  function initialize() {
+    if (panel) return;
+    panel = element('dialog', undefined, 'chat-canvas'); panel.id = 'chat-canvas'; panel.setAttribute('aria-labelledby', 'canvas-title');
+    const heading = element('header', undefined, 'canvas-heading'), title = element('h2', 'Canvas'); title.id = 'canvas-title';
+    const close = button('×', () => panel.close(), 'icon-button quiet'); close.setAttribute('aria-label', 'Close Canvas');
+    close.replaceChildren(icon('m6 6 12 12M6 18 18 6'));
+    heading.append(title, close);
+    const toolbar = element('div', undefined, 'canvas-toolbar');
+    documents = element('select'); documents.setAttribute('aria-label', 'Open canvases');
+    documents.addEventListener('change', () => select(drafts.get(documents.value)));
+    toolbar.append(documents, button('New', () => open({source:'', name:`Untitled ${serial + 1}.md`, language:'markdown', trigger:document.activeElement})));
+    const info = element('div', undefined, 'canvas-document');
+    name = element('input'); name.maxLength = 160; name.setAttribute('aria-label', 'Canvas filename');
+    language = element('select'); language.setAttribute('aria-label', 'Canvas language');
+    for (const [value, label] of [['markdown','Writing'],['text','Plain text'],['python','Python'],['javascript','JavaScript'],['typescript','TypeScript'],['html','HTML'],['css','CSS'],['svg','SVG'],['json','JSON'],['bash','Shell'],['other','Other code']]) language.append(new Option(label, value));
+    name.addEventListener('input', persist); language.addEventListener('change', () => { persist(); showEditor(); }); info.append(name, language);
+    const tabs = element('div', undefined, 'canvas-tabs segmented'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Canvas view');
+    editTab = button('Edit', showEditor); previewTab = button('Preview', showPreview);
+    editTab.id = 'canvas-edit-tab'; previewTab.id = 'canvas-preview-tab';
+    for (const [tab, controls] of [[editTab,'canvas-editor'],[previewTab,'canvas-preview']]) {
+      tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', controls); tabs.append(tab);
+      tab.addEventListener('keydown', event => {
+        if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
+        event.preventDefault(); const next = event.key === 'Home' ? editTab : event.key === 'End' ? previewTab : tab === editTab ? previewTab : editTab;
+        next.click(); next.focus();
+      });
+    }
+    editor = element('textarea'); editor.id = 'canvas-editor'; editor.maxLength = 128000; editor.spellcheck = false;
+    editor.setAttribute('aria-label', 'Canvas editor'); editor.setAttribute('aria-labelledby', 'canvas-edit-tab');
+    editor.addEventListener('input', persist);
+    editor.addEventListener('keydown', event => {
+      if (event.key === 'Tab' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !['markdown','text'].includes(language.value)) {
+        event.preventDefault();
+        if (editor.value.length - (editor.selectionEnd - editor.selectionStart) + 2 <= editor.maxLength) {
+          editor.setRangeText('  ', editor.selectionStart, editor.selectionEnd, 'end'); persist();
+        }
+      }
+    });
+    preview = element('div', undefined, 'canvas-preview'); preview.id = 'canvas-preview'; preview.tabIndex = 0;
+    preview.setAttribute('role', 'tabpanel'); preview.setAttribute('aria-labelledby', 'canvas-preview-tab');
+    status = element('small', '', 'muted'); status.id = 'canvas-status';
+    const footer = element('footer', undefined, 'canvas-footer');
+    footer.append(status, button('Ask Klaude', ask), button('Download', download), button('Discard', () => {
+      const id = current.id; current = null; drafts.delete(id);
+      const next = [...drafts.values()].at(-1); if (next) select(next); else { panel.close(); editor.value = ''; }
+      refreshLaunchers();
+    }));
+    panel.append(heading, toolbar, info, tabs, editor, preview, footer);
+    document.getElementById('main-content').append(panel);
+    panel.addEventListener('close', closed);
+    panel.addEventListener('keydown', event => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); download(); }
+      if (event.key === 'Escape' && !mobile.matches) { event.preventDefault(); panel.close(); }
+    });
+    launch = button('Canvas', openAvailable, 'quiet canvas-launch'); launch.prepend(icon()); launch.title = 'Open Canvas';
+    document.querySelector('.topbar-actions').prepend(launch);
+    const menu = document.getElementById('mobile-chat-menu');
+    menuItem = button('Canvas', () => { menu.hidePopover?.(); openAvailable(); }, 'message-action');
+    const tile = element('span', undefined, 'menu-action-icon'); tile.setAttribute('aria-hidden', 'true'); tile.append(icon());
+    menuItem.setAttribute('role', 'menuitem'); menuItem.prepend(tile); menu.prepend(menuItem);
+    refreshLaunchers();
+  }
+  mobile.addEventListener('change', () => {
+    if (!panel?.open) return;
+    const focused = panel.contains(document.activeElement) ? document.activeElement : editor;
+    panel.close(); if (mobile.matches) panel.showModal(); else panel.show();
+    focused.focus({preventScroll:true});
+  });
+  document.addEventListener('klaude-auth-reset', reset);
+  document.addEventListener('klaude-chat-session-changed', reset);
+  document.addEventListener('klaude-view', () => { if (currentView !== 'chat' && panel?.open) panel.close(); refreshLaunchers(); });
+  document.addEventListener('klaude-snapshot', refreshLaunchers);
+  document.addEventListener('klaude-canvas-availability', () => queueMicrotask(refreshLaunchers));
+  window.addEventListener('pagehide', reset);
+  document.addEventListener('DOMContentLoaded', initialize);
+  return Object.freeze({open});
 })();
 window.KlaudeLockQuoteCollection = {"version":1,"collection_id":"klaude-quotes-5b69a58f4724fb5e","dataset":{"id":"geosfero/positivequotation-public-domain-quotes","url":"https://huggingface.co/datasets/geosfero/positivequotation-public-domain-quotes","revision":"4c8151903a29476f8fc66b26237c5911e1199835","source_file":"data.json","source_sha256":"f9e8db216cc7e83dbb21dc24735d2d828a6047c709381ed4240e5e049e2bd7c4","reviewed_rows":30,"selected_rows":19,"license":"other","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA.","attribution_notice":"Preserve attribution, source_entry and source_url when republishing.","license_notice":"vendor/lockscreen-quotes-NOTICE.txt"},"source_verification":{"url":"https://www.gutenberg.org/ebooks/39281.txt.utf-8","sha256":"1ae9bc98d49be7ec3d78d2015fa34951c3733f138230545ea89dc1af401d9f9e","method":"Exact complete proverb matched to its numbered source entry; no truncation or reattribution."},"easter_eggs":{"source_file":"lockscreen-quotes.json","selected_rows":130,"pop_culture_rows":38,"meme_rows":71,"greeting_rows":21,"notice":"User supplied examples and original Klaude microcopy; not part of the proverb dataset."},"quotes":[{"id":4591,"quote":"Old age is honourable.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":15,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4591","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4592,"quote":"Lose nothing for asking.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":44,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4592","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4594,"quote":"Great boast, small roast.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":140,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4594","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4595,"quote":"Charity begins at home.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":231,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4595","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4597,"quote":"Custom is second nature.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":372,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4597","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4599,"quote":"Extremes seldom last long.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":520,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4599","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4600,"quote":"First come, first served.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":579,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4600","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4602,"quote":"Grasp all, lose all.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":717,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4602","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4603,"quote":"Impudence is not courage.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":852,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4603","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4604,"quote":"Kindness will always conquer.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":889,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4604","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4605,"quote":"Labour warms, sloth harms.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":910,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4605","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4606,"quote":"Better late than never.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":920,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4606","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4608,"quote":"Live and let live.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":982,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4608","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4609,"quote":"Look before you leap.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":989,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4609","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4610,"quote":"Love is no lack.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":1000,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4610","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4612,"quote":"Manners often make fortunes.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":1025,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4612","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4615,"quote":"Share and share alike.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":1421,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4615","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4616,"quote":"Still waters run deep.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":1530,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4616","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":4617,"quote":"More haste worse speed.","attribution":"English Proverb","source_title":"A Dictionary of English Proverbs and Proverbial Phrases","source_compiler":"Thomas Preston","source_entry":753,"source_url":"https://www.gutenberg.org/ebooks/39281","detail_url":"https://positivequotation.com/quote/4617","public_domain_scope":"Project Gutenberg marks this source edition public domain in the USA."},{"id":10001,"quote":"Also try Minecraft.","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10002,"quote":"Also try Terraria.","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10003,"quote":"Also try Hytale.","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10004,"quote":"67","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10005,"quote":"TETSUOOOO","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10006,"quote":"May the source be with you.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10007,"quote":"A wild idea appeared.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10008,"quote":"Roll for initiative. Fix the bug.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10009,"quote":"The cake can wait. Ship the fix.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10010,"quote":"A save point is a good place to breathe.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10011,"quote":"Side quest: drink some water.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10012,"quote":"Inventory full. Curiosity isn't.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10013,"quote":"This is the way to the logs.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10014,"quote":"One does not simply close 47 tabs.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10015,"quote":"New game plus, same old TODO.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10016,"quote":"Your next quest starts with one line.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10017,"quote":"Somewhere, a tiny robot is cheering.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10018,"quote":"Plot twist: the bug was a feature request.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10019,"quote":"Choose your character. Keep your kindness.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10020,"quote":"The portal opens after one more test.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10021,"quote":"Respawn with a fresh cup of tea.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10022,"quote":"The stars have aligned. The build passed.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10023,"quote":"A long time ago, in a branch far away...","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10024,"quote":"Every hero needs a loading screen.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10025,"quote":"The secret level is called sleep.","attribution":"Klaude","source_kind":"easter_egg","category":"pop_culture","origin":"original_microcopy"},{"id":10026,"quote":"Welcome back, choom.","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10027,"quote":"Good morning, Night City.","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10028,"quote":"Greetings, Tarnished.","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10029,"quote":"Welcome aboard, Helldiver.","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10030,"quote":"Hey there, Traveler.","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10031,"quote":"Welcome back, Trailblazer.","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10032,"quote":"Hello, Proxy.","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10033,"quote":"Welcome back, crewmate.","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10034,"quote":"Hi, Barbie!","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10035,"quote":"Hi, Ken!","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10036,"quote":"Hello there.","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10037,"quote":"Welcome to the multiverse.","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10038,"quote":"The Digital Circus welcomes you.","attribution":"User supplied","source_kind":"easter_egg","category":"pop_culture","origin":"user_prompt"},{"id":10039,"quote":"It works on my machine. The machine is worried.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10040,"quote":"Task failed successfully.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10041,"quote":"My tabs have tabs.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10042,"quote":"I have no idea what I'm doing, but the tests pass.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10043,"quote":"One more tiny change. Famous last words.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10044,"quote":"I came. I saw. I forgot why I opened this tab.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10045,"quote":"The bug has entered its character arc.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10046,"quote":"Please hold while I negotiate with the cache.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10047,"quote":"Keyboard: clack clack. Brain: buffering.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10048,"quote":"This meeting could have been a comment.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10049,"quote":"My coffee has a dependency tree.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10050,"quote":"The spinner and I are in a staring contest.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10051,"quote":"The logs know what you did.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10052,"quote":"A semicolon walked into a bar. It ended there.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10053,"quote":"Nobody panic. I found the missing bracket.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10054,"quote":"The deploy button is looking at me funny.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10055,"quote":"404: motivation briefly unavailable.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10056,"quote":"This is fine. The tests are on fire.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10057,"quote":"I asked for a sign. Got a stack trace.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10058,"quote":"Current mood: waiting for localhost.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10059,"quote":"I have 99 problems and a cache is 98.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10060,"quote":"The TODOs are multiplying when I'm not looking.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10061,"quote":"If this compiles, I'm telling nobody.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10062,"quote":"Loading... my second thought.","attribution":"Klaude","source_kind":"easter_egg","category":"meme","origin":"original_microcopy"},{"id":10063,"quote":"What's up, brother? \u261d\ufe0f\ud83e\udd13","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10064,"quote":"Hello, everynyan!","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10065,"quote":"Hi, hi! Good morning!","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10066,"quote":"Close enough. Welcome back!","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10067,"quote":"Chat, we're so back.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10068,"quote":"Wakey wakey, it's coding time.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10069,"quote":"It's giving welcome back.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10070,"quote":"The bug filed a bug report about me.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10071,"quote":"I fixed one thing. Three things took it personally.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10072,"quote":"The error message said 'good luck.'","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10073,"quote":"The code works. Please do not make eye contact.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10074,"quote":"I gave the bug a name. Now it's a feature.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10075,"quote":"Today's forecast: scattered stack traces.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10076,"quote":"The database has trust issues.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10077,"quote":"My rubber duck asked for a transfer.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10078,"quote":"The compiler and I are no longer speaking.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10079,"quote":"I deleted the bug. It respawned in staging.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10080,"quote":"The build passed. Nobody move.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10081,"quote":"The unit tests are unionizing.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10082,"quote":"The README is a historical fiction novel.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10083,"quote":"Even my TODO list has a TODO list.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10084,"quote":"The CSS is holding everything together emotionally.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10085,"quote":"The frontend is smiling. The backend knows why.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10086,"quote":"I asked AI for help. It asked me for context.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10087,"quote":"The agent is autonomous until it needs a password.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10088,"quote":"The token budget has left the chat.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10089,"quote":"My GPU sounds like it's filing a complaint.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10090,"quote":"The cache remembers things I wish it wouldn't.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10091,"quote":"We don't talk about the third migration.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10092,"quote":"The branch is called final-final-actually-final.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10093,"quote":"The merge conflict won custody of the semicolon.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10094,"quote":"I put the bug in dark mode. It's still there.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10095,"quote":"If it's undocumented, it's a treasure hunt.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10096,"quote":"The test is flaky. So am I before coffee.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10097,"quote":"404: weekend not found.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10098,"quote":"I have achieved inbox zero. By closing the tab.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10099,"quote":"My password hint is 'nice try.'","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10100,"quote":"The Wi-Fi has chosen a dramatic exit.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10101,"quote":"Autocorrect has joined the enemy team.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10102,"quote":"My keyboard knows too much.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10103,"quote":"Coffee first. Existential debugging later.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10104,"quote":"I turned on focus mode. My brain filed an appeal.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10105,"quote":"The progress bar is thinking about its future.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10106,"quote":"I accepted the cookies. They accepted my fate.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10107,"quote":"The printer has been promoted to final boss.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10108,"quote":"Yesterday's quick fix is today's ancient curse.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10109,"quote":"Success! Something else has broken.","attribution":"User supplied","source_kind":"easter_egg","category":"meme","origin":"user_prompt"},{"id":10110,"quote":"Hello, sugar.","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10111,"quote":"Welcome back to the lobby.","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10112,"quote":"Hey, adventurer. New quest?","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10113,"quote":"Hello from another timeline.","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10114,"quote":"Greetings, mysterious protagonist.","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10115,"quote":"Welcome to your next episode.","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10116,"quote":"GM, internet stranger!","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10117,"quote":"Hey bestie. You made it.","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10118,"quote":"Well, well, well. Look who's back.","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10119,"quote":"Hello, World!","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10120,"quote":"Welcome back, localhost.","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10121,"quote":"Hey, developer. Missed you.","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10122,"quote":"Greetings, carbon-based lifeform.","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10123,"quote":"Welcome back. Your branch awaits.","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10124,"quote":"Oh, hi. Want to build something?","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10125,"quote":"Hello from the other side of the stack.","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10126,"quote":"Hey, human. Ready for round two?","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10127,"quote":"Your next commit says hello.","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10128,"quote":"Welcome back. Your TODOs missed you.","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10129,"quote":"Hey, the terminal remembers you.","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"},{"id":10130,"quote":"Greetings, keeper of the code.","attribution":"User supplied","source_kind":"easter_egg","category":"greeting","origin":"user_prompt"}]};
 "use strict";
@@ -2144,6 +2750,7 @@ let localModels = [];
 let pollTimer = null;
 let sessionsLoad = 0;
 let sessionsLoaded = false;
+let sessionsQuery = "", sessionsSearchTimer;
 let modelsLoad = 0;
 let workspaceLoad = 0;
 let workspaceOperation = "files";
@@ -2255,6 +2862,9 @@ document.addEventListener("klaude-auth-reset", () => {
   workspaceLoad += 1;
   workspaceOperation = "files";
   sessionsLoaded = false;
+  sessionsQuery = "";
+  clearTimeout(sessionsSearchTimer);
+  byId("session-search").value = "";
   sessions = [];
   localModels = [];
   byId("session-list").replaceChildren();
@@ -2262,6 +2872,7 @@ document.addEventListener("klaude-auth-reset", () => {
   byId("model-choice").replaceChildren();
   byId("model-connection-choice").replaceChildren();
   byId("effort-choice").replaceChildren();
+  byId("thinking-effort-options").replaceChildren();
   setModelBrandIcon(byId("model-logo"), "", "");
   setModelBrandIcon(byId("model-choice-logo"), "", "");
   byId("model-platform").replaceChildren();
@@ -2607,13 +3218,16 @@ function setContextPanel(open, focus = false) {
   layout.classList.toggle("inspector-open", open);
   layout.classList.toggle("inspector-closed", !open);
   byId("inspector").inert = !open;
+  byId("context-panel-scrim").hidden = !open;
   byId("inspector-toggle").setAttribute("aria-expanded", String(open));
   try { sessionStorage.setItem("klaude.context-panel.open", JSON.stringify(open)); } catch { /* Optional persistence. */ }
-  if (focus) (open ? byId("cp-tab-agent") : byId("inspector-toggle")).focus();
+  if (focus) (open ? byId("cp-tab-agent") :
+    byId(narrowScreen.matches ? "mobile-chat-more" : "inspector-toggle")).focus();
   document.dispatchEvent(new Event("klaude-context-panel"));
 }
 byId("inspector-toggle").setAttribute("aria-label", "Toggle context panel");
 byId("inspector-toggle").addEventListener("click", () => setContextPanel(!contextPanelOpen, true));
+byId("context-panel-scrim").addEventListener("click", () => setContextPanel(false, true));
 function updatePanelLayout() {
   toggleSessions(!narrowScreen.matches && !layout.classList.contains("sessions-collapsed"));
   setContextPanel(contextPanelOpen);
@@ -2800,6 +3414,9 @@ document.addEventListener("click", (event) => {
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
+    if (chatInfoPanel.matches(":popover-open")) {
+      closeChatInfo(); (window.MobileChatUI?.infoTrigger() || chatInfoToggle).focus({ preventScroll: true }); event.preventDefault(); return;
+    }
     if (narrowScreen.matches) toggleSessions(false);
     for (const id of ["model-menu", "thinking-menu"]) {
       const menu = byId(id);
@@ -2903,10 +3520,32 @@ async function controlledRequest(path, body, includeControlEpoch = true) {
 }
 
 function showError(error) {
+  if (error.name === "AbortError") return;
   if (error.authEpoch !== undefined && error.authEpoch !== authEpoch) return;
   if (error.status === 401) { showLocalAccess(); return; }
-  notice.textContent = error.message || String(error);
+  window.KlaudeToast.show(error.message || String(error), { variant: "error" });
 }
+
+function chatAdmissionBlocked() {
+  return Boolean(latest?.chat_model_blocked || latest?.state === "interrupted");
+}
+function renderChatAvailability() {
+  const blocked = chatAdmissionBlocked(), interrupted = latest?.state === "interrupted";
+  byId("chat-availability").hidden = !blocked;
+  byId("chat-availability-message").textContent = !blocked ? "" : interrupted ?
+    "The previous reply was interrupted. Your draft is kept." :
+    "This model is under maintenance. Choose another model to keep chatting.";
+  byId("chat-availability-action").textContent = interrupted ? "New chat" : "Check Downloads";
+}
+byId("chat-availability-action").addEventListener("click", () => {
+  if (latest?.state === "interrupted") { byId("new-session").click(); return; }
+  showView("models");
+  const url = new URL(location.href);
+  url.searchParams.set("models-section", "downloads");
+  url.searchParams.delete("models-detail");
+  history.pushState(history.state, "", url.pathname + url.search + url.hash);
+  window.ModelStoreUI?.restoreFromLocation();
+});
 
 async function finishStartup() {
   if (document.documentElement.dataset.startup !== "loading") return;
@@ -3233,6 +3872,7 @@ async function snapshot() {
     if (epoch === currentEpoch && Number(raw) < Number(currentRaw)) return;
   }
   latest = data;
+  renderChatAvailability();
   renderAgentActivity(data.activity);
   renderChatSendStatus();
   window.refreshLibraryCapabilities?.();
@@ -3263,6 +3903,9 @@ async function snapshot() {
   byId("session").textContent = `Session ${data.session_id.slice(0, 8)}`;
   byId("session").title = data.session_id;
   byId("state").textContent = data.state;
+  byId("chat-info-mode").textContent = data.mode === "thinking" ?
+    `Thinking${data.effort ? ` · ${data.effort}` : ""}` : "Standard";
+  byId("chat-info-plan").textContent = data.plan_mode ? "On" : "Off";
   byId("plan-toggle").title = data.plan_mode ? "Disable Plan mode" : "Enable Plan mode";
   byId("plan-toggle").setAttribute("aria-pressed", String(data.plan_mode));
   byId("plan-toggle").disabled = Boolean(data.active_turn_id);
@@ -3277,7 +3920,7 @@ async function snapshot() {
   byId("steer").hidden = !busy;
   byId("send").setAttribute("aria-label", busy ? "Queue message" : "Send message");
   byId("send").title = busy ? "Queue message" : "Send message";
-  byId("send").disabled = pending || Boolean(data.requires_model_selection);
+  byId("send").disabled = pending || Boolean(data.requires_model_selection) || chatAdmissionBlocked();
   if (window.ChatAttachmentsUI) window.ChatAttachmentsUI.refresh();
   else {
     byId("attach-file").disabled = true;
@@ -3327,7 +3970,16 @@ async function snapshot() {
   for (const element of [...messages.children]) {
     if (element !== chatResponseStatus && !retained.has(element.dataset.id)) element.remove();
   }
+  const completedWork = !busy && data.activity?.lifecycle === 'completed' && data.inspector?.completed_at ?
+    [...data.messages].reverse().find(message => message.role === 'assistant' &&
+      message.created_at >= data.inspector.started_at && message.created_at <= data.inspector.completed_at) : null;
+  let userRequest = '';
+  let canvasIntent = null;
   for (const [position, message] of orderedMessages.entries()) {
+    if (message.role === 'user') {
+      userRequest = message.content;
+      canvasIntent = window.KlaudeCanvasPolicy?.intent(userRequest, canvasIntent);
+    }
     const existing = [...messages.children].find((element) => element.dataset.id === message.id);
     const streaming = message.id === "partial" && busy;
     const article = existing || addMessage(message.role, message.content, message.id, streaming);
@@ -3338,6 +3990,11 @@ async function snapshot() {
     if (atPosition !== article) messages.insertBefore(article, atPosition || null);
     window.ChatMarkdown?.metadata?.(article, {
       createdAt: message.created_at,
+      workedSeconds: message.worked_seconds ?? (message === completedWork ?
+        Math.max(0, Math.round(data.inspector.completed_at - data.inspector.started_at)) : undefined),
+      generationStats: message.generation_stats,
+      userRequest,
+      canvasIntent,
       sessionId: data.session_id,
       previousResponse: message.previous_response === true,
       canRetry: data.message_retry_in_place === true,
@@ -3403,34 +4060,54 @@ function renderModelOptions() {
   byId("model-platform").replaceChildren(modelPlatformIndicator(select.value,
     localModels.find(item => item.id === select.value)?.backend || (select.value === currentModel ? latest.provider : "")));
   const locked = runtimeChoiceInFlight || Boolean(latest.active_turn_id) || Boolean(latest.queue?.length);
-  select.disabled = locked || !localModels.length;
-  byId("apply-model").disabled = locked || !localModels.length ||
+  const modelLocked = runtimeChoiceInFlight || latest.chat_deferred_model_selection !== true && locked;
+  select.disabled = modelLocked || !localModels.length;
+  byId("apply-model").disabled = modelLocked || !localModels.length ||
     select.value === currentModel && !latest.requires_model_selection;
-  byId("model-connection-choice").disabled = locked;
+  byId("model-connection-choice").disabled = modelLocked;
   const levels = (latest.effort_levels || []).filter(value => value !== "off");
   const supportsThinking = levels.length > 0 && !latest.requires_model_selection;
   byId("thinking-control").hidden = !supportsThinking;
-  byId("mode-toggle").disabled = locked || !supportsThinking;
+  byId("mode-toggle").disabled = locked || !supportsThinking || chatAdmissionBlocked();
   for (const id of ["model-menu", "thinking-menu"]) {
     const summary = byId(id).querySelector("summary");
-    const unavailable = locked || id === "thinking-menu" && !supportsThinking;
+    const unavailable = id === "model-menu" ? modelLocked : locked || !supportsThinking || chatAdmissionBlocked();
     summary.setAttribute("aria-disabled", String(unavailable));
     summary.tabIndex = unavailable ? -1 : 0;
     if (unavailable) byId(id).open = false;
   }
-  byId("model-picker").disabled = locked;
-  byId("effort-label").hidden = byId("effort-choice").hidden = !supportsThinking;
+  byId("model-picker").disabled = modelLocked;
   byId("effort-choice").replaceChildren(...levels.map(level => {
     const option = document.createElement("option"); option.value = level; option.textContent = level[0].toUpperCase() + level.slice(1); return option;
   }));
   byId("effort-choice").value = levels.includes(latest.effort) ? latest.effort : levels.includes("medium") ? "medium" : levels[0] || "";
   byId("effort-choice").disabled = locked;
+  const efforts = byId("thinking-effort-options");
+  if (JSON.stringify([...efforts.children].map(button => button.dataset.effort)) !== JSON.stringify(levels)) {
+    efforts.replaceChildren(...levels.map(level => {
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "message-action";
+      button.dataset.effort = level; button.setAttribute("role", "menuitemradio");
+      const icon = document.createElement("span"); icon.className = "menu-action-icon";
+      icon.setAttribute("aria-hidden", "true"); icon.append(byId("mode-toggle").querySelector("svg").cloneNode(true));
+      const label = document.createElement("span"); label.textContent = level[0].toUpperCase() + level.slice(1);
+      const check = document.createElement("span"); check.className = "effort-check";
+      check.setAttribute("aria-hidden", "true"); check.textContent = "✓";
+      button.append(icon, label, check); return button;
+    }));
+  }
+  for (const button of efforts.children) {
+    button.setAttribute("aria-checked", String(button.dataset.effort === byId("effort-choice").value));
+    button.disabled = locked || chatAdmissionBlocked();
+  }
   window.BrowserModelsUI?.render();
+  window.MobileChatUI?.render();
 }
 
 async function refreshModels() {
   const load = ++modelsLoad;
   const epoch = authEpoch;
+  window.MobileChatUI?.loading(true);
   const finish = beginLoading(byId("model-status"), { kind: "text", count: 1, preserve: localModels.length > 0, label: "Loading models…" });
   try {
     const providers = Boolean(latest?.model_providers);
@@ -3442,7 +4119,8 @@ async function refreshModels() {
       const connection = byId("model-connection-choice"), previous = connection.value;
       connection.replaceChildren(...inventory.connections.map(item => {
         const option = document.createElement("option"); option.value = item.id;
-        option.textContent = `${item.name} · ${item.source}`; option.disabled = !item.enabled; return option;
+        option.textContent = `${item.name} · ${item.source}`; option.disabled = !item.enabled;
+        option.dataset.backend = item.backend; option.dataset.source = item.source; return option;
       }));
       const preferred = [previous, latest.model_connection, inventory.connections.find(item => item.enabled && item.backend === "ollama" && item.source === "Local")?.id, inventory.connections.find(item => item.enabled)?.id];
       connection.value = preferred.find(id => inventory.connections.some(item => item.id === id && item.enabled)) || "";
@@ -3458,13 +4136,16 @@ async function refreshModels() {
   } catch (error) {
     if (load !== modelsLoad || epoch !== authEpoch || !authenticated) return;
     byId("model-status").textContent = error.message;
+    window.MobileChatUI?.catalogError(error.message);
   }
-  finally { finish(); }
+  finally { finish(); if (load === modelsLoad) window.MobileChatUI?.loading(false); }
   renderModelOptions();
 }
 
 async function chooseRuntime(kind, value, { onError = showError } = {}) {
-  if (!latest || runtimeChoiceInFlight || latest.active_turn_id || latest.queue?.length) return false;
+  if (!latest || runtimeChoiceInFlight ||
+      (kind !== "model" || latest.chat_deferred_model_selection !== true) &&
+      (latest.active_turn_id || latest.queue?.length)) return false;
   runtimeChoiceInFlight = true;
   const epoch = authEpoch;
   const effort = byId("effort-choice").value;
@@ -3494,8 +4175,39 @@ async function chooseRuntime(kind, value, { onError = showError } = {}) {
   }
 }
 // Keep each split action on the existing revisioned runtime controls.
+const chatInfoPanel = byId("chat-info-panel"), chatInfoToggle = byId("chat-info-toggle");
+function closeChatInfo() {
+  if (chatInfoPanel.matches(":popover-open")) chatInfoPanel.hidePopover();
+}
+function positionChatInfo() {
+  if (!chatInfoPanel.matches(":popover-open")) return;
+  const viewport = window.visualViewport;
+  const anchor = (window.MobileChatUI?.infoTrigger() || chatInfoToggle).getBoundingClientRect();
+  const left = (viewport?.offsetLeft || 0) + 16, top = (viewport?.offsetTop || 0) + 16;
+  const right = left + (viewport?.width || innerWidth) - 32;
+  const bottom = top + (viewport?.height || innerHeight) - 32;
+  chatInfoPanel.style.maxHeight = `${Math.max(44, bottom - top)}px`;
+  const bounds = chatInfoPanel.getBoundingClientRect();
+  chatInfoPanel.style.left = `${Math.max(left, Math.min(anchor.right - bounds.width, right - bounds.width))}px`;
+  chatInfoPanel.style.top = `${Math.max(top, Math.min(anchor.bottom + 4, bottom - bounds.height))}px`;
+}
+chatInfoPanel.addEventListener("toggle", () => {
+  const open = chatInfoPanel.matches(":popover-open");
+  chatInfoToggle.setAttribute("aria-expanded", String(open));
+  if (open) {
+    for (const id of ["model-menu", "thinking-menu"]) byId(id).open = false;
+    positionChatInfo();
+    chatInfoPanel.focus({ preventScroll: true });
+  }
+});
+for (const event of ["klaude-chat-session-changed", "klaude-auth-reset"]) document.addEventListener(event, closeChatInfo);
+document.addEventListener("klaude-view", () => { if (currentView !== "chat") closeChatInfo(); });
+window.addEventListener("resize", positionChatInfo);
+window.visualViewport?.addEventListener("resize", positionChatInfo);
+window.visualViewport?.addEventListener("scroll", positionChatInfo);
+new ResizeObserver(positionChatInfo).observe(chatInfoToggle.parentElement);
 byId("model-picker").addEventListener("click", () => {
-  byId("model-menu").open = !byId("model-menu").open;
+  window.MobileChatUI?.openModels();
 });
 function positionChatSelector(menu) {
   const popup = menu.querySelector(".model-row"), anchor = menu.parentElement.getBoundingClientRect();
@@ -3505,7 +4217,7 @@ function positionChatSelector(menu) {
   const rightEdge = leftEdge + (viewport?.width || innerWidth) - 32;
   const bottomEdge = topEdge + (viewport?.height || innerHeight) - 32;
   popup.style.maxHeight = `${Math.max(44, bottomEdge - topEdge)}px`;
-  const bounds = popup.getBoundingClientRect();
+  const bounds = {width: popup.offsetWidth, height: popup.offsetHeight};
   popup.style.left = `${Math.max(leftEdge, Math.min(anchor.left, rightEdge - bounds.width))}px`;
   const above = anchor.top - bounds.height - 4;
   popup.style.top = `${Math.max(topEdge, Math.min(above >= topEdge ? above : anchor.bottom + 4, bottomEdge - bounds.height))}px`;
@@ -3514,16 +4226,19 @@ function positionChatSelector(menu) {
 for (const id of ["model-menu", "thinking-menu"]) {
   const menu = byId(id), summary = menu.querySelector("summary");
   summary.addEventListener("click", event => {
-    if (summary.getAttribute("aria-disabled") === "true") event.preventDefault();
+    if (summary.getAttribute("aria-disabled") === "true") { event.preventDefault(); return; }
+    if (id === "model-menu") { event.preventDefault(); window.MobileChatUI?.openModels(); }
   });
   menu.addEventListener("toggle", () => {
     summary.setAttribute("aria-expanded", String(menu.open));
     if (id === "model-menu") byId("model-picker").setAttribute("aria-expanded", String(menu.open));
     if (menu.open) {
+      closeChatInfo();
       byId(id === "model-menu" ? "thinking-menu" : "model-menu").open = false;
       const popup = menu.querySelector(".model-row");
       if (!popup.matches(":popover-open")) popup.showPopover();
       positionChatSelector(menu);
+      if (id === "thinking-menu") (popup.querySelector('[aria-checked="true"]') || popup.querySelector("button"))?.focus({ preventScroll: true });
     } else {
       const popup = menu.querySelector(".model-row");
       if (popup.matches(":popover-open")) popup.hidePopover();
@@ -3546,6 +4261,7 @@ window.addEventListener("resize", repositionChatSelectors);
 window.visualViewport?.addEventListener("resize", repositionChatSelectors);
 window.visualViewport?.addEventListener("scroll", repositionChatSelectors);
 new ResizeObserver(repositionChatSelectors).observe(byId("composer"));
+new ResizeObserver(repositionChatSelectors).observe(byId("model-control"));
 byId("model-choice").addEventListener("change", renderModelOptions);
 byId("apply-model").addEventListener("click", () =>
   chooseRuntime("model", byId("model-choice").value));
@@ -3557,19 +4273,46 @@ byId("effort-choice").addEventListener("change", async () => {
     byId("mode-toggle").focus({ preventScroll: true });
   }
 });
+byId("thinking-effort-options").addEventListener("click", event => {
+  const button = event.target.closest("button[data-effort]");
+  if (!button || button.disabled) return;
+  byId("effort-choice").value = button.dataset.effort;
+  byId("effort-choice").dispatchEvent(new Event("change"));
+});
+byId("thinking-menu").addEventListener("keydown", event => {
+  const menu = byId("thinking-menu"), buttons = [...menu.querySelectorAll("button:not(:disabled)")];
+  if (!buttons.length) return;
+  const index = buttons.indexOf(document.activeElement);
+  const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 :
+    event.key === "ArrowDown" ? (index + 1) % buttons.length :
+    event.key === "ArrowUp" ? (index - 1 + buttons.length) % buttons.length : null;
+  if (next !== null) { event.preventDefault(); menu.open = true; buttons[next].focus({ preventScroll: true }); }
+  if (event.key === "Escape") {
+    event.preventDefault(); event.stopPropagation(); menu.open = false;
+    menu.querySelector("summary").focus({ preventScroll: true });
+  }
+});
 byId("mode-toggle").addEventListener("click", () =>
   chooseRuntime("mode", latest?.mode === "thinking" ? "standard" : "thinking"));
 
 async function refreshSessions({ quiet = false } = {}) {
   const load = ++sessionsLoad;
   const epoch = authEpoch;
+  const query = byId("session-search").value.trim().slice(0, 200);
   const finish = quiet ? () => {} : beginLoading(byId("session-list"), { kind: "rows", count: 5, preserve: sessionsLoaded, label: "Loading conversations…" });
   if (!sessionsLoaded) byId("session-empty").hidden = true;
   try {
-    const data = await jsonRequest(`/api/v1/sessions?archived=${byId("archived-sessions").getAttribute("aria-pressed") === "true"}`);
+    const url = `/api/v1/sessions?archived=${byId("archived-sessions").getAttribute("aria-pressed") === "true"}`;
+    let data;
+    try { data = await jsonRequest(url + (query ? `&query=${encodeURIComponent(query)}` : "")); }
+    catch (error) {
+      if (!query || error.status !== 400 || epoch !== authEpoch) throw error;
+      data = await jsonRequest(url);
+    }
     if (load !== sessionsLoad || epoch !== authEpoch || !authenticated) return;
-    if (quiet && sessionsLoaded && JSON.stringify(sessions) === JSON.stringify(data.sessions)) return;
+    if (quiet && sessionsLoaded && sessionsQuery === (data.query || "").toLowerCase() && JSON.stringify(sessions) === JSON.stringify(data.sessions)) return;
     sessions = data.sessions;
+    sessionsQuery = (data.query || "").toLowerCase();
     sessionsLoaded = true;
     renderSessionList();
     window.BrowserManagement?.capabilitiesChanged();
@@ -3579,21 +4322,29 @@ async function refreshSessions({ quiet = false } = {}) {
 function renderSessionList() {
   const list = byId("session-list");
   if (!sessionsLoaded && loadingStates.has(list)) return;
+  const indicators = new Map([...list.querySelectorAll(".session-running")].map(node =>
+    [node.closest("[data-session-open]").dataset.sessionOpen, node]));
   list.replaceChildren();
   const filter = byId("session-search").value.trim().toLowerCase();
   for (const item of sessions) {
-    if (filter && !`${item.title || ""} ${item.preview || ""} ${item.session_id}`.toLowerCase().includes(filter)) continue;
+    if (filter && sessionsQuery !== filter && !filter.split(/\s+/).every(term =>
+      `${item.title || ""} ${item.preview || ""} ${item.session_id}`.toLowerCase().includes(term))) continue;
     const button = document.createElement("button");
     button.type = "button";
     button.dataset.sessionOpen = item.session_id;
     const title = item.title || item.preview || item.session_id.slice(0, 12);
     const titleNode = document.createElement("span");
     titleNode.className = "session-title"; titleNode.textContent = title;
+    if (filter && item.preview) {
+      const snippet = document.createElement("small"); snippet.className = "session-match";
+      snippet.textContent = item.preview; titleNode.append(snippet);
+    }
     button.append(titleNode);
     if (item.active) {
-      const indicator = document.createElement("span");
+      const indicator = indicators.get(item.session_id) || document.createElement("span");
       indicator.className = "session-running"; indicator.setAttribute("aria-hidden", "true");
-      indicator.append(libraryIcon("refresh")); button.append(indicator);
+      if (!indicator.firstChild) indicator.append(MaterialLoading.create({ size: "small" }));
+      button.append(indicator);
       button.setAttribute("aria-label", `${title}, running`);
     }
     button.title = item.active ? "Conversation is running" : item.resumable ? item.preview : "Requires this session's model and mode";
@@ -3608,7 +4359,14 @@ function renderSessionList() {
     byId("archived-sessions").getAttribute("aria-pressed") === "true" ? "No archived conversations." :
       "Your conversations will appear here.";
 }
-byId("session-search").addEventListener("input", renderSessionList);
+byId("session-search").maxLength = 200;
+byId("session-search").placeholder = "Search conversations…";
+byId("session-search").addEventListener("input", () => {
+  sessionsLoad++;
+  clearTimeout(sessionsSearchTimer);
+  renderSessionList();
+  sessionsSearchTimer = setTimeout(() => refreshSessions().catch(showError), 250);
+});
 byId("archived-sessions").addEventListener("click", () => {
   const button = byId("archived-sessions");
   const archived = button.getAttribute("aria-pressed") !== "true";
@@ -3732,13 +4490,15 @@ function connect() {
 
 async function sendMessage(disposition) {
   const text = prompt.value.trim();
-  if (!text || pending || !latest) return;
+  if (!text || pending || !latest || chatAdmissionBlocked()) return;
   const attachments = window.ChatAttachmentsUI?.ids() || [];
   if (window.ChatAttachmentsUI?.preparing() || attachments.length && latest.active_turn_id) return;
   const activeTurn = latest.active_turn_id;
   const effectiveDisposition = disposition === "steer" ? "steer" :
     activeTurn ? "queue" : "start";
-  const intentKey = `${effectiveDisposition}\u0000${activeTurn || ""}\u0000${text}\u0000${attachments.join(",")}`;
+  const automatic = disposition !== "steer" && latest.chat_auto_queue === true;
+  const admission = automatic ? "auto" : effectiveDisposition;
+  const intentKey = `${admission}\u0000${automatic ? "" : activeTurn || ""}\u0000${text}\u0000${attachments.join(",")}`;
   if (!pendingIntent || pendingIntent.key !== intentKey) {
     pendingIntent = { key: intentKey, requestId: requestId() };
   }
@@ -3760,7 +4520,7 @@ async function sendMessage(disposition) {
     } else {
       await jsonRequest("/api/v1/turns", "POST", {
         request_id: pendingIntent.requestId, text,
-        disposition: effectiveDisposition,
+        disposition: admission,
         ...(attachments.length ? { attachments } : {}),
       });
     }
@@ -4243,6 +5003,8 @@ async function initialize() {
     csrf = auth.csrf;
     const username = auth.username || "admin";
     byId("account-initial").textContent = Array.from(username)[0].toLocaleUpperCase();
+    byId("mobile-chat-profile-initial").textContent = byId("account-initial").textContent;
+    byId("mobile-chat-profile-name").textContent = username;
     byId("account-shortcut").setAttribute("aria-label", `Account settings for ${username}`);
   }
   const client = await jsonRequest("/api/v1/clients", "POST", {});
@@ -4340,4 +5102,5 @@ byId("change-password").addEventListener("submit", async (event) => {
 window.addEventListener("hashchange", () => {
   if (location.hash.length > 1) initialize().catch(initializationFailed);
 });
+window.MobileChatUI?.init();
 initialize().catch(initializationFailed);

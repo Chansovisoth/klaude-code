@@ -355,9 +355,11 @@ def test_browser_applies_shared_settings_and_automatic_memory(tmp_path, monkeypa
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize("change_after_review", [False, True])
+@pytest.mark.parametrize("policy,change_after_review", [
+    ("ask", False), ("ask", True), ("allow", False), ("deny", False),
+])
 def test_browser_mcp_tools_require_review_and_recheck_definition(
-    tmp_path, monkeypatch, change_after_review,
+    tmp_path, monkeypatch, policy, change_after_review,
 ):
     from klaude_core import config
     from klaude_core.mcp_client import MCPRegistry, MCPServerConfig, namespaced_tool_name
@@ -373,6 +375,9 @@ def test_browser_mcp_tools_require_review_and_recheck_definition(
     }])
     MCPRegistry(cfg.mcp_servers_file).save({server.name: server})
     name = namespaced_tool_name("fixture", "lookup")
+    from klaude_core.settings_store import update_settings
+
+    update_settings(cfg.data_dir / "chat-preferences.json", {("permissions", name): policy})
     calls = []
     cfg._mcp_client_manager = SimpleNamespace(
         call=lambda selected, tool, arguments: calls.append((selected.name, tool, arguments)) or {
@@ -390,6 +395,12 @@ def test_browser_mcp_tools_require_review_and_recheck_definition(
         try:
             handle = app.submit("Use the fixture MCP lookup")
             consumer = asyncio.create_task(_collect(handle))
+            if policy != "ask":
+                await asyncio.wait_for(consumer, timeout=5)
+                await handle.result()
+                assert not app.pending_interactions()
+                assert bool(calls) is (policy == "allow")
+                return
             pending = ()
             for _ in range(200):
                 pending = app.pending_interactions()

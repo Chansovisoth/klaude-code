@@ -738,7 +738,7 @@ window.KlaudeAppearance ??= (() => {
           colorSource: ["preset", "custom", "image"].includes(data.colorSource) ? data.colorSource : "preset",
           accent: /^#[a-f0-9]{6}$/i.test(data.accent) ? data.accent : defaults.accent,
           variant: ["tonal-spot", "expressive", "fidelity", "content", "monochrome", "neutral", "vibrant", "rainbow", "fruit-salad"].includes(data.variant) ? data.variant : defaults.variant,
-          transparency: Number.isInteger(data.transparency) && data.transparency >= 0 && data.transparency <= 20 ? data.transparency : 0,
+          transparency: Number.isInteger(data.transparency) && data.transparency >= 0 && data.transparency <= 50 ? data.transparency : 0,
           loadingStyle: ["expressive", "classic"].includes(data.loadingStyle) ? data.loadingStyle : defaults.loadingStyle,
           loadingBarStyle: (() => {
             const style = typeof data.loadingBarStyle === "string" ? data.loadingBarStyle.replace(/-thick$/, "") : "";

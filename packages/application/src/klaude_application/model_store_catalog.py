@@ -23,16 +23,23 @@ def _text(value: Any, limit=200):
     return "".join(c for c in str(value or "") if c.isprintable())[:limit]
 
 
-def _cache(cfg, key, read, refresh):
+def _cache(cfg, key, read, refresh, *, metadata_version=None):
     identity = hashlib.sha256((cfg.huggingface_base_url + ":" + key).encode()).hexdigest()
     root = cfg.data_dir / "model-manager" / "discovery"
     path = root / f"{identity}.json"
     with _LOCK:
         previous = read_record(path)
-        if not refresh and previous and 0 <= time.time() - previous.get("checked_at", 0) < TTL:
+        if (
+            not refresh
+            and previous
+            and 0 <= time.time() - previous.get("checked_at", 0) < TTL
+            and (metadata_version is None or previous.get("metadata_version") == metadata_version)
+        ):
             return {**previous, "stale": False}
         try:
             data = {**read(), "checked_at": time.time(), "source": "Hugging Face GGUF"}
+            if metadata_version is not None:
+                data["metadata_version"] = metadata_version
         except Exception:
             return {
                 **previous,
@@ -50,7 +57,7 @@ def _cache(cfg, key, read, refresh):
         return {**data, "stale": False}
 
 
-def catalog(cfg, query="", sort="downloads", *, refresh=False, page=1):
+def catalog(cfg, query="", sort="downloads", *, refresh=False, page=1, limit=20):
     if (
         not isinstance(query, str)
         or len(query) > 200
@@ -58,13 +65,17 @@ def catalog(cfg, query="", sort="downloads", *, refresh=False, page=1):
         or sort not in {"downloads", "lastModified"}
         or type(page) is not int
         or not 1 <= page <= 500
+        or type(limit) is not int
+        or not 1 <= limit <= 50
     ):
         raise ValueError("Choose a bounded catalog query and ordering")
 
     def read():
         cursor = ""
         if page > 1:
-            previous_key = "list:" + sort + ":" + query + ":page:" + str(page - 1)
+            previous_key = (
+                "list:" + sort + ":" + query + ":limit:" + str(limit) + ":page:" + str(page - 1)
+            )
             previous_digest = hashlib.sha256(
                 (cfg.huggingface_base_url + ":" + previous_key).encode()
             ).hexdigest()
@@ -74,41 +85,56 @@ def catalog(cfg, query="", sort="downloads", *, refresh=False, page=1):
             if not previous or not previous.get("next_cursor"):
                 raise ValueError("No further catalog page is available")
             cursor = previous["next_cursor"]
-        rows, next_cursor = hub_repo_search(
-            cfg.huggingface_base_url, "", "model", query, 20, sort, filter_tag="gguf",
-            cursor=cursor, with_cursor=True,
-        )
-        models = []
-        for row in rows:
-            identity = row["id"]
-            if not re.fullmatch(
-                r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}", identity
-            ):
-                continue
-            downloads = row.get("downloads")
-            models.append(
-                {
-                    "id": "hf:" + identity,
-                    "name": identity.split("/")[-1],
-                    "publisher": identity.split("/")[0],
-                    "task": _text(row.get("pipeline_tag"), 80),
-                    "summary": _text(row["summary"], 240)
-                    or "Community GGUF. Read its model card and choose an exact file.",
-                    "categories": [],
-                    "capabilities": [],
-                    "variants": [],
-                    "downloads": downloads
-                    if row.get("downloads_known") and type(downloads) is int and downloads >= 0
-                    else None,
-                    "modified": _text(row.get("last_modified"), 80),
-                    "source_url": "https://huggingface.co/" + identity,
-                    "license": None,
-                }
+        models, seen = [], set()
+        next_cursor = ""
+        # Hub can return a short batch or entries outside our identity bounds.
+        # Fill from its continuation without dropping valid models or guessing a
+        # page-number offset. Retain a small, explicit metadata request budget.
+        for _ in range(4):
+            remaining = limit - len(models)
+            rows, next_cursor = hub_repo_search(
+                cfg.huggingface_base_url, "", "model", query, remaining, sort, filter_tag="gguf",
+                cursor=cursor, with_cursor=True,
             )
+            if len(rows) > remaining:
+                raise ValueError("Catalog returned more models than requested")
+            for row in rows:
+                identity = row["id"]
+                if not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}", identity
+                ):
+                    continue
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                downloads = row.get("downloads")
+                models.append(
+                    {
+                        "id": "hf:" + identity,
+                        "name": identity.split("/")[-1],
+                        "publisher": identity.split("/")[0],
+                        "task": _text(row.get("pipeline_tag"), 80),
+                        "summary": _text(row["summary"], 240)
+                        or "Community GGUF. Read its model card and choose an exact file.",
+                        "categories": [],
+                        "capabilities": [],
+                        "variants": [],
+                        "downloads": downloads
+                        if row.get("downloads_known") and type(downloads) is int and downloads >= 0
+                        else None,
+                        "modified": _text(row.get("last_modified"), 80),
+                        "source_url": "https://huggingface.co/" + identity,
+                        "license": None,
+                    }
+                )
+            if len(models) == limit or not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
         return {"models": models, "sort": sort, "query": query, "page": page,
-                "page_size": 20, "more": bool(next_cursor), "next_cursor": next_cursor}
+                "page_size": limit, "more": bool(next_cursor), "next_cursor": next_cursor}
 
-    return _cache(cfg, "list:" + sort + ":" + query + ":page:" + str(page), read, refresh)
+    key = "list:" + sort + ":" + query + ":limit:" + str(limit) + ":page:" + str(page)
+    return _cache(cfg, key, read, refresh, metadata_version=2)
 
 
 def detail(cfg, identity, *, refresh=False):

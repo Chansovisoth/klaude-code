@@ -2909,7 +2909,8 @@ CLI_COMMANDS = (
         "Manage document and image copies without automatic indexing.",
     ),
     CommandSpec("library image-service", CommandSurface.CLI,
-                "library image-service [--endpoint URL] [--enable|--disable] [--yes]",
+                "library image-service [--endpoint URL] [--provider sdcpp|ollama] "
+                "[--model MODEL] [--enable|--disable] [--yes]",
                 "Review a local native image service; no generation."),
     CommandSpec("library image-service-recover", CommandSurface.CLI,
                 "library image-service-recover [--yes]",

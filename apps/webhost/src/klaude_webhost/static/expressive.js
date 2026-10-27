@@ -43,7 +43,7 @@ window.KlaudeExpressive = (() => {
     const range = document.getElementById('theme-transparency');
     if (range) {
       const amount = Number(value.transparency) || 0;
-      const maximum = Number(range.max) || 20;
+      const maximum = Number(range.max) || 50;
       const minimum = Number(range.min) || 0;
       const track = range.parentElement;
       track.style.setProperty('--range-progress', `${Math.max(0, Math.min(100, (amount - minimum) / (maximum - minimum) * 100))}%`);
@@ -401,7 +401,7 @@ window.KlaudeExpressive = (() => {
       const pages = [['chat', 'Chat'], ['workspace', 'Workspaces'], ['library', 'Library'], ['models', 'Models'],
         ['integrations', 'Integrations'], ['activity', 'Activity'], ['settings', 'Settings']];
       const available = pages.map(([page, label]) => ({ group: 'Navigate', label: `Open ${label}`, run: () => showView(page) }));
-      available.push({ group: 'Chat', label: 'Switch model', run: () => { showView('models'); byId('models-query').focus(); } },
+      available.push({ group: 'Chat', label: 'Switch model', run: () => { showView('chat'); window.MobileChatUI?.openModels(); } },
         { group: 'Chat', label: 'Find a conversation', run: () => { toggleSessions(true); byId('session-search').focus(); } },
         { group: 'Chat', label: 'Toggle Context Panel', run: () => byId('inspector-toggle').click() },
         { group: 'Help', label: 'Show keyboard shortcuts', run: () => open('shortcuts') });

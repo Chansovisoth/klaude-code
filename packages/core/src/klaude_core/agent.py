@@ -29,6 +29,7 @@ from .capabilities import TurnCapabilities, TurnScope
 from .context_compaction import build_recap
 from .entities import structured_domains_for_text
 from .execution import TurnGovernor
+from .generation_stats import GenerationStats
 from .intent import (
     exact_literal_response,
     explicit_literal_response_request,
@@ -5463,8 +5464,13 @@ class Agent:
                     return name
             return ""
 
+        generation_stats = GenerationStats()
+        request_started_at = time.monotonic()
+
         def finish_payload() -> dict[str, Any]:
             payload: dict[str, Any] = {"turn_capabilities": capability_snapshot().to_dict()}
+            if stats := generation_stats.public():
+                payload["generation_stats"] = stats
             if task_progress.outcomes:
                 self.last_task_progress = task_progress.to_dict()
                 payload["task_progress"] = self.last_task_progress
@@ -5479,6 +5485,12 @@ class Agent:
                 usage = None  # unchanged metadata belongs to an earlier request
             if usage is not None:
                 self.last_request_usage = usage
+            if not failed:
+                generation_stats.observe(
+                    usage[1] if usage is not None else None,
+                    metadata.get("eval_duration") if isinstance(metadata, dict) else None,
+                    time.monotonic() - request_started_at,
+                )
             reason = governor.observe_model_usage(
                 usage
             )
@@ -6220,6 +6232,7 @@ class Agent:
                         )
                     )
             request_metadata_before = getattr(self.ollama, "last_chat_metadata", None)
+            request_started_at = time.monotonic()
             if hasattr(self.ollama, "last_chat_metadata"):
                 self.ollama.last_chat_metadata.clear()
             workspace_planner = getattr(self.ollama, "chat_workspace_plan", None)
@@ -6268,6 +6281,7 @@ class Agent:
                 # calls from the same response.
                 stream_with_tools = bool(schemas) and self.model_info.backend != "ollama"
                 structured_chat = getattr(self.ollama, "chat_structured_action", None)
+                request_started_at = time.monotonic()
                 if planning_request and callable(workspace_planner):
                     msg = workspace_planner(
                         self.model, request_messages, options=request_options, think=request_think,
@@ -7335,6 +7349,9 @@ class Agent:
             try:
                 if self.execution_guard is not None:
                     self.execution_guard()
+                final_metadata = getattr(self.ollama, "last_chat_metadata", None)
+                if isinstance(final_metadata, dict):
+                    final_metadata.clear()
                 if self.ollama_options or self.ollama_think is not None:
                     final_kwargs: dict[str, Any] = {
                         "tools": [],
@@ -7342,8 +7359,10 @@ class Agent:
                     }
                     if self.ollama_think is not None:
                         final_kwargs["think"] = self.ollama_think
+                    request_started_at = time.monotonic()
                     final_msg = self.ollama.chat(self.model, model_messages(), **final_kwargs)
                 else:
+                    request_started_at = time.monotonic()
                     final_msg = self.ollama.chat(self.model, model_messages(), tools=[])
                 observe_runtime_usage()
                 self.messages.append(final_msg)
@@ -7379,6 +7398,10 @@ class Agent:
                 structured_synthesis = getattr(self.ollama, "chat_structured_action", None)
                 synthesis_chat = (structured_synthesis if structured_action_protocol
                                   and callable(structured_synthesis) else self.ollama.chat)
+                final_metadata = getattr(self.ollama, "last_chat_metadata", None)
+                if isinstance(final_metadata, dict):
+                    final_metadata.clear()
+                request_started_at = time.monotonic()
                 final_msg = synthesis_chat(self.model, model_messages(), **synthesis_kwargs)
                 observe_runtime_usage()
                 self.messages.append(final_msg)

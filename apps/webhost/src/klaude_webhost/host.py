@@ -26,11 +26,11 @@ from klaude_application.browser_jobs import generated_jobs
 from klaude_application.browser_media_settings import OPERATIONS as MODEL_SETTINGS_OPERATIONS
 from klaude_application.browser_models import BrowserModels
 from klaude_application.browser_sessions import public_markdown, workspace_sessions
-from klaude_application.browser_settings import read_browser_settings
+from klaude_application.browser_settings import mcp_permission_states, read_browser_settings
 from klaude_application.browser_tools import ASSISTANT_READ_TOOLS
 from klaude_application.chat_attachments import prepare_attachment
 from klaude_application.contracts import UserInputRequest
-from klaude_application.coordination import CursorExpired
+from klaude_application.coordination import CursorExpired, QueuedTurn
 from klaude_application.library_artifacts import ArtifactService
 from klaude_application.library_management import LibraryManagement
 from klaude_application.local_runtime import saved_local_choice
@@ -394,6 +394,7 @@ class LocalWebHost:
 
     def _public_snapshot(self, viewer_id: str | None = None) -> dict[str, Any]:
         snapshot = self.application.snapshot(viewer_id=viewer_id)
+        selected_info, selected_mode, selected_effort, model_pending = self.application.model_selection()
         edits_enabled = self._edits_activated and self.application.agent.workspace.write_enabled
         messages = []
         budget = 700_000
@@ -437,7 +438,9 @@ class LocalWebHost:
             messages.append({"id": item["id"], "role": item["role"],
                              "content": content, "created_at": item["created_at"]})
             selected_ids.add(item["id"])
-            for attribute in ("retry_root", "previous_response"):
+            for attribute in (
+                "retry_root", "previous_response", "worked_seconds", "generation_stats",
+            ):
                 if attribute in item:
                     messages[-1][attribute] = item[attribute]
             if item.get("attachments"):
@@ -495,22 +498,27 @@ class LocalWebHost:
             "image_studio": self.library is not None,
             "model_settings": self.library is not None,
             "model_store_catalog": self.library is not None,
+            "chat_auto_queue": True,
+            "chat_model_blocked": bool(self.library is not None and
+                                       self.library.model_chat_blocked(
+                                           selected_info)),
             "requires_model_selection": snapshot.get("requires_model_selection", False),
             "model_providers": getattr(self.application.agent, "browser_models", None) is not None,
-            "model_connection": self.application.agent.model_info.connection_id,
-            "effort_levels": list(self.application.agent.model_info.capabilities.effort_levels),
+            "model_connection": selected_info.connection_id,
+            "effort_levels": list(selected_info.capabilities.effort_levels),
             "messages": messages, "state": snapshot["state"],
             "activity": snapshot["activity"],
             "inspector": snapshot.get("inspector"),
             "context_panel": True,
             "partial": snapshot["partial"][:64_000],
             "cursor": snapshot["cursor"],
-            "model": self.application.agent.model,
-            "model_ref": self.application.agent.model_info.ref,
-            "provider": self.application.agent.model_info.backend,
-            "mode": self.application.agent.reasoning_mode,
-            "effort": (self.application.agent.reasoning_effort
-                       if self.application.agent.reasoning_mode == "thinking" else None),
+            "model": selected_info.model_id,
+            "model_ref": selected_info.ref,
+            "provider": selected_info.backend,
+            "mode": selected_mode,
+            "effort": selected_effort,
+            "model_selection_pending": model_pending,
+            "chat_deferred_model_selection": True,
             "tools": "file edits enabled" if edits_enabled else (
                 "Workspace read-only · MCP reviews"
                 if getattr(getattr(self.application.agent, "browser_tools", None), "mcp_names", ())
@@ -529,12 +537,13 @@ class LocalWebHost:
             "history_truncated": len(messages) < len(snapshot["messages"]),
         }
 
-    def sessions(self, *, archived: bool = False) -> list[dict[str, Any]]:
+    def sessions(self, *, archived: bool = False, query: str = "") -> list[dict[str, Any]]:
         """Show only bounded sessions bound to this host's workspace."""
         with self._lock:
             rows = []
             for item in workspace_sessions(
-                self.application.memory, self.application.agent.workdir, archived=archived,
+                self.application.memory, self.application.agent.workdir,
+                archived=archived, query=query,
             ):
                 try:
                     models = getattr(self.application.agent, "browser_models", None)
@@ -1101,7 +1110,8 @@ class _Handler(BaseHTTPRequestHandler):
                     "/attachments.js": "attachments.js",
                     "/management.js": "management.js",
                     "/media.js": "media.js",
-                    "/ai-icons.js": "ai-icons.js", "/style.css": "style.css", "/markdown.js": "markdown.js", "/lens.js": "lens.js",
+                    "/ai-icons.js": "ai-icons.js", "/style.css": "style.css",
+                    "/markdown.js": "markdown.js", "/lens.js": "lens.js",
                     "/loading-indicator.js": "loading-indicator.js",
                     "/vendor/material-loading-shapes.js": "vendor/material-loading-shapes.js",
                     "/vendor/markdown-it.min.js": "vendor/markdown-it.min.js",
@@ -1184,11 +1194,15 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             try:
                 params = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
-                if set(params) - {"archived"} or params.get("archived", ["false"]) not in (
+                if (set(params) - {"archived", "query"} or any(len(v) != 1 for v in params.values())
+                        or params.get("archived", ["false"]) not in (
                     ["true"], ["false"],
-                ):
+                )):
                     raise ValueError("Invalid session filter")
-                items = self.owner.sessions(archived=params.get("archived") == ["true"])
+                query = params.get("query", [""])[0]
+                items = self.owner.sessions(
+                    archived=params.get("archived") == ["true"], query=query,
+                )
             except ValueError:
                 self._error(HTTPStatus.BAD_REQUEST, "invalid_argument", "Invalid session filter")
                 return
@@ -1196,7 +1210,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.SERVICE_UNAVAILABLE, "storage_unavailable",
                             "Sessions temporarily unavailable")
                 return
-            self._json(HTTPStatus.OK, {"sessions": items})
+            self._json(HTTPStatus.OK, {"sessions": items, "query": query})
         elif path == "/api/v1/sessions/export":
             try:
                 params = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
@@ -1246,7 +1260,7 @@ class _Handler(BaseHTTPRequestHandler):
                     if path.endswith("/store") and params:
                         from klaude_application.model_store_catalog import catalog
 
-                        if (set(params) - {"source", "query", "sort", "refresh", "page"}
+                        if (set(params) - {"source", "query", "sort", "refresh", "page", "limit"}
                                 or params.get("source") != ["huggingface"]
                                 or any(len(v) != 1 for v in params.values())
                                 or params.get("refresh", ["0"])[0] not in {"0", "1"}):
@@ -1254,7 +1268,8 @@ class _Handler(BaseHTTPRequestHandler):
                         result = catalog(service.cfg, params.get("query", [""])[0],
                                          params.get("sort", ["downloads"])[0],
                                          refresh=params.get("refresh") == ["1"],
-                                         page=int(params.get("page", ["1"])[0]))
+                                         page=int(params.get("page", ["1"])[0]),
+                                         limit=int(params.get("limit", ["20"])[0]))
                     else:
                         if params:
                             raise ValueError("Unknown Model Store filter")
@@ -1513,9 +1528,11 @@ class _Handler(BaseHTTPRequestHandler):
                 if path.endswith("image-test"):
                     from klaude_core.image_generation import inspect
 
-                    if set(body) != {"endpoint"} or not isinstance(body["endpoint"], str):
+                    if (set(body) - {"endpoint", "provider", "model"}
+                            or not isinstance(body.get("endpoint"), str)):
                         raise ValueError("Choose an image-service address")
-                    evidence = inspect(body["endpoint"])
+                    evidence = inspect(body["endpoint"], body.get("provider", "sdcpp"),
+                                       body.get("model", ""))
                     result = {key: evidence[key] for key in (
                         "model", "limits", "sampler", "scheduler",
                         "cancel_queued", "cancel_generating",
@@ -1602,7 +1619,7 @@ class _Handler(BaseHTTPRequestHandler):
             disposition = body.get("disposition", "start")
             if (not isinstance(text, str) or not text.strip() or len(text) > 65_536
                     or not isinstance(request_id, str)
-                    or disposition not in ("start", "queue")):
+                    or disposition not in ("start", "queue", "auto")):
                 self._error(HTTPStatus.BAD_REQUEST, "invalid_argument", "Invalid turn")
                 return
             try:
@@ -1614,8 +1631,12 @@ class _Handler(BaseHTTPRequestHandler):
                         self._error(HTTPStatus.SERVICE_UNAVAILABLE, "host_stopping",
                                     "Web UI is stopping")
                         return
-                    if self.owner.library is not None and self.owner.library.model_busy():
-                        raise RuntimeError("Model work active or unconfirmed; check Downloads")
+                    if (self.owner.library is not None and self.owner.library.model_chat_blocked(
+                            self.owner.application.model_selection()[0])):
+                        self._error(HTTPStatus.CONFLICT, "model_work_pending",
+                                    "This model is under maintenance. Choose another model "
+                                    "or check Downloads.")
+                        return
                     if disposition == "queue":
                         if body.get("attachments"):
                             raise ValueError("Send attachments when the current reply finishes")
@@ -1631,13 +1652,22 @@ class _Handler(BaseHTTPRequestHandler):
                             auth[0], viewer, self.owner.application.session_id,
                             body["attachments"],
                         ) if "attachments" in body else None
-                        handle = self.owner.application.submit(
-                            text, request_id=request_id, _controller_id=viewer,
-                            attachments=attachments,
-                        )
+                        if disposition == "auto":
+                            handle = self.owner.application.submit_or_enqueue(
+                                text, request_id=request_id, creator_id=viewer,
+                                attachments=attachments,
+                            )
+                        else:
+                            handle = self.owner.application.submit(
+                                text, request_id=request_id, _controller_id=viewer,
+                                attachments=attachments,
+                            )
                         receipt = {"request_id": handle.request_id,
-                                   "turn_id": handle.turn_id, "state": handle.state,
-                                   "session_id": handle.session_id}
+                                   "state": handle.state, "session_id": handle.session_id}
+                        if isinstance(handle, QueuedTurn):
+                            receipt["queue_id"] = handle.id
+                        else:
+                            receipt["turn_id"] = handle.turn_id
             except ValueError as exc:
                 if "request ID already used" in str(exc):
                     self._error(HTTPStatus.CONFLICT, "stale_revision", "Request ID conflict")
@@ -1646,8 +1676,13 @@ class _Handler(BaseHTTPRequestHandler):
                 else:
                     self._error(HTTPStatus.BAD_REQUEST, "invalid_argument", str(exc)[:240])
                 return
-            except RuntimeError:
-                self._error(HTTPStatus.CONFLICT, "session_busy", "Session is busy")
+            except RuntimeError as exc:
+                reason = "The conversation changed. Refresh before sending again."
+                if "active" in str(exc):
+                    reason = "A reply is in progress. Your draft is kept; send it to queue next."
+                elif "reconcile" in str(exc):
+                    reason = "The previous reply was interrupted. Open a new chat to continue."
+                self._error(HTTPStatus.CONFLICT, "session_busy", reason)
                 return
             except (OSError, sqlite3.Error):
                 self._error(HTTPStatus.SERVICE_UNAVAILABLE, "storage_unavailable",
@@ -1703,7 +1738,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.CONFLICT, "stale_revision", "Plan setting changed")
                 return
             except RuntimeError:
-                self._error(HTTPStatus.CONFLICT, "session_busy", "Session is busy")
+                self._error(HTTPStatus.CONFLICT, "session_busy",
+                            "Wait for the current reply before changing Plan.")
                 return
             self._json(HTTPStatus.OK, {"enabled": body["enabled"], "revision": revision})
         elif path == "/api/v1/messages/action":
@@ -1823,8 +1859,12 @@ class _Handler(BaseHTTPRequestHandler):
                     control = self.owner.application.control()
                     if control is not None and control != (viewer, body["control_epoch"]):
                         raise ValueError("session control changed")
-                    if self.owner.library is not None and self.owner.library.model_busy():
-                        raise RuntimeError("Model work active or unconfirmed; check Downloads")
+                    if (self.owner.library is not None and
+                            self.owner.library.model_chat_blocked(info)):
+                        self._error(HTTPStatus.CONFLICT, "model_work_pending",
+                                    "This model is under maintenance. Choose another model "
+                                    "or check Downloads.")
+                        return
                     if key == "model_ref":
                         revision = self.owner.application.choose_configured_model(
                             info, expected_revision=body["expected_revision"],
@@ -2136,6 +2176,14 @@ class _Handler(BaseHTTPRequestHandler):
                 if query:
                     raise ValueError("Unknown connection filter")
                 result = read_mcp_inventory(service.cfg.mcp_servers_file)
+                permissions = mcp_permission_states(service.cfg)
+                servers = result["servers"]
+                assert isinstance(servers, list)
+                for server in servers:
+                    state = permissions.get(server["name"])
+                    if state and state["fingerprint"] == server["fingerprint"]:
+                        server["permission"] = state["policy"]
+                        server["permission_revision"] = state["revision"]
                 result["management_allowed"] = self._mcp_management_allowed()
             elif path == "/api/v1/settings/memory":
                 if query:
@@ -2470,7 +2518,9 @@ class _Handler(BaseHTTPRequestHandler):
                             self._error(HTTPStatus.FORBIDDEN, "forbidden",
                                         "Model management requires an admin account")
                             return
-                    if (str(draft.get("operation", "")).startswith("mcp-")
+                    if ((str(draft.get("operation", "")).startswith("mcp-") or
+                         draft.get("operation") == "setting-save" and
+                         str(draft.get("id", "")).startswith("mcp_permissions."))
                             and not self._mcp_management_allowed()):
                         self._error(HTTPStatus.FORBIDDEN, "forbidden",
                                     "MCP management requires an admin account")

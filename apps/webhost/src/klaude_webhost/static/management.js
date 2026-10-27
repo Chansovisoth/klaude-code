@@ -375,6 +375,7 @@ window.BrowserManagement = (() => {
   const generationStatusId = generationDialog ? "image-generate-status" : "generated-jobs-status";
   const generationTabs = byId("generation-tabs");
   let generationType = "image";
+  let studioFromChat = false;
   let generationPreparation = 0;
   let studioCapabilities = null, studioCheck = 0;
   const studioDrafts = new Map();
@@ -402,7 +403,7 @@ window.BrowserManagement = (() => {
       studioCapabilities = result;
       byId('image-generator').replaceChildren(new Option(`${result.backend} · ${result.model || 'Not configured'}`));
       byId('image-capabilities-status').textContent = result.available ?
-        result.cancel_generating ? 'Service ready. Cancellation targets this job only.' : 'Service ready. Only queued jobs can be cancelled; running jobs may finish remotely.' : result.message;
+        result.cancellation_notice || (result.cancel_generating ? 'Service ready. Cancellation targets this job only.' : 'Service ready. Only queued jobs can be cancelled; running jobs may finish remotely.') : result.message;
       if (result.available) {
         for (const axis of ['width', 'height']) {
           byId(`image-${axis}`).min = Math.ceil(Math.max(256, result.limits[`min_${axis}`]) / 64) * 64;
@@ -431,7 +432,7 @@ window.BrowserManagement = (() => {
 
   function active(kind) {
     if (kind === "image") return authenticated && currentView === "library";
-    return authenticated && (kind === "sessions" || (kind === "jobs" ? currentView === "library" && librarySection === "outputs" : ["memory", "settings", "media"].includes(kind) ? currentView === "settings" :
+    return authenticated && (kind === "sessions" || (kind === "jobs" ? (currentView === "library" && librarySection === "outputs" || studioFromChat && currentView === "chat") : ["memory", "settings", "media"].includes(kind) ? currentView === "settings" :
       currentView === "integrations" && integrationSection === "connections"));
   }
   function busy(resource) { return changes.has(resource); }
@@ -614,10 +615,28 @@ window.BrowserManagement = (() => {
     }
     byId("connection-detail-status").textContent = connectionToggleUpdating(item) ? "" : connectionStatus(item);
     const unavailable = !connections.management_allowed || busy("browser-mcp");
+    const policy = byId("connection-detail-permission");
+    policy.disabled = unavailable || !item.tool_count || !item.permission_revision;
+    for (const input of policy.querySelectorAll("input")) input.checked = input.value === item.permission;
+    byId("connection-permission-help").textContent = item.permission === "mixed" ?
+      "Tools have different policies. Choose a policy to apply to all discovered tools on future turns." :
+      "Applies to future turns for discovered tools. New tools keep their default policy. Auto skips approval; Deny blocks calls.";
     byId("connection-detail-change").textContent = item.enabled ? "Disable" : "Enable";
     byId("connection-detail-change").disabled = unavailable || !item.enabled && item.oauth;
     byId("connection-detail-remove").disabled = unavailable;
   }
+  byId("connection-detail-permission").addEventListener("change", event => {
+    const item = detailConnection, value = event.target.value;
+    if (!item || !connections?.management_allowed || busy("browser-mcp") || reviewDialog.open) return;
+    connectionFailures.delete(item.name);
+    renderConnectionDetails();
+    review({ operation: "setting-save", id: `mcp_permissions.${item.name}`, value,
+      revision: item.permission_revision }, "browser-mcp", "connections", {
+      current: () => connections?.servers.some(current => current.name === item.name &&
+        current.permission_revision === item.permission_revision),
+      beforeOpen: () => connectionDialog.close(),
+    });
+  });
   function openConnection(item) {
     detailConnection = item; renderConnectionDetails(); connectionDialog.showModal();
   }
@@ -705,7 +724,7 @@ window.BrowserManagement = (() => {
           if (kind === "research") {
             if (!["running", "completed"].includes(item.status)) actions.append(domainButton("Start", () => reviewJob({ operation: "research-run", target: identity, revision: item.revision }, `research:${identity}`, kind)));
             if (["running", "queued", "interrupted"].includes(item.status)) actions.append(domainButton("Stop", () => reviewJob({ operation: "research-stop", target: identity, revision: item.revision }, `research-control:${identity}`, kind)));
-          } else if (!item.artifact && item.status !== "cancelled") {
+          } else if (!item.artifact && item.status !== "cancelled" && item.recoverable !== false) {
             actions.append(domainButton("Recover output", () => reviewJob({ operation: "image-recover", target: identity }, `image-recovery:${identity}`, kind)));
             actions.append(domainButton("Cancel job", () => reviewJob({ operation: "image-cancel", target: identity }, `image-control:${identity}`, kind)));
           }
@@ -790,18 +809,32 @@ window.BrowserManagement = (() => {
   generationAdd?.append(libraryIcon("plus"));
   generationAdd?.addEventListener("click", () => {
     if (!active("jobs") || byId("image-add").disabled || reviewDialog.open) return;
+    studioFromChat = false;
     generationPreparation += 1;
     byId(generationStatusId).textContent = "";
     generationDialog.showModal();
     checkImageService();
     byId(generationType === "research" ? "research-question" : "image-prompt").focus();
   });
+  async function openChatImageStudio() {
+    if (!authenticated || currentView !== "chat" || !latest?.profile_management || reviewDialog.open) return;
+    byId("mobile-chat-menu").hidePopover();
+    byId("attach-dialog").close();
+    studioFromChat = true;
+    generationPreparation += 1;
+    selectGenerationType("image");
+    generationDialog.showModal();
+    await Promise.all([loadJobs(), checkImageService()]);
+    if (generationDialog.open && currentView === "chat") byId("image-prompt").focus();
+  }
+  for (const id of ["chat-create-image", "attach-create-image"]) byId(id)?.addEventListener("click", openChatImageStudio);
   byId("image-generate-close")?.append(libraryIcon("close"));
   byId("image-generate-close")?.addEventListener("click", () => generationDialog?.close());
   generationDialog?.addEventListener("close", () => {
     if (generationDialog.open) return;
     generationPreparation += 1;
     byId("image-generate-status").textContent = "";
+    if (studioFromChat && authenticated && currentView === "chat") byId("attach-file").focus({preventScroll:true});
   });
   window.addEventListener("popstate", () => generationDialog?.close());
   byId("image-generate").addEventListener("submit", event => {
@@ -1006,7 +1039,7 @@ window.BrowserManagement = (() => {
     const connections = domainButton("Manage connections", () => {
       byId("integration-sections").querySelector('[data-integration="connections"]').click(); showView("integrations");
     }, "quiet"); connections.id = "tool-mcp-settings";
-    mcp.append(mcpHeading, domainText("p", "Manage MCP tool availability per server in MCPs. Configured MCP calls require review unless denied.", "muted"), connections); section.append(mcp);
+    mcp.append(mcpHeading, domainText("p", "Choose Auto, Ask first, or Deny in each MCP’s connection details.", "muted"), connections); section.append(mcp);
     const advanced = settingsDisclosure("advanced_permissions", "Advanced permission rules", "shield");
     const body = domainText("div", "", "settings-advanced-body");
     body.append(domainText("h4", "Workspace protections"), domainText("p", "Workspace boundaries, protected files and network restrictions apply independently of approval preferences.", "muted"),
@@ -1196,6 +1229,7 @@ window.BrowserManagement = (() => {
     if (active("memory")) { loadMemory(); loadSettings(); loadOperations(); }
     else { memoryRead?.abort(); memoryLoad += 1; settingsRead?.abort(); settingsLoad += 1; }
     if (!active("connections")) { connectionsRead?.abort(); connectionsLoad += 1; connectionDialog.close(); }
+    if (studioFromChat && currentView !== "chat") { studioFromChat = false; generationDialog?.close(); }
     if (active("jobs")) loadJobs(); else { jobsRead?.abort(); jobsLoad += 1; generationDialog?.close(); }
   });
   document.addEventListener("klaude-operations", event => {
@@ -1234,7 +1268,7 @@ window.BrowserManagement = (() => {
     profileReady = undefined;
     settingsRead?.abort(); settingsLoad += 1; settings = null;
     jobsRead?.abort(); jobsLoad += 1; jobs = null;
-    generationPreparation += 1; generationDialog?.close();
+    studioFromChat = false; generationPreparation += 1; generationDialog?.close();
     selectGenerationType("image");
     if (generationAdd) generationAdd.disabled = true;
     byId("image-generate").querySelector("button").disabled = true;

@@ -64,7 +64,8 @@ async def verify(host, root, chrome, runtime):
             })
             await tab.command("Page.navigate", {"url": host.origin})
             await tab.wait('typeof byId!=="undefined" && !byId("local-access").hidden')
-            await tab.js('byId("login-password").value=' + json.dumps(
+            await tab.js('byId("login-username").value="admin";'
+                         'byId("login-password").value=' + json.dumps(
                 host.accounts.initial_password()
             ) + ';byId("account-login").requestSubmit()')
             await tab.wait('latest?.session_id && pollTimer!==null && MaterialLoading')
@@ -189,6 +190,21 @@ async def verify(host, root, chrome, runtime):
             await tab.idle()
             assert await tab.js('byId("chat-send-status").hidden')
             await tab.js('window.fetch=composerFetch')
+            # A stale tab still starts or queues exactly once at server admission.
+            runtime.release.clear()
+            runtime.entered.clear()
+            await tab.send("Wait")
+            await tab.wait('latest.active_turn_id && !pending')
+            await tab.js('''latest={...latest,active_turn_id:''};
+              prompt.value='Queued from a stale tab';byId('composer').requestSubmit()''')
+            await tab.wait('!pending && latest.queue.some(item=>'
+                           'item.mine && item.text==="Queued from a stale tab")')
+            assert await tab.js('notice.textContent==="" && latest.queue.filter(item=>'
+                                'item.text==="Queued from a stale tab").length===1')
+            runtime.release.set()
+            await tab.idle()
+            assert await tab.js('latest.messages.filter(item=>item.role==="user" && '
+                                'item.content==="Queued from a stale tab").length===1')
             # A rejected request keeps the draft and releases the immediate status.
             await tab.js('''window.fetch=(input,options)=>String(input)==='/api/v1/turns' ?
               Promise.resolve(new Response(JSON.stringify({error:{code:'fixture',
@@ -235,6 +251,7 @@ async def verify(host, root, chrome, runtime):
                       "activity_animation_survives_snapshot": True,
                       "legacy_asset_and_activity_compatibility": True,
                       "failed_send_keeps_draft": True, "logout_cleanup": True,
+                      "stale_snapshot_queues_once": True,
                       "browser_exceptions": 0, "screenshots": str(OUT)}
             (OUT / "results.json").write_text(json.dumps(result, indent=2) + "\n")
             print(json.dumps(result, indent=2))

@@ -216,9 +216,13 @@ class OperationJournal:
             return self._receipt(updated)
 
     def witness_after_matches(
-        self, request_id: str, owner_id: str, *, candidate: object
+        self, request_id: str, owner_id: str, *, candidate: object, include_active: bool = False,
     ) -> bool:
-        """Check a proposed recovery effect without changing its unknown fence."""
+        """Check a private witness without changing its fence or replaying an effect.
+
+        Recovery callers require unknown state. Admission readers may also check
+        active work to scope a separate resource without trusting a target file.
+        """
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             self._expire(db, self._clock())
@@ -226,7 +230,8 @@ class OperationJournal:
                 "SELECT * FROM operations WHERE request_id=? AND owner_id=?",
                 (request_id, owner_id),
             ).fetchone()
-            if row is None or row[5] != "unknown" or not row[12]:
+            states = ACTIVE | {"unknown"} if include_active else {"unknown"}
+            if row is None or row[5] not in states or not row[12]:
                 raise OperationConflict("Matching unknown recovery witness unavailable")
             owned = db.execute(
                 "SELECT request_id,generation FROM operation_resources WHERE resource=?",

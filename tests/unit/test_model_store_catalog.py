@@ -23,6 +23,7 @@ def hub(tmp_path, monkeypatch):
         if request.url.path == "/api/models":
             assert request.url.params["filter"] == "gguf"
             assert request.url.params["direction"] == "-1"
+            assert "lastModified" in request.url.params.get_list("expand")
             return httpx.Response(
                 200,
                 json=[
@@ -91,3 +92,63 @@ def test_cache_age_offline_and_query_bounds(hub):
     with pytest.raises(ValueError):
         hub_gguf_files(cfg.huggingface_base_url, "", "../invalid")
     assert all("private" not in json.dumps(dict(r.headers)) for r in calls)
+
+
+def test_catalog_upgrades_cached_metadata_and_retains_offline_fallback(hub):
+    cfg, calls, state = hub
+    first = catalog(cfg)
+    path = next((cfg.data_dir / "model-manager" / "discovery").glob("*.json"))
+    old = json.loads(path.read_text())
+    old.pop("metadata_version")
+    old["models"][0]["modified"] = ""
+    path.write_text(json.dumps(old))
+    updated = catalog(cfg)
+    assert len(calls) == 2
+    assert updated["models"][0]["modified"] == "2026-10-25T00:00:00Z"
+    assert updated["metadata_version"] == 2
+    path.write_text(json.dumps(old))
+    state["offline"] = True
+    fallback = catalog(cfg)
+    assert fallback["stale"] and fallback["models"] == old["models"]
+    assert fallback["checked_at"] == first["checked_at"]
+
+
+@pytest.mark.parametrize("limit", [18, 21, 24, 50])
+def test_catalog_accepts_bounded_responsive_grid_page_sizes(hub, limit):
+    cfg, calls, _ = hub
+    result = catalog(cfg, limit=limit)
+    assert result["page_size"] == limit
+    assert calls[-1].url.params["limit"] == str(limit)
+    for invalid in [0, 51, True]:
+        with pytest.raises(ValueError, match="bounded"):
+            catalog(cfg, limit=invalid)
+
+
+def test_catalog_tops_up_short_filtered_batches_without_skipping_next_page(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from klaude_application import model_store_catalog as store
+
+    cfg = SimpleNamespace(data_dir=tmp_path, huggingface_base_url="http://catalog.test")
+    calls = []
+
+    def row(identity):
+        return {"id": identity, "summary": "", "downloads": 1, "downloads_known": True}
+
+    def search(*args, cursor="", **kwargs):
+        calls.append((cursor, args[4]))
+        if not cursor:
+            return [row("maker/first"), row("invalid"), row("maker/first")], "fill"
+        if cursor == "fill":
+            return [row(f"maker/m-{i}") for i in range(20)], "second"
+        assert cursor == "second"
+        return [row(f"maker/n-{i}") for i in range(21)], ""
+
+    monkeypatch.setattr(store, "hub_repo_search", search)
+    first = catalog(cfg, limit=21)
+    second = catalog(cfg, limit=21, page=2)
+    assert len(first["models"]) == len(second["models"]) == 21
+    assert not {item["id"] for item in first["models"]} & {
+        item["id"] for item in second["models"]
+    }
+    assert calls == [("", 21), ("fill", 20), ("second", 21)]

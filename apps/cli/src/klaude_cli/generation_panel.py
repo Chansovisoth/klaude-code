@@ -143,7 +143,8 @@ class GenerationPanel:
                     "adapter",
                     RowKind.INFO,
                     "Service",
-                    "stable-diffusion.cpp native API",
+                    "Ollama (experimental)" if self.draft.get("provider") == "ollama"
+                    else "stable-diffusion.cpp native API",
                     description="Existing local/LAN server · no authentication or installation",
                 ),
                 row("toggle", "Image generation", value="ON" if self.draft["enabled"] else "OFF"),
@@ -419,6 +420,7 @@ class GenerationPanel:
         request = ImageGenerationCommand.for_client(
             cfg, operation,
             endpoint=self.draft["endpoint"],
+            provider=self.draft.get("provider", "sdcpp"), model=self.draft["model"],
             prompt=self.prompt,
             options={
                 "width": self.width,

@@ -109,18 +109,47 @@ def public_markdown(memory: Memory, workspace: Path, identity: str) -> bytes:
 
 
 def workspace_sessions(
-    memory: Memory, workspace: Path, *, archived: bool = False,
+    memory: Memory, workspace: Path, *, archived: bool = False, query: str = "",
 ) -> list[dict[str, Any]]:
     """Filter workspace and archive state before the bounded database page."""
+    if not isinstance(query, str) or len(query) > 200 or any(not c.isprintable() for c in query):
+        raise ValueError("Enter a search of at most 200 characters")
+    terms = list(dict.fromkeys([
+        query.casefold().strip(), *re.findall(r"[\w.+#-]+", query.casefold()),
+    ]))
+    terms = [term for term in terms if term][:8]
+    public_text = (
+        "CASE WHEN json_valid(t.content) AND json_type(t.content)='text' "
+        "THEN json_extract(t.content,'$') ELSE '' END"
+    )
+
+    def rank(text: str) -> str:
+        return " + ".join(f"CASE WHEN instr(lower({text}),?)>0 THEN 1 ELSE 0 END" for _ in terms)
+
     with memory._db_lock:
-        rows = memory.db.execute(
-            "SELECT t.session_id,MAX(t.ts),COUNT(*) FROM turns t "
-            "JOIN application_workspace w ON w.session_id=t.session_id "
-            "WHERE w.path=? AND t.role IN ('user','assistant') AND "
-            "EXISTS(SELECT 1 FROM session_archive a WHERE a.session_id=t.session_id)=? "
-            "GROUP BY t.session_id ORDER BY MAX(t.ts) DESC LIMIT 100",
-            (str(workspace.resolve()), int(archived)),
-        ).fetchall()
+        if terms:
+            title_rank = rank("coalesce(n.name,'') || ' ' || t.session_id")
+            rows = memory.db.execute(
+                f"SELECT t.session_id,MAX(t.ts),COUNT(*),MAX({rank(public_text)}) "
+                f"+ 2*MAX({title_rank}) AS relevance FROM turns t "
+                "JOIN application_workspace w ON w.session_id=t.session_id "
+                "LEFT JOIN session_names n ON n.session_id=t.session_id "
+                "WHERE w.path=? AND t.role IN ('user','assistant') AND "
+                "EXISTS(SELECT 1 FROM session_archive a WHERE a.session_id=t.session_id)=? "
+                "GROUP BY t.session_id HAVING relevance>0 "
+                "ORDER BY relevance DESC,MAX(t.ts) DESC LIMIT 100",
+                (*terms, *terms, str(workspace.resolve()), int(archived)),
+            ).fetchall()
+            rows = [row[:3] for row in rows]
+        else:
+            rows = memory.db.execute(
+                "SELECT t.session_id,MAX(t.ts),COUNT(*) FROM turns t "
+                "JOIN application_workspace w ON w.session_id=t.session_id "
+                "WHERE w.path=? AND t.role IN ('user','assistant') AND "
+                "EXISTS(SELECT 1 FROM session_archive a WHERE a.session_id=t.session_id)=? "
+                "GROUP BY t.session_id ORDER BY MAX(t.ts) DESC LIMIT 100",
+                (str(workspace.resolve()), int(archived)),
+            ).fetchall()
         items = []
         for identity, updated, count in rows:
             preview = memory.db.execute(
@@ -129,6 +158,17 @@ def workspace_sessions(
                 "WHERE session_id=? AND role IN ('user','assistant') ORDER BY ts DESC,rowid DESC "
                 "LIMIT 1", (identity,),
             ).fetchone()
+            if terms:
+                positions = ",".join(f"nullif(instr(lower({public_text}),?),0)" for _ in terms)
+                match = memory.db.execute(
+                    f"SELECT substr({public_text},max(1,coalesce({positions},1)-48),240) "
+                    "FROM turns t WHERE t.session_id=? AND t.role IN ('user','assistant') "
+                    f"AND ({rank(public_text)})>0 "
+                    f"ORDER BY ({rank(public_text)}) DESC,t.ts DESC LIMIT 1",
+                    (*terms, identity, *terms, *terms),
+                ).fetchone()
+                if match:
+                    preview = match
             title = memory.db.execute(
                 "SELECT substr(name,1,160) FROM session_names WHERE session_id=?", (identity,),
             ).fetchone()

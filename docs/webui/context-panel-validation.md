@@ -8,6 +8,11 @@ permission modes were added.
 Connection status appears in the navbar; the duplicate Inspector footer and
 its status update/style rules have been removed.
 
+On mobile (up to 850px), tapping outside the Context Panel closes it and restores
+focus to the header menu. Focused Chromium checks at 320px and 390px verified
+outside dismissal, inside interaction, saved closed state and focus return;
+the desktop panel remains undimmed. No browser errors were observed.
+
 ## Execution data and privacy
 
 `klaude_application.inspection` projects the existing `application.public.v1`

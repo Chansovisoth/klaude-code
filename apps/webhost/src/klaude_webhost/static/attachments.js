@@ -146,7 +146,8 @@ window.ChatAttachmentsUI = (() => {
       selected.some(item => item.truncated) ? "Long file text is truncated to 32,000 characters." : "");
     byId("chat-attachment-status").textContent = label;
     byId("chat-attachment-status").hidden = !label;
-    byId("send").disabled = pending || jobs > 0 || Boolean(waiting) || Boolean(latest?.requires_model_selection);
+    byId("send").disabled = pending || jobs > 0 || Boolean(waiting) ||
+      Boolean(latest?.requires_model_selection) || chatAdmissionBlocked();
     byId("steer").disabled = pending || jobs > 0 || Boolean(selected.length);
     byId("attach-file").disabled = pending || !available;
     byId("attach-file").title = available ? "Attach file" :

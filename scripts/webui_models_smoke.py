@@ -129,6 +129,17 @@ async def verify(host, root, state, *, legacy=False):
                              "byId('models-query').dispatchEvent(new Event('input'))")
                 assert await tab.js("byId('models-items').textContent"
                                     ".includes('No matching models')")
+                await tab.click("#nav-chat")
+                await tab.command("Emulation.setDeviceMetricsOverride", {
+                    "width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": True,
+                })
+                await tab.click("#mobile-chat-title")
+                await tab.wait("byId('mobile-model-sheet').open && "
+                               "byId('mobile-model-list').querySelectorAll('button').length===20")
+                assert await tab.js("byId('mobile-model-group').textContent==='Local models' && "
+                                   "byId('mobile-model-list').textContent.includes('Installed')")
+                await tab.click("#mobile-model-close")
+                await tab.wait("!byId('mobile-model-sheet').open")
                 assert not tab.errors, tab.errors
                 return {"legacy": "local catalog/search/pagination passed", "console_errors": 0}
 
@@ -150,9 +161,62 @@ async def verify(host, root, state, *, legacy=False):
                     "width": width, "height": 844, "deviceScaleFactor": 1, "mobile": False,
                 })
                 for control, menu_id in (("model-picker", "model-menu"), ("thinking-menu summary", "thinking-menu")):
+                    if menu_id == "model-menu":
+                        trigger = "mobile-chat-title" if width <= 850 else "model-picker"
+                        await tab.click("#" + trigger)
+                        await tab.wait("byId('mobile-model-sheet').open && "
+                                       "byId('mobile-model-list').querySelectorAll('button').length===20")
+                        await tab.click("#mobile-model-next")
+                        assert await tab.js("byId('mobile-model-list').querySelectorAll('button')"
+                                            ".length===5")
+                        await tab.click("#mobile-model-previous")
+                        await tab.js("Promise.all(byId('mobile-model-sheet').getAnimations()"
+                                     ".map(a=>a.finished.catch(()=>{})))")
+                        overflow = await tab.js("""(()=>{
+                          const body=byId('mobile-model-sheet').querySelector('.mobile-model-body');
+                          const edge=body.getBoundingClientRect().right;
+                          return {fits:body.scrollWidth<=body.clientWidth,
+                            width:body.clientWidth,scroll:body.scrollWidth,
+                            outside:[...body.querySelectorAll('*')].filter(el=>
+                              el.getBoundingClientRect().right>edge+.5).map(el=>({
+                                id:el.id,tag:el.tagName,width:el.getBoundingClientRect().width
+                              })).slice(0,10)};
+                        })()""")
+                        assert overflow["fits"], (width, overflow)
+                        if width == 390:
+                            capture = await tab.command("Page.captureScreenshot", {"format": "png"})
+                            (output / "chat-model-sheet-all-390.png").write_bytes(
+                                base64.b64decode(capture["data"]))
+                        assert await tab.js("""(()=>{
+                          const sheet=byId('mobile-model-sheet').getBoundingClientRect();
+                          return sheet.left>=0 && sheet.right<=innerWidth && sheet.top>=0 &&
+                            sheet.bottom<=innerHeight && !byId('model-menu').open &&
+                            (innerWidth>850 || byId('model-control').getBoundingClientRect().height===0) &&
+                            byId('mobile-chat-subtitle').textContent.includes(latest.model);
+                        })()""")
+                        await tab.js("byId('mobile-model-search').value='model-03';"
+                                     "byId('mobile-model-search').dispatchEvent("
+                                     "new Event('input'))")
+                        assert await tab.js("byId('mobile-model-list').querySelectorAll('button')"
+                                            ".length===1 && byId('mobile-model-pages').hidden")
+                        capture = await tab.command("Page.captureScreenshot", {"format": "png"})
+                        (output / f"chat-model-sheet-{width}.png").write_bytes(
+                            base64.b64decode(capture["data"]))
+                        await tab.js("byId('mobile-model-close').focus()")
+                        await tab.command("Input.dispatchKeyEvent", {
+                            "type": "keyDown", "key": "Escape", "code": "Escape",
+                            "windowsVirtualKeyCode": 27,
+                        })
+                        await tab.wait("!byId('mobile-model-sheet').open")
+                        await tab.wait(f"document.activeElement===byId('{trigger}')")
+                        continue
                     await tab.click("#" + control)
                     await tab.wait(f"byId('{menu_id}').open")
-                    await asyncio.sleep(.1)
+                    await tab.js(
+                        "Promise.all(document.getAnimations()"
+                        ".filter(a=>a.effect.getTiming().iterations!==Infinity)"
+                        ".map(a=>a.finished.catch(()=>{})))"
+                    )
                     assert await tab.js(f"""(() => {{
                         const popup=byId('{menu_id}').querySelector('.model-row').getBoundingClientRect();
                         const composer=byId('composer');
@@ -162,7 +226,7 @@ async def verify(host, root, state, *, legacy=False):
                             document.documentElement.scrollWidth<=innerWidth &&
                             byId('thinking-control').getBoundingClientRect().right<=innerWidth &&
                             byId('model-control').getBoundingClientRect().left>=0 &&
-                            model.height===32 && thinking.height===32 &&
+                            model.height===(innerWidth<=850 ? 0 : 32) && thinking.height===32 &&
                             byId('plan-toggle').getBoundingClientRect().height===32;
                     }})()"""), await tab.js(f"""(() => {{
                         const r=byId('{menu_id}').querySelector('.model-row').getBoundingClientRect();
@@ -196,6 +260,58 @@ async def verify(host, root, state, *, legacy=False):
                             "code": "Escape", "windowsVirtualKeyCode": 27})
                     assert await tab.js(f"!byId('{menu_id}').open && "
                         f"document.activeElement===byId('{menu_id}').querySelector('summary')")
+            # One-tap sheet activation uses real revisioned HTTP actions for
+            # configured local/cloud connections; failures keep the old runtime.
+            await tab.command("Emulation.setDeviceMetricsOverride", {
+                "width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": True,
+            })
+            await tab.click("#mobile-chat-title")
+            await tab.wait("byId('mobile-model-sheet').open")
+            await tab.js("byId('mobile-model-search').value='model-02';"
+                         "byId('mobile-model-search').dispatchEvent(new Event('input'))")
+            state["runtime_error"] = True
+            await tab.click("#mobile-model-list button")
+            await tab.wait("!runtimeChoiceInFlight && "
+                           "byId('mobile-model-status').dataset.error==='true'")
+            assert await tab.js("byId('mobile-model-sheet').open && "
+                               "latest.model_ref.endsWith('/model-01')")
+            state["runtime_error"] = False
+            await tab.js("byId('mobile-model-search').value='';"
+                         "byId('mobile-model-search').dispatchEvent(new Event('input'));"
+                         "byId('mobile-model-connection').value='cloud';"
+                         "byId('mobile-model-connection').dispatchEvent(new Event('change'))")
+            await tab.wait("byId('mobile-model-list').querySelectorAll('button').length===3 && "
+                           "byId('mobile-model-group').textContent==='Cloud models'")
+            assert await tab.js("!byId('mobile-model-list').textContent.includes('Installed')")
+            await tab.click("#mobile-model-list button")
+            await tab.wait("!runtimeChoiceInFlight && !byId('mobile-model-sheet').open && "
+                           "latest.model_ref==='openai_api@cloud/cloud-00'")
+            assert host.application.agent.model_info.ref == "openai_api@cloud/cloud-00"
+            await tab.click("#mobile-chat-title")
+            await tab.js("byId('mobile-model-connection').value='alpha';"
+                         "byId('mobile-model-connection').dispatchEvent(new Event('change'))")
+            await tab.wait("byId('mobile-model-list').querySelectorAll('button').length===20")
+            await tab.js("byId('mobile-model-search').value='model-01';"
+                         "byId('mobile-model-search').dispatchEvent(new Event('input'))")
+            await tab.click("#mobile-model-list button")
+            await tab.wait("!runtimeChoiceInFlight && !byId('mobile-model-sheet').open && "
+                           "latest.model_ref.endsWith('/model-01')")
+            assert state["runtime_calls"] == 3
+            assert not (host.library.data / "chat-preferences.json").exists()
+            assert await tab.js("""(()=>{
+              const saved=latest;
+              try {
+                latest={...latest,active_turn_id:'fixture-active'};renderModelOptions();
+                MobileChatUI.openModels();
+                return byId('mobile-model-sheet').open &&
+                  [...byId('mobile-model-list').querySelectorAll('button')].some(b=>!b.disabled);
+              } finally {
+                byId('mobile-model-sheet').close();latest=saved;renderModelOptions();
+              }
+            })()""")
+            await tab.command("Emulation.setDeviceMetricsOverride", {
+                "width": 1440, "height": 844, "deviceScaleFactor": 1, "mobile": False,
+            })
             await tab.js("""(() => {
                 const saved=latest.effort_levels;
                 latest.effort_levels=['off']; renderModelOptions();
@@ -218,6 +334,8 @@ async def verify(host, root, state, *, legacy=False):
             await tab.wait("!runtimeChoiceInFlight && latest.mode==='thinking'")
             await tab.click("#plan-toggle")
             await tab.wait("latest.plan_mode===true")
+            assert await tab.js("byId('mobile-chat-subtitle').textContent.includes('Thinking') && "
+                               "byId('mobile-chat-subtitle').textContent.includes('Plan')")
             await asyncio.sleep(.3)
             assert await tab.js("getComputedStyle(byId('mode-toggle')).backgroundColor===getComputedStyle(byId('plan-toggle')).backgroundColor && "
                 "getComputedStyle(byId('mode-toggle')).backgroundColor!==offModeColor && "
@@ -258,7 +376,7 @@ async def verify(host, root, state, *, legacy=False):
             await tab.js("window.modelsSnapshot=latest;latest={...latest,active_turn_id:'fixture'};"
                          "renderModelOptions()")
             assert await tab.js("[...byId('models-items').querySelectorAll('button')]"
-                                ".every(b=>b.disabled)")
+                                ".some(b=>!b.disabled)")
             await tab.js("latest=modelsSnapshot;renderModelOptions()")
 
             geometry = []
@@ -387,11 +505,18 @@ def main():
                                          "http://127.0.0.1:1/v1"))
             registry.add(ModelConnection("disabled", "Disabled connection", "openai_compatible",
                                          "http://127.0.0.1:1/v1", enabled=False))
+            registry.add(ModelConnection("cloud", "Cloud provider", "openai_api",
+                                         "https://api.example.invalid/v1", source="Cloud"))
             state = {"runtime_calls": 0, "catalog_error": False, "runtime_error": False}
 
             def discover(connection, _key, state=state):
                 if state["catalog_error"]:
                     raise RuntimeError("Fixture catalog unavailable")
+                if connection.id == "cloud":
+                    return [ModelInfo(connection.backend, f"cloud-{i:02}", f"cloud-{i:02}",
+                                      ModelCapabilities(), connection_id=connection.id,
+                                      connection_revision=connection.revision,
+                                      connection_source=connection.source) for i in range(3)]
                 if connection.id != "alpha":
                     return []
                 return [ModelInfo(connection.backend, f"model-{i:02}", (
@@ -406,7 +531,7 @@ def main():
                     raise ValueError("Fixture runtime unavailable")
                 state["runtime_calls"] += 1
                 result = _Runtime()
-                result.backend = "openai_compatible"
+                result.backend = _info.backend
                 return result
 
             if not legacy:

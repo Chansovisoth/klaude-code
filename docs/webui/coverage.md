@@ -10,6 +10,7 @@ inventory's historical statements that no host/browser API exists.
 | --- | --- | --- |
 | Chat | CommonMark replies with tables/tasks, local code highlighting and copy, stable streaming, response actions, timestamp/Branch/Retry menu, shared Agent, conversation rename/archive/restore/delete and Markdown download, configured local/cloud model selection and supported effort controls, explicit startup defaults, tool reviews, questions, queue/control, device/Library text, PDF, DOCX and image attachments | In-place answer variants, queued attachments and image frame/crop controls |
 | Workspaces | Bounded reads/search/Git views, navigable file rows/breadcrumbs, highlighted source preview/copy and colored diffs; opt-in local edits | Full workspace lifecycle and coding controls |
+| Chat search and Canvas | Ranked saved-dialogue search with matching snippets; editable code/writing drafts, desktop dock/mobile dialog, passive previews, download and draft-only revision requests; recorded Worked for durations | Conversation semantic indexing, persistent Canvas history and automatic AI document revisions |
 | Library → Uploads | List/Grid/Gallery, image-only month-added groups, bounded cached thumbnails, adaptive image preview with zoom/touch controls, reviewed source links/tag chips, URL history, independent type/archive filters and sorting, reviewed imports with automatic image detection, text preview/download/tags/archive/restore/delete, reviewed saved-file Learn, image analysis and selected AI tags | Directory trees, original modification/capture dates, rich document rendering and bulk management |
 | Library → Generated | Separate inventory of saved reports/images, existing file views/actions, reviewed report Learn, Research queue/start/stop with configurable saved budgets and image-service generation/cancel/output recovery, image analysis and selected AI tags, separate saved Research model | Arbitrary generated workspace files and broader job history/control |
 | Integrations → Knowledge | Compact paged library/source rows, source/chunk counts, indexed-text search, reviewed public-URL/text-upload Learn, exact existing-source refresh and URL history; legacy Library Knowledge links migrate here | Hybrid/model queries, crawl/source creation and broader management |
@@ -22,6 +23,21 @@ inventory's historical statements that no host/browser API exists.
 Initial Library/Skills actions cover parts of inventory F058–F060, F069–F070,
 F072–F073 and F080–F082. They do not establish whole-feature parity. Desktop and
 mobile reuse the existing Material 3 Expressive shell, tokens and reduced motion.
+Chat uses an 800px conversation/composer column, a quiet header model selector,
+and attachment/Thinking/Plan controls below the input. Stop stays in the composer;
+an active draft exposes Queue and Steer. Passive Conversation details holds status,
+permissions, current modes and session identity. On narrow active composers the
+unavailable mode controls return when idle. Focused browser evidence and limits:
+`chat-layout-validation.md`.
+Compact Chat now combines brand/model/mode in one app bar, uses a searchable
+native model sheet and a 104px empty composer, and hides phone bottom navigation
+when the keyboard reduces the viewport. Desktop retains its existing layout.
+Evidence: `mobile-chat-layout-validation.md`.
+Chat also exposes genuine maintenance/interruption state before sending and keeps
+drafts with a recovery action. Unrelated model downloads retain their mutation
+fences without blocking chat. Updated hosts choose start/queue at server admission
+with durable deduplication, avoiding stale-tab start/queue conflicts. Evidence and
+live activation: `chat-admission-validation.md`.
 Shared page loading uses Google's seven-shape Material indicator, with compiled
 official morph geometry and audited end-4 cadence/rotation/zoom constants. Chat activity,
 refresh and pending operations use compact uncontained variants; pages use a

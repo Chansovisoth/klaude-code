@@ -15,6 +15,7 @@ from typing import Any, Literal, cast
 
 from klaude_core import Agent, AgentEvent, TurnScope
 from klaude_core.config import Config
+from klaude_core.generation_stats import public_generation_stats
 from klaude_core.memory import Memory
 from klaude_core.model_runtime import ModelInfo
 from klaude_core.session_runtime import capture
@@ -173,6 +174,7 @@ class HeadlessApplication:
         self._lock = threading.RLock()
         self._requests: dict[str, tuple[tuple[str, str, str, str], TurnHandle]] = {}
         self._active: TurnHandle | None = None
+        self._pending_model: tuple[ModelInfo, str, str | None, bool] | None = None
         self._closed = False
         self.requires_model_selection = False
         self.agent.set_session_context(self.session_id)
@@ -233,13 +235,13 @@ class HeadlessApplication:
         self, info: ModelInfo, *, expected_revision: int,
         request_id: str | None = None,
     ) -> int:
-        """Select a metadata-verified local model at an idle boundary."""
+        """Select a verified local model for the next turn."""
         if not isinstance(info, ModelInfo) or info.backend != "ollama":
             raise ValueError("only the configured local Ollama model can be selected")
         return self._choose_runtime(
             info, self.agent.reasoning_mode,
             self.agent.reasoning_effort if self.agent.reasoning_mode == "thinking" else None,
-            expected_revision=expected_revision, request_id=request_id,
+            expected_revision=expected_revision, request_id=request_id, next_turn=True,
         )
 
     def choose_reasoning(
@@ -274,7 +276,7 @@ class HeadlessApplication:
         try:
             return self._choose_runtime(
                 info, mode, effort, expected_revision=expected_revision, request_id=request_id,
-                runtime=runtime, configured=True,
+                runtime=runtime, configured=True, next_turn=True,
             )
         finally:
             if self.agent.runtime is not runtime:
@@ -285,7 +287,7 @@ class HeadlessApplication:
     def _choose_runtime(
         self, info: ModelInfo, mode: str, effort: str | None, *,
         expected_revision: int, request_id: str | None,
-        runtime: Any = None, configured: bool = False,
+        runtime: Any = None, configured: bool = False, next_turn: bool = False,
     ) -> int:
         if request_id is not None:
             self._validate_request_id(request_id)
@@ -315,13 +317,15 @@ class HeadlessApplication:
         else:
             raise ValueError("invalid reasoning mode")
         with self._lock:
-            if self._active is not None and not self._active.finished.is_set():
+            active = self._active is not None and not self._active.finished.is_set()
+            if active and not next_turn:
                 raise RuntimeError("turn is active")
-            if self.turns.queue(self.session_id, self.controller_id, include_submitted=False):
+            if (not next_turn and
+                    self.turns.queue(self.session_id, self.controller_id, include_submitted=False)):
                 raise RuntimeError("queued work must finish before changing models")
             if configured:
                 BrowserModels(cfg).current(info)
-            previous = capture(self.agent)
+            previous = self._selected_runtime()
             if previous is None:
                 raise ValueError("current model is not selected")
             selected = {
@@ -332,6 +336,7 @@ class HeadlessApplication:
             revision = self.turns.set_runtime_choice(
                 self.session_id, selected, previous,
                 expected_revision=expected_revision, request_id=request_id,
+                next_turn_worker=self.client_id if next_turn else None,
             )
             saved = self.memory.session_runtime(self.session_id)
             fields = ("model", "mode", "effort", "definition", "credentials")
@@ -339,26 +344,72 @@ class HeadlessApplication:
                     or saved is None
                     or any(saved[key] != selected[key] for key in fields)):
                 raise ValueError("runtime choice was superseded")
-            self.agent.model = info.model_id
-            self.agent.model_info = info
-            self.agent.reasoning_mode = mode
-            if effort is not None:
-                self.agent.reasoning_effort = effort
-            self.agent.ollama_think = effort if mode == "thinking" else False
-            self.agent.ollama_code_think = self.agent.ollama_think
-            if runtime is not None:
-                previous_runtime = self.agent.runtime
-                self.agent.runtime = runtime
-                self.agent.ollama = runtime
-                close = getattr(previous_runtime, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:
-                        pass
-            self.agent.set_session_context(self.session_id)
             self.requires_model_selection = False
+            if active:
+                self._pending_model = (info, mode, effort, configured)
+            else:
+                self._install_runtime(info, mode, effort, runtime)
+                self._pending_model = None
+                if next_turn:
+                    try:
+                        self.run_next_queued()
+                    except Exception:
+                        # Selection has committed. Scheduling failure must not
+                        # report it as rejected or replay an accepted queue item.
+                        pass
             return revision
+
+    def model_selection(self) -> tuple[ModelInfo, str, str | None, bool]:
+        """The next-turn selection; the Agent retains the running turn's runtime."""
+        with self._lock:
+            if self._pending_model is not None:
+                info, mode, effort, _ = self._pending_model
+                return info, mode, effort, True
+            mode = self.agent.reasoning_mode
+            return (self.agent.model_info, mode,
+                    self.agent.reasoning_effort if mode == "thinking" else None, False)
+
+    def _selected_runtime(self) -> dict | None:
+        value = capture(self.agent)
+        if value is None or self._pending_model is None:
+            return value
+        info, mode, effort, _ = self._pending_model
+        return {**value, "model": info.ref, "mode": mode, "effort": effort,
+                "definition": info.connection_revision, "credentials": info.credential_revision}
+
+    def _apply_pending_model(self) -> None:
+        if self._pending_model is None:
+            return
+        info, mode, effort, configured = self._pending_model
+        runtime = None
+        if configured:
+            models = BrowserModels(self.agent.tool_config)
+            models.current(info)
+            runtime = models.runtime(info)
+        self._install_runtime(info, mode, effort, runtime)
+        self._pending_model = None
+
+    def _install_runtime(self, info: ModelInfo, mode: str, effort: str | None,
+                         runtime: Any = None) -> None:
+        self.agent.model = info.model_id
+        self.agent.model_info = info
+        self.agent.reasoning_mode = mode
+        if effort is not None:
+            self.agent.reasoning_effort = effort
+        self.agent.ollama_think = effort if mode == "thinking" else False
+        self.agent.ollama_code_think = self.agent.ollama_think
+        if runtime is not None:
+            previous_runtime = self.agent.runtime
+            self.agent.runtime = runtime
+            self.agent.ollama = runtime
+            close = getattr(previous_runtime, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+        self.agent.set_session_context(self.session_id)
+        self.requires_model_selection = False
 
     def resume(self, session_id: str) -> None:
         """Restore private continuity only for the explicitly selected runtime."""
@@ -387,6 +438,7 @@ class HeadlessApplication:
             self.agent.plan_mode = self.turns.session_options(session_id)[1]
             self.agent.set_session_context(session_id)
             self.session_id = session_id
+            self._pending_model = None
             self.requires_model_selection = False
 
     def resume_local(self, session_id: str) -> None:
@@ -483,6 +535,7 @@ class HeadlessApplication:
             self.agent.plan_mode = self.turns.session_options(target)[1]
             self.agent.set_session_context(target)
             self.session_id = target
+            self._pending_model = None
             return target, prompt
 
     def retry_message(
@@ -561,6 +614,7 @@ class HeadlessApplication:
                         pass
             self.agent.set_session_context(session_id)
             self.session_id = session_id
+            self._pending_model = None
             self.requires_model_selection = require_selection
             return session_id
 
@@ -636,6 +690,8 @@ class HeadlessApplication:
                 raise RuntimeError("application is closed")
             if self.requires_model_selection:
                 raise ValueError("Choose a model before starting this conversation")
+            if self._active is None or self._active.finished.is_set():
+                self._apply_pending_model()
             runtime = capture(self.agent)
             if runtime is None:
                 raise ValueError("explicit model/runtime selection required")
@@ -693,6 +749,30 @@ class HeadlessApplication:
                 raise
             return handle
 
+    def submit_or_enqueue(
+        self, text: str, *, request_id: str, creator_id: str,
+        attachments: ChatAttachmentInput | None = None,
+    ) -> TurnHandle | QueuedTurn:
+        """Choose start/queue at admission, retaining one receipt across turn changes."""
+        self._validate_request_id(request_id)
+        with self._lock:
+            queued = self.turns.queue_receipt(request_id)
+            if queued is not None:
+                if attachments is not None:
+                    raise ValueError("request ID already used with different input")
+                # Existing enqueue validation checks session, creator and input,
+                # including terminal queue receipts. Never start a second turn.
+                return self.enqueue(text, request_id=request_id, creator_id=creator_id)
+            if self.receipt(request_id) is not None:
+                return self.submit(text, request_id=request_id, _controller_id=creator_id,
+                                   attachments=attachments)
+            if self._active is not None and not self._active.finished.is_set():
+                if attachments is not None:
+                    raise ValueError("Send attachments when the current reply finishes")
+                return self.enqueue(text, request_id=request_id, creator_id=creator_id)
+            return self.submit(text, request_id=request_id, _controller_id=creator_id,
+                               attachments=attachments)
+
     def enqueue(
         self, text: str, *, request_id: str, scope: TurnScope | str = TurnScope.STANDARD,
         creator_id: str | None = None, priority: bool = False,
@@ -703,7 +783,7 @@ class HeadlessApplication:
                 raise RuntimeError("application is closed")
             if self.requires_model_selection:
                 raise ValueError("Choose a model before queueing work in this conversation")
-            runtime = capture(self.agent)
+            runtime = self._selected_runtime()
             if runtime is None:
                 raise ValueError("explicit model/runtime selection required")
             return self.turns.enqueue(
@@ -754,7 +834,7 @@ class HeadlessApplication:
             active = self._active
             if active is None or active.turn_id != turn_id or active.finished.is_set():
                 raise ValueError("active turn changed")
-            runtime = capture(self.agent)
+            runtime = self._selected_runtime()
             if runtime is None:
                 raise ValueError("explicit model/runtime selection required")
             item = self.turns.enqueue(
@@ -773,6 +853,7 @@ class HeadlessApplication:
         with self._lock:
             if self._closed or (self._active is not None and not self._active.finished.is_set()):
                 return None
+            self._apply_pending_model()
             runtime = capture(self.agent)
             if runtime is None:
                 raise ValueError("explicit model/runtime selection required")
@@ -957,6 +1038,7 @@ class HeadlessApplication:
         saved = False
         model_content: object | None = None
         saw_error = False
+        generation_stats = None
         try:
             handle.emit("turn.started")
             builder = getattr(agent, "system_prompt_builder", None)
@@ -988,6 +1070,10 @@ class HeadlessApplication:
                         saw_error = True
                 elif event.kind == "error":
                     saw_error = True
+                elif event.kind == "done":
+                    generation_stats = public_generation_stats(
+                        event.payload.get("generation_stats"),
+                    )
                 if handle.cancelled.is_set():
                     break
             if handle.cancelled.is_set():
@@ -1032,6 +1118,9 @@ class HeadlessApplication:
                     state=handle.state if handle.state != "interrupted" else "failed",
                     assistant=final_text if saved else None, model_content=model_content,
                     message_id=handle._final_message_id,
+                    legacy_completion=(
+                        {"generation_stats": generation_stats} if generation_stats else None
+                    ),
                 )
                 if saved:
                     handle.emit(

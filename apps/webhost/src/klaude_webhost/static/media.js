@@ -14,7 +14,7 @@ window.BrowserModelsUI = (() => {
     byId("models-current-name").textContent = latest.requires_model_selection ? "Choose a model" : latest.model;
     byId("models-current-name").title = latest.model_ref || latest.model;
     byId("models-current-status").textContent = choosing ? "Changing model…" : latest.active_turn_id || latest.queue?.length ?
-      "Models can be changed when this conversation is idle." : latest.requires_model_selection ? "Select a model to start chatting." : "";
+      latest.chat_deferred_model_selection === true ? "Model changes apply to the next prompt and queued messages." : "Models can be changed when this conversation is idle." : latest.requires_model_selection ? "Select a model to start chatting." : "";
     byId("configured-models-refresh").disabled = loading;
     byId("configured-models-refresh").setAttribute("aria-busy", String(loading));
     const nodes = connections.map(item => {
@@ -62,7 +62,8 @@ window.BrowserModelsUI = (() => {
       }
       const use = domainButton(choosing === item.id ? "Changing…" : current ? "Current" : "Use model", () => useModel(item), current ? "quiet" : "secondary");
       use.setAttribute("aria-label", current ? `${item.name}, current chat model` : `Use ${item.name} for this conversation`);
-      use.disabled = current || runtimeChoiceInFlight || Boolean(choosing) || Boolean(latest.active_turn_id) || Boolean(latest.queue?.length);
+      use.disabled = current || runtimeChoiceInFlight || Boolean(choosing) ||
+        latest.chat_deferred_model_selection !== true && (Boolean(latest.active_turn_id) || Boolean(latest.queue?.length));
       node.append(artwork, content, use);
       return node;
     });
@@ -75,7 +76,7 @@ window.BrowserModelsUI = (() => {
     byId("models-pages").hidden = items.length <= pageSize;
   }
   async function useModel(item) {
-    if (choosing || !active() || runtimeChoiceInFlight || latest.active_turn_id || latest.queue?.length) return;
+    if (choosing || !active() || runtimeChoiceInFlight || latest.chat_deferred_model_selection !== true && (latest.active_turn_id || latest.queue?.length)) return;
     choosing = item.id;
     const epoch = authEpoch;
     render();
@@ -179,7 +180,7 @@ window.BrowserMedia = (() => {
       { operation: "image-settings-save", ...entry.value, revision: entry.base.version } :
       { operation: "defaults-save", field: entry.base.id, value: entry.value, expected: entry.base.value },
     order: entry => entry.base.id === "vision_enabled" ? entry.value ? 2 : -2 : entry.base.id === "image_service" ? 3 : 0,
-    count: entry => entry.base.id === "image_service" ? ["endpoint", "enabled"].filter(key => entry.value[key] !== entry.base.value[key]).length : 1,
+    count: entry => entry.base.id === "image_service" ? ["endpoint", "enabled", "provider", "model"].filter(key => entry.value[key] !== entry.base.value[key]).length : 1,
     normalized: normalizedDraft,
     validate: entries => entries.every(entry => {
       const inputs = entry.base.id === "image_service" ? [byId("image-service-url")] :
@@ -229,7 +230,7 @@ window.BrowserMedia = (() => {
   }
   function renderBusy() {
     for (const input of byId("default-model-fields").querySelectorAll("input, select, button")) input.disabled = busy("defaults");
-    for (const input of byId("image-service-save").querySelectorAll("input, button")) input.disabled = busy("image_service");
+    for (const input of byId("image-service-save").querySelectorAll("input, select, button")) input.disabled = busy("image_service");
     byId("default-model-catalog").querySelector("button").disabled = !settings || loadingCatalog;
     byId('image-service-test').disabled = imageTestBusy || busy('image_service') || !latest?.model_settings;
   }
@@ -312,6 +313,9 @@ window.BrowserMedia = (() => {
     byId("default-model-fields").replaceChildren(...fields);
     const image = SettingsDrafts.value("models", "image_service");
     byId("image-service-url").value = image.endpoint;
+    byId("image-service-provider").value = image.provider;
+    byId("image-service-model-name").value = image.model;
+    byId("image-service-model-row").hidden = image.provider !== "ollama";
     byId("image-service-enabled").checked = image.enabled;
     byId("image-service-model").textContent = settings.image_service.model ? `Saved model: ${settings.image_service.model}` : "No image model configured.";
     recovery("defaults"); recovery("image_service"); renderBusy();
@@ -336,7 +340,7 @@ window.BrowserMedia = (() => {
       settings = result;
       SettingsDrafts.ingest("models", [
         ...Object.entries(settings.defaults).map(([id, value]) => ({ id, value, version: value, label: labels[id] })),
-        { id: "image_service", value: { endpoint: settings.image_service.endpoint, enabled: settings.image_service.enabled },
+        { id: "image_service", value: { endpoint: settings.image_service.endpoint, enabled: settings.image_service.enabled, provider: settings.image_service.provider || "sdcpp", model: settings.image_service.model },
           version: settings.image_service.revision, label: labels.image_service },
       ]);
       const selected = byId("default-model-connection").value;
@@ -372,7 +376,7 @@ window.BrowserMedia = (() => {
         throw new Error("Restart the Web UI host and reload to check model capabilities.");
       catalogLoaded = true; loadingCatalog = false;
       models = result.models; renderSettings();
-      byId("media-settings-status").textContent = models.length ? "Compatible models are listed for each role. Choose models, then Save changes." : "This connection returned no models.";
+      byId("media-settings-status").textContent = models.length ? "" : "This connection returned no models.";
     } catch (error) {
       if (active() && epoch === authEpoch && current === catalogGeneration && error.name !== "AbortError") {
         domainError(error, "media-settings-status");
@@ -395,23 +399,27 @@ window.BrowserMedia = (() => {
   });
   let imageTestResult = null, imageTestBusy = false;
   const changeImage = () => {
+    byId("image-service-model-row").hidden = byId("image-service-provider").value !== "ollama";
     imageTestResult = null;
-    if (settings) stage("image_service", { endpoint: byId("image-service-url").value.trim(), enabled: byId("image-service-enabled").checked });
+    if (settings) stage("image_service", { endpoint: byId("image-service-url").value.trim(), enabled: byId("image-service-enabled").checked, provider: byId("image-service-provider").value, model: byId("image-service-model-name").value.trim() });
   };
   byId('image-service-test').addEventListener('click', async () => {
     const endpoint = byId('image-service-url').value.trim(), epoch = authEpoch;
+    const provider = byId('image-service-provider').value, model = byId('image-service-model-name').value.trim();
     imageTestBusy = true; renderBusy();
     imageTestResult = {endpoint, message: 'Testing image service…'};
     byId('image-settings-status').textContent = imageTestResult.message;
     try {
-      const result = await domainRequest('/api/v1/settings/models/image-test', 'POST', {endpoint});
-      if (epoch !== authEpoch || !active() || byId('image-service-url').value.trim() !== endpoint) return;
+      const result = await domainRequest('/api/v1/settings/models/image-test', 'POST', {endpoint, provider, model});
+      if (epoch !== authEpoch || !active() || byId('image-service-url').value.trim() !== endpoint || byId('image-service-provider').value !== provider || byId('image-service-model-name').value.trim() !== model) return;
       imageTestResult = {endpoint, message: `Service reached. Model: ${result.model}. Width ${result.limits.min_width}–${result.limits.max_width}, height ${result.limits.min_height}–${result.limits.max_height}. No image was generated.`};
       byId('image-settings-status').textContent = imageTestResult.message;
     } catch (error) { if (epoch === authEpoch && active()) { imageTestResult = {endpoint, message: error.message}; byId('image-settings-status').textContent = error.message; } }
     finally { if (epoch === authEpoch) { imageTestBusy = false; renderBusy(); } }
   });
   byId("image-service-url").addEventListener("input", changeImage);
+  byId("image-service-model-name").addEventListener("input", changeImage);
+  byId("image-service-provider").addEventListener("change", changeImage);
   byId("image-service-enabled").addEventListener("change", changeImage);
   byId("image-service-save").addEventListener("submit", event => { event.preventDefault(); changeImage(); });
   document.addEventListener("klaude-view", () => {
@@ -963,6 +971,7 @@ window.ModelStoreUI = (() => {
   const labels = ['Discover', 'Installed', 'Downloads'];
   const categories = ['Coding', 'Reasoning', 'Vision', 'General-purpose', 'Lightweight'];
   let section = 'discover', collection = '', category = '', catalog = null, connections = [], endpoint = '', inventory = null;
+  let livePageSize = 20;
   let liveCatalog = null, livePage = 1, liveSerial = 0, liveReading = null, searchTimer = null, detailReading = '', liveLoading = false;
   const liveDetails = new Map();
   const hub = () => collection === 'charts' || byId('store-source').value === 'huggingface';
@@ -970,6 +979,47 @@ window.ModelStoreUI = (() => {
   let popularCatalog = null, recentCatalog = null, popularReading = null, popularSerial = 0;
   let jobs = [], observedTransfers = [], jobsLoaded = false, serial = 0, allowed = false, pending = false, timer = null, reading = null, busyRead = false;
   const downloadBars = new Map();
+  const downloadRates = new Map();
+  const downloadRateKey = item => `${item.request_id ? 'owned' : 'observed'}:${item.request_id || item.id}`;
+  function sampleDownloadRates(items) {
+    const now = performance.now(), retained = new Set();
+    for (const item of items) {
+      const key = downloadRateKey(item), progress = item.progress;
+      if (!['running','cancelling'].includes(item.state) || !Number.isFinite(progress?.completed) ||
+          !Number.isFinite(progress?.total) || progress.total <= 0 || progress.completed < 0) continue;
+      retained.add(key);
+      const previous = downloadRates.get(key), elapsed = previous ? (now - previous.at) / 1000 : 0;
+      if (previous && elapsed < .25 && previous.total === progress.total && previous.stage === progress.stage &&
+          progress.completed >= previous.completed) continue;
+      const comparable = previous && elapsed >= .25 && elapsed <= 15 && previous.total === progress.total &&
+        previous.stage === progress.stage && progress.completed >= previous.completed;
+      downloadRates.set(key, {at:now, total:progress.total, stage:progress.stage, completed:progress.completed,
+        rate:comparable ? (progress.completed - previous.completed) / elapsed / 1_000_000 : null});
+    }
+    for (const key of downloadRates.keys()) if (!retained.has(key)) downloadRates.delete(key);
+  }
+  function downloadMetadata(item) {
+    const installed = item.state === 'completed' && item.kind === 'model-pull' && item.connection === endpoint && !inventory?.stale
+      ? inventory?.models?.find(row => row.name === item.model) : null;
+    let variant;
+    for (const collection of [catalog?.models || [], [...liveDetails.values()]]) {
+      for (const model of collection) {
+        variant = model.variants?.find(row => row.tag === item.model);
+        if (variant) break;
+      }
+      if (variant) break;
+    }
+    const parameters = installed?.parameters || item.parameters || variant?.parameters;
+    const size = installed?.size ?? item.size ?? variant?.size;
+    const knownSize = Number.isFinite(size) && size >= 0;
+    const fileSizeKnown = Number.isFinite(item.progress?.total) && item.progress.total > 0;
+    return {parameters:typeof parameters === 'string' && parameters.trim() ? parameters : 'Parameters unknown',
+      size:knownSize ? fileSize(size) : variant?.size_label || (fileSizeKnown ? `File ${fileSize(item.progress.total)}` : 'Size unknown')};
+  }
+  function downloadSpeed(item) {
+    const rate = downloadRates.get(downloadRateKey(item))?.rate;
+    return Number.isFinite(rate) ? `${rate.toLocaleString(undefined, {minimumFractionDigits:1, maximumFractionDigits:2})} MB/s` : '— MB/s';
+  }
   function removeDownloadBar(key) { const bar = downloadBars.get(key); bar?.destroy?.(); bar?.element.remove(); downloadBars.delete(key); }
   function clearDownloadBars() { for (const key of downloadBars.keys()) removeDownloadBar(key); }
   const active = () => authenticated && currentView === 'models';
@@ -1005,6 +1055,7 @@ window.ModelStoreUI = (() => {
     byId('store-source').value = p.get('models-source') === 'offline' || category || ['tools','vision','thinking'].includes(p.get('models-capability')) ? 'curated' : 'huggingface';
     byId('store-sort').value = p.get('models-sort') === 'lastModified' ? 'lastModified' : 'downloads';
     livePage = Math.max(1, Math.min(500, Number(p.get('models-page')) || 1));
+    livePageSize = Math.max(1, Math.min(50, Number(p.get('models-page-size')) || 20));
     byId('store-size').value = ['8','16','32'].includes(p.get('models-size')) ? p.get('models-size') : 'all';
     byId('store-capability').value = ['tools','vision','thinking'].includes(p.get('models-capability')) ? p.get('models-capability') : 'all';
     return true;
@@ -1017,7 +1068,7 @@ window.ModelStoreUI = (() => {
     if (cat) { collection = ''; byId('store-source').value = 'curated'; }
     const url = new URL(location.href);
     for (const [key, value] of Object.entries({'models-section': section, 'models-category': category,
-      'models-collection': collection, 'models-page': livePage > 1 ? String(livePage) : '', 'models-detail': detail, 'models-variant': detail ? variant : '', 'models-query': byId('store-query').value,
+      'models-collection': collection, 'models-page': livePage > 1 ? String(livePage) : '', 'models-page-size': livePage > 1 ? String(livePageSize) : '', 'models-detail': detail, 'models-variant': detail ? variant : '', 'models-query': byId('store-query').value,
       'models-source': byId('store-source').value === 'curated' ? 'offline' : 'huggingface', 'models-sort': byId('store-sort').value,
       'models-size': byId('store-size').value, 'models-capability': byId('store-capability').value})) {
       if (value && value !== 'all') url.searchParams.set(key, value); else url.searchParams.delete(key);
@@ -1072,6 +1123,11 @@ window.ModelStoreUI = (() => {
     const task = source?.task || (known.has(source?.summary) ? source.summary : '');
     return /^[a-z][a-z0-9-]{0,79}$/.test(task) ? task.charAt(0).toUpperCase() + task.slice(1) : '';
   }
+  function modelUpdated(item) {
+    const date = typeof item?.modified === 'string' && item.modified.trim() ? new Date(item.modified) : null;
+    return date && Number.isFinite(date.getTime()) ? date : null;
+  }
+  const updatedLabel = date => date ? new Intl.DateTimeFormat(undefined, {dateStyle:'medium'}).format(date) : 'Unknown';
   function modelRow(item, rank = 0) {
     const button = domainButton('', () => openDetail(item.id, button), 'store-row quiet');
     button.dataset.storeModel = item.id;
@@ -1082,13 +1138,18 @@ window.ModelStoreUI = (() => {
       const downloads = domainText('small', '', 'store-download-count muted');
       downloads.title = purpose; downloads.setAttribute('aria-label', purpose);
       downloads.append(libraryIcon('download'), domainText('span', item.downloads.toLocaleString()));
-      content.append(downloads);
+      const metadata = domainText('span', '', 'store-model-metadata');
+      const modified = modelUpdated(item), updated = domainText('small', 'Updated ', 'store-last-updated muted');
+      if (modified) {
+        const time = domainText('time', updatedLabel(modified));
+        time.dateTime = modified.toISOString(); time.title = modified.toLocaleString(); updated.append(time);
+      } else updated.append(document.createTextNode('Unknown'));
+      metadata.append(downloads, updated); content.append(metadata);
     } else content.append(domainText('small', purpose, 'muted'));
     const task = modelTask(item);
     if (task) content.append(domainText('small', task, 'store-task-label muted'));
     content.append(runtimeBadge());
 
-    if (item.modified && byId('store-sort').value === 'lastModified') content.append(domainText('small', `Updated ${item.modified}`, 'muted'));
     if (rank) { button.classList.add('store-ranked-row'); button.append(domainText('span', String(rank), 'store-rank')); }
     const installed = inventory?.models?.some(local => item.variants?.some(v => v.tag === local.name));
     button.append(icon(item.id, 40), content, domainText('span', installed ? 'Installed' : 'View', 'store-cta'));
@@ -1097,7 +1158,7 @@ window.ModelStoreUI = (() => {
   }
   function modelGrid(items, ranked = false) {
     const grid = domainText('div', '', 'store-model-grid');
-    items.forEach((item, index) => grid.append(modelRow(item, ranked ? index + 1 : 0)));
+    items.forEach((item, index) => grid.append(modelRow(item, ranked && Number.isInteger(item.downloads) ? index + 1 : 0)));
     return grid;
   }
   function filtered() {
@@ -1109,6 +1170,13 @@ window.ModelStoreUI = (() => {
   function emptyState(target, title, description, icon) {
     collectionEmpty(target, title, description, icon); target.classList.add('is-empty');
     target.querySelector('.collection-empty').setAttribute('role', 'status');
+  }
+  function catalogLoading(target) {
+    const state = domainText('div', '', 'collection-empty store-catalog-loading');
+    state.setAttribute('role', 'status'); target.setAttribute('aria-busy', 'true');
+    const indicator = window.MaterialLoadingCircle?.create({size:'large'});
+    if (indicator) state.append(indicator);
+    state.append(domainText('p', 'Loading Catalog')); target.append(state);
   }
   function settingsLink(target) {
     target.append(domainButton('Open model settings', () => {
@@ -1142,6 +1210,7 @@ window.ModelStoreUI = (() => {
     if (variant && selectedIndex >= 0 && variantPageSelection !== variant) { variantPage = Math.floor(selectedIndex / 20) + 1; variantPageSelection = variant; }
     const metadata = variants.find(row => row.tag === variant);
     const installed = metadata && inventory?.models?.find(row => row.name === variant);
+    const downloadSize = installed?.size != null ? fileSize(installed.size) : metadata?.size != null ? fileSize(metadata.size) : metadata?.size_label || '';
     const destination = connections.find(c => c.id === endpoint)?.name || '';
     const current = Boolean(installed && !latest?.requires_model_selection && (latest?.model_ref === `ollama@${endpoint}/${variant}` || endpoint === 'default-ollama' && [variant,`ollama/${variant}`].includes(latest?.model_ref || latest?.model)));
     const useAllowed = Boolean(installed && !inventory.stale && !current && !pending && !runtimeChoiceInFlight && !latest?.active_turn_id && !latest?.queue?.length && (latest?.model_providers || endpoint === 'default-ollama'));
@@ -1171,19 +1240,22 @@ window.ModelStoreUI = (() => {
     summary.append(runtimeBadge());
     if (item?.stale) summary.append(domainText('p', 'Cached metadata', 'model-detail-source muted'));
     const actionArea = domainText('div', '', 'model-detail-actions');
-    const install = domainButton(current ? 'Current model' : 'Use model', async () => {
-      if (!installed) { focusVariants(); return; }
+    const install = domainButton(installed ? current ? 'Current model' : 'Use model' : variant ? `Download${downloadSize ? ` · ${downloadSize}` : ''}` : 'Choose model', async () => {
+      if (!installed) {
+        if (!variant) focusVariants(); else review('model-pull', variant);
+        return;
+      }
       if (installed) {
         if (!useAllowed) return; pending = true; renderDetail();
         try { await chooseRuntime('model', latest.model_providers ? `ollama@${endpoint}/${variant}` : variant, {onError:error => message(error.message)}); }
         finally { pending = false; renderDetail(); }
       }
-    }, installed ? 'model-detail-install' : 'secondary model-detail-choose'); install.id = 'store-detail-install';
-    install.disabled = installed ? !useAllowed : !variants.length;
-    if (installed) actionArea.append(install);
+    }, installed || variant ? 'model-detail-install' : 'secondary model-detail-choose'); install.id = 'store-detail-install';
+    install.disabled = installed ? !useAllowed : variant ? !canWrite() || !inventory?.models || inventory.stale : !variants.length;
+    if (!installed && variant) install.prepend(libraryIcon('download'));
+    actionArea.append(install);
     let blocker = '';
-    if (loading) blocker = 'Loading exact variants…';
-    else if (!variants.length) blocker = item?.error || 'No supported variants are available.';
+    if (!loading && !variants.length) blocker = item?.error || 'No supported variants are available.';
     else if (!endpoint) blocker = 'Choose an enabled native Ollama connection in Model settings.';
     else if (!allowed && !installed) blocker = 'Installation requires an admin account.';
     else if (latest?.active_turn_id || latest?.queue?.length) blocker = 'Finish the conversation and queue before model work.';
@@ -1209,6 +1281,7 @@ window.ModelStoreUI = (() => {
     const task = modelTask(item);
     if (task) facts.push(['Task', task]);
     if (Number.isInteger(item?.downloads)) facts.push(['Hub downloads', new Intl.NumberFormat(undefined, {notation:'compact', maximumFractionDigits:1}).format(item.downloads)]);
+    if (Number.isInteger(item?.downloads) || modelUpdated(item)) facts.push(['Updated', updatedLabel(modelUpdated(item))]);
     if (variants.length) facts.push(['Available variants', String(variants.length)]);
     if (metadata?.parameters) facts.push(['Parameters', metadata.parameters]);
     if (detail.startsWith('hf:') && variants.length) facts.push(['Format', 'GGUF']);
@@ -1236,7 +1309,7 @@ window.ModelStoreUI = (() => {
     const genericAbout = modelTask(item).toLowerCase() === description || ['Community GGUF model. Capabilities and device fit are not verified.', 'Community GGUF. Read its model card and choose an exact file.'].includes(description);
     if (!genericAbout) reading.append(about);
     const variantSection = detailSection('Choose your download','store-variants-heading'); variantSection.id = 'store-variants-section'; variantSection.querySelector('h2').tabIndex = -1;
-    const variantCount = domainText('p', loading ? 'Finding available files…' : `${variants.length} ${variants.length === 1 ? 'file' : 'files'} available`, 'model-variant-count muted');
+    const variantCount = domainText('p', loading ? 'Finding available variants…' : `${variants.length} ${variants.length === 1 ? 'variant' : 'variants'} available`, 'model-variant-count muted');
     variantCount.id = 'store-variant-count'; variantSection.append(variantCount);
     if (connections.length > 1) {
       const label = domainText('label','Download to'), select = document.createElement('select'); select.id = 'store-detail-endpoint';
@@ -1262,18 +1335,17 @@ window.ModelStoreUI = (() => {
     });
     variantSection.append(fieldset);
     let variantFooter = null;
-    if (variants.length && !installed) {
-      const downloadLabel = metadata && size !== 'Unknown' ? `Download · ${size}` : 'Download';
-      const choose = domainButton(variant ? downloadLabel : 'Choose variant', () => {
+    if ((variants.length || loading) && !installed) {
+      const choose = domainButton(loading ? 'Loading' : variant ? `Download${downloadSize ? ` · ${downloadSize}` : ''}` : 'Choose model', () => {
         if (!variant) focusVariants(); else review('model-pull', variant);
       }, 'model-detail-install');
       choose.id = 'store-variant-install';
-      choose.disabled = variant ? !canWrite() || !inventory?.models || inventory.stale : false;
+      choose.disabled = loading || (variant ? !canWrite() || !inventory?.models || inventory.stale : false);
       if (variant) choose.prepend(libraryIcon('download'));
       variantFooter = domainText('div', '', 'model-variant-footer');
       variantFooter.append(choose);
     }
-    if (!variants.length) variantSection.append(domainText('p',loading ? 'Loading supported exact files…' : item?.error || 'No supported single-file variants are available. Open the source to inspect alternatives.','muted'));
+    if (!variants.length && !loading) variantSection.append(domainText('p',item?.error || 'No supported single-file variants are available. Open the source to inspect alternatives.','muted'));
     if (variants.length > 20) {
       const nav = domainText('nav','','pagination'); nav.id = 'store-variants-pages'; nav.setAttribute('aria-label','Variant pages');
       for (const [name,delta] of [['previous',-1],['next',1]]) {
@@ -1377,6 +1449,9 @@ window.ModelStoreUI = (() => {
     if (exactName.textContent !== item.model) exactName.textContent = item.model;
     const metadata = byId('store-download-info-metadata'); metadata.replaceChildren();
     const rows = [['Status', downloadState(item)], ['Connection', connections.find(c => c.id === item.connection)?.name || item.connection]];
+    const facts = downloadMetadata(item);
+    rows.push(['Parameters', facts.parameters], ['Size', facts.size]);
+    if (['running','cancelling'].includes(item.state)) rows.push(['Speed', downloadSpeed(item)]);
     if (item.kind === 'model-delete') rows.push(['Action', 'Remove model']);
     const progress = item.progress;
     if (Number.isFinite(progress?.total) && progress.total > 0 && Number.isFinite(progress.completed))
@@ -1418,7 +1493,7 @@ window.ModelStoreUI = (() => {
       const observed = !item.request_id;
       if (item.dismissed && item.state !== 'unknown') continue;
       const key = item.request_id || item.id, source = observed ? 'observed' : 'owned', name = downloadName(item);
-      const row = existing.get(key) || domainText('article', '', 'store-download-row'); row.dataset.downloadId = key; retained.add(key);
+      const row = existing.get(key) || domainText('article', '', 'store-download-row collection-row library-card'); row.dataset.downloadId = key; retained.add(key);
       if (observed) row.classList.add('model-observed-transfer');
       if (item.dismissed) row.classList.add('model-dismissed-notice');
       row.setAttribute('aria-label', `${name}: ${downloadState(item)}`);
@@ -1429,6 +1504,14 @@ window.ModelStoreUI = (() => {
       const bytes = ['running','cancelling'].includes(item.state) && Number.isFinite(progress?.total) && progress.total > 0 && Number.isFinite(progress.completed);
       const status = domainText('span', bytes ? `${fileSize(progress.completed)} / ${fileSize(progress.total)}` : downloadState(item), 'store-download-status');
       status.dataset.state = item.state; content.append(title, status);
+      const facts = downloadMetadata(item), metadata = domainText('div', '', 'store-download-metadata muted');
+      metadata.append(domainText('span', facts.parameters), domainText('span', facts.size));
+      if (['running','cancelling'].includes(item.state)) {
+        const speed = domainText('span', downloadSpeed(item), 'store-download-speed');
+        speed.title = Number.isFinite(item.progress?.completed) ?
+          'Estimated from reported file progress; available after two updates' : 'Speed unavailable: byte progress is not reported';
+        metadata.append(speed);
+      }
       const actions = domainText('div', '', 'store-download-actions');
       if (!observed && item.cancellable && item.kind === 'model-pull' && ['accepted','running'].includes(item.state))
         actions.append(downloadAction('Stop download', 'close', () => jobAction('/api/v1/models/cancel', key), 'stop'));
@@ -1444,7 +1527,8 @@ window.ModelStoreUI = (() => {
         row.querySelector('.store-download-icon').replaceWith(mark);
         row.querySelector('.store-download-content').replaceWith(content);
         row.querySelector('.store-download-actions').replaceWith(actions);
-      } else row.append(mark, content, actions);
+        row.querySelector('.store-download-metadata').replaceWith(metadata);
+      } else row.append(mark, content, actions, metadata);
       if (['running','cancelling'].includes(item.state)) downloadProgress(row, progress, `Current file progress for ${name}`, key);
       else { removeDownloadBar(key); }
       if (target.children[position] !== row) target.insertBefore(row, target.children[position] || null);
@@ -1510,7 +1594,7 @@ window.ModelStoreUI = (() => {
     }
     byId('store-panel').setAttribute('aria-labelledby', `store-tab-${section}`);
     byId('store-search-row').hidden = section === 'downloads' || !supported();
-    byId('store-query').placeholder = section === 'installed' ? 'Search installed models…' : 'Search models or a use case…';
+    byId('store-query').placeholder = section === 'installed' ? 'Search installed models…' : hub() ? 'Search community models…' : 'Search offline collection…';
     byId('store-endpoint-label').hidden = !supported() || connections.length < 2 || section === 'discover' || section === 'downloads' && !jobs.length;
     byId('store-download-open').disabled = !canWrite() || !inventory?.models || inventory.stale;
     byId('store-source').disabled = !latest?.model_store_catalog || section !== 'discover' || collection === 'charts';
@@ -1524,6 +1608,7 @@ window.ModelStoreUI = (() => {
     }
     storeFilterMenus.forEach(menu => menu.sync());
     const target = byId('store-content'); if (section !== 'downloads' || !supported()) target.replaceChildren(); target.classList.remove('is-empty');
+    target.setAttribute('aria-busy', 'false');
     byId('store-installed-pages').hidden = section !== 'installed' || !supported();
     if (!supported()) {
       allowed = false; dialog.hidden = true; downloadDialog.close(); closeStoreFilters(); message(restartMessage);
@@ -1546,26 +1631,34 @@ window.ModelStoreUI = (() => {
         if (!endpoint || !inventory?.models) settingsLink(target);
       }
       installedPage = Math.max(1, Math.min(installedPage, Math.ceil(rows.length / 20)));
+      const list = domainText('div', '', 'store-installed-list');
       for (const row of rows.slice((installedPage - 1) * 20, installedPage * 20)) {
-        const button = domainButton('', () => openDetail(row.name, button), 'store-row quiet'); button.dataset.storeModel = row.name;
+        const card = domainText('div', '', 'collection-row library-card');
+        const button = domainButton('', () => openDetail(row.name, button), 'store-row collection-open quiet'); button.dataset.storeModel = row.name;
+        button.title = row.name;
         const copy = domainText('span', '', 'store-card-content');
         copy.append(domainText('strong', row.name), domainText('small', `${row.parameters || 'Parameters unknown'} · ${row.size != null ? fileSize(row.size) : 'Size unknown'}`, 'muted'));
-        button.append(icon(row.name, 40), copy, domainText('span', 'Manage', 'store-cta')); target.append(button);
+        button.append(icon(row.name, 40), copy, domainText('span', 'Manage', 'store-cta'));
+        card.append(button); list.append(card);
       }
+      if (rows.length) target.append(list);
       updateDomainPager('store-installed', (installedPage - 1) * 20, {items:rows.slice((installedPage - 1) * 20, installedPage * 20), total:rows.length, page_size:20, more:installedPage * 20 < rows.length});
       byId('store-installed-pages').hidden = rows.length <= 20;
       renderDetail(); return;
     }
     const landing = liveLanding();
+    if (latest?.model_store_catalog && (landing && !popularCatalog && !recentCatalog ||
+        !landing && hub() && liveLoading && !liveCatalog?.models?.length)) {
+      byId('store-live-pages').hidden = true; catalogLoading(target); return;
+    }
     if (landing) {
       byId('store-live-pages').hidden = true;
-      const popular = (popularCatalog?.models || []).filter(item => Number.isInteger(item.downloads));
+      const popular = completeLandingRows(landingRows('downloads'));
       target.append(sectionHeading('Popular models', 'See all', () => navigate('discover', '', '', false, 'charts')));
       target.append(domainText('p', 'By Hugging Face downloads' + (popularCatalog?.stale ? ' · Cached' : ''), 'store-source-note muted'));
       if (popular.length) target.append(modelGrid(popular, true));
       else target.append(domainText('p', popularCatalog?.error ? 'Catalog unavailable. Try Refresh.' : latest?.model_store_catalog ? 'Loading models…' : 'Update the host to explore more models.', 'muted'));
-      const popularIds = new Set(popular.map(item => item.id));
-      const recent = (recentCatalog?.models || []).filter(item => !popularIds.has(item.id));
+      const recent = completeLandingRows(landingRows('lastModified'));
       if (recent.length) {
         target.append(sectionHeading('Recently updated', 'See all', () => {
           byId('store-source').value = 'huggingface'; byId('store-sort').value = 'lastModified';
@@ -1583,14 +1676,12 @@ window.ModelStoreUI = (() => {
       }); target.append(back);
       if (hub()) {
         target.append(domainText('p', 'Hugging Face public catalog · repository downloads, not Ollama usage. Capabilities and device fit are not verified.', 'store-source-note muted'));
-        if (liveCatalog?.checked_at) target.append(domainText('p', `${liveCatalog.stale ? 'Cached' : 'Checked'} ${new Date(liveCatalog.checked_at * 1000).toLocaleString()} · up to 20 results`, 'store-source-note muted'));
+        if (liveCatalog?.checked_at) target.append(domainText('p', `${liveCatalog.stale ? 'Cached' : 'Checked'} ${new Date(liveCatalog.checked_at * 1000).toLocaleString()} · ${livePageSize} results per page`, 'store-source-note muted'));
         if (liveCatalog?.error) target.append(domainText('p', liveCatalog.error, 'domain-status'));
-        const rows = (liveCatalog?.models || []).filter(item => collection !== 'charts' || Number.isInteger(item.downloads));
+        const rows = liveCatalog?.models || [];
         target.append(modelGrid(rows, collection === 'charts'));
-        if (collection === 'charts' || byId('store-sort').value === 'lastModified') renderLivePager(liveCatalog);
-        else byId('store-live-pages').hidden = true;
-        if (liveLoading) target.append(domainText('p', 'Loading catalog…', 'muted'));
-        else if (!rows.length) target.append(domainText('p', 'No matching catalog models. Curated and Installed remain available.', 'muted'));
+        renderLivePager(liveCatalog);
+        if (!liveLoading && !rows.length && !liveCatalog?.error) target.append(domainText('p', 'No matching community models. Offline collection and Installed remain available.', 'muted'));
       } else {
         const matches = filtered(); matches.forEach(item => target.append(modelRow(item)));
         if (!matches.length) emptyState(target, 'No matching curated models', 'Try another use case or choose the Hugging Face catalog in Filters.', 'models');
@@ -1598,43 +1689,106 @@ window.ModelStoreUI = (() => {
     }
     renderDetail();
   }
-  async function loadPopular(force = false) {
+  function landingGeometry() {
+    const target = byId('store-content'), style = getComputedStyle(target);
+    const minimum = parseFloat(style.getPropertyValue('--store-grid-min')) || 290;
+    const gap = parseFloat(style.getPropertyValue('--store-grid-gap')) || 8;
+    const columns = Math.max(1, Math.floor((target.getBoundingClientRect().width + gap) / (minimum + gap)));
+    return {columns, capacity:columns * Math.max(1, Math.round(20 / columns))};
+  }
+  function completeLandingRows(rows) {
+    const {columns, capacity} = landingGeometry(), count = Math.min(capacity, rows.length);
+    return rows.slice(0, count >= columns ? Math.floor(count / columns) * columns : count);
+  }
+  function landingRows(sort) {
+    const seen = new Set();
+    const unique = rows => rows.filter(item => item?.id && !seen.has(item.id) && seen.add(item.id));
+    const popular = unique((popularCatalog?.models || []).filter(item => Number.isInteger(item.downloads)));
+    if (sort === 'downloads') return popular;
+    const excluded = new Set(completeLandingRows(popular).map(item => item.id));
+    seen.clear();
+    return unique((recentCatalog?.models || []).filter(item => !excluded.has(item.id)));
+  }
+  async function loadPopular(force = false, fillOnly = false) {
     if (!active() || !latest?.model_store_catalog || popularReading) return;
     const id = ++popularSerial, epoch = authEpoch, request = new AbortController(); popularReading = request;
+    const valid = () => active() && epoch === authEpoch && id === popularSerial;
+    const legacy = {downloads:popularCatalog?._legacy || false, lastModified:recentCatalog?._legacy || false};
+    const get = sort => sort === 'downloads' ? popularCatalog : recentCatalog;
+    const set = (sort, result) => { if (sort === 'downloads') popularCatalog = result; else recentCatalog = result; };
+    async function readPage(sort, page, refresh) {
+      const url = `/api/v1/models/store?source=huggingface&sort=${sort}&page=${page}&refresh=${refresh ? '1' : '0'}`;
+      let data;
+      try { data = await domainRequest(url + (legacy[sort] ? '' : '&limit=21'), 'GET', undefined, {signal:request.signal}); }
+      catch (error) {
+        if (legacy[sort] || error.status !== 400 || !/Unknown Model Store filter/i.test(error.message)) throw error;
+        legacy[sort] = true;
+        data = await domainRequest(url, 'GET', undefined, {signal:request.signal});
+      }
+      return {...data, _page:page, _legacy:legacy[sort], _refresh:refresh};
+    }
     try {
-      await Promise.allSettled(['downloads', 'lastModified'].map(async sort => {
-        let result;
+      if (!fillOnly) await Promise.allSettled(['downloads', 'lastModified'].map(async sort => {
         try {
-          const url = `/api/v1/models/store?source=huggingface&sort=${sort}`;
-          const previous = sort === 'downloads' ? popularCatalog : recentCatalog;
-          if (!previous && force) {
-            const cached = await domainRequest(`${url}&refresh=0`, 'GET', undefined, {signal:request.signal});
-            if (!active() || epoch !== authEpoch || id !== popularSerial) return;
-            if (sort === 'downloads') popularCatalog = cached; else recentCatalog = cached;
-            render();
+          if (!get(sort) && force) {
+            const cached = await readPage(sort, 1, false);
+            if (!valid()) return;
+            set(sort, cached); render();
           }
-          result = await domainRequest(`${url}&refresh=${force ? '1' : '0'}`, 'GET', undefined, {signal:request.signal});
+          const result = await readPage(sort, 1, force);
+          if (!valid()) return;
+          set(sort, result);
         } catch (error) {
-          if (error.name === 'AbortError') return;
-          const previous = sort === 'downloads' ? popularCatalog : recentCatalog;
-          result = {...previous, error:error.message, stale:true};
+          if (error.name === 'AbortError' || !valid()) return;
+          set(sort, {...get(sort), error:error.message, stale:true, _fillFailed:true});
         }
-        if (!active() || epoch !== authEpoch || id !== popularSerial) return;
-        if (sort === 'downloads') popularCatalog = result; else recentCatalog = result;
         render();
       }));
+      // Popular is filled first so Recent can replace every displayed duplicate.
+      for (const sort of ['downloads', 'lastModified']) {
+        while (valid() && section === 'discover' && liveLanding() && !detail) {
+          const previous = get(sort);
+          if (!previous?.more || previous.error || previous._fillFailed || (previous._page || 1) >= 4 ||
+              landingRows(sort).length >= landingGeometry().capacity) break;
+          try {
+            const next = await readPage(sort, (previous._page || 1) + 1, Boolean(previous._refresh));
+            if (!valid()) return;
+            set(sort, {...next, models:[...(previous.models || []), ...(next.models || [])],
+              _fillFailed:Boolean(next.error)});
+          } catch (error) {
+            if (error.name === 'AbortError' || !valid()) return;
+            set(sort, {...previous, error:error.message, stale:true, _fillFailed:true});
+          }
+          render();
+        }
+      }
     } finally { if (popularReading === request) popularReading = null; }
   }
+  let landingGeometryKey = '', landingResizeFrame = 0;
+  const landingObserver = new ResizeObserver(() => {
+    if (!active() || section !== 'discover' || !hub() || detail) return;
+    const geometry = landingGeometry(), key = `${geometry.columns}:${geometry.capacity}`;
+    if (key === landingGeometryKey) return;
+    landingGeometryKey = key; cancelAnimationFrame(landingResizeFrame);
+    landingResizeFrame = requestAnimationFrame(() => {
+      if (!active() || section !== 'discover' || !hub() || detail) return;
+      if (liveLanding()) { render(); loadPopular(false, true); }
+      else if (landingGeometry().capacity !== livePageSize) loadLive();
+    });
+  });
+  landingObserver.observe(byId('store-content'));
+  window.addEventListener('pagehide', () => { landingObserver.disconnect(); cancelAnimationFrame(landingResizeFrame); });
+  window.addEventListener('pageshow', () => { landingGeometryKey = ''; landingObserver.observe(byId('store-content')); });
 
   function renderLivePager(data) {
     const rows = data?.models || [];
     const pager = byId('store-live-pages');
-    pager.setAttribute('aria-label', byId('store-sort').value === 'lastModified' ? 'Recently updated model pages' : 'Top GGUF model pages');
+    pager.setAttribute('aria-label', byId('store-query').value.trim() ? 'Model search result pages' : byId('store-sort').value === 'lastModified' ? 'Recently updated model pages' : 'Top GGUF model pages');
     if (!data || !rows.length) { pager.hidden = true; return; }
     pager.hidden = false;
-    const known = (livePage - 1) * 20 + rows.length + Number(Boolean(data.more));
-    updateDomainPager('store-live', (livePage - 1) * 20, {
-      items: rows, total: known, page_size: 20, more: Boolean(data.more),
+    const known = (livePage - 1) * livePageSize + rows.length + Number(Boolean(data.more));
+    updateDomainPager('store-live', (livePage - 1) * livePageSize, {
+      items: rows, total: known, page_size: livePageSize, more: Boolean(data.more),
     });
     byId('store-live-page').textContent = `Page ${livePage}`;
   }
@@ -1642,8 +1796,10 @@ window.ModelStoreUI = (() => {
     if (next < 1 || next > 500 || next === livePage) return;
     livePage = next; liveCatalog = null;
     const url = new URL(location.href);
-    if (livePage > 1) url.searchParams.set('models-page', String(livePage));
-    else url.searchParams.delete('models-page');
+    if (livePage > 1) {
+      url.searchParams.set('models-page', String(livePage));
+      url.searchParams.set('models-page-size', String(livePageSize));
+    } else { url.searchParams.delete('models-page'); url.searchParams.delete('models-page-size'); }
     history.pushState(history.state, '', url.pathname + url.search + url.hash);
     loadLive();
   }
@@ -1657,9 +1813,18 @@ window.ModelStoreUI = (() => {
   byId('store-live-next').addEventListener('click', () => moveLivePage(livePage + 1));
   async function loadLive(force = false) {
     if (!active() || !latest?.model_store_catalog || section !== 'discover' || !hub()) return;
+    const capacity = Math.min(50, landingGeometry().capacity);
+    if (capacity !== livePageSize) {
+      // Each size has its own provider cursor chain. Start that chain explicitly
+      // rather than skipping models or reusing a cursor from another page size.
+      livePageSize = capacity; livePage = 1; liveCatalog = null;
+      const url = new URL(location.href);
+      url.searchParams.delete('models-page'); url.searchParams.delete('models-page-size');
+      history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+    }
     const current = ++liveSerial, epoch = authEpoch;
     liveReading?.abort(); liveReading = new AbortController(); liveLoading = true; render();
-    const parameters = new URLSearchParams({source: 'huggingface', query: byId('store-query').value.trim(), sort: collection === 'charts' ? 'downloads' : byId('store-sort').value, page: livePage, refresh: force ? '1' : '0'});
+    const parameters = new URLSearchParams({source: 'huggingface', query: byId('store-query').value.trim(), sort: collection === 'charts' ? 'downloads' : byId('store-sort').value, page: livePage, limit: livePageSize, refresh: force ? '1' : '0'});
     try {
       const result = await domainRequest(`/api/v1/models/store?${parameters}`, 'GET', undefined, {signal: liveReading.signal});
       if (!active() || current !== liveSerial || epoch !== authEpoch) return;
@@ -1700,6 +1865,7 @@ window.ModelStoreUI = (() => {
     try {
       const result = await domainRequest('/api/v1/models/downloads');
       if (!active() || epoch !== authEpoch) return;
+      sampleDownloadRates([...result.items, ...(result.observed || [])]);
       const completed = jobs.some(old => ['running','accepted','unknown'].includes(old.state) && result.items.some(j => j.request_id === old.request_id && j.state === 'completed'));
       jobs = result.items; observedTransfers = result.observed || []; jobsLoaded = true; allowed = result.management_allowed; renderStoreCounts();
       if (completed) loadInventory();
@@ -1758,7 +1924,14 @@ window.ModelStoreUI = (() => {
     const button = event.target.closest('button[data-page]');
     if (button) { installedPage = Number(button.dataset.page); render(); }
   });
-  byId('store-query').addEventListener('input', () => { installedPage = 1; livePage = 1; if (section === 'discover' && hub()) { clearTimeout(searchTimer); searchTimer = setTimeout(() => navigate(section, category, '', true), 350); } else navigate(section, category, '', true); });
+  byId('store-query').addEventListener('input', () => {
+    installedPage = 1; livePage = 1; clearTimeout(searchTimer);
+    if (section === 'discover' && hub()) {
+      liveReading?.abort(); liveSerial += 1; liveCatalog = null;
+      liveLoading = Boolean(byId('store-query').value.trim()); render();
+      searchTimer = setTimeout(() => navigate(section, category, '', true), 350);
+    } else navigate(section, category, '', true);
+  });
   function changeEndpoint(value) { endpoint = value; byId('store-endpoint').value = value; byId('store-download-destination').textContent = connections.find(c => c.id === endpoint)?.name || ''; installedPage = 1; inventory = null; loadInventory(); }
   byId('store-endpoint').addEventListener('change', () => changeEndpoint(byId('store-endpoint').value));
   byId('store-download-open').append(libraryIcon('plus'));
@@ -1772,6 +1945,16 @@ window.ModelStoreUI = (() => {
   byId('store-size').addEventListener('change', () => { installedPage = 1; navigate(section, category, '', true); });
   byId('store-capability').addEventListener('change', () => navigate(section, category, '', true));
   byId('models-refresh').addEventListener('click', () => load());
+  byId('store-home').addEventListener('click', event => {
+    if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    event.preventDefault(); clearTimeout(searchTimer); closeStoreFilters();
+    byId('store-query').value = '';
+    byId('store-source').value = 'huggingface'; byId('store-sort').value = 'downloads';
+    byId('store-capability').value = byId('store-size').value = 'all';
+    livePage = 1;
+    navigate('discover', '', '', false, '');
+    byId('models-view').scrollTop = 0;
+  });
   byId('store-detail-back').prepend(libraryIcon('previous'));
   byId('store-detail-back').addEventListener('click', () => {
     if (browseContext?.url && history.length > 1) history.back();
@@ -1780,7 +1963,7 @@ window.ModelStoreUI = (() => {
   document.addEventListener('klaude-view', () => {
     clearInterval(timer); timer = null;
     if (active()) { if (urlState() === false) return; render(); load(); if (supported()) timer = setInterval(loadJobs, 2000); }
-    else { clearDownloadBars(); serial++; reading?.abort(); liveReading?.abort(); clearTimeout(searchTimer); popularSerial++; popularReading?.abort(); popularReading = null; dialog.hidden = true; downloadDialog.close(); closeStoreFilters(); downloadInfo.close(); }
+    else { clearDownloadBars(); downloadRates.clear(); serial++; reading?.abort(); liveReading?.abort(); clearTimeout(searchTimer); popularSerial++; popularReading?.abort(); popularReading = null; dialog.hidden = true; downloadDialog.close(); closeStoreFilters(); downloadInfo.close(); }
   });
   document.addEventListener('klaude-snapshot', () => {
     const capability = supported();
@@ -1794,7 +1977,7 @@ window.ModelStoreUI = (() => {
   window.addEventListener('popstate', () => { if (active() && urlState() !== false) { render(); if (liveLanding()) loadPopular(); else if (hub()) loadLive(); } });
   document.addEventListener('klaude-auth-reset', () => {
     downloadInfo.close(); downloadInfoKey = downloadInfoSource = downloadInfoError = '';
-    clearDownloadBars();
+    clearDownloadBars(); downloadRates.clear();
     shownDetail = detailSignature = variantPageSelection = ''; browseContext = null; detailsOpen.clear();
     clearInterval(timer); clearTimeout(searchTimer); popularSerial++; popularReading?.abort(); popularReading = null; popularCatalog = recentCatalog = null; closeStoreFilters(); byId('store-live-pages').hidden = true; livePage = 1; liveSerial++; liveReading?.abort(); liveDetails.clear(); liveCatalog = null; serial++; reading?.abort(); dialog.hidden = true; downloadDialog.close(); byId('store-download-tag').value = ''; catalog = inventory = null; jobs = []; connections = [];
     observedTransfers = []; jobsLoaded = false; renderStoreCounts();
@@ -1894,32 +2077,97 @@ window.ModelConnectionsUI = (() => {
   const message = value => { byId('model-connections-status').textContent = value; };
   const currentConnection = () => latest?.model_connection || `default-${latest?.provider?.replaceAll('_', '-')}`;
   const locked = () => !data?.management_allowed || pending || Boolean(data.pending) || Boolean(latest?.active_turn_id) || Boolean(latest?.queue?.length);
+  let editorTrigger = null;
+  function connectionMenu(trigger, actions, identity) {
+    const menu = domainText('div', '', 'message-menu context-action-menu');
+    menu.id = `connection-actions-${identity}`;
+    menu.setAttribute('popover', 'auto'); menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', 'Connection actions');
+    trigger.setAttribute('popovertarget', menu.id);
+    trigger.setAttribute('aria-haspopup', 'menu'); trigger.setAttribute('aria-expanded', 'false');
+    for (const [label, icon, action, disabled, danger] of actions) {
+      const button = domainButton('', () => {
+        menu.hidePopover(); trigger.focus({preventScroll:true}); action();
+      }, 'message-action' + (danger ? ' danger' : ''));
+      button.setAttribute('role', 'menuitem'); button.disabled = disabled;
+      const mark = domainText('span', '', 'menu-action-icon'); mark.setAttribute('aria-hidden', 'true');
+      mark.append(libraryIcon(icon)); button.append(mark, domainText('span', label)); menu.append(button);
+    }
+    let focusLast = false;
+    trigger.addEventListener('keydown', event => {
+      if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+      event.preventDefault(); focusLast = event.key === 'ArrowUp';
+      if (!menu.matches(':popover-open')) trigger.click();
+    });
+    menu.addEventListener('toggle', () => {
+      const open = menu.matches(':popover-open'); trigger.setAttribute('aria-expanded', String(open));
+      if (!open) return;
+      const anchor = trigger.getBoundingClientRect(), viewport = window.visualViewport;
+      const left = (viewport?.offsetLeft || 0) + 8, top = (viewport?.offsetTop || 0) + 8;
+      const right = left + (viewport?.width || innerWidth) - 16;
+      const bottom = top + (viewport?.height || innerHeight) - 16;
+      menu.style.maxHeight = `${Math.max(48, bottom - top)}px`;
+      menu.style.left = `${Math.max(left, Math.min(anchor.right - menu.offsetWidth, right - menu.offsetWidth))}px`;
+      menu.style.top = `${Math.max(top, Math.min(anchor.bottom + 4, bottom - menu.offsetHeight))}px`;
+      const available = [...menu.querySelectorAll('button:not(:disabled)')];
+      (focusLast ? available.at(-1) : available[0])?.focus({preventScroll:true}); focusLast = false;
+    });
+    menu.addEventListener('keydown', event => {
+      const items = [...menu.querySelectorAll('button:not(:disabled)')];
+      const index = items.indexOf(document.activeElement);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 :
+        event.key === 'ArrowDown' ? (index + 1) % items.length :
+        event.key === 'ArrowUp' ? (index - 1 + items.length) % items.length : null;
+      if (next !== null) { event.preventDefault(); items[next]?.focus(); }
+      if (event.key === 'Escape') {
+        event.preventDefault(); event.stopPropagation(); menu.hidePopover(); trigger.focus();
+      }
+    });
+    return menu;
+  }
   function render() {
     byId('model-connection-add').disabled = locked();
     const container = byId('model-settings-connections'); container.replaceChildren();
     if (!data) return;
-    for (const item of data.connections) {
-      const node = domainText('article', '', 'management-row');
+    const query = byId('model-connection-query').value.trim().toLocaleLowerCase();
+    const rows = data.connections.filter(item => `${item.name} ${item.backend} ${item.source} ${item.url}`.toLocaleLowerCase().includes(query));
+    if (!rows.length) {
+      const empty = domainText('p', query ? 'No matching connections' : 'No connections yet', 'muted collection-empty');
+      empty.setAttribute('role', 'status'); container.append(empty);
+    }
+    for (const item of rows) {
+      const node = domainText('article', '', 'management-row collection-row library-card model-connection-row');
       const content = domainText('div', '', 'management-content');
-      content.append(domainText('h3', item.name), domainText('p', `${item.backend} · ${item.source} routing · ${item.enabled ? 'Enabled' : 'Disabled'}`, 'muted'));
+      const backend = window.AIIcons?.platform(item.backend)?.name || window.AIIcons?.provider(item.backend)?.name || (item.backend === 'openai_compatible' ? 'OpenAI compatible' : item.backend);
+      const heading = domainText('div', '', 'model-connection-title');
+      heading.append(domainText('h3', item.name), domainText('span', item.enabled ? 'Enabled' : 'Disabled', 'model-capability'));
+      content.append(heading, domainText('p', `${backend} · ${item.source}`, 'muted'));
       if (item.url) content.append(domainText('p', item.url, 'model-connection-address'));
       content.append(domainText('small', item.credential_set ? 'Credential saved' : 'No saved credential', 'muted'));
       const actions = domainText('div', '', 'management-actions');
       const inUse = currentConnection() === item.id;
-      const test = domainButton('Test', async () => {
-        if (pending) return; pending = true; render(); const epoch = authEpoch;
+      const testConnection = async () => {
+        if (pending) return; pending = true; message('Testing connection…'); render(); const epoch = authEpoch;
         try { const result = await domainRequest('/api/v1/settings/model-connections/test', 'POST', {connection: item.id, revision: item.revision}); if (epoch === authEpoch && active()) message(result.message); }
         catch (error) { if (epoch === authEpoch && active()) message(error.message); }
         finally { if (epoch === authEpoch) { pending = false; render(); } }
-      });
-      test.disabled = locked(); actions.append(test);
-      if (item.backend !== 'openai_codex') actions.append(domainButton('Edit', () => open('edit', item)));
-      actions.append(domainButton(item.enabled ? 'Disable' : 'Enable', () => review({operation: 'model-connection-enabled', connection: item.id, revision: item.revision, enabled: !item.enabled})));
-      if (item.credential_editable) actions.append(domainButton('Credential', () => open('credential', item)));
-      actions.append(domainButton('Remove', () => review({operation: 'model-connection-remove', connection: item.id, revision: item.revision}), 'quiet danger'));
-      for (const button of actions.children) if (button !== test) button.disabled = locked() || inUse;
-      if (inUse) content.append(domainText('small', 'Current conversation connection. Select another model before changing it.', 'muted'));
-      node.append(content, actions); container.append(node);
+      };
+      const disabled = locked() || inUse;
+      const choices = [
+        ['Test', 'connection', testConnection, locked()],
+        ...(item.backend !== 'openai_codex' ? [['Edit', 'options', () => open('edit', item), disabled]] : []),
+        [item.enabled ? 'Disable' : 'Enable', item.enabled ? 'close' : 'connection', () => review({operation: 'model-connection-enabled', connection: item.id, revision: item.revision, enabled: !item.enabled}), disabled],
+        ...(item.credential_editable ? [['Credential', 'shield', () => open('credential', item), disabled]] : []),
+        ['Remove', 'trash', () => review({operation: 'model-connection-remove', connection: item.id, revision: item.revision}), disabled, true],
+      ];
+      const more = domainButton('', () => {}, 'icon-button quiet');
+      more.setAttribute('aria-label', `Options for ${item.name}`); more.title = 'Connection options';
+      more.append(libraryIcon('more')); more.disabled = locked();
+      const menu = connectionMenu(more, choices, item.id); actions.append(more);
+      if (inUse) content.append(domainText('small', 'Current chat connection', 'muted'));
+      const icon = domainText('span', '', 'model-connection-icon'); icon.setAttribute('aria-hidden', 'true');
+      icon.append(libraryIcon('models'));
+      node.append(icon, content, actions, menu); container.append(node);
     }
     const recovery = byId('model-connections-recovery'); recovery.replaceChildren();
     if (data.pending) {
@@ -1942,6 +2190,7 @@ window.ModelConnectionsUI = (() => {
   }
   function open(nextMode, item = null) {
     if (locked() || reviewDialog.open) return;
+    editorTrigger = document.activeElement;
     mode = nextMode; selected = item; formVersion++; byId('model-connection-form').reset();
     byId('model-connection-title').textContent = mode === 'credential' ? `Credential · ${item.name}` : item ? `Edit ${item.name}` : 'Add model connection';
     byId('model-connection-definition').hidden = mode === 'credential'; byId('model-credential-fields').hidden = mode !== 'credential';
@@ -1985,11 +2234,18 @@ window.ModelConnectionsUI = (() => {
     byId('model-connection-source').value = adapter === 'ollama' ? 'Local' : 'Cloud';
     byId('model-connection-authentication').checked = adapter !== 'ollama';
   });
+  const closeConnectionMenus = () => byId('model-settings-connections').querySelectorAll(':popover-open').forEach(menu => menu.hidePopover());
+  new MutationObserver(() => { if (byId('models-settings').hidden) closeConnectionMenus(); })
+    .observe(byId('models-settings'), {attributes:true, attributeFilter:['hidden']});
+  window.addEventListener('resize', closeConnectionMenus);
+  document.addEventListener('klaude-view', closeConnectionMenus);
+  byId('model-connection-filter').addEventListener('submit', event => event.preventDefault());
+  byId('model-connection-query').addEventListener('input', render);
   byId('model-connection-add').addEventListener('click', () => open('add'));
   byId('model-connections-refresh').addEventListener('click', load);
   byId('model-connection-close').append(libraryIcon('close'));
   byId('model-connection-close').addEventListener('click', () => dialog.close());
-  dialog.addEventListener('close', () => { formVersion++; byId('model-credential-value').value = ''; byId('model-connection-add').focus(); });
+  dialog.addEventListener('close', () => { formVersion++; byId('model-credential-value').value = ''; (editorTrigger?.isConnected ? editorTrigger : byId('model-connection-add')).focus(); });
   document.addEventListener('klaude-view', () => { if (active()) load(); else { serial++; read?.abort(); dialog.close(); } });
   document.addEventListener('klaude-snapshot', () => { if (active() && !data && !loading && latest?.model_settings) load(); });
   document.addEventListener('klaude-operations', event => {
@@ -1998,5 +2254,5 @@ window.ModelConnectionsUI = (() => {
     const signature = JSON.stringify(relevant.map(item => [item.request_id, item.state]));
     if (signature !== lastOperations) { lastOperations = signature; load(); BrowserMedia.load(true); }
   });
-  document.addEventListener('klaude-auth-reset', () => { serial++; read?.abort(); data = null; pending = false; lastOperations = ''; dialog.close(); byId('model-connection-form').reset(); byId('model-settings-connections').replaceChildren(); byId('model-connections-recovery').replaceChildren(); message(''); });
+  document.addEventListener('klaude-auth-reset', () => { serial++; read?.abort(); data = null; pending = false; lastOperations = ''; dialog.close(); byId('model-connection-query').value = ''; byId('model-connection-form').reset(); byId('model-settings-connections').replaceChildren(); byId('model-connections-recovery').replaceChildren(); message(''); });
 })();
