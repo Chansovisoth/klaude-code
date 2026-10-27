@@ -135,6 +135,29 @@ Workspace layout:
   help is available for all Web pages and Research budgets settings, plus
   Execution limits. Search results
   has no help button.
+- Settings retains Account, Theme, Agent, Models and Memory. Models opens a
+  single-column Defaults overview with Connections and Image generation summaries;
+  Manage connections, Connected models and Image generation are dedicated
+  destinations under Models, restored by `models-screen` URL state. Connected
+  models browses configured providers with search, connection filtering and paging;
+  conversation selection stays in Chat. Primary default roles use whole-row model
+  choosers; fallbacks, token tuning and Vision enable live in Advanced defaults.
+  Each fallback uses the same full-width chooser row as the primary roles.
+  Defaults and image-service drafts have independent Apply/Discard scopes and
+  preserve the existing reviewed saves, recovery witnesses and current-chat runtime.
+  Account shows read-only identity, Security and a separate Sign out action;
+  password fields live in a native dialog. Memory puts its preference and saved
+  text rows first, with overflow Edit/Forget actions and a shared Add/Edit dialog
+  retaining review. These editors fill narrow phone screens and clear on dismissal
+  or sign-out. Account, Agent, Models and Memory use compact, divided settings
+  groups inspired by the saved GPT reference, adapted to Klaude Material roles.
+  Theme retains its existing layout apart from the shared page-bottom actions.
+- WebUI spacing follows the existing Material surfaces and a 4px-based rhythm:
+  preserve responsive page gutters, inset text and controls within interactive
+  rows, group related controls tightly and separate distinct sections. Check
+  horizontal padding and alignment with long content at narrow and wide sizes,
+  including safe areas and keyboard/focus geometry; do not stretch a phone
+  layout or replace the established Material identity with a reference style.
 - Dialog header close actions use the shared cross icon with an accessible Close
   label and tooltip. Model download/details dialogs follow the same top-right
   control; confirmation footer actions retain their explicit action wording.
@@ -868,31 +891,22 @@ Workspace layout:
   Desktop uses Up/Down, smaller layouts Left/Right, with Home/End in both.
   Settings navigation has its own container, separate from theme chips. Through
   850px it remains a single horizontally scrolling sticky row with an opaque
-  Material surface and opaque selected tonal tab. At these widths, dirty Agent,
-  Models and Theme actions move to an application-level dock outside the cards'
-  container/scroll contexts. Phones span the viewport immediately above the
-  measured bottom navigation; tablet docks span the main application area.
-  ResizeObserver measures the dock and navigation, and visualViewport changes
-  account for keyboard overlays and focused-field clearance. Measured padding
-  keeps the last settings accessible; safe-area padding and bounded long status
-  messages retain usable actions. Clean bars and bars outside the active
-  category/page are hidden. Agent and Models share Theme's footer class, tonal
-  divider surface, quiet Discard and filled Apply changes actions, including
-  desktop card-edge coverage and the existing mobile dock. Unsaved counts,
-  conflicts and Check save status remain available through their existing
-  transaction handling. Theme shows Discard/Apply only when its preview differs
-  from the saved appearance at every viewport size, hiding again after Apply,
-  Discard or returning each control to its saved value. Failed saves keep the row
-  available. Desktop bars return to their original card positions. The Theme footer paints
-  across the card padding and compensates for the Settings scroll region's bottom
-  inset, so content cannot show through beside or below Apply/Discard. Evidence:
-  `docs/webui/mobile-settings-layout-validation.md`.
+  Material surface and opaque selected tonal tab. Dirty Agent, Model Defaults,
+  Image generation and Theme actions use the shared page-bottom dock on all
+  screen sizes. On phones the dock sits above the measured bottom navigation;
+  tablet and desktop docks span the main application area. ResizeObserver and
+  visualViewport measurements account for viewport and keyboard changes, and
+  scroll clearance keeps the final controls reachable above the dock. Clean
+  bars and bars outside the active category or screen stay hidden. Each draft
+  retains its own Discard, Apply changes, conflict and recovery behavior.
+  Theme shows its actions only while appearance differs from the saved value.
+  Evidence: `docs/webui/settings-structure-validation.md`.
   The Settings columns fill the available main area, with 24px outer padding
   (16px on phones), a compact 160px category list and the remaining width for
-  content. Settings no longer caps or centers its content column. Cards and the
-  Models stack use natural heights rather than filling the scroll region.
-  Execution limits and related Model Defaults use responsive grids based on the
-  actual card width; control pairs remain bounded to 32rem and number inputs
+  content. Account, Agent, Models and Memory use a bounded single content
+  column; cards and the Models stack use natural heights rather than filling
+  the scroll region. Agent controls adapt to the available width; Model roles
+  and fallbacks use full-width rows. Control pairs remain bounded and number inputs
   retain their smaller limit. Models separates available models, model roles,
   Utility/Vision options, fallbacks and image service setup without changing
   their backend save contracts. Short model-role labels stay beside their controls

@@ -1,34 +1,66 @@
 "use strict";
+window.ModelsSettingsNavigation = (() => {
+  let screen = 'overview';
+  const screens = ['overview', 'connections', 'catalog', 'image'];
+  const panels = {overview: 'model-default-settings', connections: 'model-connections-settings', catalog: 'models-configured', image: 'image-service-settings'};
+  const links = byId('models-overview-links'); links.hidden = false;
+  links.innerHTML = `<section class="settings-section"><h3>Connections</h3><p id="models-connections-summary" class="muted">Loading connection status…</p><div class="settings-row-group"><button type="button" data-model-screen="connections" class="quiet settings-navigation-row">Manage connections <span aria-hidden="true">›</span></button><button type="button" data-model-screen="catalog" class="quiet settings-navigation-row">Browse connected models <span aria-hidden="true">›</span></button></div></section><section class="settings-section"><h3>Image generation</h3><p id="models-image-summary" class="muted">Loading service status…</p><div class="settings-row-group"><button type="button" data-model-screen="image" class="quiet settings-navigation-row">Configure service <span aria-hidden="true">›</span></button></div></section>`;
+  function show(next, {restore = false, focus = false} = {}) {
+    if (!screens.includes(next)) next = 'overview';
+    if (!restore && next !== screen && !canLeave()) return;
+    screen = next;
+    for (const [name, id] of Object.entries(panels)) byId(id).hidden = name !== screen;
+    links.hidden = screen !== 'overview';
+    byId('models-settings-back').hidden = screen === 'overview';
+    byId('models-screen-title').textContent = {overview:'Models', connections:'Connections', catalog:'Connected models', image:'Image generation'}[screen];
+    if (!restore) {
+      const url = new URL(location.href); url.searchParams.set('models-screen', screen);
+      history.pushState(history.state, '', url.pathname + url.search + url.hash);
+      document.dispatchEvent(new CustomEvent('klaude-view', {detail: currentView}));
+    }
+    if (focus) { byId('settings-view').scrollTop = 0; byId('models-screen-title').focus(); }
+    window.SettingsActions?.refresh();
+  }
+  function canLeave() {
+    const id = screen === 'image' ? 'image-service' : 'models';
+    const state = window.SettingsDrafts?.category(id);
+    return !state || (!state.drafts.changed().length && !state.saving) || window.confirm('You have pending changes. Leave this screen and keep your draft?');
+  }
+  links.addEventListener('click', event => { const button = event.target.closest('[data-model-screen]'); if (button) show(button.dataset.modelScreen, {focus:true}); });
+  byId('models-settings-back').addEventListener('click', () => show('overview', {focus:true}));
+  document.addEventListener('klaude-view', () => {
+    if (currentView === 'settings' && settingsSection === 'models') show(new URLSearchParams(location.search).get('models-screen') || 'overview', {restore:true});
+  });
+  window.addEventListener('popstate', event => {
+    if (!authenticated || currentView !== 'settings' || settingsSection !== 'models') return;
+    const url = new URL(location.href), target = url.searchParams;
+    const leaving = target.get('view') !== 'settings' || target.get('settings') !== 'models' || (target.get('models-screen') || 'overview') !== screen;
+    if (leaving && !canLeave()) {
+      event.stopImmediatePropagation();
+      target.set('view', 'settings'); target.set('settings', 'models'); target.set('models-screen', screen);
+      history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+    }
+  }, {capture:true});
+  window.addEventListener('popstate', () => { if (authenticated && currentView === 'settings' && settingsSection === 'models') document.dispatchEvent(new CustomEvent('klaude-view', {detail:currentView})); });
+  document.addEventListener('klaude-auth-reset', () => { show('overview', {restore:true}); byId('models-connections-summary').textContent = ''; byId('models-image-summary').textContent = ''; });
+  show('overview', {restore:true});
+  return {show, canLeave};
+})();
 
-// Browse the existing configured catalog; selection uses the same fenced runtime
-// action as the composer. Connection definitions and secrets stay host-owned.
+// Browse models from configured providers. Runtime selection belongs to Chat.
 window.BrowserModelsUI = (() => {
   let connections = [], catalog = [], selected = "", catalogConnection = "";
-  let reading = null, generation = 0, loading = false, choosing = "", page = 1;
+  let reading = null, generation = 0, loading = false, page = 1;
   let ready;
   const pageSize = 20;
-  const active = () => authenticated && currentView === "settings" && settingsSection === "models" && byId("models-configured").open;
+  const active = () => authenticated && currentView === "settings" && settingsSection === "models" && !byId("models-configured").hidden;
   const backendLabel = value => ({ ollama: "Ollama", openai_compatible: "OpenAI compatible", openai_codex: "OpenAI Codex", openai_api: "OpenAI", openrouter: "OpenRouter", gemini_api: "Google", deepseek: "DeepSeek", anthropic: "Anthropic" }[value] || value);
   function render() {
     if (!active() || !latest) return;
-    byId("models-current-name").textContent = latest.requires_model_selection ? "Choose a model" : latest.model;
-    byId("models-current-name").title = latest.model_ref || latest.model;
-    byId("models-current-status").textContent = choosing ? "Changing model…" : latest.active_turn_id || latest.queue?.length ?
-      latest.chat_deferred_model_selection === true ? "Model changes apply to the next prompt and queued messages." : "Models can be changed when this conversation is idle." : latest.requires_model_selection ? "Select a model to start chatting." : "";
     byId("configured-models-refresh").disabled = loading;
-    byId("configured-models-refresh").setAttribute("aria-busy", String(loading));
-    const nodes = connections.map(item => {
-      const button = domainButton("", () => { selected = item.id; page = 1; load(false); }, "models-connection quiet");
-      button.append(domainText("span", item.name, "models-connection-name"), domainText("small", `${item.source} · ${backendLabel(item.backend)}${item.enabled ? "" : " · Disabled"}`, "muted"));
-      button.title = item.name;
-      button.dataset.rowKey = item.id;
-      button.dataset.rowSignature = JSON.stringify([item, selected === item.id, Boolean(choosing)]);
-      button.setAttribute("aria-pressed", String(selected === item.id));
-      button.disabled = !item.enabled || Boolean(choosing);
-      return button;
-    });
-    reconcileRows(byId("models-connections"), nodes);
-    if (!connections.length && !loading) byId("models-connections").replaceChildren(domainText("p", "No configured connections.", "muted"));
+    const source = byId('models-source');
+    source.replaceChildren(new Option('All connections', '*'), ...connections.map(item => { const option = new Option(`${item.name}${item.enabled ? '' : ' · Disabled'}`, item.id); option.disabled = !item.enabled; return option; }));
+    source.value = selected;
     const connection = connections.find(item => item.id === selected);
     byId("models-catalog-title").textContent = connection?.name || "Available models";
     const query = byId("models-query").value.trim().toLocaleLowerCase();
@@ -37,13 +69,10 @@ window.BrowserModelsUI = (() => {
     page = Math.min(page, totalPages);
     byId("models-count").textContent = catalogConnection === selected ? `${items.length.toLocaleString()} shown` : "";
     byId("models-query").disabled = !catalogConnection;
-    const currentModel = latest.model_providers ? latest.model_ref : latest.model;
     const rows = items.slice((page - 1) * pageSize, page * pageSize).map(item => {
-      const current = currentModel === item.id && !latest.requires_model_selection;
       const node = domainText("article", "", "models-model library-card collection-row");
       node.dataset.rowKey = item.id;
-      node.dataset.current = String(current);
-      node.dataset.rowSignature = JSON.stringify([item, current, choosing, runtimeChoiceInFlight, Boolean(latest.active_turn_id), Boolean(latest.queue?.length)]);
+      node.dataset.rowSignature = JSON.stringify(item);
       const content = domainText("div", "", "models-model-content");
       const artwork = domainText("span", "", "collection-icon");
       const brandIcon = domainText("span", "", "model-brand-icon");
@@ -60,33 +89,16 @@ window.BrowserModelsUI = (() => {
         for (const effort of efforts) capabilities.append(domainText("span", effort, "model-capability"));
         content.append(capabilities);
       }
-      const use = domainButton(choosing === item.id ? "Changing…" : current ? "Current" : "Use model", () => useModel(item), current ? "quiet" : "secondary");
-      use.setAttribute("aria-label", current ? `${item.name}, current chat model` : `Use ${item.name} for this conversation`);
-      use.disabled = current || runtimeChoiceInFlight || Boolean(choosing) ||
-        latest.chat_deferred_model_selection !== true && (Boolean(latest.active_turn_id) || Boolean(latest.queue?.length));
-      node.append(artwork, content, use);
+      node.append(artwork, content);
       return node;
     });
     const target = byId("models-items");
     // Keep delayed skeletons owned by beginLoading until a catalog is available.
     if (rows.length) reconcileRows(target, rows);
     else if (!loading) collectionEmpty(target, query ? "No matching models" : "No models available",
-      query ? "Try another model name." : selected ? "Refresh this connection to check its available models." : "Enable a connection in Klaude’s terminal Model settings.", "models");
+      query ? "Try another model name." : selected ? "Refresh this connection to check its available models." : "Add or enable a connection in Manage connections.", "models");
     updateDomainPager("models", (page - 1) * pageSize, { items: rows, total: items.length, page_size: pageSize, more: page < totalPages });
     byId("models-pages").hidden = items.length <= pageSize;
-  }
-  async function useModel(item) {
-    if (choosing || !active() || runtimeChoiceInFlight || latest.chat_deferred_model_selection !== true && (latest.active_turn_id || latest.queue?.length)) return;
-    choosing = item.id;
-    const epoch = authEpoch;
-    render();
-    const ok = await chooseRuntime("model", item.id, { onError: error => {
-      if (epoch === authEpoch && active()) byId("models-status").textContent = error.message;
-    } });
-    if (epoch !== authEpoch) return;
-    choosing = "";
-    if (ok && active()) byId("models-status").textContent = `${item.name} is ready for this conversation.`;
-    render();
   }
   async function load(refreshInventory = true) {
     if (!active() || !latest) return;
@@ -100,40 +112,37 @@ window.BrowserModelsUI = (() => {
     const current = () => active() && epoch === authEpoch && loadId === generation;
     try {
       if (refreshInventory) {
-        const inventory = latest.model_providers ? (await domainRequest("/api/v1/models/connections", "GET", undefined, { signal: reading.signal })).connections :
+        const inventory = latest.model_settings ? (await domainRequest("/api/v1/settings/models", "GET", undefined, { signal: reading.signal })).connections : latest.model_providers ? (await domainRequest("/api/v1/models/connections", "GET", undefined, { signal: reading.signal })).connections :
           [{ id: "legacy-local", name: "Local models", source: "Local", backend: "ollama", enabled: true }];
         if (!current()) return;
         connections = inventory;
-        if (!connections.some(item => item.id === selected && item.enabled)) selected =
-          connections.find(item => item.id === latest.model_connection && item.enabled)?.id || connections.find(item => item.enabled)?.id || "";
+        if (selected !== "*" && !connections.some(item => item.id === selected && item.enabled)) selected = connections.find(item => item.id === latest.model_connection && item.enabled)?.id || connections.find(item => item.enabled)?.id || "";
       }
       if (!selected) { catalog = []; catalogConnection = ""; byId("models-status").textContent = "No enabled model connection."; return; }
-      const connectionId = selected;
-      const result = await domainRequest(latest.model_providers ? `/api/v1/models/catalog?connection=${encodeURIComponent(connectionId)}` : "/api/v1/models/local", "GET", undefined, { signal: reading.signal });
-      if (!current()) return;
-      catalog = result.models; catalogConnection = connectionId;
-      byId("models-status").textContent = "";
+      const connectionId = selected, models = [], errors = [];
+      for (const connection of connections.filter(item => item.enabled && (selected === '*' || item.id === selected))) {
+        try {
+          const result = await domainRequest(latest.model_settings ? `/api/v1/models/catalog?connection=${encodeURIComponent(connection.id)}&purpose=defaults` : latest.model_providers ? `/api/v1/models/catalog?connection=${encodeURIComponent(connection.id)}` : '/api/v1/models/local', 'GET', undefined, {signal:reading.signal});
+          if (!current()) return;
+          models.push(...result.models);
+          catalog = [...models]; catalogConnection = connectionId; render();
+        } catch (error) {
+          if (!current() || error.name === 'AbortError') return;
+          errors.push(`${connection.name}: ${error.message}`);
+        }
+      }
+      catalog = models; catalogConnection = connectionId;
+      byId("models-status").textContent = errors.join(' · ');
     } catch (error) { if (current()) byId("models-status").textContent = `${error.message}${catalog.length ? " Previously loaded models remain visible." : ""}`; }
     finally {
       finish();
       if (loadId === generation) { loading = false; render(); }
     }
   }
-  decorateDisclosure(byId("models-configured").querySelector("summary"));
-  byId("models-configured").open = readNavigationChoice("configured-catalog", ["open", "closed"], "closed") === "open";
-  byId("models-configured").addEventListener("toggle", () => {
-    saveNavigationChoice("configured-catalog", byId("models-configured").open ? "open" : "closed");
-    if (active()) load(); else { generation++; reading?.abort(); loading = false; }
-  });
+  byId('models-source').addEventListener('change', () => { selected = byId('models-source').value; page = 1; load(false); });
   byId("models-previous").append(libraryIcon("previous"));
   byId("models-next").append(libraryIcon("next"));
   byId("configured-models-refresh").addEventListener("click", () => load());
-  byId("models-defaults").addEventListener("click", () => {
-    showView("settings", { section: "models" });
-    const heading = byId('model-default-heading'); heading.tabIndex = -1;
-    heading.focus({preventScroll: true}); heading.scrollIntoView({block: 'start'});
-  });
-  byId('models-manage-connections').addEventListener('click', () => { showView('settings', {section: 'models'}); const heading = byId('model-connections-heading'); heading.tabIndex = -1; heading.focus({preventScroll:true}); heading.scrollIntoView({block:'start'}); });
   byId("models-query").addEventListener("input", () => { page = 1; render(); });
   byId("models-previous").addEventListener("click", () => { page = Math.max(1, page - 1); render(); });
   byId("models-next").addEventListener("click", () => { page += 1; render(); });
@@ -146,13 +155,10 @@ window.BrowserModelsUI = (() => {
     else { generation += 1; reading?.abort(); loading = false; cancelLoading(byId("models-items")); }
   });
   document.addEventListener("klaude-auth-reset", () => {
-    generation += 1; reading?.abort(); loading = false; choosing = "";
-    connections = []; catalog = []; selected = catalogConnection = ""; ready = undefined; page = 1; byId("models-configured").open = false; saveNavigationChoice("configured-catalog", "closed");
+    generation += 1; reading?.abort(); loading = false;
+    connections = []; catalog = []; selected = ""; catalogConnection = ""; ready = undefined; page = 1;
     byId("models-query").value = "";
-    for (const id of ["models-connections", "models-items", "models-status", "models-count", "models-current-status", "models-numbers"]) byId(id).replaceChildren();
-    byId("models-current-name").textContent = "Choose a model";
-    byId("models-current-name").removeAttribute("title");
-    byId("models-catalog-title").textContent = "Available models";
+    for (const id of ["models-source", "models-items", "models-status", "models-count", "models-numbers"]) byId(id).replaceChildren();
     byId("models-pages").hidden = true;
   });
   function capabilitiesChanged() {
@@ -170,11 +176,11 @@ window.BrowserMedia = (() => {
   let fallbacksOpen = false;
   const active = () => authenticated && currentView === "settings";
   const manager = () => window.BrowserManagement;
-  const busy = kind => !settings || settings.management_allowed === false || SettingsDrafts.locked("models") || Boolean(settings.pending[kind]) || manager().busy(`media-${kind}`);
+  const busy = kind => !settings || settings.management_allowed === false || SettingsDrafts.locked(kind === "image_service" ? "image-service" : "models") || Boolean(settings.pending[kind]) || manager().busy(`media-${kind}`);
   const labels = { chat: "Startup chat", utility: "Utility", research: "Research", vision: "Vision",
     fallbacks: "Utility fallbacks", vision_fallbacks: "Vision fallbacks", output_tokens: "Utility output tokens", vision_enabled: "Vision image input", image_service: "Image generation service" };
-  SettingsDrafts.register("models", {
-    panel: "models-settings", status: "media-settings-status", render: renderSettings, changed: renderBusy,
+  const settingsAdapter = {
+    panel: "model-default-settings", status: "media-settings-status", render: renderSettings, changed: renderBusy,
     refresh: () => load(false, true), blocked: () => !settings || settings.management_allowed === false || Object.keys(settings.pending).length > 0,
     operation: entry => entry.base.id === "image_service" ?
       { operation: "image-settings-save", ...entry.value, revision: entry.base.version } :
@@ -191,7 +197,11 @@ window.BrowserMedia = (() => {
       "Enable Vision image input: images can be sent to your configured Vision model and fallbacks when you request analysis." :
       entry.base.id === "image_service" && entry.value.enabled && (!entry.base.value.enabled || entry.value.endpoint !== entry.base.value.endpoint) ?
         `Image generation: enable requests to ${entry.value.endpoint}. Generation prompts will be sent to this server.` : null,
-  });
+  };
+  SettingsDrafts.register("models", {...settingsAdapter,
+    blocked: () => !settings || settings.management_allowed === false || Boolean(settings.pending.defaults)});
+  SettingsDrafts.register("image-service", {...settingsAdapter, panel: "image-service-settings", status: "image-settings-status",
+    blocked: () => !settings || settings.management_allowed === false || Boolean(settings.pending.image_service)});
   function normalizedDraft(entry) {
     if (entry.base.id !== "image_service") return entry.value;
     let endpoint = SettingsDrafts.normalizedEndpoint(entry.value.endpoint);
@@ -213,7 +223,7 @@ window.BrowserMedia = (() => {
     select.addEventListener("change", describe); describe();
     return select;
   }
-  const stage = (field, value) => SettingsDrafts.set("models", field, value);
+  const stage = (field, value) => SettingsDrafts.set(field === "image_service" ? "image-service" : "models", field, value);
   function recovery(kind) {
     const container = byId(kind === "defaults" ? "defaults-recovery" : "image-settings-recovery");
     const pending = settings.pending[kind];
@@ -221,10 +231,10 @@ window.BrowserMedia = (() => {
     if (!pending) return;
     container.append(domainText("p", pending.state === "unknown" ? "The last save is unconfirmed. Check its saved state before making another change." : "A shared save is in progress.", "muted"));
     if (pending.state === "unknown") {
-      const button = domainButton("Check saved state", () => SettingsDrafts.recover("models", {
+      const button = domainButton("Check saved state", () => SettingsDrafts.recover(kind === "defaults" ? "models" : "image-service", {
         operation: kind === "defaults" ? "defaults-recover" : "image-settings-recover", target: pending.request_id,
       }));
-      const state = SettingsDrafts.category("models");
+      const state = SettingsDrafts.category(kind === "defaults" ? "models" : "image-service");
       button.disabled = state.saving || Boolean(state.drafts.entries.get("recovery")?.pending); container.append(button);
     }
   }
@@ -257,14 +267,16 @@ window.BrowserMedia = (() => {
       const controls = domainText("div", "", "settings-controls");
       controls.append(select, RoleModelPicker.decorate(select, label, field, settings.connections));
       select.addEventListener("change", () => stage(field, select.value || null));
-      form.append(title, controls); form.addEventListener("submit", event => { event.preventDefault(); stage(field, select.value || null); });
+      const picker = controls.querySelector('button');
+      picker.classList.add('settings-role-row'); picker.prepend(title); title.removeAttribute('for');
+      form.append(controls); form.classList.add('settings-role-container'); form.addEventListener("submit", event => { event.preventDefault(); stage(field, select.value || null); });
       roleFields.append(form);
     }
     fields.push(roles);
     const fallbacks = domainText("details", "", "settings-disclosure settings-fallbacks");
     fallbacks.id = "model-fallbacks"; fallbacks.open = fallbacksOpen;
     fallbacks.addEventListener("toggle", () => { if (fallbacks.isConnected) fallbacksOpen = fallbacks.open; });
-    fallbacks.append(decorateDisclosure(domainText("summary", "Fallback models")));
+    fallbacks.append(decorateDisclosure(domainText("summary", "Advanced defaults")));
     for (const [field, label, icon] of [["fallbacks", "Utility fallbacks", "tools"], ["vision_fallbacks", "Vision fallbacks", "vision"]]) {
       const form = domainText("form", "", "settings-fallback-form");
       const heading = domainText("h3", "", "model-role-label");
@@ -272,13 +284,14 @@ window.BrowserMedia = (() => {
       form.append(heading, domainText("p", "Optional models, tried in this order only when the primary cannot complete the request.", "muted"));
       const selects = [0, 1, 2].map(index => {
         const row = domainText("div", "", "setting-row");
-        const label = domainText("label", `Fallback ${index + 1}`);
+        const label = domainText("span", `Fallback ${index + 1}`, "model-role-label");
         const select = modelSelect(`default-value-${field}-${index}`, defaults[field][index], field === "fallbacks" ? "utility" : "vision");
         select.dataset.draftField = field;
-        label.htmlFor = select.id;
         const controls = domainText("div", "", "settings-controls");
         controls.append(select, RoleModelPicker.decorate(select, `${field === "fallbacks" ? "Utility" : "Vision"} fallback ${index + 1}`, field === "fallbacks" ? "utility" : "vision", settings.connections));
-        row.append(label, controls); form.append(row); return select;
+        const picker = controls.querySelector("button");
+        picker.classList.add("settings-role-row"); picker.prepend(label);
+        row.classList.add("settings-role-container"); row.append(controls); form.append(row); return select;
       });
       const changed = () => stage(field, selects.map(select => select.value).filter(Boolean));
       selects.forEach(select => select.addEventListener("change", changed));
@@ -309,9 +322,9 @@ window.BrowserMedia = (() => {
     const track = domainText("span", ""); track.setAttribute("aria-hidden", "true");
     toggleLabel.append(toggle, track); enabledControls.append(toggleLabel);
     enabled.append(enabledLabel, enabledControls); optionFields.append(enabled);
-    fields.push(options, fallbacks);
+    fallbacks.append(options); fields.push(fallbacks);
     byId("default-model-fields").replaceChildren(...fields);
-    const image = SettingsDrafts.value("models", "image_service");
+    const image = SettingsDrafts.value("image-service", "image_service");
     byId("image-service-url").value = image.endpoint;
     byId("image-service-provider").value = image.provider;
     byId("image-service-model-name").value = image.model;
@@ -338,8 +351,12 @@ window.BrowserMedia = (() => {
         return;
       }
       settings = result;
+      byId('models-connections-summary').textContent = `${settings.connections.length} configured · ${settings.connections.filter(item => item.enabled).length} enabled`;
+      byId('models-image-summary').textContent = `${settings.image_service.enabled ? 'Enabled' : 'Disabled'} · ${settings.image_service.provider === 'ollama' ? 'Ollama' : 'stable-diffusion.cpp'}${settings.image_service.model ? ' · ' + settings.image_service.model : ''}`;
       SettingsDrafts.ingest("models", [
         ...Object.entries(settings.defaults).map(([id, value]) => ({ id, value, version: value, label: labels[id] })),
+      ]);
+      SettingsDrafts.ingest("image-service", [
         { id: "image_service", value: { endpoint: settings.image_service.endpoint, enabled: settings.image_service.enabled, provider: settings.image_service.provider || "sdcpp", model: settings.image_service.model },
           version: settings.image_service.revision, label: labels.image_service },
       ]);
@@ -427,7 +444,7 @@ window.BrowserMedia = (() => {
     else { generation += 1; reading?.abort(); catalogReading?.abort(); catalogGeneration += 1; loadingCatalog = false; }
   });
   document.addEventListener("klaude-operations", event => {
-    if (SettingsDrafts.category("models").saving) return;
+    if (SettingsDrafts.category("models").saving || SettingsDrafts.category("image-service").saving) return;
     if (active() && event.detail.some(item => ["defaults-save", "image-settings-save", "defaults-recover", "image-settings-recover"].includes(item.kind) && ["completed", "failed", "unknown"].includes(item.state))) {
       // Reload only when an operation changes, preserving unsaved form edits.
       const revision = JSON.stringify(event.detail.filter(item => item.kind.startsWith("defaults-") || item.kind.startsWith("image-settings-")).map(item => [item.request_id, item.state]));
@@ -1180,7 +1197,7 @@ window.ModelStoreUI = (() => {
   }
   function settingsLink(target) {
     target.append(domainButton('Open model settings', () => {
-      showView('settings', {section:'models'}); byId('model-connections-heading').scrollIntoView({block:'start'});
+      showView('settings', {section:'models'}); ModelsSettingsNavigation.show('connections', {focus:true});
     }, 'quiet'));
   }
   function detailSection(title, identity) {
@@ -2045,10 +2062,13 @@ window.RoleModelPicker = (() => {
       const identity = select.value.split('/')[0].split('@')[1];
       if ([...byId('role-picker-connection').options].some(option => option.value === identity)) byId('role-picker-connection').value = identity;
       dialog.showModal(); byId('role-picker-query').focus(); load();
-    }, 'secondary model-choice-button');
+    }, 'quiet model-choice-button');
     button.id = select.id + '-picker'; button.setAttribute('aria-haspopup', 'dialog');
     button.setAttribute('aria-label', `Choose ${label.toLocaleLowerCase()} model`);
-    const describe = () => { button.textContent = select.selectedOptions[0]?.textContent || 'Unset'; button.title = select.value || 'Unset'; };
+    const valueLabel = domainText('span', '', 'model-role-value');
+    const arrow = domainText('span', '›', 'model-role-chevron'); arrow.setAttribute('aria-hidden', 'true');
+    button.append(valueLabel, arrow);
+    const describe = () => { valueLabel.textContent = (select.value ? select.selectedOptions[0]?.textContent : 'Automatic / unconfigured') || 'Unconfigured'; button.title = select.value || 'Unset'; button.setAttribute('aria-label', `Choose ${label.toLocaleLowerCase()} model, ${valueLabel.textContent}`); };
     select.addEventListener('change', describe); describe();
     select.hidden = true;
     queueMicrotask(() => { const fieldLabel = document.querySelector(`label[for="${select.id}"]`); if (fieldLabel) fieldLabel.htmlFor = button.id; });
@@ -2059,6 +2079,7 @@ window.RoleModelPicker = (() => {
   byId('role-picker-unset').addEventListener('click', () => select('', 'Unset'));
   byId('role-picker-query').addEventListener('input', () => { page = 1; render(); });
   byId('role-picker-connection').addEventListener('change', load);
+  byId('role-picker-refresh').addEventListener('click', load);
   for (const [action, delta] of [['previous', -1], ['next', 1]]) {
     byId(`role-picker-${action}`).append(libraryIcon(action));
     byId(`role-picker-${action}`).addEventListener('click', () => { page += delta; render(); });

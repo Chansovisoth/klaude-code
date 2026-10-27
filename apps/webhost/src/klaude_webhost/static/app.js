@@ -4596,6 +4596,7 @@ function showSettingsSection(section, { restore = false, focus = false } = {}) {
   }
   if (!settingsSections.includes(section) || section === "account" && loginMethod !== "password")
     section = loginMethod === "password" ? "account" : "theme";
+  if (settingsSection === 'models' && section !== 'models' && !restore && window.ModelsSettingsNavigation && !window.ModelsSettingsNavigation.canLeave()) return;
   const changed = settingsSection !== section;
   if (changed) settingsSectionGeneration += 1;
   if (changed && settingsSection === "account") {
@@ -4613,7 +4614,10 @@ function showSettingsSection(section, { restore = false, focus = false } = {}) {
     byId(tab.getAttribute("aria-controls")).hidden = !active;
   }
   settingsSection = section;
+  if (section !== 'account') byId('password-dialog').close();
+  if (section !== 'memory') byId('memory-editor').close();
   saveNavigationChoice("settings-section", section);
+  window.SettingsActions?.refresh();
   if (changed) byId("settings-view").scrollTop = 0;
   if (currentView === "settings") {
     if (focus || panelFocus?.hidden) selected.focus({ preventScroll: true });
@@ -4625,6 +4629,7 @@ function showSettingsSection(section, { restore = false, focus = false } = {}) {
     url.searchParams.set("settings", section);
     history.pushState(history.state, "", url.pathname + url.search + url.hash);
   }
+  if (changed && !restore) document.dispatchEvent(new CustomEvent("klaude-view", {detail:currentView}));
 }
 for (const tab of byId("settings-sections").querySelectorAll("[data-settings]")) {
   tab.addEventListener("click", () => showSettingsSection(tab.dataset.settings));
@@ -4639,14 +4644,16 @@ window.SettingsActions = (() => {
   };
   function refresh() {
     cancelAnimationFrame(frame); frame = 0;
-    const mobile = !desktopSettings.matches && authenticated && currentView === "settings";
-    const active = mobile ? entries.find(entry => !entry.panel.hidden && !entry.bar.hidden) : null;
+    const inSettings = authenticated && currentView === "settings";
+    const mobile = !desktopSettings.matches && inSettings;
+    const active = inSettings ? entries.find(entry => !entry.panel.closest('[hidden]') && !entry.bar.hidden) : null;
     for (const entry of entries) {
       if (entry === active) {
         if (entry.bar.parentElement !== dock) dock.append(entry.bar);
       } else if (entry.bar.parentNode !== entry.anchor.parentNode) entry.anchor.after(entry.bar);
     }
     dock.hidden = !active;
+    view.classList.toggle("has-settings-actions", Boolean(active));
     const tabs = byId("settings-sections");
     property(view, "--settings-navigation-size", `${Math.ceil(tabs.getBoundingClientRect().height)}px`);
     const viewport = window.visualViewport;
@@ -4657,8 +4664,9 @@ window.SettingsActions = (() => {
     const keyboardInset = mobile ? Math.max(0, viewportInset - navigationInset) : 0;
     property(view, "--settings-keyboard-inset", `${Math.ceil(keyboardInset)}px`);
     if (active) {
-      const bottom = Math.ceil(Math.max(viewportInset, navigationInset));
       const main = byId("main-content").getBoundingClientRect();
+      const pageInset = desktopSettings.matches ? Math.max(0, innerHeight - main.bottom) : 0;
+      const bottom = Math.ceil(Math.max(viewportInset, navigationInset, pageInset));
       property(dock, "inset-inline-start", phone.matches ? "0px" : `${Math.max(0, main.left)}px`);
       property(dock, "inset-inline-end", phone.matches ? "0px" : `${Math.max(0, innerWidth - main.right)}px`);
       property(dock, "bottom", `${bottom}px`);
@@ -4727,6 +4735,7 @@ byId("settings-sections").addEventListener("keydown", event => {
 });
 
 function showView(view, { restore = false, section = null } = {}) {
+  if (currentView === 'settings' && settingsSection === 'models' && (view !== 'settings' || section && section !== 'models') && !restore && window.ModelsSettingsNavigation && !window.ModelsSettingsNavigation.canLeave()) return;
   if (!viewNames.includes(view)) view = "chat";
   const changed = currentView !== view;
   const previousSettingsSection = settingsSection;
@@ -5076,6 +5085,13 @@ byId("account-login").addEventListener("submit", async (event) => {
     window.KlaudeLockScreen?.syncPassword();
   }
 });
+const passwordDialog = byId('password-dialog');
+byId('password-open').addEventListener('click', () => { passwordDialog.showModal(); byId('current-password').focus(); });
+for (const id of ['password-close', 'password-cancel']) byId(id).addEventListener('click', () => passwordDialog.close());
+passwordDialog.addEventListener('close', () => { byId('change-password').reset(); byId('password-status').textContent = ''; byId('password-open').focus({preventScroll:true}); });
+document.addEventListener('klaude-view', () => { if (currentView !== 'settings' || settingsSection !== 'account') passwordDialog.close(); });
+document.addEventListener('klaude-auth-reset', () => passwordDialog.close());
+
 byId("change-password").addEventListener("submit", async (event) => {
   event.preventDefault();
   const replacement = byId("new-password").value;
@@ -5104,3 +5120,8 @@ window.addEventListener("hashchange", () => {
 });
 window.MobileChatUI?.init();
 initialize().catch(initializationFailed);
+
+window.addEventListener('beforeunload', event => {
+  const dirty = ['models', 'image-service'].some(id => { const state = window.SettingsDrafts?.category(id); return state && (state.drafts.changed().length || state.saving); });
+  if (dirty) { event.preventDefault(); event.returnValue = ''; }
+});

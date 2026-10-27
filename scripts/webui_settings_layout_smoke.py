@@ -31,7 +31,8 @@ OUT = Path("/tmp/klaude-settings-layout")
 MEASURE = """(()=>{
   const view=byId('settings-view'),tabs=byId('settings-sections'),dock=byId('settings-action-dock');
   const panel=view.querySelector('[role=tabpanel]:not([hidden])');
-  const bar=panel.querySelector('.settings-save-bar,#theme-save-bar')||dock.firstElementChild;
+  const bar=[...panel.querySelectorAll('.settings-save-bar,#theme-save-bar')]
+    .find(element=>!element.hidden&&!element.closest('[hidden]'))||dock.firstElementChild;
   const b=bar.getBoundingClientRect(),d=dock.getBoundingClientRect(),n=tabs.getBoundingClientRect();
   const selected=tabs.querySelector('[aria-selected=true]'),s=selected.getBoundingClientRect();
   const rail=document.querySelector('.rail').getBoundingClientRect();
@@ -62,6 +63,15 @@ MEASURE = """(()=>{
     actionsFit:actions.every(r=>r.left>=0&&r.right<=innerWidth&&r.top>=d.top&&r.bottom<=d.bottom),
     rightAligned:actions.at(-1)?.right>=d.right-40,
     panelEnd:panel.getBoundingClientRect().bottom,
+    scrollInfo:{scrollHeight:view.scrollHeight,clientHeight:view.clientHeight,scrollTop:view.scrollTop,
+      viewRect:v.toJSON(),afterHeight:getComputedStyle(view,'::after').height,
+      afterContent:getComputedStyle(view,'::after').content,classes:view.className},
+    contentEnd:Math.max(0,...[...panel.querySelectorAll('input,select,textarea,button,summary')]
+      .filter(el=>{
+        const closed=el.closest('details:not([open])');
+        return el.getClientRects().length && !el.closest('[hidden]') &&
+          (!closed || el.tagName==='SUMMARY' && el.parentElement===closed);
+      }).map(el=>el.getBoundingClientRect().bottom)),
     desktopThemeCoverage:Math.abs(b.left-p.left)<1&&Math.abs(b.right-p.right)<1&&
       b.bottom>=Math.min(v.bottom,p.bottom)-1&&
       getComputedStyle(bar).backgroundColor.startsWith('rgb(')&&
@@ -105,7 +115,9 @@ async def verify(host, root, chrome):
                 "window.SettingsActions && "
                 "document.documentElement.dataset.startup==='ready'"
             )
-            await tab.js("showView('settings',{section:'agent'})")
+            # This walkthrough intentionally keeps multiple drafts while switching
+            # categories; accept the existing leave-with-draft confirmation.
+            await tab.js("window.confirm=()=>true; showView('settings',{section:'agent'})")
             await tab.wait("Boolean(byId('setting-runtime_options-max_steps'))")
             await tab.js("""const field=byId('setting-runtime_options-max_steps');
               field.value=Number(field.value)+1;field.dispatchEvent(new Event('input'));
@@ -179,6 +191,25 @@ async def verify(host, root, chrome):
                                 "byId('agent-settings').querySelectorAll('details')"
                                 ".forEach(section=>section.open=true)"
                             )
+                        if category == "agent":
+                            row_geometry = await tab.js("""[...byId('agent-settings-fields')
+                              .querySelectorAll(
+                                '.settings-group-body > .setting-row:not(.settings-toggle-row)')]
+                              .filter(row=>row.getClientRects().length).map(row=>{
+                                const label=row.firstElementChild.getBoundingClientRect();
+                                const controls=row.querySelector('.settings-controls')
+                                  .getBoundingClientRect();
+                                const bounds=row.getBoundingClientRect();
+                                return {id:row.dataset.setting, left:label.toJSON(),
+                                  right:controls.toJSON(), row:bounds.toJSON()};
+                              })""")
+                            assert all(
+                                item["left"]["right"] <= item["right"]["left"] + 1
+                                and item["left"]["top"] < item["right"]["bottom"]
+                                and item["right"]["top"] < item["left"]["bottom"]
+                                and item["right"]["right"] <= item["row"]["right"] + 1
+                                for item in row_geometry
+                            ), (theme, width, row_geometry)
                         if category == "agent" and width in (390, 1440):
                             help_count = await tab.js(
                                 "byId('agent-settings').querySelectorAll('.settings-help-button').length"
@@ -187,7 +218,7 @@ async def verify(host, root, chrome):
                             for index in range(help_count):
                                 await tab.js(
                                     "byId('agent-settings').querySelectorAll('.settings-help-button')"
-                                f"[{index}].click()"
+                                    f"[{index}].click()"
                                 )
                                 assert await tab.js("""(()=>{
                                   const d=byId('agent-help-dialog'),r=d.getBoundingClientRect();
@@ -279,11 +310,21 @@ async def verify(host, root, chrome):
                                 if result["end"]:
                                     assert result["panelEnd"] <= d["top"] + 1, result
                             else:
+                                assert result["docked"] and result["orientation"] == "vertical", (
+                                    result
+                                )
+                                assert result["reserved"] and result["actionsFit"], result
+                                assert abs(result["dock"]["left"] - result["main"]["left"]) < 1, (
+                                    result
+                                )
+                                assert abs(result["dock"]["right"] - result["main"]["right"]) < 1, (
+                                    result
+                                )
                                 assert (
-                                    not result["docked"] and result["orientation"] == "vertical"
+                                    abs(result["dock"]["bottom"] - result["main"]["bottom"]) < 1
                                 ), result
-                                if category == "theme":
-                                    assert result["desktopThemeCoverage"], result
+                                if result["end"]:
+                                    assert result["contentEnd"] <= result["dock"]["top"] + 1, result
                             reports.append(
                                 {
                                     "theme": theme,
@@ -421,7 +462,7 @@ async def verify(host, root, chrome):
                 "viewport_keyboard_emulation": True,
                 "measured_navigation_and_padding": True,
                 "drafts_and_discard_apply": True,
-                "desktop_restoration": True,
+                "desktop_page_dock": True,
                 "console_errors": 0,
             }
     finally:

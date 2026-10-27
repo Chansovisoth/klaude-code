@@ -106,6 +106,20 @@ async def verify(host, root):
                 "byId('models-save-bar').hidden && !SettingsDrafts.category('models').saving"
             )
             assert host.application.agent.model == "fixture"
+            await tab.js("byId('model-fallbacks').open=true")
+            await tab.click("#default-value-fallbacks-0-picker")
+            await tab.wait(
+                "byId('role-model-picker').open && "
+                "Boolean(byId('role-picker-items').querySelector('.store-row'))"
+            )
+            await tab.click("#role-picker-items .store-row")
+            assert await tab.js(
+                "!byId('models-save-bar').hidden && "
+                "SettingsDrafts.value('models','fallbacks').length===1"
+            )
+            await tab.click("#models-discard")
+            assert await tab.js("SettingsDrafts.value('models','fallbacks').length===0")
+            await tab.click("[data-model-screen=image]")
             await tab.click("#image-service-test")
             try:
                 await tab.wait(
@@ -119,6 +133,8 @@ async def verify(host, root):
                     )
                 )
                 raise
+            await tab.click("#models-settings-back")
+            await tab.click("[data-model-screen=connections]")
             await tab.click("#model-connection-add")
             await tab.js(
                 "byId('model-connection-name').value='Browser native'; "
@@ -174,8 +190,10 @@ async def verify(host, root):
             await tab.js("showView('models')")
             await tab.wait("byId('store-endpoint').options.length===2")
             assert await tab.js("byId('store-endpoint-label').hidden")
-            await tab.js("byId('store-source').value='curated';"
-                         "byId('store-source').dispatchEvent(new Event('change'))")
+            await tab.js(
+                "byId('store-source').value='curated';"
+                "byId('store-source').dispatchEvent(new Event('change'))"
+            )
             await tab.wait("Boolean(document.querySelector('.store-row[data-store-model=qwen3]'))")
             await tab.click(".store-row[data-store-model=qwen3]")
             await tab.wait("!byId('store-detail').hidden && Boolean(byId('store-detail-endpoint'))")
@@ -185,6 +203,7 @@ async def verify(host, root):
             await tab.click("#store-tab-installed")
             assert await tab.js("!byId('store-endpoint-label').hidden")
             await tab.js("showView('settings', {section:'models'})")
+            await tab.click("[data-model-screen=connections]")
             await tab.wait("!byId('model-connection-add').disabled")
             await action("Test")
             await tab.wait(
@@ -232,6 +251,178 @@ async def verify(host, root):
                 "!byId('model-settings-connections').textContent.includes('Browse"
                 "r native') && !byId('model-connection-add').disabled"
             )
+            await tab.click("#models-settings-back")
+            await tab.click("[data-model-screen=catalog]")
+            await tab.wait("Boolean(byId('models-items').querySelector('.models-model'))")
+            assert await tab.js("!byId('models-items').querySelector('button')")
+            await tab.js("history.back()")
+            await tab.wait("!byId('model-default-settings').hidden")
+            await tab.click("[data-model-screen=image]")
+            await tab.js(
+                "byId('image-service-url').value='http://127.0.0.1:54321'; byId('image-"
+                "service-url').dispatchEvent(new Event('input'))"
+            )
+            assert await tab.js(
+                "!byId('image-service-save-bar').hidden && byId('models-save-bar').hidden"
+            )
+            await tab.click("#image-service-discard")
+            await tab.click("#models-settings-back")
+            await tab.js(
+                "byId('default-value-utility').value=''; "
+                "byId('default-value-utility').dispatchEvent(new Event('change')); "
+                "window.savedConfirm=window.confirm; window.confirm=()=>false"
+            )
+            await tab.click("[data-model-screen=connections]")
+            assert await tab.js("!byId('model-default-settings').hidden")
+            await tab.js("history.back()")
+            await asyncio.sleep(0.2)
+            assert await tab.js(
+                "!byId('model-default-settings').hidden && "
+                "new URLSearchParams(location.search).get('models-screen')==='overview'"
+            )
+            await tab.js("window.confirm=window.savedConfirm")
+            await tab.click("#models-discard")
+            for width, height in [(320, 568), (390, 844), (768, 1024), (1440, 900)]:
+                await tab.command(
+                    "Emulation.setDeviceMetricsOverride",
+                    {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False},
+                )
+                for screen in ["overview", "connections", "catalog", "image"]:
+                    await tab.js("ModelsSettingsNavigation.show(" + json.dumps(screen) + ")")
+                    await asyncio.sleep(0.15)
+                    assert await tab.js(
+                        "document.documentElement.scrollWidth<=innerWidth && byId('models-setti"
+                        "ngs').scrollWidth<=byId('models-settings').clientWidth"
+                    ), (width, screen)
+                    if screen == "overview":
+                        assert await tab.js(
+                            "new Set([...document.querySelectorAll('.settings-role-grid > "
+                            ".settings-role-container')]"
+                            ".map(row=>Math.round(row.getBoundingClientRect().left))).size===1"
+                        )
+                        await tab.js("byId('model-fallbacks').open=true")
+                        assert await tab.js("""(() => {
+                          const rows=[...document.querySelectorAll(
+                            '.settings-fallback-form .settings-role-row')];
+                          return rows.length===6 && rows.every(row => {
+                            const r=row.getBoundingClientRect(),
+                              group=row.closest('form').getBoundingClientRect();
+                            return Math.abs(r.left-group.left)<1 && Math.abs(r.right-group.right)<1;
+                          });
+                        })()""")
+                        assert await tab.js("""(() => {
+                          const roles=getComputedStyle(
+                            document.querySelector('.settings-role-grid'));
+                          const advanced=getComputedStyle(byId('model-fallbacks'));
+                          return roles.borderColor===advanced.borderColor &&
+                            roles.borderRadius===advanced.borderRadius &&
+                            roles.backgroundColor===advanced.backgroundColor;
+                        })()""")
+                        rows = await tab.js("""[...document.querySelectorAll(
+                              '.settings-role-row, .settings-navigation-row')]
+                            .filter(el=>el.getClientRects().length).map(el=>{
+                              const style=getComputedStyle(el), box=el.getBoundingClientRect();
+                              return {text:el.textContent, left:parseFloat(style.paddingLeft),
+                                right:parseFloat(style.paddingRight), width:box.width,
+                                parent:byId('models-settings').clientWidth,
+                                childrenFit:[...el.children].every(child=>{
+                                  const r=child.getBoundingClientRect();
+                                  return !r.width || r.left>=box.left && r.right<=box.right;
+                                })};
+                            })""")
+                        assert all(
+                            row["left"] >= 12
+                            and row["right"] >= 12
+                            and row["width"] <= row["parent"] + 1
+                            and row["childrenFit"]
+                            for row in rows
+                        ), (width, rows)
+                    shot = await tab.command("Page.captureScreenshot", {"format": "png"})
+                    (output / f"settings-{screen}-{width}.png").write_bytes(
+                        base64.b64decode(shot["data"])
+                    )
+                await tab.js(
+                    "ModelsSettingsNavigation.show('overview'); showView('settings',{sectio"
+                    "n:'account'})"
+                )
+                shot = await tab.command("Page.captureScreenshot", {"format": "png"})
+                (output / f"account-{width}.png").write_bytes(base64.b64decode(shot["data"]))
+                await tab.click("#password-open")
+                assert await tab.js(
+                    "byId('password-dialog').open && document.activeElement===byId('current"
+                    "-password')"
+                )
+                if width <= 560:
+                    await tab.wait(
+                        "Math.abs(byId('password-dialog').getBoundingClientRect().width-innerWidth)<1"
+                    )
+                shot = await tab.command("Page.captureScreenshot", {"format": "png"})
+                (output / f"password-{width}.png").write_bytes(base64.b64decode(shot["data"]))
+                await tab.js("byId('new-password').value='temporary-fixture'")
+                await tab.command(
+                    "Input.dispatchKeyEvent",
+                    {
+                        "type": "keyDown",
+                        "key": "Escape",
+                        "code": "Escape",
+                        "windowsVirtualKeyCode": 27,
+                    },
+                )
+                await tab.command(
+                    "Input.dispatchKeyEvent",
+                    {
+                        "type": "keyUp",
+                        "key": "Escape",
+                        "code": "Escape",
+                        "windowsVirtualKeyCode": 27,
+                    },
+                )
+                await tab.wait(
+                    "!byId('password-dialog').open && !byId('new-password').value && docume"
+                    "nt.activeElement===byId('password-open')"
+                )
+                await tab.js("showView('settings',{section:'memory'})")
+                await tab.wait("!byId('memory-create').disabled")
+                shot = await tab.command("Page.captureScreenshot", {"format": "png"})
+                (output / f"memory-{width}.png").write_bytes(base64.b64decode(shot["data"]))
+                await tab.click("#memory-create")
+                assert await tab.js(
+                    "byId('memory-editor').open && document.activeElement===byId('memory-fact')"
+                )
+                await tab.click("#memory-editor-cancel")
+                await tab.wait(
+                    "!byId('memory-editor').open && document.activeElement===byId('memory-create')"
+                )
+                await tab.js("showView('settings',{section:'models'})")
+            await tab.js("showView('settings',{section:'memory'})")
+            await tab.click("#memory-create")
+            await tab.js(
+                "byId('memory-fact').value='Settings layout fixture'; byId('memory-add'"
+                ").requestSubmit()"
+            )
+            await tab.wait("reviewDialog.open")
+            assert await tab.js("!byId('memory-editor').open")
+            await tab.click("#domain-review-cancel")
+            await tab.wait(
+                "byId('memory-editor').open && "
+                "byId('memory-fact').value==='Settings layout fixture'"
+            )
+            await tab.js("byId('memory-add').requestSubmit()")
+            await tab.wait("reviewDialog.open")
+            await tab.click("#domain-review-confirm")
+            await tab.wait("byId('memory-items').textContent.includes('Settings layout fixture')")
+            await tab.click("#memory-items .icon-button")
+            await tab.click("#memory-items [role=menuitem]")
+            assert await tab.js(
+                "byId('memory-editor').open && byId('memory-fact').value==='Settings la"
+                "yout fixture'"
+            )
+            await tab.click("#memory-editor-cancel")
+            await tab.click("#memory-items .icon-button")
+            await tab.js("byId('memory-items').querySelector('.danger').click()")
+            await tab.wait("reviewDialog.open")
+            assert await tab.js("byId('domain-review-confirm').classList.contains('danger')")
+            await tab.click("#domain-review-cancel")
             assert Native.pulls == 0
             await tab.click("#logout")
             await tab.wait("!authenticated")
@@ -260,4 +451,4 @@ async def verify(host, root):
 
 
 if __name__ == "__main__":
-    fixture_main(verify, admin_lan=os.environ.get("KLAUDE_TEST_ADMIN_LAN") == "1")
+    fixture_main(verify, admin_lan=os.environ.get("KLAUDE_TEST_ADMIN_LAN", "1") == "1")

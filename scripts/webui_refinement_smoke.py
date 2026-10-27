@@ -1,6 +1,7 @@
 """Isolated real-Chrome checks for compact collections and stateful refresh.
 
 Use --baseline to capture the previous layout before implementing changes.
+Use --layout-only to verify the responsive collection layout without action flows.
 Use --accessibility for focused state restoration, keyboard, text scaling,
 forced colors, reduced motion and sampled palette contrast checks.
 """
@@ -222,18 +223,27 @@ async def verify(host, root, service, chrome):
                         layouts.append({"section": section, "width": width, "theme": theme, **info})
                         if not baseline:
                             assert not info["overflow"]
+                            expected_gutter = 16 if width <= 560 else 24 if width <= 1240 else 28
+                            assert await tab.js("""(() => {
+                              const view=document.querySelector('.main-view:not([hidden])');
+                              const style=getComputedStyle(view);
+                              return [parseFloat(style.paddingLeft),
+                                parseFloat(style.paddingRight)];
+                            })()""") == [expected_gutter, expected_gutter]
                             assert await tab.js("""(() => {
                               const rail=document.querySelector('.rail');
                               return rail.scrollWidth<=rail.clientWidth;})()""")
             checks = []
-            if not baseline:
+            if not baseline and "--layout-only" not in sys.argv:
                 await exercise(tab, click, screenshot, service, checks)
+            if not baseline:
                 assert not tab.errors, tab.errors
             print(
                 json.dumps(
                     {
                         "checks": checks,
                         "baseline": baseline,
+                        "layout_only": "--layout-only" in sys.argv,
                         "layouts": layouts,
                         "browser_exceptions": len(tab.errors),
                         "screenshots": str(output),
@@ -285,10 +295,20 @@ async def exercise(tab, click, screenshot, service, checks):
       byId('library-refresh').getAttribute('aria-busy')==='true' &&
       byId('library-items').contains(beforeRow)""")
     await tab.wait('!byId("library-refresh").disabled')
-    assert await tab.js("""JSON.stringify(fileParameters())===beforeRefresh &&
-      byId('library-items').contains(beforeRow) && byId('library-view').scrollTop===beforeScroll &&
-      byId('library-status').textContent.includes('Fixture request failed') &&
-      refineRequests.slice(refreshReadStart).filter(p=>p==='/api/v1/library/items').length===1""")
+    refresh_checks = await tab.js("""({
+      parameters: JSON.stringify(fileParameters())===beforeRefresh,
+      row: byId('library-items').contains(beforeRow),
+      scroll: byId('library-view').scrollTop===beforeScroll,
+      status: byId('library-status').textContent.includes('Fixture request failed'),
+      requests: refineRequests.slice(refreshReadStart).filter(p=>p==='/api/v1/library/items').length
+    })""")
+    assert refresh_checks == {
+        "parameters": True,
+        "row": True,
+        "scroll": True,
+        "status": True,
+        "requests": 1,
+    }, refresh_checks
     service.artifacts.import_bytes(b"New backend data", "document", "note-00-added.txt")
     await tab.js("byId('library-refresh').click()")
     await tab.wait('!byId("library-refresh").disabled && filePage.total===11')

@@ -497,35 +497,59 @@ window.BrowserManagement = (() => {
     if (!memory) return;
     byId("memory-auto").checked = memory.enabled;
     byId("memory-auto").disabled = busy("memory-settings");
-    byId("memory-add").querySelector("button").disabled = busy("memory-facts");
+    byId("memory-editor-review").disabled = busy("memory-facts");
+    byId("memory-create").disabled = busy("memory-facts");
     const query = byId("memory-query").value.trim().toLowerCase();
     const items = memory.entries.filter(item => `${item.fact} ${item.id}`.toLowerCase().includes(query));
     byId("memory-items").replaceChildren(...items.map(item => {
       const pending = changes.get("memory-facts");
       const { node, actions } = row(item.fact, pending ?
         pending.phase === "unknown" ? "Unconfirmed change · check Activity" : "Change pending" : "Saved memory");
+      node.classList.add("memory-row");
       const edit = domainButton("Edit", () => editMemory(item));
       const remove = domainButton("Forget", () => review({ operation: "memory-delete", id: item.id }, "memory-facts", "memory"));
       edit.disabled = Boolean(pending) || item.truncated;
       if (item.truncated) edit.title = "This long memory can be edited in the CLI";
       remove.disabled = Boolean(pending);
-      actions.append(edit, remove);
+      remove.classList.add('danger');
+      const trigger = domainButton('⋮', () => {}, 'quiet icon-button');
+      trigger.setAttribute('aria-label', 'Memory actions'); trigger.setAttribute('aria-haspopup', 'menu');
+      const menu = domainText('div', '', 'message-menu context-action-menu');
+      menu.id = 'memory-actions-' + item.id; menu.setAttribute('popover', 'auto'); menu.setAttribute('role', 'menu');
+      trigger.setAttribute('popovertarget', menu.id); trigger.setAttribute('aria-expanded', 'false');
+      for (const action of [edit, remove]) { action.classList.add('message-action'); action.setAttribute('role', 'menuitem'); action.addEventListener('click', () => menu.hidePopover()); }
+      menu.append(edit, remove); actions.append(trigger, menu);
+      menu.addEventListener('toggle', () => {
+        const open = menu.matches(':popover-open'); trigger.setAttribute('aria-expanded', String(open));
+        if (open) { const rect = trigger.getBoundingClientRect(); menu.style.left = `${Math.max(8, Math.min(rect.right - menu.offsetWidth, innerWidth - menu.offsetWidth - 8))}px`; menu.style.top = `${Math.max(8, Math.min(rect.bottom + 4, innerHeight - menu.offsetHeight - 8))}px`; edit.focus(); }
+      });
+      trigger.addEventListener('keydown', event => { if (['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); trigger.click(); } });
+      menu.addEventListener('keydown', event => {
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); menu.hidePopover(); trigger.focus(); }
+        const buttons = [edit, remove].filter(button => !button.disabled), index = buttons.indexOf(document.activeElement);
+        if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) { event.preventDefault(); buttons[event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : buttons.length - 1)) % buttons.length]?.focus(); }
+      });
       return node;
     }));
     if (!items.length) byId("memory-items").append(domainText("p", query ? "No matching memories." : "No saved memories.", "muted"));
   }
-  function editMemory(item) {
-    const { node, actions } = row("", "Edit this saved fact");
-    const input = document.createElement("textarea");
-    input.value = item.fact; input.maxLength = 500; input.rows = 3;
-    input.setAttribute("aria-label", "Replacement memory");
-    node.firstChild.prepend(input);
-    actions.append(domainButton("Review edit", () => {
-      review({ operation: "memory-edit", id: item.id, fact: input.value }, "memory-facts", "memory");
-    }), domainButton("Cancel", renderMemory));
-    const target = [...byId("memory-items").children].find(child => child.firstChild.firstChild.textContent === item.fact);
-    if (target) { target.replaceWith(node); input.focus(); }
+  let editingMemory = null;
+  function openMemory(item = null) {
+    editingMemory = item;
+    byId('memory-editor-title').textContent = item ? 'Edit memory' : 'Add memory';
+    byId('memory-editor-review').textContent = item ? 'Review edit' : 'Review memory';
+    byId('memory-fact').value = item?.fact || '';
+    byId('memory-editor').showModal(); byId('memory-fact').focus();
   }
+  function editMemory(item) { openMemory(item); }
+  const closeMemory = () => byId('memory-editor').close();
+  byId('memory-editor-close').append(libraryIcon('close'));
+  byId('password-close').append(libraryIcon('close'));
+  byId('memory-editor-close').addEventListener('click', closeMemory);
+  byId('memory-editor-cancel').addEventListener('click', closeMemory);
+  byId('memory-create').addEventListener('click', () => openMemory());
+  byId('memory-editor').addEventListener('close', () => { editingMemory = null; byId('memory-add').reset(); byId('memory-create').focus({preventScroll:true}); });
+  document.addEventListener('klaude-view', () => { if (currentView !== 'settings' || settingsSection !== 'memory') closeMemory(); });
   function renderConnections() {
     if (!connections) return;
     const allowed = connections.management_allowed;
@@ -1156,7 +1180,7 @@ window.BrowserManagement = (() => {
     if (!active("memory")) return;
     if (!latest?.profile_management) {
       byId("memory-status").textContent = restartHint;
-      byId("memory-auto").disabled = true; byId("memory-add").querySelector("button").disabled = true;
+      byId("memory-auto").disabled = true; byId("memory-editor-review").disabled = true; byId("memory-create").disabled = true;
       return;
     }
     const generation = ++memoryLoad;
@@ -1214,7 +1238,17 @@ window.BrowserManagement = (() => {
   });
   byId("memory-add").addEventListener("submit", event => {
     event.preventDefault();
-    review({ operation: "memory-add", fact: byId("memory-fact").value }, "memory-facts", "memory");
+    const draft = {operation: editingMemory ? 'memory-edit' : 'memory-add', fact: byId('memory-fact').value};
+    if (editingMemory) draft.id = editingMemory.id;
+    closeMemory();
+    const restoreEditor = () => {
+      if (!authenticated || currentView !== 'settings' || settingsSection !== 'memory') return;
+      openMemory(draft.operation === 'memory-edit' ? {id:draft.id, fact:draft.fact} : null);
+      byId('memory-fact').value = draft.fact;
+    };
+    review(draft, 'memory-facts', 'memory', {
+      onDiscard: result => { if (!result.uncertain) restoreEditor(); }, onError: restoreEditor,
+    });
   });
   byId("connection-add").addEventListener("submit", event => {
     event.preventDefault();
@@ -1285,7 +1319,7 @@ window.BrowserManagement = (() => {
     for (const id of ["memory-status", "connections-status", "memory-query", "connections-query"]) {
       byId(id).textContent = ""; if ("value" in byId(id)) byId(id).value = "";
     }
-    byId("memory-add").reset(); byId("connection-add").reset();
+    closeMemory(); byId("memory-add").reset(); byId("connection-add").reset(); byId("memory-create").disabled = true;
     byId("memory-auto").checked = false; byId("memory-auto").disabled = true;
   });
   function capabilitiesChanged() {
