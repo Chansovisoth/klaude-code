@@ -64,6 +64,20 @@ Current reproduction, focused browser evidence and limits are recorded in
   variants, light/dark/system, local custom/image accents, bounded surface
   transparency, source-measured corner/motion tokens, connected controls, native
   switches/radios/ranges/fields, contextual tooltips, dialogs/popovers and shapes.
+  Tooltips now share a 12×6px arrow in the existing inverse-surface color. The
+  controller flips above/below, clamps the bubble within the visual viewport and
+  offsets the arrow to the trigger, including after a viewport change. Titled
+  text/links/SVGs use the same tooltip as icon actions; explicit `data-tooltip`
+  labels are honored. Hover/keyboard behavior retains native title suppression,
+  restores existing ARIA descriptions and dismisses on Escape, scroll or resize.
+  A temporary isolated Chromium check (`/tmp/klaude_tooltip_arrow_preview.py`)
+  covers 36 light/dark × 1440/390/320px × upper/lower left/center/right layouts,
+  real mouse/keyboard events, modal controls, reduced motion and dismissal. Arrow
+  geometry and viewport bounds are measured; screenshots in
+  `/tmp/klaude-tooltip-arrows/` were inspected at phone and desktop sizes. This is
+  focused tooltip validation, without a full Expressive regression or live-host
+  restart claim. Source/bundle JavaScript syntax, both bundle checks and whitespace
+  checks pass; unrelated worktree changes are preserved.
 - Shell/navigation/conversation drawer, chat/composer, Markdown/code actions,
   attachment/status surfaces, Context Panel, full/Context Library, Models,
   Integrations, Settings Account/Theme/Agent/Models/Memory, session/review dialogs,

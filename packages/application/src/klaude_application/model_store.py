@@ -26,7 +26,7 @@ from klaude_core.settings_store import atomic_write_private, settings_lock
 
 from .operation_journal import OperationConflict, OperationJournal
 
-OPERATIONS = frozenset({"model-pull", "model-delete"})
+OPERATIONS = frozenset({"model-pull", "model-delete", "model-image-download"})
 RESOURCE = "browser-model-work"
 OWNER = "web-admin"
 VERIFIED = "2026-10-25"
@@ -115,6 +115,10 @@ def discovery() -> dict[str, Any]:
 
 
 def inventory(cfg: Config, identity: str) -> dict[str, Any]:
+    if identity == "image:sdcpp":
+        from .image_model_store import inventory as image_inventory
+
+        return image_inventory(cfg)
     connection, credential = endpoint(cfg, identity)
     cache_key = hashlib.sha256(
         f"{identity}:{connection.revision}:{credential}".encode()
@@ -153,6 +157,10 @@ def inventory(cfg: Config, identity: str) -> dict[str, Any]:
 
 
 def prepare(cfg: Config, draft: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
+    if draft.get("operation") == "model-image-download":
+        from .image_model_store import prepare as image_prepare
+
+        return image_prepare(cfg, draft)
     from .model_manager import ModelManagerCommand
 
     if set(draft) != {"operation", "connection", "model"}:
@@ -222,6 +230,10 @@ def save_target(cfg: Config, identity: str, fields: dict[str, Any]) -> None:
 
 
 def private_target(fields: dict[str, Any]) -> dict[str, Any]:
+    if fields.get("endpoint") == "image:sdcpp":
+        from .image_model_store import KEYS
+
+        return {key: fields[key] for key in KEYS}
     keys = ("endpoint", "model", "revision", "credential_revision", "digest")
     return {k: fields[k] for k in keys}
 
@@ -272,6 +284,7 @@ def jobs(cfg: Config, journal: OperationJournal) -> dict[str, Any]:
                 "model": target.get("model", "Unknown model"),
                 "connection": target.get("endpoint", ""),
                 "message": target.get("message", ""),
+                **({"size": target["size"]} if target.get("endpoint") == "image:sdcpp" else {}),
                 "dismissed": dismissed,
             }
         )
@@ -281,6 +294,10 @@ def jobs(cfg: Config, journal: OperationJournal) -> dict[str, Any]:
 
 
 def run(cfg: Config, request: dict[str, Any], progress: Callable | None = None) -> dict:
+    if request["operation"] == "model-image-download":
+        from .image_model_store import run as image_run
+
+        return image_run(cfg, request, progress or (lambda _: None))
     from .model_manager import ModelManagerCommand
 
     command = ModelManagerCommand.from_worker({
@@ -313,6 +330,10 @@ def reconcile(
     cfg: Config, journal: OperationJournal, identity: str, *, require_end_proof: bool = False,
 ) -> dict[str, Any]:
     receipt = journal.status(identity, OWNER)
+    if receipt is not None and receipt.kind == "model-image-download":
+        from .image_model_store import reconcile as image_reconcile
+
+        return image_reconcile(cfg, journal, identity)
     if receipt is None or receipt.kind not in OPERATIONS or receipt.state != "unknown":
         raise OperationConflict("Only an unconfirmed model operation can be checked")
     target = read_record(target_path(cfg, identity), limit=16_384)

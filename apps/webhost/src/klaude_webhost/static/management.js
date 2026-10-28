@@ -156,13 +156,14 @@ window.SettingsDrafts = (() => {
     } finally { clearTimeout(timer); }
   }
   const request = (...args) => bounded(domainRequest(...args));
-  async function prepare(entry, operation, epoch) {
+  async function prepare(state, entry, operation, epoch) {
     const prepared = await request("/api/v1/library/review", "POST", { draft: operation });
     if (!current(epoch)) {
       domainRequest("/api/v1/library/discard", "POST", { review_id: prepared.review_id }).catch(() => {});
       throw new DOMException("Signed out", "AbortError");
     }
-    entry.pending = { review_id: prepared.review_id, request_id: requestId(), phase: "submitting" };
+    entry.pending = { review_id: prepared.review_id, request_id: requestId(), phase: "submitting",
+      reviewed: state.adapter.reviewed?.(entry, prepared) };
     return submit(entry);
   }
   async function submit(entry) {
@@ -215,8 +216,9 @@ window.SettingsDrafts = (() => {
     if (entry.recovery) { state.drafts.entries.delete("recovery"); return; }
     // A concurrent edit after our successful save is still a conflict, rather
     // than evidence that our draft was the final value in storage.
+    const reviewed = entry.pending?.reviewed;
     entry.pending = null;
-    if (!equal(entry.latest.value, state.adapter.normalized?.(entry) ?? entry.value)) {
+    if (!equal(entry.latest.value, reviewed ?? state.adapter.normalized?.(entry) ?? entry.value)) {
       entry.conflict = true;
       throw new Error(`${entry.base.label} changed again. Choose which value to keep.`);
     }
@@ -235,7 +237,7 @@ window.SettingsDrafts = (() => {
       for (const entry of entries) {
         savingLabel = entry.base.label;
         state.message = `Saving ${entry.base.label}… ${saved} of ${entries.length} saved. Changes are saved individually.`; render(state);
-        const operation = await prepare(entry, state.adapter.operation(entry), epoch);
+        const operation = await prepare(state, entry, state.adapter.operation(entry), epoch);
         render(state);
         await waitFor(entry, operation, epoch);
         await finishEntry(state, entry, epoch); saved += 1;
@@ -374,57 +376,175 @@ window.BrowserManagement = (() => {
   // Other management controls also load with the earlier inline image form.
   const generationStatusId = generationDialog ? "image-generate-status" : "generated-jobs-status";
   const generationTabs = byId("generation-tabs");
+  const positionGenerationIndicator = generationTabs ? primaryTabIndicator(generationTabs) : () => {};
   let generationType = "image";
   let studioFromChat = false;
   let generationPreparation = 0;
   let studioCapabilities = null, studioCheck = 0;
   const studioDrafts = new Map();
+  const imageRatios = {'1:1': [512,512], '3:2': [768,512], '16:9': [1024,576]};
+  let imageRatio = '1:1', imageOrientation = 'landscape';
+  function ratioDimensions(ratio, orientation = imageOrientation) {
+    const dimensions = imageRatios[ratio] || ['width', 'height'].map(axis => Number(byId(`image-${axis}`).value));
+    const [short, long] = [...dimensions].sort((a,b) => a-b);
+    return orientation === 'portrait' ? [short, long] : [long, short];
+  }
+  function validImageDimensions([width, height]) {
+    return ['width', 'height'].every((axis, index) => {
+      const input = byId(`image-${axis}`), value = [width, height][index];
+      return value >= Number(input.min) && value <= Number(input.max);
+    });
+  }
+  function syncImageRatio() {
+    for (const input of byId('image-ratio-quick').querySelectorAll('input')) {
+      input.checked = input.value === imageRatio;
+      input.disabled = input.value !== 'custom' && !validImageDimensions(ratioDimensions(input.value));
+    }
+    for (const input of byId('image-orientation').querySelectorAll('input')) {
+      input.checked = input.value === imageOrientation;
+      input.disabled = !validImageDimensions(ratioDimensions(imageRatio, input.value));
+    }
+  }
+  function applyImageRatio() {
+    if (imageRatio !== 'custom') {
+      const [width, height] = ratioDimensions(imageRatio);
+      byId('image-width').value = width; byId('image-height').value = height;
+    }
+    imageDimensions();
+  }
+  function renderCreationSummary() {
+    const model = studioCapabilities?.model || jobs?.image_settings.model || '';
+    const backend = studioCapabilities?.backend;
+    byId('image-model-summary').textContent = `Model: ${backend ? backend + ' · ' : ''}${model || 'Not configured'}`;
+    byId('image-model-summary').title = model;
+    byId('image-sampling-summary').textContent = `Steps: ${byId('image-steps').value}`;
+    const reference = byId('research-model-source').value === 'default' && jobs?.research_model ?
+      jobs.research_model : latest?.model_ref || latest?.model;
+    const readable = String(reference || '').replace(/^([^@/]+)@[^/]+\//, '$1 · ')
+      .replace(/^ollama\//, 'ollama · ');
+    byId('research-model-label').textContent = `Model: ${readable || 'Unavailable'}`;
+    byId('research-model-label').title = reference || '';
+    byId('research-settings-help').textContent = jobs?.research_model ?
+      'Uses saved Research context, output and search budgets from Agent settings.' :
+      'Uses the current chat model. Choose a separate Research default in Models settings. Context, output and search budgets come from Agent settings.';
+    for (const [id, key, label] of [['research-context-summary', 'context_tokens', 'Context'],
+      ['research-output-summary', 'output_tokens', 'Output']]) {
+      const tokens = jobs?.research_defaults?.[key];
+      byId(id).textContent = Number.isInteger(tokens) ? `${label}: ${tokens} tokens` : `${label}: Unavailable`;
+    }
+  }
+  function openCreationSettings(type) {
+    const dialog = byId(`${type}-create-settings`);
+    if (!generationDialog.open || dialog.open) return;
+    renderCreationSummary(); dialog.showModal();
+  }
+  function validCreationForm(type) {
+    const form = byId(type === 'image' ? 'image-generate' : 'research-create');
+    const invalid = [...form.elements].find(input => input.willValidate && !input.validity.valid);
+    if (!invalid) return true;
+    if (!form.contains(invalid)) {
+      openCreationSettings(type);
+      if (type === 'image') byId('image-advanced').open = true;
+    }
+    invalid.reportValidity(); return false;
+  }
+  for (const type of ['image', 'research']) {
+    byId(`${type}-composer-icon`).append(libraryIcon(type === 'image' ? 'sparkles' : 'search'));
+    byId(`${type}-options`).append(libraryIcon('more'));
+    byId(`${type}-options`).addEventListener('click', () => openCreationSettings(type));
+    const dialog = byId(`${type}-create-settings`);
+    byId(`${type}-create-settings-close`).append(libraryIcon('close'));
+    for (const action of ['close', 'done']) byId(`${type}-create-settings-${action}`)
+      .addEventListener('click', () => dialog.close());
+    dialog.addEventListener('close', () => {
+      renderCreationSummary();
+      if (generationDialog.open && authenticated) byId(`${type}-options`).focus({preventScroll:true});
+    });
+    dialog.addEventListener('keydown', event => {
+      if (event.key === 'Escape') {
+        event.preventDefault(); event.stopPropagation(); dialog.close();
+      }
+    });
+  }
+  for (const id of ['image-steps', 'image-seed', 'research-model-source', 'research-format'])
+    byId(id).addEventListener('input', renderCreationSummary);
   function imageDimensions() {
-    byId("image-dimensions").textContent = `${byId("image-width").value} × ${byId("image-height").value} pixels`;
+    const dimensions = `${byId("image-width").value} × ${byId("image-height").value} pixels`;
+    byId("image-dimensions").textContent = `Size: ${dimensions}`;
+    byId("image-settings-dimensions").textContent = dimensions;
+    syncImageRatio(); renderCreationSummary();
   }
   function restoreImageDraft(draft) {
     for (const key of ['prompt', 'width', 'height', 'steps', 'seed']) byId(`image-${key}`).value = draft[key];
-    const ratio = `${draft.width},${draft.height}`;
-    byId('image-ratio').value = [...byId('image-ratio').options].some(o => o.value === ratio) ? ratio : 'custom';
+    imageOrientation = Number(draft.width) < Number(draft.height) ? 'portrait' : 'landscape';
+    imageRatio = Object.keys(imageRatios).find(ratio => {
+      const [width, height] = ratioDimensions(ratio);
+      return width === Number(draft.width) && height === Number(draft.height);
+    }) || 'custom';
     imageDimensions();
   }
   async function checkImageService() {
     if (latest?.image_studio !== true) {
       studioCapabilities = null;
+      byId('image-service-status').textContent = 'Unavailable';
+      byId('image-service-status').dataset.state = 'error';
       byId('image-capabilities-status').textContent = 'Restart the WebUI host, then reload this page to use Image studio.';
       render(); return;
     }
     const id = ++studioCheck, epoch = authEpoch;
     studioCapabilities = null; render();
-    byId('image-capabilities-status').textContent = 'Checking image service…';
+    byId('image-service-status').textContent = 'Checking…';
+    byId('image-service-status').dataset.state = 'checking';
+    byId('image-check-service').disabled = true;
+    byId('image-capabilities-status').textContent = '';
     try {
       const result = await domainRequest('/api/v1/library/image-capabilities');
       if (id !== studioCheck || epoch !== authEpoch || !active('jobs')) return;
       studioCapabilities = result;
-      byId('image-generator').replaceChildren(new Option(`${result.backend} · ${result.model || 'Not configured'}`));
-      byId('image-capabilities-status').textContent = result.available ?
-        result.cancellation_notice || (result.cancel_generating ? 'Service ready. Cancellation targets this job only.' : 'Service ready. Only queued jobs can be cancelled; running jobs may finish remotely.') : result.message;
+      byId('image-generator').replaceChildren(new Option(result.model || 'Not configured'));
+      byId('image-generator').title = `${result.backend} · ${result.model || 'Not configured'}`;
+      byId('image-service-status').textContent = result.available ? 'Ready' : result.enabled ? 'Unavailable' : 'Not configured';
+      byId('image-service-status').dataset.state = result.available ? 'ready' : 'error';
+      byId('image-capabilities-status').textContent = result.available ? '' : result.message;
       if (result.available) {
         for (const axis of ['width', 'height']) {
           byId(`image-${axis}`).min = Math.ceil(Math.max(256, result.limits[`min_${axis}`]) / 64) * 64;
           byId(`image-${axis}`).max = Math.floor(Math.min(1024, result.limits[`max_${axis}`]) / 64) * 64;
         }
-        for (const option of byId('image-ratio').options) {
-          if (option.value === 'custom') continue;
-          const [w,h] = option.value.split(',').map(Number);
-          option.disabled = w < Number(byId('image-width').min) || w > Number(byId('image-width').max) || h < Number(byId('image-height').min) || h > Number(byId('image-height').max);
-        }
+        syncImageRatio();
       }
-    } catch (error) { if (id === studioCheck && epoch === authEpoch) byId('image-capabilities-status').textContent = error.message; }
-    if (id === studioCheck && epoch === authEpoch) render();
+    } catch (error) { if (id === studioCheck && epoch === authEpoch) {
+      byId('image-service-status').textContent = 'Unavailable';
+      byId('image-service-status').dataset.state = 'error';
+      byId('image-capabilities-status').textContent = error.message;
+    } }
+    if (id === studioCheck && epoch === authEpoch) { byId('image-check-service').disabled = false; render(); }
   }
   byId('image-check-service').addEventListener('click', checkImageService);
-  byId('image-ratio').addEventListener('change', () => {
-    if (byId('image-ratio').value === 'custom') { byId('image-advanced').open = true; byId('image-width').focus(); return; }
-    const [width, height] = byId('image-ratio').value.split(',');
-    byId('image-width').value = width; byId('image-height').value = height; imageDimensions();
+  byId('image-submit').prepend(libraryIcon('sparkles'));
+  byId('image-ratio-quick').addEventListener('change', event => {
+    if (!event.target.matches('input')) return;
+    imageRatio = event.target.value;
+    applyImageRatio();
+    if (imageRatio === 'custom') { byId('image-advanced').open = true; byId('image-width').focus(); }
   });
-  for (const axis of ['width', 'height']) byId(`image-${axis}`).addEventListener('input', () => { byId('image-ratio').value = 'custom'; imageDimensions(); });
+  for (const icon of byId('image-orientation').querySelectorAll('[data-orientation]'))
+    icon.append(libraryIcon(icon.dataset.orientation));
+  byId('image-orientation').addEventListener('change', event => {
+    if (!event.target.matches('input')) return;
+    imageOrientation = event.target.value;
+    if (imageRatio === 'custom') {
+      const [width, height] = ratioDimensions('custom');
+      byId('image-width').value = width; byId('image-height').value = height;
+    }
+    applyImageRatio();
+  });
+  for (const axis of ['width', 'height']) byId(`image-${axis}`).addEventListener('input', () => {
+    imageRatio = 'custom';
+    const width = Number(byId('image-width').value), height = Number(byId('image-height').value);
+    if (width && height && width !== height) imageOrientation = width < height ? 'portrait' : 'landscape';
+    imageDimensions();
+  });
   byId('image-reset-options').addEventListener('click', () => {
     const recommended = axis => Math.max(Number(byId(`image-${axis}`).min), Math.min(512, Number(byId(`image-${axis}`).max)));
     restoreImageDraft({prompt: byId('image-prompt').value, width: recommended('width'), height: recommended('height'), steps:20, seed:-1});
@@ -493,6 +613,7 @@ window.BrowserManagement = (() => {
       }
     } finally { render(); }
   }
+  let memoryRenderKey = null;
   function renderMemory() {
     if (!memory) return;
     byId("memory-auto").checked = memory.enabled;
@@ -501,34 +622,24 @@ window.BrowserManagement = (() => {
     byId("memory-create").disabled = busy("memory-facts");
     const query = byId("memory-query").value.trim().toLowerCase();
     const items = memory.entries.filter(item => `${item.fact} ${item.id}`.toLowerCase().includes(query));
+    const renderKey = JSON.stringify([items, query, changes.get("memory-facts")?.phase]);
+    if (renderKey === memoryRenderKey && byId("memory-items").childNodes.length) return;
+    memoryRenderKey = renderKey;
     byId("memory-items").replaceChildren(...items.map(item => {
       const pending = changes.get("memory-facts");
       const { node, actions } = row(item.fact, pending ?
         pending.phase === "unknown" ? "Unconfirmed change · check Activity" : "Change pending" : "Saved memory");
       node.classList.add("memory-row");
-      const edit = domainButton("Edit", () => editMemory(item));
-      const remove = domainButton("Forget", () => review({ operation: "memory-delete", id: item.id }, "memory-facts", "memory"));
-      edit.disabled = Boolean(pending) || item.truncated;
-      if (item.truncated) edit.title = "This long memory can be edited in the CLI";
-      remove.disabled = Boolean(pending);
-      remove.classList.add('danger');
-      const trigger = domainButton('⋮', () => {}, 'quiet icon-button');
-      trigger.setAttribute('aria-label', 'Memory actions'); trigger.setAttribute('aria-haspopup', 'menu');
-      const menu = domainText('div', '', 'message-menu context-action-menu');
-      menu.id = 'memory-actions-' + item.id; menu.setAttribute('popover', 'auto'); menu.setAttribute('role', 'menu');
-      trigger.setAttribute('popovertarget', menu.id); trigger.setAttribute('aria-expanded', 'false');
-      for (const action of [edit, remove]) { action.classList.add('message-action'); action.setAttribute('role', 'menuitem'); action.addEventListener('click', () => menu.hidePopover()); }
-      menu.append(edit, remove); actions.append(trigger, menu);
-      menu.addEventListener('toggle', () => {
-        const open = menu.matches(':popover-open'); trigger.setAttribute('aria-expanded', String(open));
-        if (open) { const rect = trigger.getBoundingClientRect(); menu.style.left = `${Math.max(8, Math.min(rect.right - menu.offsetWidth, innerWidth - menu.offsetWidth - 8))}px`; menu.style.top = `${Math.max(8, Math.min(rect.bottom + 4, innerHeight - menu.offsetHeight - 8))}px`; edit.focus(); }
-      });
-      trigger.addEventListener('keydown', event => { if (['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); trigger.click(); } });
-      menu.addEventListener('keydown', event => {
-        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); menu.hidePopover(); trigger.focus(); }
-        const buttons = [edit, remove].filter(button => !button.disabled), index = buttons.indexOf(document.activeElement);
-        if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) { event.preventDefault(); buttons[event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : buttons.length - 1)) % buttons.length]?.focus(); }
-      });
+      if (!pending) node.querySelector('.management-content small').remove();
+      const trigger = domainButton('', () => {}, 'quiet icon-button');
+      trigger.setAttribute('aria-label', 'Memory actions'); trigger.title = 'Memory actions';
+      trigger.append(libraryIcon('more'));
+      const menu = window.settingsActionMenu(trigger, [
+        ['Edit', 'options', () => editMemory(item), Boolean(pending) || item.truncated],
+        ['Forget', 'trash', () => review({ operation: 'memory-delete', id: item.id }, 'memory-facts', 'memory'), Boolean(pending), true],
+      ], `memory-${item.id}`, 'Memory actions');
+      if (item.truncated) menu.querySelector('button').title = 'This long memory can be edited in the CLI';
+      actions.append(trigger, menu);
       return node;
     }));
     if (!items.length) byId("memory-items").append(domainText("p", query ? "No matching memories." : "No saved memories.", "muted"));
@@ -674,6 +785,76 @@ window.BrowserManagement = (() => {
       onError: () => connectionFailures.set(item.name, "Could not update connection. Its confirmed state is unchanged."),
     });
   }
+  const imageJobState = item => ({queued:'Queued', submitting:'Submitting…',
+    queued_remote:'Queued on server', running_remote:'Generating on server…',
+    completed_remote:'Output ready to recover', running:'Generating…', generating:'Generating…',
+    completed:'Completed', complete:'Completed', failed:'Failed', cancelled:'Cancelled',
+    interrupted:'Interrupted', unknown:'Outcome unconfirmed'}[item?.status] || item?.status || '');
+  async function downloadImageOutput(artifact) {
+    const epoch = authEpoch;
+    try {
+      const data = await domainRequest(`/api/v1/library/item?id=${encodeURIComponent(artifact)}`);
+      if (epoch !== authEpoch || !active('jobs')) return;
+      const link = document.createElement('a');
+      link.href = artifactUrl(data.item); link.download = data.item.filename; link.click();
+    } catch (error) { if (epoch === authEpoch && active('jobs')) domainError(error, generationStatusId); }
+  }
+  function repeatImage(item) {
+    const draft = studioDrafts.get(item.id || item.job);
+    if (draft) restoreImageDraft(draft);
+    byId('image-prompt').focus(); byId('image-prompt').select();
+  }
+  function imageOutputActions(item) {
+    const actions = domainText('div', '', 'management-actions');
+    actions.append(domainButton('Open output', () => openArtifact(item.artifact).catch(domainError), 'quiet'),
+      domainButton('Download', () => downloadImageOutput(item.artifact), 'quiet'),
+      domainButton(studioDrafts.has(item.id || item.job) ? 'Generate again' : 'Generate another', () => repeatImage(item), 'quiet'));
+    return actions;
+  }
+  function imageJobRow(item) {
+    const identity = item.id || item.job;
+    const {node, actions} = row(item.model, imageJobState(item));
+    node.classList.add('image-studio-job'); node.dataset.rowKey = identity;
+    node.dataset.rowSignature = JSON.stringify(item) + busy(`image:${identity}`) + busy(`image-control:${identity}`) +
+      busy(`image-recovery:${identity}`);
+    node.querySelector('p').title = item.model;
+    const mark = domainText('div', '', 'image-job-thumbnail');
+    mark.setAttribute('aria-hidden', 'true');
+    mark.append(libraryIcon('image'));
+    node.prepend(mark);
+    if (item.artifact) actions.append(...imageOutputActions(item).children);
+    else if (item.status !== 'cancelled' && item.recoverable !== false) {
+      actions.append(domainButton('Recover output', () => reviewJob({operation:'image-recover', target:identity}, `image-recovery:${identity}`, 'image'), 'quiet'),
+        domainButton('Cancel job', () => reviewJob({operation:'image-cancel', target:identity}, `image-control:${identity}`, 'image'), 'quiet'));
+    }
+    for (const button of actions.children) button.disabled = busy(`image-control:${identity}`) || busy(`image-recovery:${identity}`);
+    if (actions.children.length) {
+      const disclosure = domainText('details', '', 'image-job-menu');
+      disclosure.open = [...byId('image-jobs').children].find(row => row.dataset.rowKey === identity)?.querySelector('details')?.open || false;
+      const summary = domainText('summary', '');
+      summary.setAttribute('aria-label', `Actions for ${item.model}`); summary.title = 'Job actions';
+      summary.append(libraryIcon('more'));
+      actions.addEventListener('click', event => {
+        if (event.target.closest('button')) disclosure.open = false;
+      });
+      disclosure.append(summary, actions); node.append(disclosure);
+    }
+    return node;
+  }
+  function renderImageStatus() {
+    if (!generationDialog.open || !active('jobs')) return;
+    const images = jobs?.images || [], newest = images[0];
+    const activeImage = images.find(item => ['queued','running','generating','queued_remote','running_remote'].includes(item.status));
+    const preparation = changes.get('image-generate');
+    const generating = preparation?.phase === 'accepted' || Boolean(activeImage);
+    const status = byId('image-result-status');
+    status.textContent = generating ? 'Generating image…' : preparation?.phase === 'unknown' ? 'Outcome unconfirmed' : preparation ? 'Preparing generation…' : newest ? imageJobState(newest) : '';
+    status.dataset.state = generating ? 'generating' : newest?.status || 'idle';
+    const cancelling = [...changes.values()].some(change => change.operation === 'image-cancel');
+    const notice = byId('image-cancellation-notice');
+    notice.hidden = !cancelling && !activeImage;
+    notice.textContent = cancelling || activeImage ? studioCapabilities?.cancellation_notice || 'The service must confirm cancellation before the job is stopped.' : '';
+  }
   function render() {
     renderMemory(); renderConnections(); if (sessionsLoaded) renderSessionList();
     renderSessionControls();
@@ -681,9 +862,9 @@ window.BrowserManagement = (() => {
       generationAdd.disabled = !latest?.profile_management || !jobs || !generationTabs && busy("image-generate");
       generationAdd.title = latest?.profile_management ? generationTabs ? "Create an image or research" : "Generate an image" : restartHint;
     }
-    byId("image-generate").querySelector("button").disabled =
+    byId("image-generate").querySelector("button[type=submit]").disabled =
       !latest?.profile_management || !jobs?.image_settings.enabled || !studioCapabilities?.available || busy("image-generate");
-    byId("research-create").querySelector("button").disabled =
+    byId("research-submit").disabled =
       !latest?.profile_management || !jobs || busy("research-create");
     for (const form of byId("agent-settings-fields").querySelectorAll("[data-setting]")) {
       for (const input of form.querySelectorAll("input, select, button")) input.disabled = SettingsDrafts.locked("agent") || busy(`setting:${form.dataset.setting}`);
@@ -706,12 +887,13 @@ window.BrowserManagement = (() => {
     }
     window.BrowserMedia?.renderBusy();
     window.BrowserVision?.renderBusy();
+    renderImageStatus(); renderCreationSummary();
   }
   async function loadJobs() {
     if (!active("jobs")) return;
     if (!latest?.profile_management) {
       byId("generated-jobs-status").textContent = restartHint;
-      for (const id of ["research-create", "image-generate"]) byId(id).querySelector("button").disabled = true;
+      for (const id of ["research-create", "image-generate"]) byId(id).querySelector("button[type=submit]").disabled = true;
       render();
       return;
     }
@@ -723,10 +905,12 @@ window.BrowserManagement = (() => {
       jobs = result;
       byId("research-model-source").querySelector('[value="default"]').disabled = !result.research_model;
       if (!result.research_model) byId("research-model-source").value = "chat";
-      byId("research-model-label").textContent = result.research_model ? `Research default: ${result.research_model}. Current chat: ${latest.model}. Queue a question, then start it after review.` : `Uses your current chat model, ${latest.model}, and saved Research budgets. Choose a Research default in Settings to use a separate model.`;
-      const imageStatus = byId("image-service-status");
-      if (result.image_settings.enabled) imageStatus.textContent = `Configured image model: ${result.image_settings.model}`;
-      else {
+      renderCreationSummary();
+      if (!studioCapabilities) {
+        byId('image-generator').replaceChildren(new Option(result.image_settings.model || 'Not configured'));
+        byId('image-generator').title = result.image_settings.model || 'Not configured';
+      }
+      if (!result.image_settings.enabled) {
         const link = domainText("a", "Model Defaults");
         link.href = "?view=settings&settings=models";
         link.addEventListener("click", event => {
@@ -738,39 +922,17 @@ window.BrowserManagement = (() => {
           heading.focus({ preventScroll: true });
           heading.scrollIntoView({ block: "center" });
         });
-        imageStatus.replaceChildren("Enable an image service in Klaude's ", link, " to generate images.");
+        byId('image-capabilities-status').replaceChildren("Enable an image service in Klaude's ", link, " to generate images.");
       }
       for (const [kind, items] of [["research", result.research], ["image", result.images]]) {
         const rows = items.map(item => {
+          if (kind === 'image') return imageJobRow(item);
           const identity = item.id || item.job;
-          const { node, actions } = row(kind === "research" ? item.question : item.model, `${item.status}${item.phase ? ` · ${item.phase}` : ""}`);
+          const { node, actions } = row(item.question, `${item.status}${item.phase ? ` · ${item.phase}` : ""}`);
           node.dataset.rowKey = identity; node.dataset.rowSignature = JSON.stringify(item) + busy(`${kind}:${identity}`);
-          if (kind === "research") {
-            if (!["running", "completed"].includes(item.status)) actions.append(domainButton("Start", () => reviewJob({ operation: "research-run", target: identity, revision: item.revision }, `research:${identity}`, kind)));
-            if (["running", "queued", "interrupted"].includes(item.status)) actions.append(domainButton("Stop", () => reviewJob({ operation: "research-stop", target: identity, revision: item.revision }, `research-control:${identity}`, kind)));
-          } else if (!item.artifact && item.status !== "cancelled" && item.recoverable !== false) {
-            actions.append(domainButton("Recover output", () => reviewJob({ operation: "image-recover", target: identity }, `image-recovery:${identity}`, kind)));
-            actions.append(domainButton("Cancel job", () => reviewJob({ operation: "image-cancel", target: identity }, `image-control:${identity}`, kind)));
-          }
-          const artifact = kind === "research" ? item.report : item.artifact;
-          if (artifact) {
-            actions.append(domainButton("Open output", () => openArtifact(artifact).catch(domainError)));
-            if (kind === 'image') {
-              const download = domainButton('Download', async () => {
-                const epoch = authEpoch;
-                try {
-                  const data = await domainRequest(`/api/v1/library/item?id=${encodeURIComponent(artifact)}`);
-                  if (epoch !== authEpoch || !active('jobs')) return;
-                  const a = document.createElement('a'); a.href = artifactUrl(data.item); a.download = data.item.filename; a.click();
-                } catch (error) { if (epoch === authEpoch && active('jobs')) domainError(error, generationStatusId); }
-              }, 'quiet');
-              actions.append(download);
-              actions.append(domainButton(studioDrafts.has(identity) ? 'Generate again' : 'Generate another', () => {
-                if (studioDrafts.has(identity)) restoreImageDraft(studioDrafts.get(identity));
-                byId('image-prompt').focus(); byId('image-prompt').select();
-              }));
-            }
-          }
+          if (!["running", "completed"].includes(item.status)) actions.append(domainButton("Start", () => reviewJob({ operation: "research-run", target: identity, revision: item.revision }, `research:${identity}`, kind)));
+          if (["running", "queued", "interrupted"].includes(item.status)) actions.append(domainButton("Stop", () => reviewJob({ operation: "research-stop", target: identity, revision: item.revision }, `research-control:${identity}`, kind)));
+          if (item.report) actions.append(domainButton("Open output", () => openArtifact(item.report).catch(domainError)));
           for (const button of actions.children) button.disabled = busy(`${kind}:${identity}`) && button.textContent === "Start";
           return node;
         });
@@ -808,10 +970,12 @@ window.BrowserManagement = (() => {
     for (const tab of generationTabs.querySelectorAll("[data-generation]")) {
       const selected = tab.dataset.generation === type;
       tab.setAttribute("aria-selected", String(selected));
+      tab.classList.toggle("mtrl-tab--active", selected);
       tab.tabIndex = selected ? 0 : -1;
       byId(tab.getAttribute("aria-controls")).hidden = !selected;
       if (selected && focus) tab.focus();
     }
+    positionGenerationIndicator();
   }
   for (const tab of generationTabs?.querySelectorAll("[data-generation]") || [])
     tab.addEventListener("click", () => selectGenerationType(tab.dataset.generation));
@@ -826,7 +990,7 @@ window.BrowserManagement = (() => {
   });
   byId("research-create").addEventListener("submit", event => {
     event.preventDefault();
-    if (byId("research-create").querySelector("button").disabled) return;
+    if (byId("research-submit").disabled || !validCreationForm('research')) return;
     reviewJob({ operation: "research-create", question: byId("research-question").value,
       model: byId("research-model-source").value === "default" && jobs?.research_model ? jobs.research_model : latest?.model_ref, format: byId("research-format").value }, "research-create", "research");
   });
@@ -837,6 +1001,7 @@ window.BrowserManagement = (() => {
     generationPreparation += 1;
     byId(generationStatusId).textContent = "";
     generationDialog.showModal();
+    renderImageStatus();
     checkImageService();
     byId(generationType === "research" ? "research-question" : "image-prompt").focus();
   });
@@ -848,8 +1013,9 @@ window.BrowserManagement = (() => {
     generationPreparation += 1;
     selectGenerationType("image");
     generationDialog.showModal();
+    renderImageStatus();
+    byId('image-prompt').focus();
     await Promise.all([loadJobs(), checkImageService()]);
-    if (generationDialog.open && currentView === "chat") byId("image-prompt").focus();
   }
   for (const id of ["chat-create-image", "attach-create-image"]) byId(id)?.addEventListener("click", openChatImageStudio);
   byId("image-generate-close")?.append(libraryIcon("close"));
@@ -857,13 +1023,25 @@ window.BrowserManagement = (() => {
   generationDialog?.addEventListener("close", () => {
     if (generationDialog.open) return;
     generationPreparation += 1;
+    byId('image-create-settings').close(); byId('research-create-settings').close();
     byId("image-generate-status").textContent = "";
     if (studioFromChat && authenticated && currentView === "chat") byId("attach-file").focus({preventScroll:true});
+  });
+  generationDialog?.addEventListener('keydown', event => {
+    const menu = event.target.closest('.image-job-menu[open]');
+    if (event.key === 'Escape' && menu) {
+      event.preventDefault(); event.stopPropagation(); menu.open = false;
+      menu.querySelector('summary').focus();
+    }
+  });
+  generationDialog?.addEventListener('click', event => {
+    for (const menu of generationDialog.querySelectorAll('.image-job-menu[open]'))
+      if (!menu.contains(event.target)) menu.open = false;
   });
   window.addEventListener("popstate", () => generationDialog?.close());
   byId("image-generate").addEventListener("submit", event => {
     event.preventDefault();
-    if (byId("image-generate").querySelector("button").disabled) return;
+    if (byId("image-submit").disabled || !validCreationForm('image')) return;
     reviewJob({ operation: "image-generate", prompt: byId("image-prompt").value,
       width: Number(byId("image-width").value), height: Number(byId("image-height").value),
       steps: Number(byId("image-steps").value), seed: Number(byId("image-seed").value) }, "image-generate", "image");
@@ -884,7 +1062,7 @@ window.BrowserManagement = (() => {
     read_skill: ["Knowledge & Skills", "skill", "Read guidance from an enabled installed Skill."],
     current_time: ["Utilities", "clock", "Read the host clock in the selected timezone."],
   };
-  function settingsDisclosure(id, title, icon, initiallyOpen = false) {
+  function settingsDisclosure(id, title, icon, initiallyOpen = true) {
     const section = domainText("details", "", "settings-disclosure");
     section.id = `agent-group-${id}`;
     section.open = settingsGroups.get(id) ?? initiallyOpen;
@@ -1018,9 +1196,11 @@ window.BrowserManagement = (() => {
   }
   function toolSettings(fields) {
     const section = settingsDisclosure("tools_permissions", "Tools & Permissions", "tools");
-    section.append(domainText("p", "Control tool access and approval behavior.", "muted"));
+    const content = domainText("div", "", "settings-group-body settings-tool-body");
+    section.append(content);
+    content.append(domainText("p", "Control tool access and approval behavior.", "muted"));
     const guidance = domainText("p", "Automatic skips approval prompts. Ask first requests permission. Deny blocks execution. Workspace, network and other access checks still apply. Disabled tools keep their approval preference.", "muted");
-    guidance.id = "tools-permissions-guidance"; section.append(guidance);
+    guidance.id = "tools-permissions-guidance"; content.append(guidance);
     const availability = new Map(fields.filter(field => field.id.startsWith("tool_availability.") && field.type === "boolean").map(field => [field.id.split(".")[1], field]));
     const permissions = new Map(fields.filter(field => field.id.startsWith("permissions.") && field.type === "policy").map(field => [field.id.split(".")[1], field]));
     const names = new Set([...availability.keys(), ...permissions.keys()]);
@@ -1056,21 +1236,21 @@ window.BrowserManagement = (() => {
       const group = domainText("section", "", "tool-permission-group");
       const heading = domainText("h4", name); heading.id = `tool-group-${name.toLowerCase().replaceAll(/[^a-z]+/g, "-")}`;
       const list = domainText("div", "", "tool-permission-list"); list.append(...cards);
-      group.setAttribute("aria-labelledby", heading.id); group.append(heading, list); section.append(group);
+      group.setAttribute("aria-labelledby", heading.id); group.append(heading, list); content.append(group);
     }
     const mcp = domainText("section", "", "tool-permission-group tool-permission-links");
     const mcpHeading = domainText("h4", "MCP", "settings-heading"); mcpHeading.prepend(libraryIcon("connection"));
     const connections = domainButton("Manage connections", () => {
       byId("integration-sections").querySelector('[data-integration="connections"]').click(); showView("integrations");
     }, "quiet"); connections.id = "tool-mcp-settings";
-    mcp.append(mcpHeading, domainText("p", "Choose Auto, Ask first, or Deny in each MCP’s connection details.", "muted"), connections); section.append(mcp);
+    mcp.append(mcpHeading, domainText("p", "Choose Auto, Ask first, or Deny in each MCP’s connection details.", "muted"), connections); content.append(mcp);
     const advanced = settingsDisclosure("advanced_permissions", "Advanced permission rules", "shield");
     const body = domainText("div", "", "settings-advanced-body");
     body.append(domainText("h4", "Workspace protections"), domainText("p", "Workspace boundaries, protected files and network restrictions apply independently of approval preferences.", "muted"),
       domainText("h4", "File editing"), domainText("p", "Activate edits from Workspaces on loopback after the clean-worktree check. Every edit still requires an exact review. LAN clients cannot activate or approve edits.", "muted"));
     const workspace = domainButton("Open workspace controls", () => showView("workspace"), "quiet"); workspace.id = "tool-workspace-settings";
     body.append(workspace, domainText("h4", "Shell and Git changes"), domainText("p", "Shell execution and Git mutations are unavailable in the WebUI. Additional terminal permission policies remain in Klaude's terminal settings.", "muted"));
-    advanced.append(body); section.append(advanced);
+    advanced.append(body); content.append(advanced);
     return section;
   }
   function renderAgentSettings() {
@@ -1087,7 +1267,7 @@ window.BrowserManagement = (() => {
         group = ""; continue;
       }
       if (current !== group) {
-        const section = settingsDisclosure(current, labels[current], icons[current], ["time_settings", "runtime_options"].includes(current));
+        const section = settingsDisclosure(current, labels[current], icons[current]);
         groupBody = domainText("div", "", "settings-group-body");
         if (current === "runtime_options") groupBody.classList.add("settings-form-grid");
         section.append(groupBody); rows.push(section); group = current;
@@ -1303,12 +1483,15 @@ window.BrowserManagement = (() => {
     settingsRead?.abort(); settingsLoad += 1; settings = null;
     jobsRead?.abort(); jobsLoad += 1; jobs = null;
     studioFromChat = false; generationPreparation += 1; generationDialog?.close();
+    byId('image-create-settings').close(); byId('research-create-settings').close();
     selectGenerationType("image");
     if (generationAdd) generationAdd.disabled = true;
-    byId("image-generate").querySelector("button").disabled = true;
+    byId("image-generate").querySelector("button[type=submit]").disabled = true;
     byId(generationStatusId).textContent = "";
     byId("research-create").reset(); byId("image-generate").reset();
+    imageRatio = '1:1'; imageOrientation = 'landscape';
     studioCheck++; studioCapabilities = null; studioDrafts.clear();
+    byId('image-result-status').textContent = ''; byId('image-cancellation-notice').hidden = true;
     byId('image-capabilities-status').textContent = ''; imageDimensions();
     for (const id of ["research-jobs", "image-jobs", "generated-jobs-status", "research-model-label", "image-service-status"]) byId(id).replaceChildren();
     byId("agent-settings-fields").replaceChildren(); byId("agent-settings-status").textContent = "";
@@ -1332,4 +1515,102 @@ window.BrowserManagement = (() => {
     if (active("jobs")) loadJobs();
   }
   return { review, busy, loadConnections, loadJobs, sessionRow, capabilitiesChanged, hasPending: () => [...changes.values()].some(item => item.phase === "accepted") };
+})();
+
+window.SystemSettings = (() => {
+  const dialog=byId('system-confirm'),transition=byId('system-transition');
+  let data=null,reading=null,serial=0,epoch=-1,review=null,origin=null,busy=false,phase='';
+  const active=()=>authenticated&&currentView==='settings'&&settingsSection==='system';
+  const status=text=>{byId('system-status').textContent=text;};
+  function revealTab(){if(active())byId('settings-tab-system').scrollIntoView({block:'nearest',inline:'nearest'});}
+  function render(){
+    const available=Boolean(data?.available)&&latest?.system_control;
+    for(const id of ['system-restart','system-shutdown'])byId(id).disabled=!available||busy||data?.busy||Boolean(phase);
+    byId('system-sessions').textContent=available?`${data.terminal_count} running terminal session${data.terminal_count===1?'':'s'} for this profile.`:'';
+    if(data?.busy)status('Wait for turns, queues and background work to finish before restarting or shutting down.');
+  }
+  async function load(){
+    if(!active()||phase)return;
+    const id=++serial,current=authEpoch;reading?.abort();reading=new AbortController();busy=true;render();
+    if(!latest?.system_control){busy=false;data=null;status('Restart the Web UI host and reload to enable System actions.');render();return;}
+    status('Loading System status…');
+    try{
+      const result=await domainRequest('/api/v1/system','GET',undefined,{signal:reading.signal});
+      if(!active()||current!==authEpoch||id!==serial)return;
+      data=result;status(result.available?'':'System actions are unavailable for this host.');
+      requestAnimationFrame(revealTab);
+    }catch(error){if(active()&&current===authEpoch&&id===serial&&error.name!=='AbortError'){data=null;status(error.message);}}
+    finally{if(current===authEpoch&&id===serial){busy=false;render();}}
+  }
+  async function open(action){
+    if(!active()||busy||phase||!data?.available)return;
+    const current=authEpoch;origin=document.activeElement;busy=true;render();
+    try{
+      const result=await domainRequest('/api/v1/system/review','POST',{action});
+      if(!active()||current!==authEpoch)return;
+      review=result;byId('system-confirm-title').textContent=action==='restart'?'Restart Web UI?':'Shut down Klaude?';
+      byId('system-confirm-summary').textContent=result.summary;
+      byId('system-confirm-status').textContent='';
+      const apply=byId('system-confirm-apply');apply.textContent=action==='restart'?'Restart Web UI':'Shut down Klaude';
+      apply.classList.toggle('danger',action==='shutdown');apply.disabled=false;
+      dialog.showModal();byId('system-confirm-cancel').focus();
+    }catch(error){if(active()&&current===authEpoch){status(error.message);load();}}
+    finally{if(current===authEpoch){busy=false;render();}}
+  }
+  function showTransition(action){
+    phase=action;transition.hidden=false;byId('system-transition-reload').hidden=true;
+    byId('system-transition-title').textContent=action==='restart'?'Restarting Web UI…':'Shutting down Klaude…';
+    byId('system-transition-message').textContent=action==='restart'?'Reconnecting to the Web UI. You will need to sign in again.':'Klaude and this profile’s terminal sessions are stopping. This page will disconnect.';
+    const loading=byId('system-transition-loading');loading.replaceChildren();
+    if(window.MaterialLoadingCircle)loading.append(MaterialLoadingCircle.create({size:'medium'}));
+  }
+  async function watchRestart(instance){
+    for(let attempt=0;attempt<35;attempt++){
+      try{
+        const response=await fetch('/api/v1/system/health',{credentials:'omit',cache:'no-store',signal:AbortSignal.timeout(1500)});
+        const result=await response.json();
+        if(response.ok&&result.ready&&result.instance!==instance){location.reload();return;}
+      }catch{/* The listener is expected to disappear during a restart. */}
+      await new Promise(resolve=>setTimeout(resolve,1000));
+    }
+    byId('system-transition-loading').replaceChildren();
+    byId('system-transition-title').textContent='Web UI has not reconnected';
+    byId('system-transition-message').textContent='Reload to check again, or start Klaude from the terminal.';
+    byId('system-transition-reload').hidden=false;
+  }
+  async function apply(){
+    if(!review||phase||!active())return;
+    const selected=review;byId('system-confirm-apply').disabled=true;
+    if(stream)stream.close();stream=null;
+    showTransition(selected.action);dialog.close();
+    try{
+      await domainRequest('/api/v1/system/apply','POST',{review_id:selected.review_id,request_id:requestId()});
+      if(selected.action==='restart'){watchRestart(selected.instance);return;}
+      byId('system-transition-loading').replaceChildren();
+      byId('system-transition-title').textContent='Klaude is shutting down';
+      byId('system-transition-message').textContent='Start Klaude from the terminal when you want to use it again.';
+    }catch(error){
+      if(error.status>=400&&error.status<500){
+        phase='';transition.hidden=true;review=null;await load();status(error.message);connect();return;
+      }
+      if(selected.action==='restart'){watchRestart(selected.instance);return;}
+      byId('system-transition-loading').replaceChildren();
+      byId('system-transition-title').textContent='Shutdown response not confirmed';
+      byId('system-transition-message').textContent='Reload to check whether Klaude is still running. The action will not be retried automatically.';
+      byId('system-transition-reload').hidden=false;
+    }
+  }
+  byId('system-refresh').addEventListener('click',load);
+  byId('system-restart').addEventListener('click',()=>open('restart'));
+  byId('system-shutdown').addEventListener('click',()=>open('shutdown'));
+  byId('system-confirm-close').append(libraryIcon('close'));
+  for(const id of ['system-confirm-close','system-confirm-cancel'])byId(id).addEventListener('click',()=>dialog.close());
+  byId('system-confirm-apply').addEventListener('click',apply);
+  dialog.addEventListener('close',()=>{if(!phase){review=null;origin?.focus({preventScroll:true});}});
+  byId('system-transition-reload').addEventListener('click',()=>location.reload());
+  document.addEventListener('klaude-view',()=>{if(active())load();else{serial++;reading?.abort();if(!phase)dialog.close();}});
+  document.addEventListener('klaude-snapshot',()=>{if(active()&&epoch!==authEpoch){epoch=authEpoch;load();}else if(active())render();});
+  document.addEventListener('klaude-auth-reset',()=>{serial++;reading?.abort();data=review=null;busy=false;epoch=-1;if(!phase)dialog.close();});
+  window.addEventListener('resize',()=>requestAnimationFrame(revealTab));
+  return {load,transitioning:()=>Boolean(phase)};
 })();

@@ -42,6 +42,17 @@ def _entry(server: dict, *, active: bool = True, latest: bool = True) -> dict:
     }
 
 
+def test_registry_update_date_comes_only_from_official_metadata():
+    from klaude_core.mcp_catalog import _parse_servers
+
+    entry = _entry({"updatedAt": "2026-10-28T00:00:00Z"})
+    assert _parse_servers({"servers": [entry]})[0].updated_at == ""
+    entry["_meta"]["io.modelcontextprotocol.registry/official"]["updatedAt"] = (
+        "2026-10-01T00:00:00Z"
+    )
+    assert _parse_servers({"servers": [entry]})[0].updated_at == "2026-10-01T00:00:00Z"
+
+
 def _payload(*entries: dict) -> dict:
     return {"servers": list(entries), "metadata": {"count": len(entries)}}
 

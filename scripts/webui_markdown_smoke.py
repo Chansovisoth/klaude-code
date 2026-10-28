@@ -200,12 +200,12 @@ async def verify(host, profile, fixture):
             await js("getSelection().removeAllRanges()")
             await js("firstCode.scrollTop=80;window.codeVerticalScroll=firstCode.scrollTop")
             await js(
-                'streamArticle.querySelector(".code-block").scrollIntoView({block:"start"});messages.scrollTop+=60'
+                'streamArticle.querySelector(".code-block").scrollIntoView({block:"start"});chatScroller.scrollTop+=60'
             )
             geometry = await js(
                 '({header:streamArticle.querySelector(".code-toolbar").getBoundingClientRect().top,'
-                "container:messages.getBoundingClientRect().top,codeTop:firstCode.scrollTop,"
-                "expected:codeVerticalScroll,scroll:messages.scrollTop,"
+                "container:chatScroller.getBoundingClientRect().top,codeTop:firstCode.scrollTop,"
+                "expected:codeVerticalScroll,scroll:chatScroller.scrollTop,"
                 'block:streamArticle.querySelector(".code-block").getBoundingClientRect().top})'
             )
             assert abs(geometry["header"] - geometry["container"]) < 2, geometry
@@ -475,13 +475,13 @@ async def verify(host, profile, fixture):
                     'byId("send").getBoundingClientRect().bottom<=byId("main-content")'
                     ".getBoundingClientRect().bottom"
                 )
-                await js("messages.scrollTop=0")
+                await js("chatScroller.scrollTop=0")
                 await screenshot("markdown-chat-" + str(width) + ".png")
                 await js('messages.querySelector(".code-block").scrollIntoView({block:"start"})')
-                await js("messages.scrollTop+=60")
+                await js("chatScroller.scrollTop+=60")
                 assert await js(
                     'Math.abs(messages.querySelector(".code-toolbar").getBoundingClientRect().top-'
-                    "messages.getBoundingClientRect().top)<2"
+                    "chatScroller.getBoundingClientRect().top)<2"
                 ), f"Code toolbar did not follow scrolling at {width}"
                 await screenshot("markdown-code-" + str(width) + ".png")
                 await js('messages.querySelector(".message-actions").scrollIntoView({block:"end"})')
@@ -555,9 +555,9 @@ async def verify(host, profile, fixture):
             assert await js(
                 'longArticle.querySelector(".message-body").textContent===' + json.dumps(long)
             )
-            await js('messages.scrollTop=0;ChatMarkdown.append(burst," tail");true')
+            await js('chatScroller.scrollTop=0;ChatMarkdown.append(burst," tail");true')
             await asyncio.sleep(0.2)
-            assert await js("messages.scrollTop===0")
+            assert await js("chatScroller.scrollTop===0")
             # Exercise parser/highlighter absence as a readable plain-text fallback.
             script = await cmd(
                 "Page.addScriptToEvaluateOnNewDocument",

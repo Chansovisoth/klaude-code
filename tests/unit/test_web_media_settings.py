@@ -52,10 +52,13 @@ def media_browser(profile_browser):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             calls.append((self.path, body))
             assert self.path == "/api/show"
+            if body["model"] == "embedding":
+                self.reply({})
+                return
             self.reply({"capabilities": ["embedding"] if body["model"] == "embedding" else
                         ["completion"] + (
                 ["vision"] if body["model"] != "text" else ["tools"]
-            )})
+            ) + (["image"] if body["model"] == "alternative" else [])})
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Models)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -106,7 +109,7 @@ def test_default_catalog_uses_real_capabilities_for_every_role_without_saving(me
     assert roles["vision"] == {"chat": False, "utility": True, "research": False,
                                 "vision": True}
     assert roles["text"] == {"chat": True, "utility": True, "research": True, "vision": False}
-    assert roles["embedding"] == dict.fromkeys(("chat", "utility", "research", "vision"), False)
+    assert roles["embedding"] == dict.fromkeys(("chat", "utility", "research", "vision"), None)
     assert {body["model"] for path, body in calls if path == "/api/show"} == set(roles)
     assert all(path in {"/api/tags", "/api/show"} for path, _ in calls)
     assert not (service.data / "operations.db").exists()
@@ -118,6 +121,15 @@ def test_default_catalog_uses_real_capabilities_for_every_role_without_saving(me
     assert all("roles" not in item for item in regular["models"])
     assert [path for path, _ in calls] == ["/api/tags"]
     assert _request(host, "GET", route + "&purpose=defaults", **auth)[0] == 503
+
+
+def test_image_catalog_distinguishes_generation_vision_and_unknown(media_browser):
+    host, _, _, auth, _ = media_browser
+    route = f"/api/v1/models/catalog?connection={DEFAULT_IDS['ollama']}&purpose=image-generation"
+    status, _, result = _request(host, "GET", route, **auth)
+    assert status == 200
+    roles = {item["name"]: item["roles"]["image-generation"] for item in result["models"]}
+    assert roles == {"alternative": True, "vision": False, "text": False, "embedding": None}
 
 
 def test_default_catalog_preserves_unknowns_and_filters_cloud_roles(profile_browser, monkeypatch):
@@ -290,6 +302,8 @@ def test_image_service_test_save_and_deduplication(media_browser, generation_lab
     draft = {"operation": "image-settings-save", "endpoint": url, "enabled": True,
              "revision": read(service.cfg)["revision"]}
     review = _review(host, auth, draft)
+    assert review["image_settings"] == {"endpoint": url, "enabled": True,
+                                         "provider": "sdcpp", "model": "local-test-model"}
     assert not read(service.cfg)["enabled"]
     assert not any(path.endswith("/jobs") for _, path, _ in calls)
     receipt, request = _submit(host, service, auth, review)

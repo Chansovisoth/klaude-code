@@ -1427,7 +1427,9 @@ def test_validated_code_request_buffers_until_mechanical_validation_passes():
     assert ollama.messages[0]["content"].startswith(
         "You are Klaude, a local-first coding assistant."
     )
-    assert "Use snake_case names." in ollama.messages[0]["content"]
+    assert "Use snake_case names." not in ollama.messages[0]["content"]
+    assert any(m.get("memory_context") and "Use snake_case names." in m["content"]
+               for m in ollama.messages if m["role"] == "user")
 
 
 def test_closing_stream_preserves_partial_assistant_in_agent_history():

@@ -34,6 +34,134 @@ from webui_control_smoke import Tab
 OUT = Path("/tmp/klaude-context-panel-preview")
 
 
+async def verify_file_pickup(tab):
+    # The visible pointer-following preview retains the exact native transfer payload.
+    for theme in ("light", "dark"):
+        await tab.js("applyAppearance({...appearance,theme:" + json.dumps(theme) + "},true)")
+        for mode in ("list", "grid", "gallery"):
+            await tab.click(f'[data-cp-view="{mode}"]')
+            await tab.wait('!byId("cp-files").hasAttribute("aria-busy")')
+            await tab.wait("""(()=>{
+              const image=byId('cp-file-items').querySelector('.cp-file img');
+              return !image || image.complete && image.naturalWidth>0;
+            })()""")
+            for fraction in ((.15, .2), (.5, .5), (.85, .8)):
+                await tab.js("window.pickupFraction=" + json.dumps(fraction))
+                pickup = await tab.js("""(()=>{
+                  const row=byId('cp-file-items').querySelector('.cp-file');
+                  const rect=row.getBoundingClientRect(),transfer=new DataTransfer();
+                  const start=new DragEvent('dragstart',{bubbles:true,cancelable:true,
+                    dataTransfer:transfer,clientX:rect.left+rect.width*pickupFraction[0],
+                    clientY:rect.top+rect.height*pickupFraction[1]});
+                  const grabX=start.clientX-rect.left,grabY=start.clientY-rect.top;
+                  let result;
+                  transfer.setDragImage=(image,x,y)=>{
+                    window.pickupPreview=document.querySelector('.cp-drag-preview');
+                    const card=pickupPreview.firstElementChild;
+                    const style=getComputedStyle(card);
+                    const origin=style.transformOrigin.split(' ').map(Number.parseFloat);
+                    const moved=new DOMMatrix(style.transform).transformPoint(
+                      new DOMPoint(grabX-origin[0],grabY-origin[1]));
+                    const bounds=pickupPreview.getBoundingClientRect();
+                    const padding=Number.parseFloat(getComputedStyle(pickupPreview).paddingLeft);
+                    result={wholeCard:card.classList.contains('cp-file') &&
+                      card.textContent===row.textContent,
+                      width:Math.abs(card.offsetWidth-row.offsetWidth)<1,
+                      shadow:style.boxShadow!=='none',
+                      transparentNative:image.tagName==='CANVAS' && image.width===1 &&
+                        image.height===1 && x===0 && y===0,
+                      anchored:Math.abs(bounds.left+padding+origin[0]+moved.x-start.clientX)<.01 &&
+                        Math.abs(bounds.top+padding+origin[1]+moved.y-start.clientY)<.01,
+                      passive:pickupPreview.inert &&
+                        pickupPreview.getAttribute('aria-hidden')==='true'};
+                  };
+                  row.dispatchEvent(start);
+                  const payload=JSON.parse(transfer.getData(
+                    'application/x-klaude-library-artifact'));
+                  return {...result,identity:payload.id===row.dataset.artifact &&
+                    payload.session===latest.session_id};
+                })()""")
+                assert all(pickup.values()), (theme, mode, pickup)
+                assert await tab.js("""(()=>{
+                  const preview=pickupPreview,card=preview.firstElementChild;
+                  const origin=getComputedStyle(card).transformOrigin.split(' ').map(parseFloat);
+                  const padding=parseFloat(getComputedStyle(preview).paddingLeft);
+                  for(const [x,y] of [[750,360],[420,290],[2,3]]) {
+                    document.dispatchEvent(new DragEvent('dragover',{clientX:x,clientY:y}));
+                    const r=preview.getBoundingClientRect();
+                    if(Math.abs(r.left+padding+origin[0]-x)>.01 ||
+                       Math.abs(r.top+padding+origin[1]-y)>.01) return false;
+                  }
+                  const left=preview.style.left,top=preview.style.top;
+                  document.dispatchEvent(new DragEvent('drag',{clientX:0,clientY:0}));
+                  if(preview.style.left!==left || preview.style.top!==top) return false;
+                  document.dispatchEvent(new DragEvent('drag',{clientX:750,clientY:360}));
+                  const final=preview.getBoundingClientRect();
+                  return Math.abs(final.left+padding+origin[0]-750)<.01;
+                })()"""), (theme, mode, fraction)
+                await tab.wait('!!document.querySelector(".cp-file.is-dragging")')
+                assert await tab.js('document.querySelectorAll(".cp-drag-preview").length===1')
+                await tab.js("""window.pickupSavedMotion=document.documentElement.dataset.motion;
+                  document.documentElement.dataset.motion='reduced';""")
+                await tab.wait("""getComputedStyle(document.querySelector('.cp-file.is-dragging'))
+                  .transform==='none' &&
+                  getComputedStyle(pickupPreview.firstElementChild).transform==='none'""")
+                assert await tab.js("Number(getComputedStyle(document.querySelector("
+                                    "'.cp-file.is-dragging')).opacity)===.35")
+                await tab.js("""if(pickupSavedMotion)
+                  document.documentElement.dataset.motion=pickupSavedMotion;
+                  else delete document.documentElement.dataset.motion;""")
+                shot = await tab.command("Page.captureScreenshot", {"format": "png"})
+                (OUT / f"pickup-{theme}-{mode}.png").write_bytes(
+                    base64.b64decode(shot["data"])
+                )
+                await tab.js("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))")
+                assert await tab.js('!document.querySelector(".cp-file.is-dragging") && '
+                                    '!document.querySelector(".cp-drag-preview")')
+                await tab.js("setContextPanel(true)")
+    await tab.click('[data-cp-view="list"]')
+    await tab.wait('!byId("cp-files").hasAttribute("aria-busy")')
+
+
+async def verify_mobile_collapse(tab):
+    await tab.js("setContextPanel(true, true)")
+    for width in (851, 850):
+        await tab.command("Emulation.setDeviceMetricsOverride", {
+            "width": width, "height": 760, "deviceScaleFactor": 1, "mobile": width <= 850,
+        })
+        if width == 851:
+            await tab.wait("!narrowScreen.matches && contextPanelOpen")
+        else:
+            await tab.wait("narrowScreen.matches && !contextPanelOpen && byId('inspector').inert")
+    assert await tab.js("byId('context-panel-scrim').hidden && "
+                        "byId('inspector-toggle').getAttribute('aria-expanded')==='false' && "
+                        "document.activeElement===byId('mobile-chat-more') && "
+                        "sessionStorage.getItem('klaude.context-panel.open')==='false'")
+    await tab.click('#mobile-chat-more')
+    await tab.click('[data-mobile-chat-action="context"]')
+    await tab.wait("contextPanelOpen && !byId('inspector').inert")
+    await tab.command("Emulation.setDeviceMetricsOverride", {
+        "width": 390, "height": 760, "deviceScaleFactor": 1, "mobile": True,
+    })
+    assert await tab.js("contextPanelOpen")  # intentional mobile open survives mobile resizes
+    await tab.click('#context-panel-scrim')
+    await tab.wait("!contextPanelOpen")
+    await tab.click('#mobile-chat-more')
+    await tab.click('[data-mobile-chat-action="context"]')
+    await tab.wait("contextPanelOpen")
+    await tab.js("window.contextResizeReload=true")
+    await tab.command('Page.reload')
+    await tab.wait("!window.contextResizeReload && typeof latest!=='undefined' && latest && "
+                   "document.documentElement.dataset.startup==='ready'")
+    assert await tab.js("!contextPanelOpen && byId('inspector').inert && "
+                        "byId('context-panel-scrim').hidden")
+    await tab.command("Emulation.setDeviceMetricsOverride", {
+        "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False,
+    })
+    await tab.wait("!narrowScreen.matches")
+    assert await tab.js("!contextPanelOpen")
+
+
 async def verify(host, root, chrome, runtime, files):
     OUT.mkdir(exist_ok=True)
     profile = root / "chrome"
@@ -73,11 +201,63 @@ async def verify(host, root, chrome, runtime, files):
             await tab.command("Page.navigate", {"url": host.origin})
             await tab.wait('typeof byId!=="undefined" && !byId("local-access").hidden')
             await tab.js(
-                'byId("login-password").value='
+                'byId("login-username").value="admin";byId("login-password").value='
                 + json.dumps(host.accounts.initial_password())
                 + ';byId("account-login").requestSubmit()'
             )
             await tab.wait("latest?.context_panel && window.ContextPanel")
+            await verify_mobile_collapse(tab)
+            if os.environ.get("KLAUDE_CONTEXT_RESPONSIVE_ONLY"):
+                assert not tab.errors, tab.errors
+                print(json.dumps({"desktop_to_mobile_collapses": True,
+                                  "mobile_saved_open_starts_collapsed": True,
+                                  "manual_mobile_open_and_resize": True,
+                                  "focus_and_scrim": True, "browser_exceptions": 0}))
+                return
+            if os.environ.get("KLAUDE_CONTEXT_DRAG_ONLY"):
+                await tab.js("setContextPanel(true)")
+                await tab.click("#cp-tab-library")
+                await tab.click("#cp-scope-all")
+                await tab.wait('byId("cp-file-items").querySelectorAll(".cp-file").length===6')
+                await verify_file_pickup(tab)
+                await tab.js("""prompt.value='Keep my draft';
+                  const row=byId('cp-file-items').querySelector('.cp-file');
+                  const transfer=new DataTransfer();
+                  row.dispatchEvent(new DragEvent('dragstart',{
+                    bubbles:true,dataTransfer:transfer}));
+                  window.pickupPayload=transfer.getData('application/x-klaude-library-artifact');""")
+                point = await tab.js("""(()=>{const r=byId('composer').getBoundingClientRect();
+                  return {x:r.left+r.width/2,y:r.top+20}})()""")
+                data = {"items": [{"mimeType": "application/x-klaude-library-artifact",
+                                   "data": await tab.js("pickupPayload")}],
+                        "dragOperationsMask": 1}
+                await tab.js("window.nativeDragPoint=" + json.dumps(point))
+                for kind in ("dragEnter", "dragOver", "drop"):
+                    await tab.command("Input.dispatchDragEvent", {
+                        "type": kind, **point, "data": data,
+                    })
+                    if kind == "dragOver":
+                        assert await tab.js("""(()=>{
+                          const preview=document.querySelector('.cp-drag-preview');
+                          const card=preview.firstElementChild,rect=preview.getBoundingClientRect();
+                          const origin=getComputedStyle(card).transformOrigin
+                            .split(' ').map(parseFloat);
+                          const padding=parseFloat(getComputedStyle(preview).paddingLeft);
+                          return Math.abs(rect.left+padding+origin[0]-nativeDragPoint.x)<1 &&
+                            Math.abs(rect.top+padding+origin[1]-nativeDragPoint.y)<1;
+                        })()"""), "The browser dragover must keep the preview under the pointer"
+                await tab.wait("ChatAttachmentsUI.ids().length===1 && "
+                               "!ChatAttachmentsUI.preparing()")
+                assert await tab.js("prompt.value==='Keep my draft' && !latest.active_turn_id && "
+                                    "!document.querySelector('.cp-file.is-dragging') && "
+                                    "!document.querySelector('.cp-drag-preview')")
+                assert host.library.listing(kind="all")["total"] == 6
+                assert not tab.errors, tab.errors
+                print(json.dumps({"pickup_previews": 6, "pickup_anchor_cases": 18,
+                                  "native_artifact_drop": True,
+                                  "cleanup": True, "browser_exceptions": 0,
+                                  "screenshots": str(OUT)}))
+                return
             assert await tab.js('!byId("cp-refresh")')
             assert await tab.js('!byId("cp-close") && !byId("cp-scope-description")')
             assert await tab.js('byId("cp-scope-current").textContent') == "Current"
@@ -194,6 +374,7 @@ async def verify(host, root, chrome, runtime, files):
                 assert (
                     await tab.js(f'fetch("/api/v1/library/items?{query}").then(r=>r.status)') == 400
                 )
+            await tab.click("#cp-scope-current")
             await tab.wait('byId("cp-file-items").children.length===1')
             assert await tab.js('byId("cp-file-items").textContent.includes("current.txt")')
             await tab.click("#cp-scope-all")
@@ -295,6 +476,7 @@ async def verify(host, root, chrome, runtime, files):
                 "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False,
             })
             await asyncio.sleep(.15)
+            await verify_file_pickup(tab)
             # A real native internal drag uses the same MIME payload emitted by dragstart.
             await tab.js("""const row=[...byId('cp-file-items').children]
               .find(r=>r.textContent.includes('other.txt'));

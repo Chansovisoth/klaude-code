@@ -8,6 +8,14 @@ permission modes were added.
 Connection status appears in the navbar; the duplicate Inspector footer and
 its status update/style rules have been removed.
 
+Entering mobile (up to 850px) collapses an open desktop Context Panel, and mobile
+startup ignores a saved open state. Explicit mobile opening still works and
+survives resizes within the mobile breakpoint. Automatic closure updates the
+scrim, inert/expanded state and saved choice, and moves focus out of hidden panel
+controls. `KLAUDE_CONTEXT_RESPONSIVE_ONLY=1 scripts/webui_context_panel_smoke.py`
+checks the 851/850px transition, 390px manual opening, outside dismissal, reload
+and focus without model calls.
+
 On mobile (up to 850px), tapping outside the Context Panel closes it and restores
 focus to the header menu. Focused Chromium checks at 320px and 390px verified
 outside dismissal, inside interaction, saved closed state and focus return;
@@ -89,6 +97,42 @@ Rows and tiles show only their Preview action, without per-file Attach buttons. 
 debounced; reads have abort, authentication, generation, session and scope checks. Failed
 reads can be retried by selecting the Library tab again. Sign-out clears search,
 inventory and Inspector data.
+
+### File pickup previews — 2026-10-28
+
+Context Library rows and Grid/Gallery tiles use a pointer-following DOM preview
+for the whole block, preserving the exact point where it was grabbed. A slight
+tilt, scale and shadow give it elevation; its original position fades without
+shifting the collection. Gallery previews retain their filename. The exact
+artifact ID, revision, session binding and native drop receiver remain unchanged.
+
+The native drag image is a transparent one-pixel canvas; the visible clone stays
+in the page and follows `drag`/`dragover` client coordinates. This avoids relying
+on browser bitmap hotspot offsets for padded/transformed snapshots. Tilt and
+scaling pivot at the grab point. The preview can clip at a viewport edge without
+moving its anchor. Zero-coordinate source events during drag cleanup are ignored.
+
+The preview is inert, hidden from accessibility and does not intercept the drop
+target. The temporary transparent canvas is removed after native capture. Drag
+end, drop, Escape, blur, visibility, navigation, panel/session/auth changes and
+inventory replacement remove the preview and source styling. Reduced motion
+omits transforms.
+
+Focused validation runs with `KLAUDE_CONTEXT_DRAG_ONLY=1 .venv/bin/python
+scripts/webui_context_panel_smoke.py`. It checks List/Grid/Gallery previews across
+light/dark appearances and three grab positions per view (18 cases), then moves
+each preview through three pointer locations including a viewport edge. Tests
+check the rendered anchor, source fading, reduced motion and cleanup. A Chromium
+native dragover verifies the actual preview follows the event coordinates; a drop
+through the real attachment receiver retains the draft, original artifact ID and
+six-item Library inventory without starting a turn. Screenshots in
+`/tmp/klaude-context-panel-preview/pickup-*.png` now capture the visible preview,
+not an independently positioned copy of a native snapshot. No OS cursor-layer or
+cross-browser verification is claimed.
+
+The full Context Panel smoke currently stops at an older preview-focus assertion
+before these checks. Its login and Current-scope setup were made explicit; full
+suite coverage is not claimed. No live model or owner data is used.
 
 Previews and lazy authenticated thumbnails reuse existing Library components.
 Context previews restore focus to the originating row and do not navigate the
@@ -196,3 +240,18 @@ button is absent and exercises failure/retry through the available controls.
 All 24 responsive layouts and remaining workflows passed with zero browser
 exceptions (`/tmp/klaude-context-no-refresh.log`). JavaScript syntax, focused
 Ruff and whitespace checks passed. Other Library refresh controls are unchanged.
+
+Empty Library refinement (2026-10-28): Context Library reuses `collectionEmpty`
+and its file/image icon, typography and colors. It centers the placeholder in
+the remaining panel area in List, Grid and Gallery. Labels distinguish no uploads,
+no conversation files, no images and unmatched search; the former duplicate plain
+empty-status sentence is removed. Scope-limit notices and failed-read guidance
+remain independent. A temporary authenticated browser inspection checked 24
+light/dark × 1440/768/390/320px × List/Grid/Gallery combinations, Current/search
+labels and the transition back to populated files, with no browser exceptions.
+Phone and desktop screenshots were inspected:
+`/tmp/klaude-context-panel-preview/empty-*.png`. Syntax, CSS bundle consistency and
+whitespace checks pass. The broader Context Panel walkthrough stopped at its
+populated-file Preview-focus assertion (line 401), before the later layout cases;
+this run does not establish a passing full Context Panel regression. No backend,
+upload, attachment or file-preview logic changes in this refinement.

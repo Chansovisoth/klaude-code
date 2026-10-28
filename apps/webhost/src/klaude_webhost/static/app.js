@@ -988,6 +988,7 @@ window.MaterialCircularProgress ??= (() => {
         progress.hide(); progress.element.removeAttribute("hidden");
       }
       return { element: progress.element, setValue: next => { progress.setValue(next, false); return progress.getValue(); },
+        resume: () => progress.show(),
         destroy: () => progress.destroy(), freeze: () => { progress.hide(); progress.element.removeAttribute("hidden"); } };
     }
     size = Math.min(240, Math.max(24, Number(size) || 48));
@@ -1247,6 +1248,25 @@ window.MaterialLoading ??= (() => {
 // the expressive morphing shape is reserved for AI generation activity.
 window.MaterialLoadingCircle ??= (() => {
   const sizes = Object.freeze({ small: 24, medium: 32, large: 48 });
+  const active = new Map();
+  const systemReduced = matchMedia("(prefers-reduced-motion: reduce)");
+  const paused = () => document.hidden || systemReduced.matches ||
+    document.documentElement.dataset.motion === "reduced";
+  function sync() {
+    for (const [element, state] of active) {
+      if (!element.isConnected) {
+        state.progress.destroy(); active.delete(element);
+      } else if (state.paused !== paused()) {
+        state.paused = paused();
+        if (state.paused) state.progress.freeze(); else state.progress.resume();
+      }
+    }
+  }
+  new MutationObserver(sync).observe(document.documentElement,
+    {attributes:true, attributeFilter:["data-motion"]});
+  new MutationObserver(sync).observe(document.documentElement, {childList:true, subtree:true});
+  systemReduced.addEventListener("change", sync);
+  document.addEventListener("visibilitychange", sync);
   function create({ size = "small" } = {}) {
     const name = Object.hasOwn(sizes, size) ? size : "small";
     const dimension = sizes[name];
@@ -1259,6 +1279,11 @@ window.MaterialLoadingCircle ??= (() => {
     element.style.width = `${dimension}px`;
     element.style.height = `${dimension}px`;
     element.setAttribute("aria-hidden", "true");
+    if (progress.resume) {
+      const state = {progress, paused:paused()};
+      active.set(element, state);
+      if (state.paused) progress.freeze();
+    }
     return element;
   }
   return Object.freeze({ create });
@@ -1602,23 +1627,38 @@ window.KlaudeExpressive = (() => {
       if (target) {
         const descriptions = (target.getAttribute('aria-describedby') || '').split(/\s+/).filter(id => id && id !== tooltip.id);
         if (descriptions.length) target.setAttribute('aria-describedby', descriptions.join(' ')); else target.removeAttribute('aria-describedby');
-        if (nativeTitle && !target.title) target.title = nativeTitle;
+        if (nativeTitle && !target.getAttribute('title')) target.setAttribute('title', nativeTitle);
       }
       target = null; nativeTitle = ''; if (tooltip.matches(':popover-open')) tooltip.hidePopover();
+      tooltip.textContent = '';
     }
     function show(element) {
       if (!element || element === target) return;
-      hide(); const label = element.title || element.getAttribute('aria-label');
+      hide(); const label = element.getAttribute('data-tooltip') || element.getAttribute('title') || element.getAttribute('aria-label');
       if (!label) return;
-      target = element; nativeTitle = element.title; if (nativeTitle) element.title = '';
+      target = element; nativeTitle = element.getAttribute('title') || ''; if (nativeTitle) element.setAttribute('title', '');
       tooltip.textContent = label;
       element.setAttribute('aria-describedby', [element.getAttribute('aria-describedby'), tooltip.id].filter(Boolean).join(' '));
+      const viewport = window.visualViewport, inset = 8, gap = 10;
+      const viewportLeft = viewport?.offsetLeft || 0, viewportTop = viewport?.offsetTop || 0;
+      const width = viewport?.width || innerWidth, height = viewport?.height || innerHeight;
+      tooltip.style.maxWidth = `${Math.max(0, Math.min(280, width - inset * 2))}px`;
+      // Measure from an unconstrained position after viewport/anchor changes.
+      tooltip.style.left = `${viewportLeft + inset}px`; tooltip.style.top = `${viewportTop + inset}px`;
       tooltip.showPopover();
       const rect = element.getBoundingClientRect(), box = tooltip.getBoundingClientRect();
-      tooltip.style.left = `${Math.max(8, Math.min(innerWidth - box.width - 8, rect.left + (rect.width - box.width) / 2))}px`;
-      tooltip.style.top = `${rect.bottom + box.height + 12 < innerHeight ? rect.bottom + 6 : Math.max(8, rect.top - box.height - 6)}px`;
+      const left = Math.max(viewportLeft + inset, Math.min(viewportLeft + width - box.width - inset,
+        rect.left + (rect.width - box.width) / 2));
+      const above = rect.top - viewportTop - inset, below = viewportTop + height - inset - rect.bottom;
+      const placeBelow = below >= box.height + gap || above < box.height + gap && below >= above;
+      tooltip.dataset.placement = placeBelow ? 'bottom' : 'top';
+      tooltip.style.left = `${left}px`;
+      tooltip.style.top = `${Math.max(viewportTop + inset, Math.min(viewportTop + height - box.height - inset,
+        placeBelow ? rect.bottom + gap : rect.top - box.height - gap))}px`;
+      tooltip.style.setProperty('--tooltip-arrow-x', `${Math.max(10, Math.min(box.width - 10,
+        rect.left + rect.width / 2 - left))}px`);
     }
-    const owner = event => closest(event.target, 'button[title], .icon-button[aria-label], [data-tooltip]');
+    const owner = event => closest(event.target, '[title], .icon-button[aria-label], [data-tooltip]');
     document.addEventListener('pointerover', event => { if (event.pointerType !== 'touch') show(owner(event)); });
     document.addEventListener('pointerout', event => { if (target && !target.contains(event.relatedTarget)) hide(); });
     document.addEventListener('focusin', event => { if (event.target instanceof Element && event.target.matches(':focus-visible')) show(owner(event)); });
@@ -1626,6 +1666,9 @@ window.KlaudeExpressive = (() => {
     document.addEventListener('pointerdown', hide);
     document.addEventListener('scroll', hide, true);
     document.addEventListener('keydown', event => { if (event.key === 'Escape') hide(); });
+    window.addEventListener('resize', hide);
+    window.visualViewport?.addEventListener('resize', hide);
+    window.visualViewport?.addEventListener('scroll', hide);
     document.addEventListener('klaude-auth-reset', hide);
   }
   function setupCommands() {
@@ -1664,7 +1707,7 @@ window.KlaudeExpressive = (() => {
       ['File preview', 'Previous / next image', '← / →'], ['File preview', 'Zoom', '+ / −'],
     ];
     function commands() {
-      const pages = [['chat', 'Chat'], ['workspace', 'Workspaces'], ['library', 'Library'], ['models', 'Models'],
+      const pages = [['chat', 'Chat'], ['workspace', 'Workspaces'], ['library', 'Library'], ['store', 'Store'],
         ['integrations', 'Integrations'], ['activity', 'Activity'], ['settings', 'Settings']];
       const available = pages.map(([page, label]) => ({ group: 'Navigate', label: `Open ${label}`, run: () => showView(page) }));
       available.push({ group: 'Chat', label: 'Switch model', run: () => { showView('chat'); window.MobileChatUI?.openModels(); } },
@@ -1798,6 +1841,94 @@ window.KlaudeExpressive = (() => {
   }
   document.addEventListener('DOMContentLoaded', setup, { once: true });
   return Object.freeze({ shape, themePreview, reduced, workspace });
+})();
+
+// Shared credential decoration. Native password controls remain the sole owner
+// of secret values, selection, form submission and password-manager integration.
+window.KlaudeSecretFields = (() => {
+  const sequence = ['clover-4', 'arrow', 'pill', 'soft-burst', 'diamond', 'clam-shell', 'pentagon'];
+  const fields = new Map();
+  function sync(input, state) {
+    if (input.type !== 'password') return;
+    const length = input.value.length, start = input.selectionStart ?? length, end = input.selectionEnd ?? length;
+    const focused = document.activeElement === input;
+    const css = getComputedStyle(input), left = parseFloat(css.paddingLeft) + parseFloat(css.borderLeftWidth);
+    const right = parseFloat(css.paddingRight) + parseFloat(css.borderRightWidth);
+    const width = Math.max(0, input.offsetWidth - left - right);
+    state.mask.style.left = `${left}px`; state.mask.style.right = `${right}px`;
+    let scroll = input.scrollLeft;
+    if (focused && start === end) {
+      if (end * 20 - scroll > width - 2) scroll = Math.max(0, end * 20 - width + 2);
+      else if (end * 20 < scroll) scroll = end * 20;
+      input.scrollLeft = scroll;
+    }
+    // Render only visible slots, even for long pasted API credentials.
+    const first = Math.max(0, Math.floor(scroll / 20)), last = Math.min(length, first + Math.ceil(width / 20) + 1);
+    const key = [first, last, start, end, scroll, focused, width].join(':');
+    if (state.key === key) return;
+    state.key = key;
+    // Keep overlapping slots mounted so typing, selection and focus changes
+    // do not restart every shape's entry animation.
+    for (const slot of [...state.shapes.children]) {
+      const position = Number(slot.dataset.position);
+      if (position < first || position >= last) slot.remove();
+    }
+    let next = state.shapes.firstElementChild;
+    for (let i = first; i < last; i++) {
+      let slot;
+      if (next && Number(next.dataset.position) === i) {
+        slot = next; next = next.nextElementSibling;
+      } else {
+        slot = document.createElement('span'); slot.className = 'password-shape-slot';
+        slot.dataset.position = String(i);
+        slot.append(window.KlaudeExpressive.shape(sequence[i % sequence.length], 64));
+        state.shapes.insertBefore(slot, next);
+      }
+      slot.classList.toggle('selected', i >= start && i < end);
+    }
+    state.shapes.style.transform = `translateX(${first * 20 - scroll}px)`;
+    state.cursor.style.transform = `translateX(${Math.max(0, Math.min(width - 2, end * 20 - scroll))}px)`;
+    state.cursor.hidden = !focused || start !== end || !length;
+  }
+  function enhance(input) {
+    if (input.id === 'login-password' || fields.has(input)) return;
+    try {
+      if (!sequence.every(name => window.KlaudeExpressive.shape(name, 64).querySelector('path[d]'))) return;
+    } catch { return; }
+    const wrapper = document.createElement('span'); wrapper.className = 'secret-shape-field';
+    const mask = document.createElement('span'); mask.className = 'secret-shape-mask'; mask.setAttribute('aria-hidden', 'true');
+    const shapes = document.createElement('span'); shapes.className = 'secret-shape-slots';
+    const cursor = document.createElement('span'); cursor.className = 'shape-password-cursor'; cursor.hidden = true;
+    input.before(wrapper); wrapper.append(input, mask); mask.append(shapes, cursor);
+    const state = { mask, shapes, cursor, key: '' }; fields.set(input, state);
+    for (const event of ['input', 'select', 'click', 'keyup', 'focus', 'blur', 'scroll', 'compositionend'])
+      input.addEventListener(event, () => sync(input, state));
+    sync(input, state);
+  }
+  function refresh() {
+    document.querySelectorAll('input[type="password"]').forEach(enhance);
+    for (const [input, state] of fields) {
+      if (!input.isConnected) { fields.delete(input); continue; }
+      if (input.getClientRects().length) sync(input, state);
+    }
+  }
+  function setup() {
+    refresh();
+    // Covers dynamically mounted dialogs and credential fields, without watching
+    // our decorative child nodes and recursively triggering the observer.
+    new MutationObserver(records => {
+      if (records.some(record => record.type === 'attributes' || [...record.addedNodes].some(node =>
+        node.nodeType === 1 && (node.matches('input[type="password"]') || node.querySelector('input[type="password"]'))))) refresh();
+    }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['type'] });
+    document.addEventListener('selectionchange', refresh);
+    document.addEventListener('reset', () => setTimeout(refresh, 0));
+    window.addEventListener('resize', refresh);
+    // Autofill and application-owned .value assignments need not emit input.
+    setInterval(() => { if (!document.hidden) refresh(); }, 250);
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', setup, { once: true });
+  else setup();
+  return Object.freeze({ refresh });
 })();
 /* Mobile presentation over the existing chat catalog, runtime actions and menus.
  * Bundled into app.js; no additional route or provider discovery path. */
@@ -1994,7 +2125,7 @@ window.MobileChatUI = (() => {
     byId('mobile-model-numbers').addEventListener('click', event => {
       const target = event.target.closest('button[data-page]'); if (target) { page = Number(target.dataset.page); render(); }
     });
-    byId('mobile-model-store').addEventListener('click', () => { closeModels(); showView('models'); });
+    byId('mobile-model-store').addEventListener('click', () => { closeModels(); showView('store'); });
     menu.addEventListener('toggle', () => {
       const open = menu.matches(':popover-open'); more.setAttribute('aria-expanded', String(open));
       if (open) { positionMenu(); menu.querySelector('button').focus({preventScroll: true}); }
@@ -2726,6 +2857,7 @@ window.KlaudeLockScreen = (() => {
 
 const byId = (id) => document.getElementById(id);
 const messages = byId("messages");
+const chatScroller = messages.closest(".chat-content");
 const chatResponseStatus = byId("chat-response-status");
 const notice = byId("notice");
 const prompt = byId("prompt");
@@ -2757,7 +2889,7 @@ let workspaceOperation = "files";
 let authenticated = false;
 let authEpoch = 0;
 let loginMethod = "password";
-const viewNames = ["chat", "workspace", "library", "models", "integrations", "activity", "settings"];
+const viewNames = ["chat", "workspace", "library", "store", "integrations", "activity", "settings"];
 let runtimeChoiceInFlight = false;
 let currentView = "chat";
 let sessions = [];
@@ -2886,7 +3018,7 @@ document.addEventListener("klaude-auth-reset", () => {
 });
 
 function nearLatestMessage() {
-  return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 100;
+  return chatScroller.scrollHeight - chatScroller.scrollTop - chatScroller.clientHeight < 100;
 }
 
 let chatScrollFrame = 0;
@@ -2894,7 +3026,7 @@ let latestScrollPending = false;
 function interruptLatestScroll() {
   if (!latestScrollPending) return;
   latestScrollPending = false;
-  messages.scrollTo({ top: messages.scrollTop, behavior: "instant" });
+  chatScroller.scrollTo({ top: chatScroller.scrollTop, behavior: "instant" });
 }
 function renderChatScrollIndicator(working) {
   const button = byId("scroll-to-latest");
@@ -2912,7 +3044,7 @@ function scheduleChatScrollControl() {
   chatScrollFrame = requestAnimationFrame(() => {
     chatScrollFrame = 0;
     const button = byId("scroll-to-latest");
-    const visible = authenticated && currentView === "chat" && messages.clientHeight > 0;
+    const visible = authenticated && currentView === "chat" && chatScroller.clientHeight > 0;
     const hidden = !visible || nearLatestMessage();
     if (hidden && visible && document.activeElement === button) messages.focus({ preventScroll: true });
     button.hidden = hidden;
@@ -2922,19 +3054,34 @@ function scheduleChatScrollControl() {
     renderChatScrollIndicator(working);
   });
 }
-messages.addEventListener("scroll", scheduleChatScrollControl, { passive: true });
+chatScroller.addEventListener("scroll", scheduleChatScrollControl, { passive: true });
 for (const event of ["wheel", "touchstart", "pointerdown", "keydown"])
-  messages.addEventListener(event, interruptLatestScroll, { passive: true });
-messages.addEventListener("scrollend", () => {
+  chatScroller.addEventListener(event, interruptLatestScroll, { passive: true });
+chatScroller.addEventListener("scrollend", () => {
   // Streaming may have extended the reply beyond the smooth scroll's target.
   if (latestScrollPending) {
     latestScrollPending = false;
-    messages.scrollTo({ top: messages.scrollHeight, behavior: "instant" });
+    chatScroller.scrollTo({ top: chatScroller.scrollHeight, behavior: "instant" });
   }
   scheduleChatScrollControl();
 });
 const chatScrollResize = new ResizeObserver(scheduleChatScrollControl);
+chatScrollResize.observe(chatScroller);
 chatScrollResize.observe(messages);
+// Reserve the actual overlay height so growing drafts, attachments and recovery
+// notices leave the last message above the composer without shortening the track.
+const chatDock = byId("composer").closest(".chat-dock");
+let chatDockHeight = 0;
+const chatDockResize = new ResizeObserver(() => {
+  const height = Math.ceil(chatDock.getBoundingClientRect().height);
+  if (!height || height === chatDockHeight) return;
+  const follow = nearLatestMessage();
+  chatDockHeight = height;
+  byId("chat-view").style.setProperty("--chat-dock-height", `${height}px`);
+  if (follow) chatScroller.scrollTop = chatScroller.scrollHeight;
+  scheduleChatScrollControl();
+});
+chatDockResize.observe(chatDock);
 // Markdown, attachments and activity details can change the remaining distance
 // without scrolling or resizing the conversation viewport.
 const chatScrollContent = new MutationObserver((changes) => {
@@ -2951,9 +3098,9 @@ document.addEventListener("klaude-view", () => { interruptLatestScroll(); schedu
 document.addEventListener("klaude-chat-session-changed", interruptLatestScroll);
 byId("scroll-to-latest").addEventListener("click", () => {
   const reduced = systemMotion.matches || document.documentElement.dataset.motion === "reduced";
-  const smooth = !reduced && "onscrollend" in messages;
+  const smooth = !reduced && "onscrollend" in chatScroller;
   latestScrollPending = smooth;
-  messages.scrollTo({ top: messages.scrollHeight, behavior: smooth ? "smooth" : "instant" });
+  chatScroller.scrollTo({ top: chatScroller.scrollHeight, behavior: smooth ? "smooth" : "instant" });
   messages.focus({ preventScroll: true });
 });
 
@@ -3212,7 +3359,7 @@ byId("sessions-toggle").addEventListener("click", () => toggleSessions(narrowScr
 byId("drawer-scrim").addEventListener("click", () => toggleSessions(false));
 let contextPanelOpen;
 try { contextPanelOpen = JSON.parse(sessionStorage.getItem("klaude.context-panel.open")); } catch { /* Use viewport default. */ }
-if (typeof contextPanelOpen !== "boolean") contextPanelOpen = false;
+if (typeof contextPanelOpen !== "boolean" || narrowScreen.matches) contextPanelOpen = false;
 function setContextPanel(open, focus = false) {
   contextPanelOpen = open;
   layout.classList.toggle("inspector-open", open);
@@ -3233,7 +3380,15 @@ function updatePanelLayout() {
   setContextPanel(contextPanelOpen);
 }
 compactInspector.addEventListener("change", updatePanelLayout);
-narrowScreen.addEventListener("change", () => toggleSessions(!narrowScreen.matches && !layout.classList.contains("sessions-collapsed")));
+narrowScreen.addEventListener("change", () => {
+  toggleSessions(!narrowScreen.matches && !layout.classList.contains("sessions-collapsed"));
+  if (narrowScreen.matches && contextPanelOpen) {
+    const restoreFocus = byId("inspector").contains(document.activeElement) ||
+      document.activeElement === byId("inspector-toggle") ||
+      document.activeElement === byId("context-panel-scrim");
+    setContextPanel(false, restoreFocus);
+  }
+});
 updatePanelLayout();
 
 // Resize the central surface from its own edges; side panels have no split lines.
@@ -3539,7 +3694,7 @@ function renderChatAvailability() {
 }
 byId("chat-availability-action").addEventListener("click", () => {
   if (latest?.state === "interrupted") { byId("new-session").click(); return; }
-  showView("models");
+  showView("store");
   const url = new URL(location.href);
   url.searchParams.set("models-section", "downloads");
   url.searchParams.delete("models-detail");
@@ -3724,7 +3879,7 @@ function placeChatResponseStatus() {
     if (anchor.nextElementSibling !== chatResponseStatus) anchor.after(chatResponseStatus);
   } else if (messages.firstElementChild !== chatResponseStatus) messages.prepend(chatResponseStatus);
   byId("welcome").hidden = true;
-  if (nearBottom) messages.scrollTop = messages.scrollHeight;
+  if (nearBottom) chatScroller.scrollTop = chatScroller.scrollHeight;
 }
 
 function renderChatSendStatus() {
@@ -3840,6 +3995,7 @@ function renderQueue(items) {
 
 let snapshotRequest = 0, snapshotApplied = 0;
 async function snapshot() {
+  if (window.SystemSettings?.transitioning()) return;
   const request = ++snapshotRequest;
   const epoch = authEpoch;
   const finish = latest ? () => {} : beginChatLoading();
@@ -3983,6 +4139,7 @@ async function snapshot() {
     const existing = [...messages.children].find((element) => element.dataset.id === message.id);
     const streaming = message.id === "partial" && busy;
     const article = existing || addMessage(message.role, message.content, message.id, streaming);
+    const imageFocus = window.ChatImageResults?.captureFocus(article);
     if (earlierLink && message.id === linkedMessage.message.id &&
         messages.firstElementChild !== article) messages.prepend(article);
     if (existing) updateMessage(existing, message.content, streaming);
@@ -3998,10 +4155,11 @@ async function snapshot() {
       sessionId: data.session_id,
       previousResponse: message.previous_response === true,
       canRetry: data.message_retry_in_place === true,
-      canAct: data.message_actions === true && !busy && !data.queue?.length && !pending &&
+      canAct: !message.image_action && data.message_actions === true && !busy && !data.queue?.length && !pending &&
         message.id.startsWith("stored:"),
     });
     window.ChatAttachmentsUI?.renderMessage(article, message, data.session_id);
+    window.ChatImageResults?.renderMessage(article, message, data.session_id, imageFocus);
   }
   if (earlierLink && !messages.querySelector('[data-id="linked-message-gap"]')) {
     const gap = document.createElement("p");
@@ -4013,7 +4171,7 @@ async function snapshot() {
   byId("welcome").hidden = visibleMessages.length > 0 || busy;
   placeChatResponseStatus();
   renderSessionList();
-  if (nearBottom) messages.scrollTop = messages.scrollHeight;
+  if (nearBottom) chatScroller.scrollTop = chatScroller.scrollHeight;
   document.dispatchEvent(new CustomEvent("klaude-snapshot", { detail: data }));
   connect();
 }
@@ -4435,6 +4593,7 @@ async function performMessageAction(action, article) {
 }
 
 function connect() {
+  if (window.SystemSettings?.transitioning()) return;
   if (!authenticated || stream || !cursor) return;
   if (!eventCursor) eventCursor = cursor;
   const source = new EventSource(`/api/v1/events?after=${encodeURIComponent(eventCursor)}`);
@@ -4462,7 +4621,7 @@ function connect() {
       byId("welcome").hidden = true;
       if (window.ChatMarkdown) ChatMarkdown.append(partial, item.text || "");
       else partial.querySelector("pre").textContent += item.text || "";
-      if (nearBottom) messages.scrollTop = messages.scrollHeight;
+      if (nearBottom) chatScroller.scrollTop = chatScroller.scrollHeight;
     }
     if (item.kind === "tool.requested") addActivity(`Requested ${item.tool || "tool"}`);
     if (item.kind === "tool.started") addActivity(`Running ${item.tool || "tool"}`);
@@ -4473,7 +4632,7 @@ function connect() {
     if (["tool.requested", "tool.started", "tool.finished", "activity.changed",
       "approval.required", "approval.resolved", "user_input.required",
       "user_input.resolved", "queue.changed", "session.state", "settings.changed",
-      "workspace.changed",
+      "workspace.changed", "image.changed",
       "turn.accepted", "turn.started", "message.completed", "turn.completed", "turn.partial", "turn.failed",
       "turn.cancelled", "turn.interrupted"].includes(item.kind) && changesState) {
       snapshot().catch(showError);
@@ -4489,7 +4648,7 @@ function connect() {
 }
 
 async function sendMessage(disposition) {
-  const text = prompt.value.trim();
+  const text = window.ChatImageResults?.submission(prompt.value.trim()) ?? prompt.value.trim();
   if (!text || pending || !latest || chatAdmissionBlocked()) return;
   const attachments = window.ChatAttachmentsUI?.ids() || [];
   if (window.ChatAttachmentsUI?.preparing() || attachments.length && latest.active_turn_id) return;
@@ -4529,6 +4688,7 @@ async function sendMessage(disposition) {
     prompt.value = "";
     prompt.style.height = "auto";
     window.ChatAttachmentsUI?.clear();
+    window.ChatImageResults?.clear();
     await snapshot();
   } catch (error) { showError(error); }
   finally {
@@ -4570,7 +4730,8 @@ byId("plan-toggle").addEventListener("click", async () => {
 // Keep navigation local to this tab; store only allowlisted page identifiers.
 function readNavigationChoice(key, choices, fallback) {
   try {
-    const saved = sessionStorage.getItem(`klaude.webui.navigation.v1.${key}`);
+    const value = sessionStorage.getItem(`klaude.webui.navigation.v1.${key}`);
+    const saved = key === 'page' ? canonicalViewName(value) : value;
     if (choices.includes(saved)) return saved;
   } catch { /* Navigation still works when browser storage is unavailable. */ }
   return fallback;
@@ -4580,7 +4741,7 @@ function saveNavigationChoice(key, value) {
   catch { /* Browser storage is optional. */ }
 }
 
-const settingsSections = ["account", "theme", "agent", "models", "memory"];
+const settingsSections = ["account", "theme", "agent", "models", "memory", "system"];
 let settingsSection = readNavigationChoice("settings-section", [...settingsSections, "images"], "account");
 let settingsSectionGeneration = 0;
 function showSettingsSection(section, { restore = false, focus = false } = {}) {
@@ -4734,7 +4895,18 @@ byId("settings-sections").addEventListener("keydown", event => {
   }
 });
 
+function canonicalViewName(view) {
+  return view === 'models' ? 'store' : view;
+}
+function canonicalizeStoreLocation() {
+  const url = new URL(location.href);
+  if (url.searchParams.get('view') !== 'models') return;
+  url.searchParams.set('view', 'store');
+  history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+}
 function showView(view, { restore = false, section = null } = {}) {
+  view = canonicalViewName(view);
+  canonicalizeStoreLocation();
   if (currentView === 'settings' && settingsSection === 'models' && (view !== 'settings' || section && section !== 'models') && !restore && window.ModelsSettingsNavigation && !window.ModelsSettingsNavigation.canLeave()) return;
   if (!viewNames.includes(view)) view = "chat";
   const changed = currentView !== view;
@@ -4761,10 +4933,10 @@ function showView(view, { restore = false, section = null } = {}) {
   if (view === "settings") showSettingsSection(section ||
     (restore ? new URLSearchParams(location.search).get("settings") : null) || settingsSection, { restore: true });
   const more = byId("nav-more"), moreMenu = byId("navigation-more");
-  const secondary = ["models", "activity", "settings"].includes(view);
+  const secondary = ["store", "activity", "settings"].includes(view);
   more.classList.toggle("selected", secondary);
   if (secondary) more.setAttribute("aria-current", "page"); else more.removeAttribute("aria-current");
-  more.setAttribute("aria-label", secondary ? `More navigation · ${{ models: "Models", activity: "Activity", settings: "Settings" }[view]}` : "More navigation");
+  more.setAttribute("aria-label", secondary ? `More navigation · ${{ store: "Store", activity: "Activity", settings: "Settings" }[view]}` : "More navigation");
   for (const button of moreMenu.querySelectorAll("[data-app-view]")) {
     if (button.dataset.appView === view) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
@@ -4773,7 +4945,7 @@ function showView(view, { restore = false, section = null } = {}) {
   if (authenticated && !restore && (changed || view === "settings" && previousSettingsSection !== settingsSection)) {
     const url = new URL(location.href);
     for (const key of [...url.searchParams.keys()])
-      if (["library", "integrations", "settings", "sources-page"].includes(key) || key.startsWith("models-") || key.startsWith("files-") || key.startsWith("knowledge-") || key.startsWith("skills-")) url.searchParams.delete(key);
+      if (["library", "integrations", "settings", "sources-page"].includes(key) || key.startsWith("models-") || key.startsWith("store-") || key.startsWith("files-") || key.startsWith("knowledge-") || key.startsWith("skills-")) url.searchParams.delete(key);
     url.searchParams.set("view", view);
     if (view === "settings") url.searchParams.set("settings", settingsSection);
     if (view !== "chat") { url.searchParams.delete("session"); url.searchParams.delete("message"); }
@@ -4786,7 +4958,7 @@ function showView(view, { restore = false, section = null } = {}) {
 }
 byId("nav-chat").addEventListener("click", () => showView("chat"));
 byId("nav-workspace").addEventListener("click", () => showView("workspace"));
-byId("nav-models").addEventListener("click", () => showView("models"));
+byId("nav-store").addEventListener("click", () => showView("store"));
 byId("nav-activity").addEventListener("click", () => showView("activity"));
 byId("nav-settings").addEventListener("click", () => showView("settings"));
 const navigationMore = byId("navigation-more");
@@ -5021,9 +5193,10 @@ async function initialize() {
   clientId = client.client_id;
   authenticated = true;
   const pageQuery = new URLSearchParams(location.search);
+  const requestedView = canonicalViewName(pageQuery.get('view'));
   showView(pageQuery.get("library") === "knowledge" || ["skills", "knowledge"].includes(pageQuery.get("integrations")) ?
     "integrations" : ["files", "outputs"].includes(pageQuery.get("library")) ?
-      "library" : viewNames.includes(pageQuery.get("view")) ? pageQuery.get("view") : readNavigationChoice("page", viewNames, "chat"), { restore: true });
+      "library" : viewNames.includes(requestedView) ? requestedView : readNavigationChoice("page", viewNames, "chat"), { restore: true });
   layout.hidden = false;
   layout.inert = false;
   if (window.KlaudeLockScreen) KlaudeLockScreen.hide();

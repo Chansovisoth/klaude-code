@@ -5,6 +5,21 @@ from __future__ import annotations
 import re
 from re import Pattern
 
+
+def requests_skill_guidance(text: str, names=()) -> bool:
+    """Explicit Skill usage, including a known name written with spaces."""
+    if prohibits_skill_read(text) or explicitly_disallows_tools(text):
+        return False
+    if re.match(r"(?i)^\s*(?:what|which|why|how|did|have|were)\b", text):
+        return False
+    if not has_nonnegated_action(text, r"\b(?:use|using|apply|follow|read)\b"):
+        return False
+    normalized = " ".join(re.findall(r"\w+", text.casefold()))
+    return bool(re.search(r"\bskills?\b|SKILL\.md", text, re.I)) or any(
+        " " + " ".join(re.findall(r"\w+", name.casefold())) + " "
+        in " " + normalized + " " for name in names
+    )
+
 _NEGATED_ACTION_PREFIX = re.compile(
     r"(?:\b(?:do|does|did|can|could|should|would|will|must|please)\s+not\b|"
     r"\b(?:don['’]?t|dont|never|without)\b|\bno\s+need\s+to\b)"

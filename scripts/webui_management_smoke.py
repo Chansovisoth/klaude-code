@@ -554,8 +554,8 @@ async def verify(host, root, chrome, session, image_url):
                 await tab.click(f"#generation-tab-{'research' if kind == 'image' else 'image'}")
                 await tab.js("releaseTabReview()")
                 await tab.wait("tabDraftDiscards > 0 && !byId('image-generate').querySelector"
-                               "('button').disabled && !byId('research-create').querySelector"
-                               "('button').disabled")
+                               "('button[type=submit]').disabled && "
+                               "!byId('research-create').querySelector('button').disabled")
                 await tab.js("window.fetch=tabDraftFetch")
                 assert await tab.js("!reviewDialog.open && byId('image-generate-panel').open")
             await tab.click("#image-generate-close")
@@ -584,7 +584,7 @@ async def verify(host, root, chrome, session, image_url):
             await tab.wait("reviewDialog.open && !byId('image-generate-panel').open")
             await tab.click("#domain-review-confirm")
             await tab.wait(
-                "byId('image-jobs').textContent.includes('complete') && !BrowserMa"
+                "byId('image-jobs').textContent.includes('Completed') && !BrowserMa"
                 "nagement.hasPending()"
             )
             if os.environ.get("KLAUDE_TEST_GENERATED_ONLY") == "1":
@@ -596,6 +596,7 @@ async def verify(host, root, chrome, session, image_url):
                     "!byId('library-view').contains(byId('research-create')) && "
                     "byId('image-generate-panel').contains(byId('research-jobs'))"
                 )
+                await tab.js("byId('image-jobs').querySelector('details').open=true")
                 await tab.click("#image-jobs button")
                 await tab.wait("byId('artifact-detail').open")
                 await tab.click("#artifact-close")

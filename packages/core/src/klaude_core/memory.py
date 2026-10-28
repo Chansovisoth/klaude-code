@@ -44,12 +44,6 @@ AUTO_MEMORY_HINTS = (
     "i would rather ",
     "from now on ",
     "for future ",
-    "my goal is ",
-    "my goals are ",
-    "always ",
-    "never ",
-    "don't abbreviate ",
-    "dont abbreviate ",
 )
 MEMORY_LINE_RE = re.compile(r"^\s*-\s+\[memory:(?P<id>[0-9a-f]{12})\]\s+(?P<fact>.+?)\s*$")
 LEGACY_MEMORY_LINE_RE = re.compile(
@@ -99,18 +93,33 @@ def auto_memory_candidates(user_text: str) -> list[str]:
     if is_sensitive_memory(user_text):
         return []
 
-    explicit = explicit_memory_candidate(user_text)
+    explicit = (explicit_memory_candidate(user_text) if re.match(
+        r"(?i)^\s*(?:please\s+)?(?:remember\b|don't forget\b|dont forget\b|note that\b)",
+        user_text,
+    ) else None)
     if explicit and not explicit[1]:
         return [explicit[0]]
 
-    lowered = user_text.lower()
-    if not any(hint in lowered for hint in AUTO_MEMORY_HINTS):
-        return []
-
-    fact = _clean_fact(user_text)
-    if len(fact) < 12 or len(fact) > 500:
-        return []
-    return [fact]
+    # A task containing "never"/"always" is not a durable preference. Saving
+    # the whole turn reintroduced obsolete tasks as memory on subsequent turns.
+    candidates = []
+    prose = re.sub(r"(?s)```.*?```|~~~.*?~~~", "", user_text)
+    prose = re.sub(r"(?m)^\s*>.*$", "", prose)
+    for clause in re.split(r"\n+|(?<=[.!?])\s+", prose):
+        clause = " ".join(clause.split())
+        if (not any(re.match(re.escape(hint.rstrip()) + r"(?:\s|[,;:])", clause, re.I)
+                    for hint in AUTO_MEMORY_HINTS)
+                or not 12 <= len(clause) <= 500
+                or re.search(r"(?i)\b(?:this|current|next|following)\s+"
+                             r"(?:app|task|turn|request|answer|project|file|example|session)\b",
+                             clause)):
+            continue
+        fact = _clean_fact(clause)
+        if fact not in candidates:
+            candidates.append(fact)
+        if len(candidates) == 4:
+            break
+    return candidates
 
 
 def _decode_content(raw: str) -> object:
@@ -1604,6 +1613,15 @@ class Memory:
         }
         if "application_deleted_sessions" not in tables:
             return
+        if 'application_image_actions' in tables:
+            if self.db.execute(
+                "SELECT 1 FROM application_image_actions WHERE session=? AND state NOT IN "
+                "('completed','failed','cancelled') LIMIT 1", (session_id,),
+            ).fetchone():
+                raise ValueError('Session has unresolved image work; cancel or recover it first')
+            self.db.execute('DELETE FROM application_image_actions WHERE session=?', (session_id,))
+        if 'application_image_sources' in tables:
+            self.db.execute('DELETE FROM application_image_sources WHERE session=?', (session_id,))
         self.db.execute(
             "INSERT OR IGNORE INTO application_deleted_sessions(session_id,deleted_at) "
             "VALUES (?,?)", (session_id, time.time()),

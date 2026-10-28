@@ -985,6 +985,7 @@ window.MaterialCircularProgress ??= (() => {
         progress.hide(); progress.element.removeAttribute("hidden");
       }
       return { element: progress.element, setValue: next => { progress.setValue(next, false); return progress.getValue(); },
+        resume: () => progress.show(),
         destroy: () => progress.destroy(), freeze: () => { progress.hide(); progress.element.removeAttribute("hidden"); } };
     }
     size = Math.min(240, Math.max(24, Number(size) || 48));
@@ -1244,6 +1245,25 @@ window.MaterialLoading ??= (() => {
 // the expressive morphing shape is reserved for AI generation activity.
 window.MaterialLoadingCircle ??= (() => {
   const sizes = Object.freeze({ small: 24, medium: 32, large: 48 });
+  const active = new Map();
+  const systemReduced = matchMedia("(prefers-reduced-motion: reduce)");
+  const paused = () => document.hidden || systemReduced.matches ||
+    document.documentElement.dataset.motion === "reduced";
+  function sync() {
+    for (const [element, state] of active) {
+      if (!element.isConnected) {
+        state.progress.destroy(); active.delete(element);
+      } else if (state.paused !== paused()) {
+        state.paused = paused();
+        if (state.paused) state.progress.freeze(); else state.progress.resume();
+      }
+    }
+  }
+  new MutationObserver(sync).observe(document.documentElement,
+    {attributes:true, attributeFilter:["data-motion"]});
+  new MutationObserver(sync).observe(document.documentElement, {childList:true, subtree:true});
+  systemReduced.addEventListener("change", sync);
+  document.addEventListener("visibilitychange", sync);
   function create({ size = "small" } = {}) {
     const name = Object.hasOwn(sizes, size) ? size : "small";
     const dimension = sizes[name];
@@ -1256,6 +1276,11 @@ window.MaterialLoadingCircle ??= (() => {
     element.style.width = `${dimension}px`;
     element.style.height = `${dimension}px`;
     element.setAttribute("aria-hidden", "true");
+    if (progress.resume) {
+      const state = {progress, paused:paused()};
+      active.set(element, state);
+      if (state.paused) progress.freeze();
+    }
     return element;
   }
   return Object.freeze({ create });

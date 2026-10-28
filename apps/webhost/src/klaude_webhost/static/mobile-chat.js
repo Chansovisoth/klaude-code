@@ -193,7 +193,7 @@ window.MobileChatUI = (() => {
     byId('mobile-model-numbers').addEventListener('click', event => {
       const target = event.target.closest('button[data-page]'); if (target) { page = Number(target.dataset.page); render(); }
     });
-    byId('mobile-model-store').addEventListener('click', () => { closeModels(); showView('models'); });
+    byId('mobile-model-store').addEventListener('click', () => { closeModels(); showView('store'); });
     menu.addEventListener('toggle', () => {
       const open = menu.matches(':popover-open'); more.setAttribute('aria-expanded', String(open));
       if (open) { positionMenu(); menu.querySelector('button').focus({preventScroll: true}); }

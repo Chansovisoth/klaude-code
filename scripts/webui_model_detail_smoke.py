@@ -85,7 +85,7 @@ async def verify(host, root):
                 "typeof latest!=='undefined' && authenticated && "
                 "document.documentElement.dataset.startup==='ready'"
             )
-            await tab.js("showView('models')")
+            await tab.js("showView('store')")
             await tab.wait("byId('store-content').querySelectorAll('.store-feature').length===3")
             await tab.wait("!byId('store-download-open').disabled")
             await tab.command(
@@ -96,7 +96,7 @@ async def verify(host, root):
                 "byId('store-content').querySelector('.store-row[data-store-model=qwen3]')"
                 ".scrollIntoView({block:'center'})"
             )
-            before_scroll = await tab.js("byId('models-view').scrollTop")
+            before_scroll = await tab.js("byId('store-view').scrollTop")
             await tab.click(".store-row[data-store-model=qwen3]")
             await tab.wait(
                 "!byId('store-detail').hidden && byId('store-detail-title').textContent==='Qwen 3'"
@@ -136,7 +136,7 @@ async def verify(host, root):
                     await tab.js(
                         "applyAppearance({...appearance,theme:"
                         + json.dumps(theme)
-                        + ",reduced:true});byId('models-view').scrollTop=0"
+                        + ",reduced:true});byId('store-view').scrollTop=0"
                     )
                     await asyncio.sleep(0.1)
                     assert await tab.js("""(() => {
@@ -148,7 +148,7 @@ async def verify(host, root):
                       const stats=byId('store-detail-stats').getBoundingClientRect();
                       const about=byId('store-detail-about').getBoundingClientRect();
                       return document.documentElement.scrollWidth<=innerWidth &&
-                        byId('models-view').scrollWidth<=byId('models-view').clientWidth &&
+                        byId('store-view').scrollWidth<=byId('store-view').clientWidth &&
                         logo.right<=title.left+1 && identity.bottom<=stats.top+1 &&
                         parseFloat(getComputedStyle(byId('store-detail-title')).fontSize)>=
                           (innerWidth>750 ? 29 : 25) &&
@@ -183,14 +183,14 @@ async def verify(host, root):
                 "byId('store-content').querySelector('.store-row[data-store-model=qwen3]')"
                 ".scrollIntoView({block:'center'})"
             )
-            before_scroll = await tab.js("byId('models-view').scrollTop")
+            before_scroll = await tab.js("byId('store-view').scrollTop")
             await tab.click(".store-row[data-store-model=qwen3]")
             await tab.click("#store-detail-back")
             await tab.wait("byId('store-detail').hidden")
             await asyncio.sleep(0.25)
-            await tab.wait("Math.abs(byId('models-view').scrollTop-Math.min("
-                           + str(before_scroll) + ",byId('models-view').scrollHeight-"
-                           "byId('models-view').clientHeight))<3")
+            await tab.wait("Math.abs(byId('store-view').scrollTop-Math.min("
+                           + str(before_scroll) + ",byId('store-view').scrollHeight-"
+                           "byId('store-view').clientHeight))<3")
             await tab.js("history.forward()")
             await tab.wait("!byId('store-detail').hidden")
             await tab.js("history.back()")

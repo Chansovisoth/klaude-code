@@ -119,6 +119,45 @@ async def verify(host, root, chrome):
             # categories; accept the existing leave-with-draft confirmation.
             await tab.js("window.confirm=()=>true; showView('settings',{section:'agent'})")
             await tab.wait("Boolean(byId('setting-runtime_options-max_steps'))")
+            assert await tab.js("""(() => {
+              const groups=[...byId('agent-settings-fields')
+                .querySelectorAll('details[id^=agent-group-]')];
+              return groups.length>=7 && groups.every(group=>group.open);
+            })()""")
+            await tab.js("""byId('agent-group-search_settings').open=false;
+              byId('agent-group-advanced_permissions').open=false;
+              {const field=byId('setting-runtime_options-max_steps');
+              field.value=Number(field.value)+1;field.dispatchEvent(new Event('input'));}""")
+            await tab.click('#agent-discard')
+            assert await tab.js("!byId('agent-group-search_settings').open && "
+                                "!byId('agent-group-advanced_permissions').open")
+            assert await tab.js("""(() => {
+              const groups=[...byId('agent-settings-fields').querySelectorAll(
+                ':scope > .settings-disclosure')];
+              const reference=getComputedStyle(
+                document.querySelector('#account-settings .settings-row-group'));
+              return groups.length>=6 && groups.every(group=>{
+                const body=group.querySelector(':scope > .settings-group-body');
+                if (!body) return false;
+                const style=getComputedStyle(body), parent=getComputedStyle(group);
+                return style.backgroundColor===reference.backgroundColor &&
+                  style.borderColor===reference.borderColor &&
+                  style.borderRadius===reference.borderRadius && parent.borderTopWidth==='0px';
+              }) && byId('agent-group-tools_permissions')
+                .querySelectorAll('[data-agent-tool]').length>0;
+            })()""")
+            await tab.js("""byId('agent-group-tools_permissions').open=true;
+              window.originalToolPolicy=SettingsDrafts.value('agent','permissions.read_file');
+              const next=[...byId('setting-permissions-read_file').querySelectorAll('input')]
+                .find(input=>!input.disabled && input.value!==originalToolPolicy);
+              next.click();""")
+            assert await tab.js(
+                "SettingsDrafts.value('agent','permissions.read_file')!==originalToolPolicy"
+            )
+            await tab.click('#agent-discard')
+            assert await tab.js(
+                "SettingsDrafts.value('agent','permissions.read_file')===originalToolPolicy"
+            )
             await tab.js("""const field=byId('setting-runtime_options-max_steps');
               field.value=Number(field.value)+1;field.dispatchEvent(new Event('input'));
               showSettingsSection('models');""")
@@ -133,9 +172,23 @@ async def verify(host, root, chrome):
                   'Agent tools and permissions':button.dataset.settings;
                 button.append(label);
               });""")
-            # Editing the hex value must preserve its resting appearance.
+            # Theme controls use the same grouped surfaces as the other pages.
             await tab.js("showSettingsSection('theme')")
-            assert await tab.js("""(()=>{
+            assert await tab.js("""(() => {
+              const groups=[...byId('theme-settings').querySelectorAll(
+                '.theme-option-surface, .theme-variant-options')];
+              const reference=getComputedStyle(
+                document.querySelector('#account-settings .settings-row-group'));
+              return groups.length===6 && groups.every(group=>{
+                const style=getComputedStyle(group);
+                return style.backgroundColor===reference.backgroundColor &&
+                  style.borderColor===reference.borderColor &&
+                  style.borderRadius===reference.borderRadius;
+              }) && byId('theme-settings').querySelectorAll('input[name=palette]').length===16 &&
+                Boolean(byId('theme-loading-preview')) && Boolean(byId('theme-progress-preview'));
+            })()""")
+            # Editing the hex value must preserve its resting appearance.
+            hex_check = await tab.js("""(()=>{
               const e=byId('theme-accent-value'),color=byId('theme-accent');
               const measure=()=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();
                 return JSON.stringify([r.width,r.height,s.padding,s.borderWidth,
@@ -152,8 +205,11 @@ async def verify(host, root, chrome):
               e.focus();e.value='#123456';e.blur();
               const blurred=color.value==='#123456';
               byId('theme-reset').click();
-              return before===focused&&committed&&invalid&&cancelled&&blurred;
+              return {same:before===focused,committed,invalid,cancelled,blurred,before,focused};
             })()""")
+            assert all(
+                hex_check[key] for key in ("same", "committed", "invalid", "cancelled", "blurred")
+            ), hex_check
             reports = []
             for theme in ("light", "dark"):
                 for width, height in (
@@ -191,7 +247,90 @@ async def verify(host, root, chrome):
                                 "byId('agent-settings').querySelectorAll('details')"
                                 ".forEach(section=>section.open=true)"
                             )
+                        if category == "theme":
+                            assert await tab.js("""(() => {
+                              const preview=document.querySelector('.theme-studio-previews')
+                                .getBoundingClientRect();
+                              const controls=document.querySelector('.theme-studio-controls')
+                                .getBoundingClientRect();
+                              return Math.abs(preview.width-controls.width)<1;
+                            })()"""), (theme,width)
+                            assert await tab.js("""(() => {
+                              const group=document.querySelector('.theme-surface-controls');
+                              const bounds=group.getBoundingClientRect();
+                              return [...group.querySelectorAll(':scope > label')].every((row,i)=>{
+                                const r=row.getBoundingClientRect(), style=getComputedStyle(row);
+                                const title=row.firstElementChild.getBoundingClientRect();
+                                const control=row.lastElementChild.getBoundingClientRect();
+                                return Math.abs(r.left-bounds.left-1)<1.5 &&
+                                  Math.abs(bounds.right-r.right-1)<1.5 &&
+                                  parseFloat(style.borderTopWidth)===(i ? 1 : 0) &&
+                                  parseFloat(style.paddingLeft)>=12 &&
+                                  title.right<=control.left+1 && control.right<=r.right &&
+                                  title.top<control.bottom && control.top<title.bottom;
+                              });
+                            })()"""), (theme,width)
                         if category == "agent":
+                            assert await tab.js("""(() => {
+                              const group=byId('agent-group-tools_permissions')
+                                .querySelector('.settings-tool-body');
+                              const nested=byId('agent-group-advanced_permissions');
+                              const a=group.getBoundingClientRect(),
+                                b=nested.getBoundingClientRect();
+                              return Math.abs(b.left-a.left-1)<1.5 &&
+                                Math.abs(a.right-b.right-1)<1.5 &&
+                                parseFloat(getComputedStyle(nested).borderTopWidth)===1;
+                            })()"""), (theme,width)
+                            divider_geometry = await tab.js("""(() => {
+                              const groups=[...document.querySelectorAll(
+                                '#agent-settings-fields > .settings-disclosure > '+
+                                '.settings-group-body')];
+                              return groups.flatMap(group=>[...group.querySelectorAll(
+                                ':scope > .setting-row')].map(row=>{
+                                  const outer=group.getBoundingClientRect(),
+                                    inner=row.getBoundingClientRect();
+                                  return {id:row.dataset.setting||row.dataset.agentTool,
+                                    left:Math.abs(inner.left-outer.left-1),
+                                    right:Math.abs(outer.right-inner.right-1),
+                                    padding:parseFloat(getComputedStyle(row).paddingLeft)};
+                                }));
+                            })()""")
+                            assert all(item["left"] < 1.5 and item["right"] < 1.5 and
+                                       item["padding"] >= 16 for item in divider_geometry), (
+                                           theme, width, divider_geometry
+                                       )
+                            tools_geometry = await tab.js("""(() => {
+                              const group=byId('agent-group-tools_permissions')
+                                .querySelector('.settings-tool-body');
+                              const outer=group.getBoundingClientRect();
+                              return [...group.querySelectorAll('.tool-permission-list')]
+                                .map(list=>{
+                                const bounds=list.getBoundingClientRect();
+                                const cards=[...list.children].map(row=>({
+                                  rect:row.getBoundingClientRect().toJSON(),
+                                  padding:parseFloat(getComputedStyle(row).paddingLeft),
+                                  segments:[...row.querySelectorAll('.tool-policy-form label span')]
+                                    .map(el=>el.getBoundingClientRect().width),
+                                }));
+                                return {left:Math.abs(bounds.left-outer.left-1),
+                                  right:Math.abs(outer.right-bounds.right-1),
+                                  columns:getComputedStyle(list).gridTemplateColumns
+                                    .split(' ').length,
+                                  width:group.clientWidth,
+                                  bottomBorder:parseFloat(getComputedStyle(list).borderBottomWidth),
+                                  cards};
+                              });
+                            })()""")
+                            assert all(
+                                item["left"] < 1.5 and item["right"] < 1.5 and
+                                item["bottomBorder"] == 1 and item["columns"] == (
+                                    2 if width > 768 and item["width"] >= 496 else 1
+                                )
+                                and all(card["padding"] >= 16 and
+                                        all(segment >= 44 for segment in card["segments"])
+                                        for card in item["cards"])
+                                for item in tools_geometry
+                            ), (theme, width, tools_geometry)
                             row_geometry = await tab.js("""[...byId('agent-settings-fields')
                               .querySelectorAll(
                                 '.settings-group-body > .setting-row:not(.settings-toggle-row)')]
@@ -204,9 +343,8 @@ async def verify(host, root, chrome):
                                   right:controls.toJSON(), row:bounds.toJSON()};
                               })""")
                             assert all(
-                                item["left"]["right"] <= item["right"]["left"] + 1
-                                and item["left"]["top"] < item["right"]["bottom"]
-                                and item["right"]["top"] < item["left"]["bottom"]
+                                (item["left"]["right"] <= item["right"]["left"] + 1
+                                 or item["left"]["bottom"] <= item["right"]["top"] + 1)
                                 and item["right"]["right"] <= item["row"]["right"] + 1
                                 for item in row_geometry
                             ), (theme, width, row_geometry)
@@ -267,6 +405,14 @@ async def verify(host, root, chrome):
                             )
                             await asyncio.sleep(0.1)
                             result = await tab.js(MEASURE)
+                            if (category in ("agent", "theme") and width in (390, 1440)
+                                    and position == 0):
+                                shot = await tab.command(
+                                    "Page.captureScreenshot", {"format": "png"}
+                                )
+                                (OUT / f"{category}-top-{theme}-{width}.png").write_bytes(
+                                    base64.b64decode(shot["data"])
+                                )
                             assert (
                                 result["bodyFits"] and result["viewFits"] and result["separate"]
                             ), result
@@ -325,6 +471,8 @@ async def verify(host, root, chrome):
                                 ), result
                                 if result["end"]:
                                     assert result["contentEnd"] <= result["dock"]["top"] + 1, result
+                            if result["end"]:
+                                assert result["contentEnd"] <= result["dock"]["top"] - 24, result
                             reports.append(
                                 {
                                     "theme": theme,
@@ -338,6 +486,48 @@ async def verify(host, root, chrome):
                             (OUT / f"{category}-{theme}-{width}.png").write_bytes(
                                 base64.b64decode(shot["data"])
                             )
+            # The image-service subscreen owns a separate draft and dock.
+            await tab.js("showSettingsSection('models'); ModelsSettingsNavigation.show('image')")
+            await tab.js("""{const field=byId('image-service-url');
+              field.value='http://127.0.0.1:1235';field.dispatchEvent(new Event('input'));
+              const provider=byId('image-service-provider');
+              provider.value='ollama';provider.dispatchEvent(new Event('change'));}""")
+            await tab.wait(
+                "!byId('image-service-save-bar').hidden && "
+                "byId('image-service-save-bar').parentElement===byId('settings-action-dock')"
+            )
+            for width, height in ((320, 568), (390, 430), (768, 1024), (851, 700), (1440, 900)):
+                await tab.command(
+                    "Emulation.setDeviceMetricsOverride",
+                    {
+                        "width": width,
+                        "height": height,
+                        "deviceScaleFactor": 1,
+                        "mobile": width <= 560,
+                    },
+                )
+                await asyncio.sleep(0.15)
+                await tab.js("byId('settings-view').scrollTop=byId('settings-view').scrollHeight")
+                await asyncio.sleep(0.1)
+                image_layout = await tab.js(MEASURE)
+                assert await tab.js("""(() => {
+                  const group=byId('image-service-save'), bounds=group.getBoundingClientRect();
+                  return [...group.querySelectorAll(':scope > .setting-row')]
+                    .filter(row=>row.getClientRects().length).every((row,i)=>{
+                      const r=row.getBoundingClientRect(), style=getComputedStyle(row);
+                      return Math.abs(r.left-bounds.left-1)<1.5 &&
+                        Math.abs(bounds.right-r.right-1)<1.5 &&
+                        parseFloat(style.borderTopWidth)===(i ? 1 : 0) &&
+                        parseFloat(style.paddingLeft)>=16;
+                    });
+                })()"""), width
+                assert image_layout["barId"] == "image-service-save-bar", image_layout
+                assert image_layout["end"] and image_layout["contentEnd"] <= (
+                    image_layout["dock"]["top"] - 24
+                ), image_layout
+            await tab.click("#image-service-discard")
+            await tab.js("ModelsSettingsNavigation.show('overview')")
+
             # Arrow/Home/End navigation keeps focus visible in the opaque scroller.
             await tab.command(
                 "Emulation.setDeviceMetricsOverride",
@@ -359,7 +549,8 @@ async def verify(host, root, chrome):
                     "getComputedStyle(document.activeElement).outlineStyle==='solid'"
                 )
             await tab.js(
-                "showSettingsSection('agent');byId('setting-research-context_tokens').focus()"
+                "showSettingsSection('agent');byId('agent-group-research').open=true;"
+                "byId('setting-research-context_tokens').focus()"
             )
             await asyncio.sleep(0.15)
             await tab.command(
@@ -449,6 +640,53 @@ async def verify(host, root, chrome):
             await tab.wait("!byId('settings-action-dock').hidden")
             await tab.click("#theme-apply")
             await tab.wait("byId('settings-action-dock').hidden")
+            # Clean pages must also leave room below their last visible option.
+            for width, height in ((320, 380), (390, 430), (768, 1024), (851, 700), (1440, 900)):
+                await tab.command(
+                    "Emulation.setDeviceMetricsOverride",
+                    {
+                        "width": width,
+                        "height": height,
+                        "deviceScaleFactor": 1,
+                        "mobile": width <= 560,
+                    },
+                )
+                for category in ("agent", "models", "image", "theme", "memory"):
+                    if category == "image":
+                        await tab.js(
+                            "showSettingsSection('models'); ModelsSettingsNavigation.show('image')"
+                        )
+                    else:
+                        await tab.js("showSettingsSection(" + json.dumps(category) + ")")
+                        if category == "models":
+                            await tab.js("ModelsSettingsNavigation.show('overview')")
+                    await asyncio.sleep(0.1)
+                    await tab.js(
+                        "byId('settings-view').scrollTop=byId('settings-view').scrollHeight"
+                    )
+                    await asyncio.sleep(0.1)
+                    gap = await tab.js("""(() => {
+                      const view=byId('settings-view'), panel=view.querySelector(
+                        '[role=tabpanel]:not([hidden])');
+                      const elements=[...panel.querySelectorAll(
+                        'input,select,textarea,button,summary')]
+                        .filter(el=>{
+                          const closed=el.closest('details:not([open])');
+                          return el.getClientRects().length && !el.closest('[hidden]') &&
+                            (!closed || el.tagName==='SUMMARY' && el.parentElement===closed);
+                        });
+                      const last=Math.max(0,...elements.map(el=>el.getBoundingClientRect().bottom));
+                      return {gap:view.getBoundingClientRect().bottom-last,
+                        end:view.scrollHeight-view.scrollTop-view.clientHeight<2,
+                        dock:byId('settings-action-dock').hidden,
+                        fits:document.documentElement.scrollWidth<=innerWidth};
+                    })()""")
+                    assert gap["end"] and gap["dock"] and gap["fits"] and gap["gap"] >= 24, (
+                        width,
+                        category,
+                        gap,
+                    )
+            await tab.js("showSettingsSection('theme')")
             await tab.js(
                 "document.querySelector('input[name=chat-density]:not(:checked)').click();showView('chat')"
             )
@@ -463,6 +701,8 @@ async def verify(host, root, chrome):
                 "measured_navigation_and_padding": True,
                 "drafts_and_discard_apply": True,
                 "desktop_page_dock": True,
+                "image_service_clearance": True,
+                "clean_page_clearance": True,
                 "console_errors": 0,
             }
     finally:

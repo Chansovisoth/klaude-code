@@ -451,7 +451,29 @@ class ArtifactStore:
             raise ValueError("Choose document or media")
         if not filename or len(filename) > 160 or any(c in filename for c in "/\\\x00"):
             raise ValueError("Invalid upload filename")
-        return self._insert(data, kind, filename, "Browser upload")
+        if kind != "media":
+            return self._insert(data, kind, filename, "Browser upload")
+        if len(data) > MAX_BYTES:
+            raise ValueError("Artifacts must be at most 32 MiB")
+        with self.database(write=True) as db:
+            # Re-uploading the same image retains its original identity and Added
+            # timestamp. Serialize lookup/insertion so concurrent uploads do too.
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute(
+                "SELECT id FROM artifacts WHERE kind='media' AND sha256=? AND size=? "
+                "ORDER BY created, rowid LIMIT 1",
+                (hashlib.sha256(data).hexdigest(), len(data)),
+            ).fetchone()
+            if existing is not None:
+                return self.get(existing["id"])
+            return self._insert(data, kind, filename, "Browser upload", db=db)
+
+    def store_chat_image_source(self, data: bytes, filename: str, session: str) -> dict[str, Any]:
+        """Snapshot explicitly attached pixels for a conversation image operation."""
+        if (not session or len(data) > 8 * 1024 * 1024
+                or image_header(data)[0] not in {"image/png", "image/jpeg"}):
+            raise ValueError("Choose a bounded PNG or JPEG source image")
+        return self._insert(data, "media", filename, "Chat image reference", session)
 
     def import_file(self, source: Path, kind: str, *, session: str = "") -> dict[str, Any]:
         if kind not in {"document", "media"}:
@@ -485,6 +507,30 @@ class ArtifactStore:
         return self._insert(
             text.encode("utf-8"), "research", name, "Research report", session, job, model, db=db
         )
+
+    def delete_many(self, targets: list[dict[str, Any]]) -> None:
+        """Delete an exact reviewed selection in one transaction, or change nothing."""
+        if not isinstance(targets, list) or not 1 <= len(targets) <= 100:
+            raise ValueError("Select between 1 and 100 files")
+        identities = set()
+        for target in targets:
+            if (not isinstance(target, dict) or set(target) != {"target", "revision"}
+                    or not isinstance(target["target"], str)
+                    or type(target["revision"]) is not int
+                    or target["target"] in identities):
+                raise ValueError("Invalid file selection")
+            identities.add(target["target"])
+        with self.database(write=True) as db:
+            db.execute("BEGIN IMMEDIATE")
+            for target in targets:
+                row = db.execute("SELECT revision FROM artifacts WHERE id=?",
+                                 (target["target"],)).fetchone()
+                if row is None or row["revision"] != target["revision"]:
+                    raise ValueError("A selected file changed; reload and select it again")
+            for identity in identities:
+                for table in ("artifact_links", "generated_images", "image_tags"):
+                    db.execute(f"DELETE FROM {table} WHERE artifact=?", (identity,))
+                db.execute("DELETE FROM artifacts WHERE id=?", (identity,))
 
     def change(
         self, identity: str, revision: int, operation: str, value: str = "", *,

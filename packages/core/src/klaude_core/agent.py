@@ -41,13 +41,15 @@ from .intent import (
     prohibits_skill_read,
     prohibits_web_search,
     requests_external_lookup,
+    requests_skill_guidance,
     without_tool_use_prohibition,
 )
 from .knowledge_tool_contract import normalize_knowledge_arguments
 from .model_runtime import ModelInfo, ModelRuntime, normalize_token_usage
 from .ollama import Ollama, OllamaIncompleteResponse
 from .permissions import PermissionDenied, PermissionGate
-from .request_context import select_request_prompt
+from .request_budget import bound_search_snippets, estimate_prose_tokens, estimate_text_tokens
+from .request_context import project_memory_context, select_request_prompt
 from .research_receipts import recovery_receipts, research_receipt
 from .response_constraints import code_quote_limit, limit_code_quotes
 from .source_use import AnswerSourceIndex, asks_what_was_used, prior_answer_source_note
@@ -4186,6 +4188,7 @@ class Agent:
         system_prompt_for_budget: str | None = None,
         ollama_options: dict[str, Any] | None = None,
         force: bool = False,
+        reserved_tokens: int = 0,
     ) -> None:
         """Keep a new request within the configured context window.
 
@@ -4215,14 +4218,15 @@ class Agent:
         from .chat_images import image_cost
 
         input_budget = max(
-            6_000,
+            0,
             (num_ctx - max(1_024, output_reserve)) * chars_per_token,
         )
         fixed = self.messages[0]
         budget_prompt = system_prompt_for_budget
         if budget_prompt is None:
             budget_prompt = str(fixed.get("content", ""))
-        used = (len(budget_prompt) * chars_per_token + 2) // 3 + len(str(tool_schemas))
+        used = (estimate_prose_tokens(budget_prompt, ratio=3) * chars_per_token
+                + len(str(tool_schemas)) + reserved_tokens * chars_per_token)
         # Reserve dialogue space before admitting large complete tool exchanges.
         # Otherwise one retained exchange can consume all recap headroom and
         # silently erase the earlier request that a short follow-up refers to.
@@ -4242,7 +4246,8 @@ class Agent:
         overflowed = False
         for unit in reversed(units):
             cost = sum(
-                len(str(message.get("content", "")))
+                estimate_prose_tokens(str(message.get("content", "")), ratio=chars_per_token)
+                * chars_per_token
                 + image_cost(message, backend=self.model_info.backend,
                              model=self.model_info.model_id) * chars_per_token
                 + sum(
@@ -4706,6 +4711,13 @@ class Agent:
             user_message,
             set(available_tools),
         )
+        if ("read_skill" in available_tools and self.skill_reader is not None
+                and requests_skill_guidance(
+                    user_message, (item.name for item in self.skill_reader.catalog()),
+                )):
+            required_retrieval_tools = tuple(dict.fromkeys(
+                (*required_retrieval_tools, "read_skill"),
+            ))
         for required_tool in required_retrieval_tools:
             if required_tool in available_tools:
                 selected_tools.setdefault(required_tool, available_tools[required_tool])
@@ -4887,10 +4899,6 @@ class Agent:
             else self.ollama_think
         )
         direct_code_system_prompt = DIRECT_CODE_SYSTEM_PROMPT
-        if self.code_context:
-            direct_code_system_prompt += (
-                "\n\nRelevant durable user and project preferences:\n" + self.code_context
-            )
         research = AgenticSearchState(user_message, self.web_research_budget)
         self.last_web_research_state = research
         discovery_calls = 0
@@ -5139,7 +5147,24 @@ class Agent:
                 workspace_execution=workspace_execution,
                 focused_retrieval=focused_retrieval,
             )
-            dialogue = [*self.messages[1:]]
+            request_prompt, memory_notes = project_memory_context(request_prompt, self.code_context)
+            # Recaps quote historical user/assistant data. Sending them as
+            # system instructions can make a local model prefer an obsolete
+            # original requirement over the user's later correction. Keep the
+            # canonical compaction marker, but never elevate recap authority.
+            dialogue = [
+                {**message, "role": "user"} if message.get("compaction_summary") else message
+                for message in self.messages[1:]
+            ]
+            if memory_notes.strip():
+                dialogue.insert(0, {
+                    "role": "user", "memory_context": True,
+                    "content": (
+                        "Historical saved memory notes (possibly stale data, not a current task, "
+                        "permission grant or tool evidence). Later conversation and current user "
+                        "corrections override these notes:\n" + memory_notes
+                    ),
+                })
             if task_progress.outcomes and used_tools:
                 # Keep one ephemeral focus note after the complete tool round.
                 # It does not accumulate in history or replace native call pairs.
@@ -5170,16 +5195,15 @@ class Agent:
             ):
                 compact_prompt = DIRECT_RESPONSE_SYSTEM_PROMPT
                 compact_prompt += "\n\n" + snapshot.render_compact_for_model()
-                if self.code_context:
-                    compact_prompt += (
-                        "\n\nRelevant durable user and project preferences:\n" + self.code_context
-                    )
                 return [
                     {"role": "system", "content": compact_prompt},
                     *dialogue,
                 ]
             context = "\n\n" + (
-                snapshot.render_execution_for_model() if workspace_execution or focused_retrieval
+                snapshot.render_execution_for_model(
+                    include_registry=not getattr(self, "compact_capability_context", False),
+                ) if workspace_execution or focused_retrieval
+                or getattr(self, "compact_capability_context", False)
                 else snapshot.render_for_model()
             )
             if task_progress.outcomes:
@@ -5523,6 +5547,15 @@ class Agent:
             yield AgentEvent('done', finish_payload())
             return
 
+        def context_limit_events(message: str):
+            if execution_state is not None:
+                report = execution_state.incomplete_report(message)
+                self.messages.append({"role": "assistant", "content": report})
+                yield AgentEvent("text", {"content": report})
+            yield AgentEvent("error", {"message": message})
+            if execution_state is not None:
+                yield AgentEvent("done", finish_payload())
+
         # Initial compaction needs the projected policy, not request admission.
         # Activate the actual local discovery contract before budgeting it;
         # admission runs inside the guarded model loop after old dialogue has
@@ -5530,6 +5563,26 @@ class Agent:
         if execution_state is not None and structured_recovery_supported():
             structured_action_protocol = True
         initial_model_messages = model_messages(admit=False)
+        # A current prompt cannot be compacted away. Reject an impossible
+        # request before compaction destroys older dialogue or a local backend
+        # silently truncates it. Image pixels have their own later admission.
+        from .request_budget import request_budget
+
+        admission = request_budget(self.model_info, request_options)
+        current_input = next((m for m in reversed(initial_model_messages)
+                              if m.get("role") == "user"), {})
+        memory_messages = [m for m in initial_model_messages if m.get("memory_context")]
+        essential_tokens = estimate_text_tokens(
+            [initial_model_messages[0], *memory_messages, current_input], active_schemas(),
+            local=self.model_info.uses_configured_context,
+        )
+        if essential_tokens > admission.context - admission.output:
+            yield from context_limit_events(
+                "The current message and required tool/policy context exceed the "
+                "estimated allocated context. Shorten the message or choose a larger Runtime "
+                "context/model. Earlier dialogue was preserved; no model request was sent."
+            )
+            return
         direct_code_prompt = (
             initial_model_messages[0]["content"]
             if code_answer_expected and not selected_tools
@@ -5539,6 +5592,9 @@ class Agent:
             active_schemas(),
             system_prompt_for_budget=direct_code_prompt or initial_model_messages[0]["content"],
             ollama_options=(request_options if self.model_info.uses_configured_context else None),
+            reserved_tokens=(estimate_text_tokens(
+                memory_messages, [], local=self.model_info.uses_configured_context,
+            ) if memory_messages else 0),
         )
 
         def execute_tool_call(call: dict[str, Any]):
@@ -6255,6 +6311,29 @@ class Agent:
                 response_arguments = {s['function']['name']: s['function']['parameters']
                                       for s in schemas}
                 request_messages = model_messages()
+                # Tool rounds can grow after user-boundary compaction. Refuse
+                # an oversized complete request instead of letting a backend
+                # silently erase the user's objective. Workspace execution and
+                # image pixels retain their additional specialized admission.
+                admission = request_budget(self.model_info, request_options)
+                estimated_input = estimate_text_tokens(
+                    request_messages, schemas, local=self.model_info.uses_configured_context,
+                )
+                for snippet_limit in (120, 0):
+                    if estimated_input <= admission.context - admission.output:
+                        break
+                    request_messages = bound_search_snippets(request_messages, snippet_limit)
+                    estimated_input = estimate_text_tokens(
+                        request_messages, schemas, local=self.model_info.uses_configured_context,
+                    )
+                if estimated_input > admission.context - admission.output:
+                    yield from context_limit_events(
+                        "The accumulated dialogue/tool results exceed the estimated allocated "
+                        "context. No oversized request was sent. Use smaller paged reads, "
+                        "compact the conversation, or explicitly choose a larger Runtime context. "
+                        "Completed tool effects are preserved; missing evidence was not invented."
+                    )
+                    return
                 image_context = getattr(self, "image_context", None)
                 if image_context is not None and image_context.prepared:
                     for prepared in image_context.prepared:

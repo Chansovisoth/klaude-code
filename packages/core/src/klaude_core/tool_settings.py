@@ -8,6 +8,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 BUILTIN_TOOL_GROUPS = (
+    ("IMAGE GENERATION", (("generate_image", "Generate or edit images"),)),
     (
         "WORKSPACE",
         (

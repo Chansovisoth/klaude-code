@@ -100,7 +100,7 @@ async def verify_chat_density(tab, output):
                  "byId('welcome').hidden=true;messages.replaceChildren(ChatMarkdown.create('user',"
                  "'Show the same conversation with less empty space.','density-user'),"
                  "ChatMarkdown.create('assistant'," + json.dumps(text) + ", 'density-reply'));"
-                 "messages.scrollTop=0;};renderDensityFixture()")
+                 "chatScroller.scrollTop=0;};renderDensityFixture()")
     cases = []
     for theme in ("light", "dark"):
         for width in (320, 390, 768, 1440):
@@ -111,7 +111,7 @@ async def verify_chat_density(tab, output):
             for density in ("comfortable", "compact"):
                 await tab.js("applyAppearance({...appearance,theme:" + json.dumps(theme)
                              + ",chatDensity:" + json.dumps(density) + ",reduced:true},true);"
-                             "messages.scrollTop=0;document.fonts.ready")
+                             "chatScroller.scrollTop=0;document.fonts.ready")
                 await tab.js("new Promise(resolve=>requestAnimationFrame("
                              "()=>requestAnimationFrame(resolve)))")
                 measurements[density] = await tab.js("""(()=>{

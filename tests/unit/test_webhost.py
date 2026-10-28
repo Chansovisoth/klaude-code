@@ -964,7 +964,7 @@ def test_webhost_factory_exposes_read_only_workspace_and_retrieval_tools(tmp_pat
             "git_status",
             "git_diff",
             "query_knowledge", "read_skill", "web_search", "fetch_url", "http_probe",
-            "current_time",
+            "current_time", "generate_image",
         }
         assert app.agent.workspace.write_enabled is False
         assert host_main.WEB_CHAT_FORMATTING in app.agent.messages[0]["content"]

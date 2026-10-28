@@ -509,10 +509,10 @@ async def verify(host, root):
 
             await tab.click("#command-open")
             await tab.js(
-                'byId("command-query").value="Open Models";byId("command-query").dispatchEvent(new Event("input"))'
+                'byId("command-query").value="Open Store";byId("command-query").dispatchEvent(new Event("input"))'
             )
             await tab.command("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter"})
-            await wait('currentView==="models" && !byId("command-palette").open')
+            await wait('currentView==="store" && !byId("command-palette").open')
             await tab.click("#command-open")
             await tab.click('[data-mode="shortcuts"]')
             await tab.js(
@@ -560,7 +560,7 @@ async def verify(host, root):
                         ("library", None),
                         ("workspace", None),
                         ("integrations", None),
-                        ("models", None),
+                        ("store", None),
                         ("activity", None),
                     ):
                         await tab.js("showView(" + json.dumps(page) + ")")

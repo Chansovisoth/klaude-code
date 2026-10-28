@@ -72,6 +72,7 @@ READ_ONLY_TOOLS = frozenset({
     "read_file", "list_dir", "workspace_info", "grep", "git_status", "git_diff",
 }) | ASSISTANT_READ_TOOLS
 FILE_EDIT_TOOLS = frozenset({"write_file", "edit_file"})
+IMAGE_TOOLS = frozenset({"generate_image"})
 
 
 @dataclass
@@ -128,6 +129,9 @@ class LocalWebHost:
         self._application_edits: dict[int, bool] = {}
         self.accounts = accounts
         self.library = library
+        self.system_control = None
+        if library is not None:
+            application.bind_image_operations(library)
         self._library_downloads = threading.BoundedSemaphore(2)
         self._attachment_reads = threading.BoundedSemaphore(2)
         self.library_images = LibraryImages()
@@ -394,7 +398,9 @@ class LocalWebHost:
 
     def _public_snapshot(self, viewer_id: str | None = None) -> dict[str, Any]:
         snapshot = self.application.snapshot(viewer_id=viewer_id)
-        selected_info, selected_mode, selected_effort, model_pending = self.application.model_selection()
+        selected_info, selected_mode, selected_effort, model_pending = (
+            self.application.model_selection()
+        )
         edits_enabled = self._edits_activated and self.application.agent.workspace.write_enabled
         messages = []
         budget = 700_000
@@ -445,6 +451,8 @@ class LocalWebHost:
                     messages[-1][attribute] = item[attribute]
             if item.get("attachments"):
                 messages[-1]["attachments"] = item["attachments"]
+            if item.get('image_action'):
+                messages[-1]['image_action'] = item['image_action']
             budget -= size
         messages.sort(key=lambda item: int(item["id"].removeprefix("stored:")))
         approvals = []
@@ -473,7 +481,7 @@ class LocalWebHost:
                     getattr(self.application.agent, "browser_tools", None),
                     "mcp_names", frozenset(),
                 )
-                allowed = READ_ONLY_TOOLS | external | (
+                allowed = READ_ONLY_TOOLS | IMAGE_TOOLS | external | (
                     FILE_EDIT_TOOLS if edits_enabled else frozenset()
                 )
                 if review is not None and review["tool"] in allowed:
@@ -490,12 +498,21 @@ class LocalWebHost:
             "library_source_notes": True,
             "library_ai_tag_edit": self.library is not None,
             "library_artifact_sources": True,
+            "library_bulk_delete": True,
             "profile_management": self.library is not None,
+            "system_control": self.system_control is not None,
             "media_management": self.library is not None,
+            "image_model_selection": self.library is not None,
             "model_store": self.library is not None,
+            "integration_store": self.library is not None,
+            "integration_store_stars": self.library is not None,
+            "integration_store_sort": self.library is not None,
+            "model_store_sdcpp": self.library is not None,
+            "model_store_sdcpp_revision": 1 if self.library is not None else 0,
             "model_download_dismissal": self.library is not None,
             "model_download_recovery": self.library is not None,
             "image_studio": self.library is not None,
+            "chat_image_generation": self.application.images is not None,
             "model_settings": self.library is not None,
             "model_store_catalog": self.library is not None,
             "chat_auto_queue": True,
@@ -639,7 +656,10 @@ class LocalWebHost:
             asyncio.run(idle.close())
             self._applications.remove(idle)
             self._application_edits.pop(id(idle), None)
-        return self._application_factory()
+        application = self._application_factory()
+        if self.library is not None:
+            application.bind_image_operations(self.library)
+        return application
 
     def switch_session(
         self, viewer: str, request_id: str, expected_session_id: str,
@@ -1078,6 +1098,13 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.FORBIDDEN, "forbidden", "Request origin rejected")
             return
         path = urlsplit(self.path).path
+        if path == "/api/v1/system/health":
+            control = self.owner.system_control
+            self._json(HTTPStatus.OK if control and not self.owner._stopping else
+                       HTTPStatus.SERVICE_UNAVAILABLE,
+                       {"ready": bool(control and not self.owner._stopping),
+                        "instance": control.instance if control else ""})
+            return
         if path in ("/fonts/Roboto.ttf", "/fonts/JetBrainsMono.ttf",
                     "/fonts/SpaceGrotesk.ttf", "/fonts/ReadexPro.ttf",
                     "/fonts/NotoSansKhmer.ttf"):
@@ -1233,6 +1260,61 @@ class _Handler(BaseHTTPRequestHandler):
             self._headers(HTTPStatus.OK, "text/markdown; charset=utf-8", len(payload),
                           attachment=f"klaude-{identity}.md")
             self.wfile.write(payload)
+        elif path == "/api/v1/system":
+            if self._viewer(auth[0]) is None:
+                return
+            if not self._admin_management_allowed():
+                self._error(HTTPStatus.FORBIDDEN, "forbidden",
+                            "System actions require an admin account")
+                return
+            try:
+                control = self.owner.system_control
+                result = control.state()[0] if control else {"available": False}
+                self._json(HTTPStatus.OK, result)
+            except (OSError, ValueError, RuntimeError, sqlite3.Error):
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE, "system_unavailable",
+                            "System status unavailable; no action was taken")
+        elif path in {"/api/v1/store/integrations", "/api/v1/store/integrations/detail",
+                      "/api/v1/store/integrations/stars"}:
+            if self._viewer(auth[0]) is None:
+                return
+            try:
+                service = self.owner.library
+                if service is None:
+                    raise ValueError("Integration Store requires a current host")
+                params = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                if any(len(value) != 1 for value in params.values()):
+                    raise ValueError("Choose one integration filter")
+                if path.endswith("/stars"):
+                    if set(params) != {"id"}:
+                        raise ValueError("Choose an exact Store item")
+                    result = service.integration_store.repository_stars(params["id"][0])
+                elif path.endswith("/detail"):
+                    if (set(params) - {"id", "resolve", "source"} or "id" not in params
+                            or params.get("resolve", ["0"])[0] not in {"0", "1"}
+                            or len(params.get("source", [""])[0]) > 1000):
+                        raise ValueError("Choose an exact Store item")
+                    result = service.integration_store.detail(
+                        params["id"][0], resolve=params.get("resolve") == ["1"],
+                        source=params.get("source", [""])[0],
+                    )
+                else:
+                    if (set(params) - {"kind", "query", "provider", "page", "refresh", "sort"}
+                            or "kind" not in params
+                            or params.get("refresh", ["0"])[0] not in {"0", "1"}):
+                        raise ValueError("Choose a bounded integration search")
+                    result = service.integration_store.catalog(
+                        params["kind"][0], params.get("query", [""])[0],
+                        provider=params.get("provider", ["skillsmp"])[0],
+                        page=int(params.get("page", ["1"])[0]),
+                        refresh=params.get("refresh") == ["1"],
+                        sort=params.get("sort", ["stars"])[0],
+                    )
+                self._json(HTTPStatus.OK, {**result,
+                                         "management_allowed": self._admin_management_allowed()})
+            except (ValueError, RuntimeError, OSError):
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE, "store_unavailable",
+                            "Integration Store unavailable. Refresh and try again.")
         elif path in {
             "/api/v1/models/store", "/api/v1/models/store/detail",
             "/api/v1/models/installed", "/api/v1/models/downloads",
@@ -1253,14 +1335,17 @@ class _Handler(BaseHTTPRequestHandler):
                 elif path.endswith("/detail"):
                     from klaude_application.model_store_catalog import detail
 
-                    if set(params) != {"id"} or len(params["id"]) != 1:
+                    if (set(params) not in ({"id"}, {"id", "runtime"})
+                            or any(len(v) != 1 for v in params.values())):
                         raise ValueError("Choose one exact catalog model")
-                    result = detail(service.cfg, params["id"][0])
+                    result = detail(service.cfg, params["id"][0],
+                                    runtime=params.get("runtime", ["ollama"])[0])
                 else:
                     if path.endswith("/store") and params:
                         from klaude_application.model_store_catalog import catalog
 
-                        if (set(params) - {"source", "query", "sort", "refresh", "page", "limit"}
+                        if (set(params) - {"source", "query", "sort", "refresh", "page", "limit",
+                                           "runtime"}
                                 or params.get("source") != ["huggingface"]
                                 or any(len(v) != 1 for v in params.values())
                                 or params.get("refresh", ["0"])[0] not in {"0", "1"}):
@@ -1269,7 +1354,8 @@ class _Handler(BaseHTTPRequestHandler):
                                          params.get("sort", ["downloads"])[0],
                                          refresh=params.get("refresh") == ["1"],
                                          page=int(params.get("page", ["1"])[0]),
-                                         limit=int(params.get("limit", ["20"])[0]))
+                                         limit=int(params.get("limit", ["20"])[0]),
+                                         runtime=params.get("runtime", ["ollama"])[0])
                     else:
                         if params:
                             raise ValueError("Unknown Model Store filter")
@@ -1296,13 +1382,15 @@ class _Handler(BaseHTTPRequestHandler):
                 else:
                     if (set(params) not in ({"connection"}, {"connection", "purpose"})
                             or len(params["connection"]) != 1
-                            or ("purpose" in params and params["purpose"] != ["defaults"])):
+                            or ("purpose" in params and params["purpose"] not in
+                                (["defaults"], ["image-generation"]))):
                         raise ValueError("Choose a configured connection")
                     if "purpose" in params:
                         from klaude_application.browser_media_settings import default_model_catalog
 
                         model_result = {"models": default_model_catalog(
                             cfg, params["connection"][0],
+                            image_generation=params["purpose"] == ["image-generation"],
                         )}
                     else:
                         model_result = {"models": [
@@ -1508,24 +1596,90 @@ class _Handler(BaseHTTPRequestHandler):
                 and expected_session != self.owner.application.session_id):
             self._error(HTTPStatus.CONFLICT, "stale_session", "Session changed; reload")
             return
-        if path in {"/api/v1/chat/attachments", "/api/v1/chat/attachments/discard"}:
+        if path in {"/api/v1/system/review", "/api/v1/system/apply"}:
+            if not self._admin_management_allowed():
+                self._error(HTTPStatus.FORBIDDEN, "forbidden",
+                            "System actions require an admin account")
+                return
+            try:
+                control = self.owner.system_control
+                if control is None:
+                    raise ValueError("Restart the Web UI host to enable System actions")
+                if path.endswith("/review"):
+                    if set(body) != {"action"}:
+                        raise ValueError("Choose a System action")
+                    result = control.review(viewer, body["action"])
+                else:
+                    if set(body) != {"review_id", "request_id"}:
+                        raise ValueError("Choose an exact reviewed System action")
+                    result = control.apply(viewer, body["review_id"], body["request_id"])
+                status = HTTPStatus.ACCEPTED if path.endswith("/apply") else HTTPStatus.OK
+                self._json(status, result)
+                if path.endswith("/apply"):
+                    threading.Thread(target=self.owner.http.shutdown, daemon=True).start()
+            except (OSError, ValueError, RuntimeError, sqlite3.Error):
+                self._error(HTTPStatus.CONFLICT, "system_unavailable",
+                            "System action unavailable or runtime changed. Review again.")
+        elif path in {"/api/v1/chat/attachments", "/api/v1/chat/attachments/discard"}:
             self._attachment_change(path, body, auth[0], viewer)
         elif path in {
             "/api/v1/library/review", "/api/v1/library/submit", "/api/v1/library/discard",
             "/api/v1/library/cancel", "/api/v1/library/vision/clear",
         }:
             self._library_change(path, body, auth[0], viewer)
-        elif path in {"/api/v1/settings/model-connections/test",
-                      "/api/v1/settings/models/image-test"}:
+        elif path == '/api/v1/chat/images/control':
+            try:
+                if (
+                    set(body) != {"id", "operation", "request_id"}
+                    or not isinstance(body["id"], str)
+                    or not re.fullmatch(r"[a-f0-9]{32}", body["id"])
+                    or body["operation"] not in ("cancel", "recover")
+                ):
+                    raise ValueError("Invalid image control request")
+                if not isinstance(body["request_id"], str) or not re.fullmatch(
+                    r"[a-f0-9]{32}", body["request_id"]
+                ):
+                    raise ValueError("Invalid image request ID")
+                with self.owner._lock:
+                    application = self.owner.application
+                    if application.images is None:
+                        raise ValueError("Chat images are unavailable")
+                    result = application.images.control(
+                        body["id"], application.session_id, body["operation"], body["request_id"]
+                    )
+                self._json(HTTPStatus.OK, result)
+            except (ValueError, OSError, RuntimeError):
+                self._error(
+                    HTTPStatus.CONFLICT,
+                    "image_control_unavailable",
+                    "The image job cannot be changed. Check its saved outcome.",
+                )
+        elif path in {
+            "/api/v1/settings/model-connections/test",
+            "/api/v1/settings/models/image-test",
+            "/api/v1/settings/models/image-models",
+        }:
             if not self._admin_management_allowed():
-                self._error(HTTPStatus.FORBIDDEN, "forbidden",
-                            "Model service tests require an admin account")
+                self._error(
+                    HTTPStatus.FORBIDDEN,
+                    "forbidden",
+                    "Model service tests require an admin account",
+                )
                 return
             try:
                 service = self.owner.library
                 if service is None:
                     raise ValueError("Model settings unavailable")
-                if path.endswith("image-test"):
+                if path.endswith("image-models"):
+                    from klaude_application.image_model_selection import catalog
+
+                    if (set(body) - {"endpoint", "refresh"}
+                            or not isinstance(body.get("endpoint"), str)
+                            or type(body.get("refresh", False)) is not bool):
+                        raise ValueError("Choose an image-service address")
+                    result = catalog(service.cfg, body["endpoint"],
+                                     refresh=body.get("refresh", False))
+                elif path.endswith("image-test"):
                     from klaude_core.image_generation import inspect
 
                     if (set(body) - {"endpoint", "provider", "model"}
@@ -1545,6 +1699,27 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception:
                 self._error(HTTPStatus.BAD_REQUEST, "model_unavailable",
                             "Service test unavailable; check its address and credentials")
+        elif path in {"/api/v1/skills/install/inspect", "/api/v1/skills/install/reconcile"}:
+            if not self._admin_management_allowed():
+                self._error(HTTPStatus.FORBIDDEN, "forbidden",
+                            "Skill recovery requires an admin account")
+                return
+            try:
+                service = self.owner.library
+                apply = path.endswith("/reconcile")
+                fields = {"request_id", "fingerprint"} if apply else {"request_id"}
+                if (service is None or set(body) != fields
+                        or not isinstance(body["request_id"], str)
+                        or apply and not isinstance(body["fingerprint"], str)):
+                    raise ValueError("Choose an exact Skill installation")
+                result = service.reconcile_skill(
+                    body["request_id"], apply=apply, fingerprint=body.get("fingerprint", ""),
+                )
+                self._json(HTTPStatus.OK, result)
+            except (ValueError, RuntimeError, OSError, sqlite3.Error):
+                self._error(HTTPStatus.CONFLICT, "skill_unconfirmed",
+                            "Recovery unavailable: the Skill is active or its evidence changed. "
+                            "Inspect again after active work finishes.")
         elif path in {"/api/v1/models/cancel", "/api/v1/models/reconcile",
                       "/api/v1/models/dismiss"}:
             if not self._admin_management_allowed():
@@ -2023,7 +2198,7 @@ class _Handler(BaseHTTPRequestHandler):
                         getattr(self.owner.application.agent, "browser_tools", None),
                         "mcp_names", frozenset(),
                     )
-                    allowed = READ_ONLY_TOOLS | external | (
+                    allowed = READ_ONLY_TOOLS | IMAGE_TOOLS | external | (
                         FILE_EDIT_TOOLS if self.owner._edits_activated
                         and self.owner.application.agent.workspace.write_enabled
                         and not getattr(self.server, "host_lan", False) else frozenset()
@@ -2212,6 +2387,7 @@ class _Handler(BaseHTTPRequestHandler):
                 if query:
                     raise ValueError("Unknown operation filter")
                 result = service.operations()
+                result["management_allowed"] = self._admin_management_allowed()
             elif path == "/api/v1/library/operation":
                 if set(query) != {"id"}:
                     raise ValueError("Choose an operation")
@@ -2513,7 +2689,8 @@ class _Handler(BaseHTTPRequestHandler):
                         raise ValueError("Invalid review")
                     draft = body["draft"]
                     if (str(draft.get("operation", "")).startswith("model-")
-                            or str(draft.get("operation", "")) in MODEL_SETTINGS_OPERATIONS):
+                            or str(draft.get("operation", "")) in MODEL_SETTINGS_OPERATIONS
+                            or draft.get("operation") == "skill-store-install"):
                         if not self._admin_management_allowed():
                             self._error(HTTPStatus.FORBIDDEN, "forbidden",
                                         "Model management requires an admin account")

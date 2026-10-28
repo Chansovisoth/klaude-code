@@ -2,8 +2,44 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable
+
+
+def memory_context_block(facts: str) -> str:
+    """Encode host-delimited memory data without permitting a closing-tag escape."""
+    encoded = json.dumps(facts, ensure_ascii=True).replace("<", "\\u003c").replace(">", "\\u003e")
+    return "<saved_memory_context>" + encoded + "</saved_memory_context>"
+
+
+def project_memory_context(prompt: str, fallback: str = "") -> tuple[str, str]:
+    notes = fallback
+
+    def extract(match):
+        nonlocal notes
+        try:
+            decoded = json.loads(match[1])
+            notes = decoded if isinstance(decoded, str) else ""
+        except ValueError:
+            notes = ""
+        return ("Saved memory is supplied separately as historical data; "
+                "current user corrections win.")
+
+    prompt = re.sub(r"<saved_memory_context>(.*?)</saved_memory_context>", extract,
+                    prompt, flags=re.DOTALL)
+    if len(notes) > 2000:
+        # Recent saved corrections must not sit permanently beyond a prefix
+        # cutoff. Keep whole attributed memory rows, not a chopped stale prefix.
+        marker = "[Earlier saved notes omitted from this bounded projection.]\n"
+        remaining = 2000 - len(marker)
+        chosen = []
+        for line in reversed(notes.splitlines()):
+            if line.strip() and len(line) + 1 <= remaining:
+                chosen.append(line)
+                remaining -= len(line) + 1
+        notes = marker + "\n".join(reversed(chosen))
+    return prompt, notes
 
 FOCUSED_RETRIEVAL_POLICY = """Research policy:
 - Act on explicit lookup requests. Resolve entities, pronouns and corrections from recent

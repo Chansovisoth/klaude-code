@@ -1,6 +1,6 @@
 "use strict";
 
-// Optional crop directly on the image. Only Search hands bytes to Google.
+// Crop directly on the image, or search the full image.
 window.BrowserLens = (() => {
   const overlay = byId("lens-overlay"), canvas = byId("lens-canvas"), context = canvas.getContext("2d");
   const stage = overlay.parentElement, trigger = byId("image-lens"), search = byId("lens-search");
@@ -40,19 +40,28 @@ window.BrowserLens = (() => {
     context.drawImage(source, crop.x, crop.y, crop.width, crop.height, x, y, w, h);
     context.strokeStyle = getComputedStyle(stage).getPropertyValue("--primary").trim();
     context.lineWidth = 2;
-    context.beginPath(); context.roundRect(x, y, w, h, Math.min(10, w / 2, h / 2)); context.stroke();
+    context.strokeRect(x, y, w, h);
     context.fillStyle = context.strokeStyle;
     for (const [hx, hy] of [[x,y],[x+w,y],[x,y+h],[x+w,y+h]]) {
       context.beginPath(); context.arc(hx, hy, 4, 0, Math.PI * 2); context.fill();
     }
   }
-  function prepare() {
+  function prepare(submitOnReady = false) {
     const ticket = ++preparation, version = generation;
     if (!source || !current()) return;
     const area = { ...crop }, output = document.createElement("canvas");
     output.width = area.width; output.height = area.height;
     output.getContext("2d").drawImage(source, area.x, area.y, area.width, area.height,
       0, 0, area.width, area.height);
+    if (submitOnReady) {
+      const encoded = output.toDataURL("image/png").split(",")[1];
+      const binary = atob(encoded), bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      if (bytes.length > 8 * 1024 * 1024) { status.textContent = "Choose a smaller area to search."; return; }
+      prepared = { file: new File([bytes], "lens-image.png", { type: "image/png" }),
+        width: area.width, height: area.height };
+      search.disabled = false; submitSearch(); return;
+    }
     output.toBlob(blob => {
       if (ticket !== preparation || version !== generation || !current()) return;
       if (!blob || blob.size > 8 * 1024 * 1024) {
@@ -135,8 +144,10 @@ window.BrowserLens = (() => {
   });
   function endDrag(event) {
     if (!drag || drag.pointer !== event.pointerId) return;
+    const submit = event.type === "pointerup" && drag.moved;
     if (event.type === "pointercancel") crop = drag.original;
     drag = null; changed(); announce();
+    if (submit) { clearTimeout(timer); prepare(true); }
   }
   for (const type of ["pointerup","pointercancel","lostpointercapture"]) canvas.addEventListener(type,endDrag);
   canvas.addEventListener("keydown", event => {
@@ -162,7 +173,7 @@ window.BrowserLens = (() => {
       event.preventDefault(); event.stopImmediatePropagation(); reset(true);
     }
   }, true);
-  search.addEventListener("click", () => {
+  function submitSearch() {
     if (!current() || !prepared || search.disabled) return;
     const form = byId("lens-upload"), files = new DataTransfer();
     files.items.add(prepared.file); byId("lens-upload-file").files = files.files;
@@ -172,7 +183,8 @@ window.BrowserLens = (() => {
     action.searchParams.set("vpw",prepared.width); action.searchParams.set("vph",prepared.height);
     form.action = action.href; HTMLFormElement.prototype.submit.call(form);
     reset(true);
-  });
+  }
+  search.addEventListener("click", submitSearch);
   new ResizeObserver(() => { if (active()) { if (current()) draw(); else reset(); } }).observe(stage);
   artifactDialog.addEventListener("close", () => { if (!artifactDialog.open) reset(); });
   document.addEventListener("klaude-auth-reset", () => reset());

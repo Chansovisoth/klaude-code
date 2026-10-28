@@ -144,26 +144,26 @@ async def verify(host, service, root, chrome, image, mode, calls, *_):
                 assert await tab.js("document.activeElement===byId('inspector-tab-ai-review') && "
                     "byId('inspector-tab-ai-review').getAttribute('aria-selected')==='true'")
                 await tab.click("#inspector-tab-details")
+                assert await tab.js("""(() => {
+                    const close=byId('artifact-close'), more=byId('artifact-more');
+                    const a=close.getBoundingClientRect(), b=more.getBoundingClientRect();
+                    return !byId('preview-sidebar-toggle') &&
+                        more.nextElementSibling===close &&
+                        artifactDialog.querySelector('.preview-heading').contains(more) &&
+                        !byId('artifact-information').contains(more) &&
+                        Math.abs(a.top-b.top)<1 && b.right<=a.left &&
+                        a.width>=44 && b.width>=44 && a.right<=innerWidth;
+                })()""")
+                await tab.click("#artifact-more")
+                await tab.wait("byId('artifact-more').getAttribute('aria-expanded')==='true'")
+                for event_type in ("keyDown", "keyUp"):
+                    await tab.command("Input.dispatchKeyEvent", {
+                        "type": event_type, "key": "Escape", "code": "Escape",
+                        "windowsVirtualKeyCode": 27,
+                    })
                 assert await tab.js(
-                    "!byId('image-expand') && "
-                    "byId('preview-sidebar-toggle').nextElementSibling===byId('artifact-more') && "
-                    "byId('artifact-information').contains(byId('preview-sidebar-toggle'))"
-                )
-                await tab.click("#preview-sidebar-toggle")
-                assert await tab.js(
-                    "artifactDialog.dataset.details==='closed' && "
-                    "byId('artifact-information').contains(byId('artifact-more')) && "
-                    "!artifactDialog.querySelector('.preview-heading')"
-                    ".contains(byId('preview-inspector-actions')) && "
-                    "byId('image-toolbar').contains(byId('image-details')) && "
-                    "!byId('image-details').hidden && "
-                    "document.activeElement===byId('image-details')"
-                )
-                await tab.click("#image-details")
-                assert await tab.js(
-                    "artifactDialog.dataset.details!=='closed' && "
-                    "byId('image-details').hidden && "
-                    "byId('preview-sidebar-toggle').getAttribute('aria-expanded')==='true'"
+                    "byId('artifact-more').getAttribute('aria-expanded')==='false' && "
+                    "document.activeElement===byId('artifact-more') && artifactDialog.open"
                 )
                 for _ in range(3):
                     await tab.click("#artifact-source-edit")

@@ -32,13 +32,17 @@ def manifest_identity(data: bytes) -> str:
 
 
 @contextmanager
-def skill_mutation_lock(cfg: Config) -> Iterator[None]:
+def skill_mutation_lock(cfg: Config, *, blocking: bool = True) -> Iterator[None]:
+    if cfg.skills_dir.is_symlink():
+        raise ValueError("Unsafe Skill storage path")
     path = cfg.skills_dir / ".mutation.lock"
     descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "a+") as lock:
         import fcntl
 
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
+            raise ValueError("Unsafe Skill mutation lock")
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         try:
             yield
         finally:
@@ -56,6 +60,8 @@ def import_indexed_skill(
     source_url: str = "",
     source_revision: str = "",
     expected_identity: str = "",
+    before_effect=None,
+    checkpoint=None,
 ):
     from .hybrid import Knowledge
     from .indexing import IndexDocument
@@ -78,10 +84,14 @@ def import_indexed_skill(
                 raise ValueError("Skill changed; review the update again")
             if json.loads(raw).get("name") != name:
                 raise ValueError("Skill identity mismatch")
+        if before_effect is not None:
+            before_effect()
         installed = install_skill_package(
             cfg, source, name=name, library=library, overwrite=overwrite,
             source_url=source_url, source_revision=source_revision,
         )
+        if checkpoint is not None:
+            checkpoint("knowledge_index", installed)
         kn = knowledge if knowledge is not None else Knowledge(cfg)
         try:
             documents = [
@@ -95,7 +105,11 @@ def import_indexed_skill(
             total = kn.replace_owner_snapshot_atomic(
                 installed.library, f"skill:{installed.name}", documents
             )
+            if checkpoint is not None:
+                checkpoint("finalize_package", installed)
             finalize_skill_package(installed)
+            if checkpoint is not None:
+                checkpoint("verify_postcondition", installed)
             return installed, total
         finally:
             if knowledge is None:
@@ -103,7 +117,8 @@ def import_indexed_skill(
 
 
 def import_remote_skill(cfg: Config, record: SkillRecord, *, transport=None, knowledge=None,
-                        overwrite: bool = False, expected_identity: str = ""):
+                        overwrite: bool = False, expected_identity: str = "", before_effect=None,
+                        checkpoint=None):
     """Download a pinned public GitHub folder, then use the normal indexed import lane."""
     if not record.canonical_identity or not record.skill_path.endswith("SKILL.md"):
         raise ValueError("Resolve the original source before installing")
@@ -126,6 +141,8 @@ def import_remote_skill(cfg: Config, record: SkillRecord, *, transport=None, kno
             cfg, source, name=record.name, overwrite=overwrite, knowledge=knowledge,
             source_url=source_url, source_revision=record.revision,
             expected_identity=expected_identity,
+            before_effect=before_effect,
+            checkpoint=checkpoint,
         )
 
 

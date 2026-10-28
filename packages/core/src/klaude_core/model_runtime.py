@@ -1927,7 +1927,9 @@ class GeminiRuntime(_CancelableResponseRuntime):
                         "parts": [{"function_response": function_response}],
                     }
                 )
-        system = next((_content(m) for m in messages if m.get("role") == "system"), "")
+        # Compaction recaps and request control notes are separate system
+        # messages. Dropping all but the first silently loses conversation state.
+        system = "\n\n".join(_content(m) for m in messages if m.get("role") == "system")
         declarations = [
             {
                 "name": t.get("function", {}).get("name"),

@@ -530,14 +530,18 @@ def check_github_skill_update(
         return {"status": CatalogStatus.MALFORMED.value}
 
 
+class SkillSourceError(ValueError):
+    """The pinned source failed bounded package validation; contains no public diagnostic."""
+
+
 def download_resolved_skill(
     record: SkillRecord, *, transport: httpx.BaseTransport | None = None
 ) -> dict[str, bytes]:
     """Read one verified skill folder at its pinned Git commit, without executing it."""
     if not record.canonical_identity or not record.skill_path.endswith("SKILL.md"):
-        raise ValueError("Resolve the original SKILL.md before installing")
+        raise SkillSourceError("Resolve the original SKILL.md before installing")
     if github_location(record.source_url) is None:
-        raise ValueError("A verified GitHub source is required")
+        raise SkillSourceError("A verified GitHub source is required")
     http = CatalogHTTP(transport, deadline_seconds=60, max_response_bytes=4_000_000)
     base = f"https://api.github.com/repos/{record.repository}/git"
     commit = http.get(f"{base}/commits/{record.revision}")
@@ -545,7 +549,7 @@ def download_resolved_skill(
     if commit.get("sha") != record.revision or not isinstance(tree, dict) or not re.fullmatch(
         r"[a-f0-9]{40}", str(tree.get("sha", ""))
     ):
-        raise ValueError("Pinned source revision is unavailable")
+        raise SkillSourceError("Pinned source revision is unavailable")
 
     def entries(tree_sha: str) -> list[dict]:
         payload = http.get(f"{base}/trees/{tree_sha}")
@@ -553,9 +557,9 @@ def download_resolved_skill(
         if payload.get("sha") != tree_sha or payload.get("truncated") is not False or (
             not isinstance(items, list) or len(items) > 1000
         ):
-            raise ValueError("Source tree is incomplete or unsupported")
+            raise SkillSourceError("Source tree is incomplete or unsupported")
         if not all(isinstance(item, dict) for item in items):
-            raise ValueError("Source tree is malformed")
+            raise SkillSourceError("Source tree is malformed")
         return items
 
     def safe_entry(item: dict) -> tuple[str, str, str, str]:
@@ -563,24 +567,24 @@ def download_resolved_skill(
         if not isinstance(name, str) or name in {"", ".", ".."} or any(
             char in name for char in "/\\\x00"
         ) or not isinstance(sha, str) or not re.fullmatch(r"[a-f0-9]{40}", sha):
-            raise ValueError("Unsafe source tree entry")
+            raise SkillSourceError("Unsafe source tree entry")
         if not isinstance(kind, str) or not isinstance(mode, str) or (
             kind, mode
         ) not in {("tree", "040000"), ("blob", "100644"), ("blob", "100755")}:
-            raise ValueError("Skill contains a symlink, submodule, or unsupported file")
+            raise SkillSourceError("Skill contains a symlink, submodule, or unsupported file")
         return name, kind, mode, sha
 
     folder = record.skill_path.split("/")[:-1]
     if len(folder) > 12:
-        raise ValueError("Skill folder is too deep")
+        raise SkillSourceError("Skill folder is too deep")
     tree_sha = tree["sha"]
     for segment in folder:
         child = next((item for item in entries(tree_sha) if item.get("path") == segment), None)
         if child is None:
-            raise ValueError("Resolved skill folder no longer exists at this revision")
+            raise SkillSourceError("Resolved skill folder no longer exists at this revision")
         _name, kind, _mode, tree_sha = safe_entry(child)
         if kind != "tree":
-            raise ValueError("Resolved skill path is not a folder")
+            raise SkillSourceError("Resolved skill path is not a folder")
 
     files: dict[str, bytes] = {}
     queued = [("", tree_sha, 0)]
@@ -590,44 +594,46 @@ def download_resolved_skill(
         prefix, current_sha, depth = queued.pop()
         directories += 1
         if directories > MAX_SKILL_FILES:
-            raise ValueError("Skill package has too many directories")
+            raise SkillSourceError("Skill package has too many directories")
         if depth > 12:
-            raise ValueError("Skill folder is too deep")
+            raise SkillSourceError("Skill folder is too deep")
         for item in entries(current_sha):
             name, kind, _mode, sha = safe_entry(item)
             path = f"{prefix}{name}"
             if len(path) > 512 or path in files:
-                raise ValueError("Unsafe or duplicate skill path")
+                raise SkillSourceError("Unsafe or duplicate skill path")
             if kind == "tree":
                 queued.append((path + "/", sha, depth + 1))
                 if len(queued) > MAX_SKILL_FILES:
-                    raise ValueError("Skill package has too many directories")
+                    raise SkillSourceError("Skill package has too many directories")
                 continue
             size = item.get("size")
             if type(size) is not int or not 0 <= size <= MAX_SKILL_FILE_BYTES:
-                raise ValueError("Skill file is too large or has unknown size")
+                raise SkillSourceError("Skill file is too large or has unknown size")
             total += size
-            if total > MAX_SKILL_PACKAGE_BYTES or len(files) >= MAX_SKILL_FILES:
-                raise ValueError("Skill package exceeds download limits")
+            if len(files) >= MAX_SKILL_FILES:
+                raise SkillSourceError("Skill package has too many files")
+            if total > MAX_SKILL_PACKAGE_BYTES:
+                raise SkillSourceError("Skill package exceeds download limits")
             blob = http.get(f"{base}/blobs/{sha}")
             if blob.get("sha") != sha or blob.get("encoding") != "base64" or (
                 blob.get("size") != size or not isinstance(blob.get("content"), str)
             ):
-                raise ValueError("Pinned skill file changed or is malformed")
+                raise SkillSourceError("Pinned skill file changed or is malformed")
             try:
                 body = base64.b64decode(blob["content"].replace("\n", ""), validate=True)
             except (ValueError, TypeError) as exc:
-                raise ValueError("Pinned skill file is malformed") from exc
+                raise SkillSourceError("Pinned skill file is malformed") from exc
             object_id = hashlib.sha1(
                 f"blob {len(body)}\0".encode() + body, usedforsecurity=False
             ).hexdigest()
             if len(body) != size or object_id != sha:
-                raise ValueError("Pinned skill file failed integrity check")
+                raise SkillSourceError("Pinned skill file failed integrity check")
             files[path] = body
     if "SKILL.md" not in files:
-        raise ValueError("Pinned folder has no SKILL.md")
+        raise SkillSourceError("Pinned folder has no SKILL.md")
     try:
         files["SKILL.md"].decode("utf-8")
     except UnicodeError as exc:
-        raise ValueError("SKILL.md is not UTF-8 text") from exc
+        raise SkillSourceError("SKILL.md is not UTF-8 text") from exc
     return files

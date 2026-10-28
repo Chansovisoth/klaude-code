@@ -139,6 +139,41 @@ def test_browser_import_review_confirm_status_and_logout_ownership(
     assert len(service.listing(kind="all")["items"]) == 1
 
 
+@pytest.mark.parametrize("image_format", ["PNG", "JPEG", "WEBP"])
+def test_reupload_image_preserves_added_time_in_library_reads(browser_library, image_format):
+    host, service, auth = browser_library
+    output = io.BytesIO()
+    Image.new("RGB", (3, 2), "red").save(output, image_format)
+    content = output.getvalue()
+    original = service.artifacts.import_bytes(content, "media", "original.png")
+    original = service.artifacts.change(original["id"], original["revision"], "tags", "saved")
+    with service.artifacts.database(write=True) as db:
+        db.execute("UPDATE artifacts SET created=? WHERE id=?", (1_700_000_000, original["id"]))
+    original = service.artifacts.get(original["id"])
+    owner = hashlib.sha256(auth["cookie"].split("=", 1)[1].encode()).hexdigest()
+    staged = host.transfers.upload(owner, io.BytesIO(content), len(content), "renamed.png")
+    status, _, review = _request(host, "POST", "/api/v1/library/review",
+                                 body={"draft": {"operation": "import", "upload_id": staged.id}},
+                                 **auth)
+    assert status == 200
+    identity = uuid.uuid4().hex
+    epoch = host.public_snapshot(auth["client_id"])["control_epoch"]
+    status, _, _ = _request(host, "POST", "/api/v1/library/submit", body={
+        "review_id": review["review_id"], "request_id": identity, "control_epoch": epoch,
+    }, **auth)
+    assert status == 202
+    assert _wait(service, identity)["state"] == "completed"
+    assert service.artifacts.get(original["id"]) == original
+    items = _request(host, "GET", "/api/v1/library/items?kind=all", **auth)[2]["items"]
+    assert len(items) == 1
+    assert items[0]["id"] == original["id"]
+    assert items[0]["created"] == original["created"]
+    detail = _request(host, "GET", "/api/v1/library/item?" + urlencode({"id": original["id"]}),
+                      **auth)[2]["item"]
+    assert detail["created"] == original["created"]
+    assert detail["revision"] == original["revision"] and detail["tags"] == ["saved"]
+
+
 @pytest.mark.parametrize("kind", ["document", "media", "research"])
 def test_saved_files_delete_after_review_without_archiving(browser_library, kind):
     host, service, auth = browser_library
@@ -169,6 +204,82 @@ def test_saved_files_delete_after_review_without_archiving(browser_library, kind
     assert _request(host, "POST", "/api/v1/library/submit", body=body, **auth)[0] == 202
     with pytest.raises(ValueError, match="no longer exists"):
         service.artifacts.get(item["id"])
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_selected_delete_is_reviewed_atomic_and_deduplicated(browser_library, changed):
+    host, service, auth = browser_library
+    items = [service.artifacts.import_bytes(f"Saved {index}".encode(), "document",
+                                            f"selected-{index}.txt") for index in range(10)]
+    items.append(service.artifacts.store_report("selected.md", "Report", job="fixture"))
+    untouched = service.artifacts.import_bytes(b"Keep", "document", "keep.txt")
+    draft = {"operation": "delete-selected", "targets": [
+        {"target": item["id"], "revision": item["revision"]} for item in items
+    ]}
+    status, _, review = _request(host, "POST", "/api/v1/library/review",
+                                 body={"draft": draft}, **auth)
+    assert status == 200 and "11 selected files" in review["summary"]
+    assert all(item["name"] in review["summary"] for item in items)
+    # Discarding a selection review never deletes anything.
+    assert _request(host, "POST", "/api/v1/library/discard",
+                    body={"review_id": review["review_id"]}, **auth)[0] == 200
+    assert all(service.artifacts.get(item["id"]) for item in items)
+    _, _, review = _request(host, "POST", "/api/v1/library/review",
+                            body={"draft": draft}, **auth)
+    if changed:
+        item = items[-1]
+        service.artifacts.change(item["id"], item["revision"], "tags", "changed")
+    identity = uuid.uuid4().hex
+    body = {"review_id": review["review_id"], "request_id": identity,
+            "control_epoch": host.public_snapshot(auth["client_id"])["control_epoch"]}
+    assert _request(host, "POST", "/api/v1/library/submit", body=body, **auth)[0] == 202
+    assert _wait(service, identity)["state"] == ("failed" if changed else "completed")
+    assert _request(host, "POST", "/api/v1/library/submit", body=body, **auth)[0] == 202
+    assert service.artifacts.get(untouched["id"]) == untouched
+    for item in items:
+        if changed:
+            assert service.artifacts.get(item["id"])
+        else:
+            with pytest.raises(ValueError, match="no longer exists"):
+                service.artifacts.get(item["id"])
+
+
+def test_selected_delete_rejects_invalid_or_stale_selections(browser_library):
+    host, service, auth = browser_library
+    item = service.artifacts.import_bytes(b"Saved", "document", "saved.txt")
+    target = {"target": item["id"], "revision": item["revision"]}
+    for targets in ([], [target] * 101, [target, target],
+                    [{**target, "revision": True}], [{**target, "revision": -1}],
+                    [{**target, "extra": "field"}], [None]):
+        assert _request(host, "POST", "/api/v1/library/review", body={"draft": {
+            "operation": "delete-selected", "targets": targets,
+        }}, **auth)[0] == 400
+    assert service.artifacts.get(item["id"]) == item
+
+
+def test_selected_delete_fences_other_artifact_changes(browser_library, monkeypatch):
+    host, service, auth = browser_library
+    item = service.artifacts.import_bytes(b"Saved", "document", "saved.txt")
+    owner = "fixture-owner"
+    draft = {"operation": "delete-selected", "targets": [
+        {"target": item["id"], "revision": item["revision"]},
+    ]}
+    review = service.prepare(owner, draft)
+    single = service.prepare(owner, {"operation": "delete", "target": item["id"],
+                                    "revision": item["revision"]})
+    # Keep the owned worker at admission to check both directions of the fence.
+    monkeypatch.setattr(service._jobs, "submit", lambda *args, **kwargs: None)
+    from klaude_application.operation_journal import OperationConflict
+
+    prior = service.journal.admit(request_id=uuid.uuid4().hex, owner_id="web-admin",
+                                  kind="tags", resource=f"artifact:{item['id']}", payload={})
+    with pytest.raises(OperationConflict):
+        service.submit(owner, review["review_id"], uuid.uuid4().hex)
+    service.journal.finish(prior.request_id, "web-admin", prior.fence,
+                           state="cancelled", outcome="cancelled")
+    service.submit(owner, review["review_id"], uuid.uuid4().hex)
+    with pytest.raises(OperationConflict):
+        service.submit(owner, single["review_id"], uuid.uuid4().hex)
 
 
 def test_previews_downloads_and_revisions_do_not_execute_documents(browser_library):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import queue
 import threading
 import time
@@ -13,11 +14,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
+import httpx
 from klaude_core import Agent, AgentEvent, TurnScope
 from klaude_core.config import Config
 from klaude_core.generation_stats import public_generation_stats
 from klaude_core.memory import Memory
 from klaude_core.model_runtime import ModelInfo
+from klaude_core.permissions import PermissionDenied
 from klaude_core.session_runtime import capture
 
 from .activity import classify_activity, tool_outcome
@@ -178,6 +181,25 @@ class HeadlessApplication:
         self._closed = False
         self.requires_model_selection = False
         self.agent.set_session_context(self.session_id)
+        self.images = None
+        if isinstance(config, Config):
+            from .chat_image_actions import ChatImageActions
+
+            self.images = ChatImageActions(config, memory, self.turns, agent.workdir)
+            agent.gate.policies.setdefault("generate_image", "allow")
+            agent.tools["generate_image"] = self.images.tool(None, "", 0, agent)
+
+    def bind_image_operations(self, operations: Any) -> None:
+        """Share the host's existing bounded operation owner; no runtime probe."""
+        if self.images is None:
+            from .chat_image_actions import ChatImageActions
+
+            self.images = ChatImageActions(
+                operations.cfg, self.memory, self.turns, operations.workspace
+            )
+            self.agent.gate.policies.setdefault("generate_image", "allow")
+            self.agent.tools["generate_image"] = self.images.tool(None, "", 0, self.agent)
+        self.images.operations = operations
 
     @classmethod
     def open_local(
@@ -648,6 +670,8 @@ class HeadlessApplication:
         with self._lock:
             snapshot = self.turns.snapshot(self.session_id, identity)
             snapshot["requires_model_selection"] = self.requires_model_selection
+            if self.images is not None:
+                self.images.project(snapshot)
             if control_epoch is not None and snapshot["control_epoch"] != control_epoch:
                 snapshot["has_control"] = False
             broker = self._active.broker if self._active is not None else None
@@ -707,6 +731,20 @@ class HeadlessApplication:
                 return previous[1]
             if self._active is not None and not self._active.finished.is_set():
                 raise RuntimeError("session already has an active turn")
+            if self.images is not None and _retry_source_row_id is not None:
+                with self.memory._db_lock:
+                    unresolved = self.memory.db.execute(
+                        "SELECT 1 FROM application_image_actions a "
+                        "LEFT JOIN application_message_retries r "
+                        "ON a.turn_id=r.turn_id WHERE a.session=? AND "
+                        "(a.message_row=? OR r.source_row_id=?) AND "
+                        "a.state NOT IN ('completed','failed','cancelled') LIMIT 1",
+                        (self.session_id, _retry_source_row_id, _retry_source_row_id),
+                    ).fetchone()
+                if unresolved:
+                    raise ValueError(
+                        'Check the original image outcome before retrying this message'
+                    )
             admission = self.turns.admit(
                 request_id=identity, session_id=self.session_id,
                 turn_id=uuid.uuid4().hex, worker_id=self.client_id,
@@ -985,6 +1023,7 @@ class HeadlessApplication:
         previous_tool_guard = agent.tool_execution_guard
         previous_ask = agent.gate._structured_ask
         previous_input = agent.tools.get("request_user_input")
+        previous_image = agent.tools.get('generate_image')
         previous_broker = agent.user_input_broker
         broker = InteractionBroker(
             handle.session_id, handle.turn_id, handle.cancelled,
@@ -1027,6 +1066,12 @@ class HeadlessApplication:
                     raise PermissionError("session workspace changed; rebind before using tools")
 
         agent.tool_execution_guard = tool_guard
+        if self.images is not None and scope == TurnScope.STANDARD and not agent.plan_mode:
+            agent.tools['generate_image'] = self.images.tool(
+                handle, self.client_id, fence, agent, attachments, user_request=text,
+            )
+        else:
+            agent.tools.pop('generate_image', None)
         lease_keeper = SessionLeaseKeeper(
             self.memory, handle.session_id, self.client_id, handle.turn_id,
             fence=fence, on_lost=handle.cancel,
@@ -1044,6 +1089,86 @@ class HeadlessApplication:
             builder = getattr(agent, "system_prompt_builder", None)
             if getattr(agent, "browser_tools", None) is not None and callable(builder):
                 agent.set_system_prompt(builder())
+            image_candidate = None
+            if self.images is not None and scope == TurnScope.STANDARD and not agent.plan_mode:
+                from klaude_core.intent import requests_skill_guidance
+
+                from .chat_image_actions import image_intent
+
+                reader = getattr(agent, "skill_reader", None)
+                skill_requested = requests_skill_guidance(
+                    text, (item.name for item in reader.catalog()) if reader is not None else (),
+                )
+                if not skill_requested:
+                    image_candidate = image_intent(
+                        text,
+                        self.images.recent(handle.session_id)
+                        or bool(attachments and any(f.image for f in attachments.files)),
+                    )
+            if image_candidate is not None:
+                if image_candidate.get("clarify"):
+                    final_text = image_candidate["clarify"]
+                else:
+                    try:
+                        guard()
+                        handle.emit(
+                            "tool.requested",
+                            tool="generate_image",
+                            execution_id=handle.turn_id,
+                            activity="Generating images",
+                        )
+                        agent.gate.check(
+                            "generate_image",
+                            "Use the configured local image service",
+                            request={"execution_id": handle.turn_id, "arguments": image_candidate},
+                        )
+                        guard()
+                        handle.emit(
+                            "tool.started",
+                            tool="generate_image",
+                            execution_id=handle.turn_id,
+                            activity="Generating images",
+                        )
+                        tool_guard()
+                        final_text = agent.tools["generate_image"].fn(**image_candidate)
+                        image_result = self.images.for_turn(handle.turn_id) if self.images else None
+                        handle.emit(
+                            "tool.finished",
+                            tool="generate_image",
+                            execution_id=handle.turn_id,
+                            executed=True,
+                            status=(image_result["state"] if image_result else "failed"),
+                        )
+                    except (ValueError, PermissionDenied) as exc:
+                        final_text = str(exc)[:500]
+                    except (OSError, httpx.HTTPError):
+                        final_text = (
+                            "Local image service unavailable. "
+                            "Check Settings → Models and the server."
+                        )
+                saved = True
+                agent.messages.extend(
+                    [
+                        {"role": "user", "content": text},
+                        {"role": "assistant", "content": final_text},
+                    ]
+                )
+                handle.state = "cancelled" if handle.cancelled.is_set() else "completed"
+                return
+            if self.images is not None and scope == TurnScope.STANDARD and not agent.plan_mode:
+                galleries = self.images.galleries(handle.session_id)
+                image_marker = "\nConversation image references: "
+                base_prompt = str(agent.messages[0]["content"]).split(image_marker, 1)[0]
+                agent.set_system_prompt(
+                    base_prompt
+                    + image_marker
+                    + "Use generate_image for requested raster generation or source-based edits. "
+                    "It uses the configured local Stable Diffusion service; report its failures "
+                    "accurately. Only confirm output after the tool saves an asset. "
+                    "Use code for requested SVG/HTML; masked inpainting is unavailable. "
+                    "Recent conversation galleries (newest first, ordered asset IDs): "
+                    + json.dumps(galleries[:3])
+                )
             effective_input: str | dict[str, Any] = retry_model_input or text
             if attachments:
                 try:
@@ -1109,20 +1234,26 @@ class HeadlessApplication:
                 agent.tools.pop("request_user_input", None)
             else:
                 agent.tools["request_user_input"] = previous_input
+            if previous_image is None:
+                agent.tools.pop('generate_image', None)
+            else:
+                agent.tools['generate_image'] = previous_image
             broker.cancel_all()
             try:
                 handle.flush_delta()
+                image_owned = self.images is not None and self.images.for_turn(handle.turn_id)
                 committed = self.turns.finish(
                     request_id=handle.request_id, session_id=handle.session_id,
                     turn_id=handle.turn_id, worker_id=self.client_id, fence=fence,
                     state=handle.state if handle.state != "interrupted" else "failed",
-                    assistant=final_text if saved else None, model_content=model_content,
+                    assistant=final_text if saved and not image_owned else None,
+                    model_content=model_content,
                     message_id=handle._final_message_id,
                     legacy_completion=(
                         {"generation_stats": generation_stats} if generation_stats else None
                     ),
                 )
-                if saved:
+                if saved and not image_owned:
                     handle.emit(
                         "message.completed", persist=False, cursor=committed.message_cursor,
                         text=final_text[:65_536],
@@ -1255,6 +1386,8 @@ class HeadlessApplication:
                 active.cancel()
         if active is not None and not await active.join():
             raise RuntimeError("agent worker did not stop during shutdown")
+        if self.images is not None:
+            self.images.close()
         if active is not None and active.renewer is not None and active.renewer.is_alive():
             raise RuntimeError("lease renewal worker did not stop after cancellation")
         close = getattr(self.agent.runtime, "close", None)

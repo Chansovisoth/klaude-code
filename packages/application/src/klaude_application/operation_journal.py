@@ -102,6 +102,51 @@ class OperationJournal:
                 "resource TEXT PRIMARY KEY, generation INTEGER NOT NULL, "
                 "request_id TEXT NOT NULL DEFAULT '')"
             )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS operation_evidence ("
+                "request_id TEXT PRIMARY KEY REFERENCES operations(request_id), "
+                "payload TEXT NOT NULL)"
+            )
+
+    def evidence(self, request_id: str, owner_id: str) -> dict:
+        """Private domain evidence; never included in generic public receipts."""
+        with closing(self._connect()) as db:
+            row = db.execute(
+                "SELECT e.payload FROM operation_evidence e JOIN operations o "
+                "ON o.request_id=e.request_id WHERE o.request_id=? AND o.owner_id=?",
+                (request_id, owner_id),
+            ).fetchone()
+            if row is None:
+                return {}
+            if len(row[0].encode()) > 128_000:
+                raise ValueError("Operation evidence exceeds limit")
+            value = json.loads(row[0])
+            if not isinstance(value, dict):
+                raise ValueError("Invalid operation evidence")
+            return value
+
+    def save_evidence(self, request_id: str, owner_id: str, fence: int, value: dict,
+                      *, expected: dict | None = None, require_running: bool = False) -> None:
+        """Commit a checkpoint before its effect; stale workers cannot update it."""
+        payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        if len(payload.encode()) > 128_000:
+            raise ValueError("Operation evidence exceeds limit")
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = self._live(db, request_id, owner_id, fence, self._clock())
+            if require_running and row[5] != "running":
+                raise OperationFenceLost("Operation cannot checkpoint another effect")
+            if expected is not None:
+                current = db.execute(
+                    "SELECT payload FROM operation_evidence WHERE request_id=?", (request_id,),
+                ).fetchone()
+                if (json.loads(current[0]) if current else {}) != expected:
+                    raise OperationFenceLost("Operation evidence changed")
+            db.execute(
+                "INSERT INTO operation_evidence VALUES(?,?) "
+                "ON CONFLICT(request_id) DO UPDATE SET payload=excluded.payload",
+                (request_id, payload),
+            )
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=2, isolation_level=None)

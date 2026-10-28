@@ -189,10 +189,21 @@ def run_generated_operation(cfg: Config, request: dict[str, Any]) -> dict[str, b
         "id": request["target"], **({"spec": request["spec"]} if action == "recover" else {}),
     }
     result = ImageGenerationCommand.for_client(cfg, action, **values).execute()
+    if operation == "image-generate":
+        try:
+            observed = job(cfg, request["spec"]["id"])
+        except (OSError, ValueError):
+            observed = {}
+        if observed.get("status") in {"failed", "cancelled"}:
+            # Exact native terminal evidence proves this request ended. Transport
+            # loss and invalid/unpersisted output retain the existing unknown fence.
+            return {"rejected": True}
     return {"ok": True} if result.get("status") in {"complete", "cancelled"} else {"ok": False}
 
 
 def operation_timeout(operation: str, fields: dict[str, Any]) -> int:
+    if operation == "image-model-load":
+        return 630
     if operation in {"vision-analyze", "vision-tags"}:
         return 300
     if operation == "research-run":

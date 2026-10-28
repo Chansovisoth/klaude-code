@@ -152,3 +152,40 @@ def test_catalog_tops_up_short_filtered_batches_without_skipping_next_page(tmp_p
         item["id"] for item in second["models"]
     }
     assert calls == [("", 21), ("fill", 20), ("second", 21)]
+
+
+def test_runtime_catalog_pages_and_exact_files_have_separate_caches(tmp_path, monkeypatch):
+    from klaude_application import model_store_catalog as store
+
+    cfg = SimpleNamespace(data_dir=tmp_path, huggingface_base_url="https://hf.fixture")
+    calls = []
+
+    def search(*args, filter_tag, cursor="", **kwargs):
+        calls.append((filter_tag, cursor))
+        assert not cursor or cursor == filter_tag + "-next"
+        return [{"id": "org/shared", "summary": "", "downloads": 10,
+                 "downloads_known": True}], "" if cursor else filter_tag + "-next"
+
+    def files(*args, image=False):
+        calls.append(("files", image))
+        return {"files": [{"filename": "model.safetensors" if image else "model.gguf",
+                           "size": 1234}], "license": "mit"}
+
+    monkeypatch.setattr(store, "hub_repo_search", search)
+    monkeypatch.setattr(store, "hub_gguf_files", files)
+    for runtime in ("sdcpp", "ollama"):
+        assert catalog(cfg, runtime=runtime, limit=1)["models"]
+        assert catalog(cfg, runtime=runtime, limit=1, page=2)["models"]
+        exact = detail(cfg, "hf:org/shared", runtime=runtime)
+        assert exact["variants"][0]["tag"].endswith(
+            ".safetensors" if runtime == "sdcpp" else ".gguf")
+    assert calls == [("text-to-image", ""), ("text-to-image", "text-to-image-next"),
+                     ("files", True), ("gguf", ""), ("gguf", "gguf-next"), ("files", False)]
+    for runtime in ("sdcpp", "ollama"):
+        catalog(cfg, runtime=runtime, limit=1, page=2)
+        detail(cfg, "hf:org/shared", runtime=runtime)
+    assert len(calls) == 6
+    with pytest.raises(ValueError):
+        catalog(cfg, runtime="arbitrary")
+    with pytest.raises(ValueError):
+        detail(cfg, "hf:org/shared", runtime="arbitrary")

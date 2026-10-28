@@ -487,6 +487,26 @@ def test_explicit_memory_parser_skips_questions_and_broad_requests():
     assert auto_memory_candidates("remember API_KEY=abcd1234secret") == []
 
 
+def test_automatic_memory_does_not_capture_whole_tasks_or_session_constraints():
+    assert auto_memory_candidates(
+        "Plan CedarLedger, currency USD. Never upload files. Suggest a first milestone."
+    ) == []
+    assert auto_memory_candidates("Never upload this project. Explain its architecture.") == []
+    assert auto_memory_candidates("I prefer violet for this app") == []
+    assert auto_memory_candidates(
+        "I prefer compact responses. Plan CedarLedger in Python. Never upload files."
+    ) == ["I prefer compact responses"]
+    assert auto_memory_candidates("From now on, use full technology names") == [
+        "From now on, use full technology names",
+    ]
+    assert auto_memory_candidates("Remember that the project currency is KHR") == [
+        "the project currency is KHR",
+    ]
+    assert auto_memory_candidates("Explain this text:\n```text\nI prefer old currency\n```") == []
+    assert auto_memory_candidates("Quote:\n> I prefer old currency") == []
+    assert auto_memory_candidates("The document says remember that currency is USD") == []
+
+
 def test_exact_memory_dedupe_does_not_create_duplicates(tmp_path):
     memory = Memory(tmp_path / "memory.md", tmp_path / "sessions.db")
 

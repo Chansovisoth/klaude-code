@@ -105,6 +105,7 @@ class MCPCatalogServer:
     repository_url: str = ""
     website_url: str = ""
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    updated_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -612,6 +613,7 @@ def _parse_servers(payload: dict[str, Any]) -> list[MCPCatalogServer]:
                 repository_url=_safe_https_url(repository.get("url")),
                 website_url=_safe_https_url(raw.get("websiteUrl")),
                 raw=raw,
+                updated_at=_public_text(official.get("updatedAt"), 80),
             )
         )
     return result

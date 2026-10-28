@@ -14,6 +14,40 @@ from klaude_core.ollama_activity import process_identity, track_transfer
 from .test_ollama_manager import cfg as cfg
 
 
+@pytest.fixture(autouse=True)
+def isolated_image_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("KLAUDE_IMAGE_MODEL_DIR", str(tmp_path / "image-models"))
+
+
+def test_image_partial_activity_is_read_only_and_expires(cfg, monkeypatch, tmp_path):
+    root = tmp_path / "image-models"
+    root.mkdir()
+    monkeypatch.setattr(model_activity, "_local_store", lambda: None)
+    clock = [time.time()]
+    monkeypatch.setattr(model_activity.time, "time", lambda: clock[0])
+    partial = root / "example.safetensors.part"
+    with partial.open("wb") as stream:
+        stream.truncate(10**10)
+    os.utime(partial, (clock[0], clock[0]))
+    (root / "ignored.txt.part").write_text("private")
+    (root / "link.gguf.part").symlink_to(partial)
+    observer = ModelActivity()
+    result = observer.read(cfg, [])
+    assert len(result["observed"]) == 1
+    row = result["observed"][0]
+    assert row["source"] == "sdcpp" and row["model"] == "example.safetensors"
+    assert row["state"] == "recent" and row["progress"] == {}
+    assert str(root) not in json.dumps(result) and "10000000000" not in json.dumps(result)
+    clock[0] += 20
+    assert observer.read(cfg, [])["observed"][0]["state"] == "quiet"
+    clock[0] += 50
+    assert not observer.read(cfg, [])["observed"]
+    os.utime(partial, (clock[0], clock[0]))
+    assert observer.read(cfg, [])["observed"][0]["state"] == "recent"
+    partial.unlink()
+    assert not observer.read(cfg, [])["observed"]
+
+
 def test_local_generation_proof_matches_only_native_loopback_daemon(monkeypatch):
     from klaude_core import ollama_activity
 

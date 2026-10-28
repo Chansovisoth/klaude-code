@@ -50,7 +50,7 @@ async def verify(host, root):
                          + ";byId('account-login').requestSubmit()")
             await tab.wait("typeof latest!=='undefined' && authenticated && "
                            "document.documentElement.dataset.startup==='ready'")
-            await tab.js("showView('models')")
+            await tab.js("showView('store')")
             await tab.wait("byId('store-endpoint').options.length===1")
             await tab.click("[data-section=downloads]")
             await tab.wait("byId('store-content').textContent.includes('No downloads yet')")

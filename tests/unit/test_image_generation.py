@@ -323,6 +323,8 @@ def generation_lab(tmp_path):
                 status = (
                     "cancelled"
                     if state["cancelled"]
+                    else "failed"
+                    if state.get("failed")
                     else "generating"
                     if state["wait"]
                     else "completed"
@@ -883,3 +885,19 @@ def test_unknown_receipt_requires_explicit_abandonment_without_network(generatio
         gen.forget(cfg, spec["id"], unknown)
     assert gen.forget(cfg, spec["id"], unknown, abandon=True)["status"] == "forgotten"
     assert not gen.job_path(cfg, spec["id"]).exists() and len(calls) == count
+
+
+def test_legacy_text_image_receipts_survive_additive_edit_capability(generation_lab):
+    import hashlib
+
+    enable(generation_lab)
+    cfg, _, _, calls, _ = generation_lab
+    spec = gen.prepare(cfg, 'A red apple')
+    spec['evidence'].pop('img2img')
+    spec['evidence'].pop('revision')
+    spec['evidence']['revision'] = hashlib.sha256(
+        json.dumps(spec['evidence'], sort_keys=True).encode()).hexdigest()
+    gen.reviewed_binding(cfg, spec)
+    result = gen.run(cfg, spec)
+    assert result['status'] == 'complete'
+    assert sum(path == '/sdcpp/v1/img_gen' for _, path, _ in calls) == 1

@@ -33,6 +33,9 @@ _RETRIEVAL_NAMES = {
 
 def asks_what_was_used(message: str) -> bool:
     """A past-use question is different from asking what is available now."""
+    if re.match(r"(?i)^\s*(?:why|how)\b", message):
+        # Explanation requests need the dialogue, not a canned retrieval receipt.
+        return False
     return bool(_ACTUAL_USE.search(message))
 
 

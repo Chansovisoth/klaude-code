@@ -187,6 +187,15 @@ let fileView = readNavigationChoice("file-view", ["list", "grid", "gallery"], "g
 const fileSorts = ["newest", "oldest", "name", "name_desc", "largest", "smallest", "type"];
 const FILE_PAGE_SIZE = 24;
 let filePage = null;
+let fileEditing = false;
+let fileSelectionVersion = 0;
+let fileSelectionPreparing = false;
+let fileSelectionScope = "";
+const fileSelection = new Map();
+let fileSelectionAnchor = "";
+let fileSelectionDrag = null;
+let fileSelectionFrame = 0;
+let suppressFileSelectionClick = false;
 let fileRead = null;
 const filePages = new Map();
 const artifactDetails = new Map();
@@ -642,6 +651,8 @@ const fileIconPaths = {
   text: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6M8 13h8M8 17h5",
   code: "m8 7-5 5 5 5m8-10 5 5-5 5m-3-14-2 18",
   image: "M3 3h18v18H3ZM3 16l6-6 5 5 3-3 4 4M7 7h.01",
+  landscape: "M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z",
+  portrait: "M7 3h10a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z",
   video: "M3 5h13v14H3Zm13 5 5-3v10l-5-3",
   audio: "M9 18V5l11-2v13M9 8l11-2M9 18a3 3 0 1 1-3-3c1.7 0 3 1.3 3 3Zm11-2a3 3 0 1 1-3-3c1.7 0 3 1.3 3 3Z",
   archive: "M4 3h16v4H4Zm1 4v14h14V7M10 11h4M10 14h4M10 17h4",
@@ -669,6 +680,7 @@ const fileIconPaths = {
   sparkles: "m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3ZM20 2v4m-2-2h4",
   info: "M12 16v-4m0-4h.01M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z",
   trash: "M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7",
+  edit: "m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15l-1 6Z",
   knowledge: "M12 5C8 2 4 3 2 4v15c4-2 7-1 10 1 3-2 6-3 10-1V4c-2-1-6-2-10 1Zm0 0v15",
   skill: "M4 8h4V5a2 2 0 0 1 4 0v3h6v4h2a2 2 0 0 1 0 4h-2v5H4v-5h2a2 2 0 0 0 0-4H4V8Z",
   connection: "M8 3v5m8-5v5M6 8h12v4a6 6 0 0 1-12 0V8Zm6 10v3",
@@ -679,6 +691,8 @@ const fileIconPaths = {
   agent: "M12 3v4M5 7h14v13H5ZM2 11v5m20-5v5M9 11h.01M15 11h.01M9 16h6",
   models: "m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5",
   clock: "M12 7v5l3 2M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z",
+  star: "m12 3 2.78 5.63L21 9.54l-4.5 4.39 1.06 6.2L12 17.2l-5.56 2.93 1.06-6.2L3 9.54l6.22-.91L12 3Z",
+  system: "M12 2v10M5.6 5.6a9 9 0 1 0 12.8 0",
   memory: "M12 18V5M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5M17.997 5.125a4 4 0 0 1 2.526 5.77M18 18a4 4 0 0 0 2-7.464M20.303 16.369A4 4 0 1 1 12 18M6.003 5.125a4 4 0 0 0-2.526 5.77M6 18a4 4 0 0 1-2-7.464M3.697 16.369A4 4 0 1 0 12 18",
   tools: "m14 6 4 4 3-3a6 6 0 0 1-8 7L6 21l-3-3 7-7a6 6 0 0 1 7-8l-3 3Z",
   shield: "M12 3 3 7v5c0 5 9 10 9 10s9-5 9-10V7l-9-4Zm-4 9 3 3 5-6",
@@ -1021,9 +1035,13 @@ const libraryFilterMenus = ["artifact-kind", "artifact-status", "artifact-sort"]
   .map(id => createTrailingFilterChip(byId(id))).filter(Boolean);
 
 function renderFileToolbar() {
+  renderFileSelection();
   for (const button of byId("file-view-modes").children) button.setAttribute("aria-pressed", String(button.dataset.fileView === fileView));
   const outputs = librarySection === "outputs";
-  byId("generated-tools").hidden = !outputs;
+  const generatedTools = byId("generated-tools");
+  // The shared dialog also opens from Chat. Only the legacy inline form is
+  // scoped to the Library's Generated page.
+  if (!generatedTools.closest("dialog")) generatedTools.hidden = !outputs;
   if (outputs) window.BrowserManagement?.loadJobs();
   byId("file-add").hidden = outputs;
   byId("image-add").hidden = !outputs;
@@ -1070,6 +1088,130 @@ function createFileTile(item, onOpen) {
   card.append(open);
   return { card, open };
 }
+function renderFileSelection() {
+  const available = latest?.library_bulk_delete === true;
+  const edit = byId("library-edit");
+  edit.disabled = !available || !filePage || fileSelectionPreparing;
+  edit.title = available ? "Edit files" : "Restart Web UI after the active reply to edit files";
+  edit.setAttribute("aria-pressed", String(fileEditing));
+  byId("library-selection").hidden = !fileEditing;
+  byId("library-selection-count").textContent = `${fileSelection.size} selected`;
+  byId("library-delete-selected").disabled = !fileSelection.size || fileSelectionPreparing;
+  byId("library-items").classList.toggle("is-editing", fileEditing);
+  for (const card of byId("library-items").querySelectorAll(".file-item")) {
+    const selected = fileSelection.has(card.dataset.fileId);
+    const button = card.querySelector(".file-open");
+    card.classList.toggle("file-bulk-selected", fileEditing && selected);
+    button.disabled = fileSelectionPreparing;
+    if (fileEditing) {
+      button.setAttribute("aria-label", `Select ${button.title}`);
+      button.setAttribute("aria-pressed", String(selected));
+      if (!button.querySelector(".file-selection-mark")) {
+        const mark = domainText("span", "", "file-selection-mark");
+        mark.setAttribute("aria-hidden", "true"); mark.append(libraryIcon("check"));
+        button.querySelector(".file-artwork").append(mark);
+      }
+    } else {
+      button.setAttribute("aria-label", `Open ${button.title}`);
+      button.removeAttribute("aria-pressed");
+      button.querySelector(".file-selection-mark")?.remove();
+    }
+  }
+}
+function finishFileEditing() {
+  stopFileSelectionDrag(); fileSelectionAnchor = "";
+  fileEditing = false; fileSelection.clear(); fileSelectionVersion += 1;
+  fileSelectionPreparing = false; renderFileSelection();
+}
+function selectFile(item) {
+  if (fileSelectionPreparing) return;
+  if (fileSelection.has(item.id)) fileSelection.delete(item.id);
+  else if (fileSelection.size < 100) fileSelection.set(item.id, { target: item.id, revision: item.revision });
+  else { byId("library-status").textContent = "Select up to 100 files at a time."; return; }
+  fileSelectionAnchor = item.id;
+  fileSelectionVersion += 1; renderFileSelection();
+}
+function setFileSelectionRange(items, baseline, start, end, selected) {
+  const next = new Map(baseline);
+  const first = Math.min(start, end), last = Math.max(start, end);
+  for (let index = first; index <= last; index++) {
+    const item = items[index];
+    if (selected) next.set(item.id, { target: item.id, revision: item.revision });
+    else next.delete(item.id);
+  }
+  if (next.size > 100) {
+    byId("library-status").textContent = "Select up to 100 files at a time.";
+    return;
+  }
+  fileSelection.clear();
+  for (const [id, target] of next) fileSelection.set(id, target);
+  fileSelectionVersion += 1; renderFileSelection();
+}
+function applyFileSelectionDrag(x, y) {
+  const drag = fileSelectionDrag;
+  if (!drag) return;
+  const card = document.elementFromPoint(x, y)?.closest("#library-items .file-item");
+  const index = drag.items.findIndex(item => item.id === card?.dataset.fileId);
+  if (index < 0 || index === drag.last) return;
+  setFileSelectionRange(drag.items, drag.baseline, drag.start, index, drag.selected);
+  drag.last = index;
+}
+function scrollFileSelectionDrag() {
+  const drag = fileSelectionDrag;
+  if (!drag) return;
+  const pane = byId("library-view"), rect = pane.getBoundingClientRect();
+  const edge = Math.min(72, rect.height / 4);
+  const delta = drag.y < rect.top + edge ? -Math.ceil((rect.top + edge - drag.y) / 5) :
+    drag.y > rect.bottom - edge ? Math.ceil((drag.y - rect.bottom + edge) / 5) : 0;
+  if (delta) {
+    pane.scrollTop += delta;
+    applyFileSelectionDrag(drag.x, Math.max(rect.top + 1, Math.min(rect.bottom - 1, drag.y)));
+  }
+  fileSelectionFrame = requestAnimationFrame(scrollFileSelectionDrag);
+}
+function moveFileSelectionDrag(event) {
+  if (!fileSelectionDrag) return;
+  if (!(event.buttons & 1)) { stopFileSelectionDrag(); return; }
+  fileSelectionDrag.x = event.clientX; fileSelectionDrag.y = event.clientY;
+  applyFileSelectionDrag(event.clientX, event.clientY);
+}
+function stopFileSelectionDrag() {
+  if (!fileSelectionDrag) return;
+  fileSelectionDrag = null; document.body.classList.remove("library-selection-dragging");
+  document.removeEventListener("pointermove", moveFileSelectionDrag);
+  document.removeEventListener("pointerup", stopFileSelectionDrag);
+  document.removeEventListener("pointercancel", stopFileSelectionDrag);
+  window.removeEventListener("blur", stopFileSelectionDrag);
+  cancelAnimationFrame(fileSelectionFrame); fileSelectionFrame = 0;
+  setTimeout(() => { suppressFileSelectionClick = false; }, 0);
+}
+byId("library-items").addEventListener("click", event => {
+  if (suppressFileSelectionClick && event.detail > 0) {
+    event.preventDefault(); event.stopImmediatePropagation();
+  }
+}, true);
+byId("library-items").addEventListener("pointerdown", event => {
+  if (!fileEditing || fileSelectionPreparing || event.pointerType !== "mouse" || event.button !== 0) return;
+  const card = event.target.closest(".file-item"), items = filePage?.items || [];
+  const index = items.findIndex(item => item.id === card?.dataset.fileId);
+  if (index < 0) return;
+  event.preventDefault(); card.querySelector(".file-open").focus({ preventScroll: true });
+  const anchor = items.findIndex(item => item.id === fileSelectionAnchor);
+  const start = event.shiftKey && anchor >= 0 ? anchor : index;
+  const selected = event.shiftKey ? true : !fileSelection.has(items[index].id);
+  const baseline = new Map(fileSelection);
+  if (!event.shiftKey || anchor < 0) fileSelectionAnchor = items[index].id;
+  suppressFileSelectionClick = true;
+  fileSelectionDrag = { items: [...items], baseline, start, last: index, selected,
+    x: event.clientX, y: event.clientY };
+  setFileSelectionRange(items, baseline, start, index, selected);
+  document.body.classList.add("library-selection-dragging");
+  document.addEventListener("pointermove", moveFileSelectionDrag);
+  document.addEventListener("pointerup", stopFileSelectionDrag);
+  document.addEventListener("pointercancel", stopFileSelectionDrag);
+  window.addEventListener("blur", stopFileSelectionDrag);
+  fileSelectionFrame = requestAnimationFrame(scrollFileSelectionDrag);
+});
 function renderFileItems(data) {
   filePage = data;
   const grid = byId("library-items");
@@ -1078,7 +1220,7 @@ function renderFileItems(data) {
   const signature = JSON.stringify([fileView, byId("artifact-sort").value,
     latest ? latest.library_images === true : null,
     data.items.map(item => [item.id, item.revision])]);
-  if (grid.dataset.filesRendered === signature && grid.querySelector(".file-item")) return;
+  if (grid.dataset.filesRendered === signature && grid.querySelector(".file-item")) { renderFileSelection(); return; }
   grid.dataset.filesRendered = signature;
   const nodes = [];
   const grouped = fileView === "gallery" && ["newest", "oldest"].includes(byId("artifact-sort").value);
@@ -1090,7 +1232,14 @@ function renderFileItems(data) {
         byId("artifact-sort").value = current === sort ? ({ name: "name_desc", newest: "oldest", largest: "smallest" }[sort] || sort) : sort;
         libraryOffset = 0; rememberLibraryLocation(); loadLibrary();
       });
-      if (byId("artifact-sort").value === sort) button.append(document.createTextNode(" ↓"));
+      const current = byId("artifact-sort").value;
+      const reverse = { name: "name_desc", newest: "oldest", largest: "smallest" }[sort];
+      const active = current === sort || current === reverse;
+      if (active) {
+        button.classList.add("is-sorted");
+        button.append(document.createTextNode(current === reverse ? " ↑" : " ↓"));
+      }
+      button.setAttribute("aria-label", `Sort by ${label}${active ? `, ${current === reverse ? "reverse order" : "current order"}` : ""}`);
       header.append(button);
     }
     nodes.push(header);
@@ -1106,6 +1255,7 @@ function renderFileItems(data) {
       }
     }
     const { card } = createFileTile(item, open => {
+      if (fileEditing) { selectFile(item); return; }
       imageSequence = data.items.filter(isLibraryImage);
       imageSequenceOffset = libraryOffset;
       imageSequenceTotal = fileView === "gallery" ? data.total : imageSequence.length;
@@ -1117,10 +1267,17 @@ function renderFileItems(data) {
     nodes.push(card);
   }
   grid.replaceChildren(...nodes);
+  renderFileSelection();
 }
 
 async function loadLibrary() {
+  stopFileSelectionDrag();
   clearTimeout(fileSearchTimer);
+  const selectionScope = JSON.stringify([librarySection, fileKind, fileStatus, byId("artifact-query").value]);
+  if (selectionScope !== fileSelectionScope) {
+    fileSelectionScope = selectionScope;
+    filePage = null; finishFileEditing();
+  }
   if (latest && latest.library_images !== true) {
     if (fileView === "gallery") fileView = "grid";
     if (!["newest", "oldest", "name"].includes(byId("artifact-sort").value))
@@ -1164,7 +1321,7 @@ async function loadLibrary() {
       collectionEmpty(grid, title, searching || filtered ?
         "Try another search or change the type and status filters." : fileView === "gallery" ?
           "Supported images appear here. Try List or Grid to see other files." : section === "outputs" ?
-            "Research reports and generated images created in the CLI appear here." : "Add a file to get started.",
+            "Generated images and research reports appear here." : "Add a file to get started.",
         fileView === "gallery" ? "image" : "file");
       grid.firstChild.classList.add("library-empty");
       grid.firstChild.setAttribute("role", "status");
@@ -1488,35 +1645,42 @@ function numberedSource(source, language) {
   pre.append(code); return pre;
 }
 
+// Shared primary-tab indicator for File inspector and Create.
+function primaryTabIndicator(tabs) {
+  const indicator = window.KlaudeMD3Tabs.createTabIndicator({ variant: "primary", widthStrategy: "auto" });
+  indicator.element.setAttribute("aria-hidden", "true");
+  const divider = document.createElement("div");
+  divider.className = "mtrl-tabs__divider"; divider.setAttribute("aria-hidden", "true");
+  tabs.append(divider, indicator.element);
+  const indicatorElement = indicator.element;
+  indicatorElement.style.left = "0px";
+  indicatorElement.style.transition = "transform 450ms cubic-bezier(0.2, 0, 0, 1), width 450ms cubic-bezier(0.2, 0, 0, 1)";
+  let ready = false;
+  function position(selected = tabs.querySelector("[aria-selected='true']"), immediate = false) {
+    const label = selected?.querySelector(".mtrl-button__text");
+    if (!label || !tabs.getClientRects().length) { ready = false; return; }
+    const width = Math.max(24, label.offsetWidth - 4);
+    const left = selected.offsetLeft + label.offsetLeft + (label.offsetWidth - width) / 2;
+    if (immediate || !ready) indicatorElement.style.transition = "none";
+    indicatorElement.style.width = `${width}px`;
+    indicatorElement.style.transform = `translateX(${left}px)`;
+    if (immediate || !ready) requestAnimationFrame(() => {
+      indicatorElement.style.transition = "transform 450ms cubic-bezier(0.2, 0, 0, 1), width 450ms cubic-bezier(0.2, 0, 0, 1)";
+    });
+    ready = true;
+  }
+  new ResizeObserver(() => position(undefined, true)).observe(tabs);
+  document.fonts?.ready.then(() => position(undefined, true));
+  return position;
+}
+
 // Presentation and gestures remain local to the existing native file dialog.
 const artifactViewer = (() => {
   const preview = byId("artifact-preview"), panel = byId("artifact-information");
   const menu = byId("artifact-menu"), more = byId("artifact-more");
   const phone = matchMedia("(max-width: 850px)");
   const inspectorTabs = byId("inspector-tabs"), inspectorScroll = panel.querySelector(".preview-information-scroll");
-  const inspectorIndicator = window.KlaudeMD3Tabs.createTabIndicator({ variant: "primary", widthStrategy: "auto" });
-  inspectorIndicator.element.setAttribute("aria-hidden", "true");
-  const inspectorDivider = document.createElement("div");
-  inspectorDivider.className = "mtrl-tabs__divider"; inspectorDivider.setAttribute("aria-hidden", "true");
-  inspectorTabs.append(inspectorDivider, inspectorIndicator.element);
-  const indicatorElement = inspectorIndicator.element;
-  indicatorElement.style.left = "0px";
-  indicatorElement.style.transition = "transform 450ms cubic-bezier(0.2, 0, 0, 1), width 450ms cubic-bezier(0.2, 0, 0, 1)";
-  let inspectorIndicatorReady = false;
-  function positionInspectorIndicator(selected, immediate = false) {
-    const label = selected?.querySelector(".mtrl-button__text");
-    if (!label) return;
-    const width = Math.max(24, label.offsetWidth - 4);
-    const left = selected.offsetLeft + label.offsetLeft + (label.offsetWidth - width) / 2;
-    if (immediate) indicatorElement.style.transition = "none";
-    indicatorElement.style.width = `${width}px`;
-    indicatorElement.style.transform = `translateX(${left}px)`;
-    if (immediate) requestAnimationFrame(() => {
-      indicatorElement.style.transition = "transform 450ms cubic-bezier(0.2, 0, 0, 1), width 450ms cubic-bezier(0.2, 0, 0, 1)";
-    });
-  }
-  new ResizeObserver(() => positionInspectorIndicator(inspectorTabs.querySelector("[aria-selected='true']"), true)).observe(inspectorTabs);
-  document.fonts?.ready.then(() => positionInspectorIndicator(inspectorTabs.querySelector("[aria-selected='true']"), true));
+  const positionInspectorIndicator = primaryTabIndicator(inspectorTabs);
   let inspectorTab = "details", inspectorArtifact = null;
   const inspectorScrolls = { details: 0, "ai-review": 0 };
   function selectInspector(tab, focus = false) {
@@ -1530,8 +1694,7 @@ const artifactViewer = (() => {
       button.classList.toggle("mtrl-tab--active", active);
       byId(button.getAttribute("aria-controls")).hidden = !active;
     }
-    positionInspectorIndicator(selected, !inspectorIndicatorReady);
-    inspectorIndicatorReady = true;
+    positionInspectorIndicator(selected);
     inspectorScroll.scrollTop = inspectorScrolls[tab];
     if (focus) selected.focus({ preventScroll: true });
   }
@@ -1680,7 +1843,6 @@ const artifactViewer = (() => {
     artifactDialog.dataset.details = state;
     panel.inert = state === "closed";
     byId("image-details").hidden = state !== "closed";
-    byId("preview-sidebar-toggle").setAttribute("aria-expanded", String(state !== "closed"));
     byId("image-details").setAttribute("aria-expanded", String(state !== "closed"));
     byId("image-details").setAttribute("aria-label", state === "closed" ? "Show file details" : "Hide file details");
     byId("image-details").title = state === "closed" ? "Show file details" : "Hide file details";
@@ -2001,13 +2163,12 @@ const artifactViewer = (() => {
     byId("image-toolbar").hidden = true;
     if (opening) { setDetails(phone.matches ? "closed" : "partial"); }
   }
-  for (const [id, icon] of [["artifact-close", "close"], ["artifact-more", "more"], ["image-zoom-out", "minus"], ["image-zoom-in", "plus"], ["artifact-download", "download"], ["image-details", "info"], ["preview-sidebar-toggle", "sidebar"]]) byId(id).append(libraryIcon(icon));
+  for (const [id, icon] of [["artifact-close", "close"], ["artifact-more", "more"], ["image-zoom-out", "minus"], ["image-zoom-in", "plus"], ["artifact-download", "download"], ["image-details", "info"]]) byId(id).append(libraryIcon(icon));
   byId("image-details").append(domainText("span", "Details"));
   byId("image-zoom-in").onclick = () => zoom(scale * 1.5);
   byId("image-zoom-out").onclick = () => zoom(scale / 1.5);
   byId("image-zoom-value").onclick = resetZoom;
   byId("image-details").onclick = () => setDetails(artifactDialog.dataset.details === "closed" ? "partial" : "closed", true);
-  byId("preview-sidebar-toggle").onclick = () => setDetails("closed", true);
   byId("preview-sheet-scrim").onclick = () => setDetails("closed", true);
   byId("preview-sheet-handle").onclick = event => { if (event.detail && sheetStart === undefined) return; setDetails(phone.matches ? "closed" : artifactDialog.dataset.details === "full" ? "partial" : "full", true); };
   let sheetStart;
@@ -2387,14 +2548,15 @@ async function prepareChange(draft, { current = () => true, beforeOpen = () => {
     return;
   }
   managementReview = { ...result, request_id: requestId(), onAccepted, onDiscard };
-  const destructive = ["delete", "model-delete", "model-connection-remove", "skill-delete", "memory-delete", "mcp-remove", "session-delete", "knowledge-delete"].includes(draft.operation);
+  const destructive = ["delete-selected", "delete", "model-delete", "model-connection-remove", "skill-delete", "memory-delete", "mcp-remove", "session-delete", "knowledge-delete"].includes(draft.operation);
   const ai = ["vision-analyze", "vision-tags"].includes(draft.operation), tags = draft.operation === "vision-tags";
-  const download = draft.operation === "model-pull";
+  const download = ["model-pull", "model-image-download"].includes(draft.operation);
+  const storeAdd = draft.operation === "mcp-store-add", storeSkill = draft.operation === "skill-store-install";
   reviewDialog.classList.toggle("model-download-confirmation", download);
   reviewDialog.classList.toggle("ai-confirmation", ai);
-  byId("domain-review-title").textContent = download ? "Download model?" : ai ? tags ? "Suggest image tags?" : "Review image?" : destructive ?
-    draft.operation === "knowledge-delete" ? draft.source ? "Delete this source?" : "Delete this knowledge?" : draft.operation === "delete" ? "Delete file permanently?" : "Remove this item?" : "Review change";
-  byId("domain-review-confirm").textContent = download ? "Download" : ai ? tags ? "Suggest tags" : "Review image" : destructive ? "Delete permanently" : "Confirm";
+  byId("domain-review-title").textContent = storeAdd ? "Add MCP server?" : storeSkill ? "Install skill?" : download ? "Download model?" : ai ? tags ? "Suggest image tags?" : "Review image?" : destructive ?
+    draft.operation === "delete-selected" ? `Delete ${draft.targets.length} selected file${draft.targets.length === 1 ? "" : "s"} permanently?` : draft.operation === "knowledge-delete" ? draft.source ? "Delete this source?" : "Delete this knowledge?" : draft.operation === "delete" ? "Delete file permanently?" : "Remove this item?" : "Review change";
+  byId("domain-review-confirm").textContent = storeAdd ? "Add server" : storeSkill ? "Install skill" : download ? "Download" : ai ? tags ? "Suggest tags" : "Review image" : destructive ? "Delete permanently" : "Confirm";
   byId("domain-review-confirm").classList.toggle("danger", destructive);
   byId("domain-review-summary").textContent = download ? "" : ai ? tags ? "Klaude will analyze this image and suggest tags for you to review." :
     "Klaude will analyze this image to answer your question." : result.summary;
@@ -2405,7 +2567,7 @@ async function prepareChange(draft, { current = () => true, beforeOpen = () => {
     const target = byId("domain-review-target"), rows = document.createElement("dl");
     const model = String(draft.model || ""), split = model.startsWith("hf.co/") ? model.lastIndexOf(":") : -1;
     const fields = split > 0 ? [["Model", model.slice(0, split)], ["File", model.slice(split + 1)]] : [["Model", model]];
-    fields.push(["Server", downloadDestination || draft.connection]);
+    fields.push([draft.connection === "image:sdcpp" ? "Destination" : "Server", downloadDestination || draft.connection]);
     for (const [label, value] of fields) {
       const term = document.createElement("dt"), description = document.createElement("dd");
       term.textContent = label; description.textContent = value; rows.append(term, description);
@@ -2800,16 +2962,55 @@ async function loadOperations() {
     }
     updateSkillStates();
     document.dispatchEvent(new CustomEvent("klaude-operations", { detail: data.items }));
-    const signature = data.items.map((item) => `${item.request_id}:${item.state}`).join("|");
+    const signature = `${data.management_allowed}:` + data.items.map((item) => `${item.request_id}:${item.state}:${item.stage || ""}:${item.code || ""}`).join("|");
     const render = signature !== operationSignature;
     const changed = operationSignature !== null && signature !== operationSignature;
     operationSignature = signature;
     if (render) byId("domain-operations").replaceChildren(...data.items.map((item) => {
       const node = domainText("article", "", "operation-row");
+      node.dataset.operationId = item.request_id;
+      node.tabIndex = -1;
       const status = item.state === "unknown" ? "Unconfirmed · local reconciliation required; do not resubmit" :
+        item.state === "failed" && item.kind === "skill-store-install" ? "Failed · review the reason before trying again" :
         item.state === "failed" ? "Rejected · reload and review the current item" : item.state;
-      node.append(domainText("strong", item.kind.replaceAll("-", " ")), domainText("span", status),
+      const title = item.kind === "skill-store-install" ? `Skill install: ${item.resource.replace(/^skill:/, "")}` : item.kind.replaceAll("-", " ");
+      node.append(domainText("strong", title), domainText("span", status),
         domainText("small", item.request_id, "muted"));
+      if (item.kind === "skill-store-install") {
+        if (item.message) node.append(domainText("p", item.message));
+        node.append(domainText("small", `Last stage: ${(item.stage || "unavailable").replaceAll("_", " ")}`, "muted"));
+        if (item.state === "unknown" && data.management_allowed && "evidence_version" in item) {
+          const inspect = domainText("button", "Inspect recovery", "text-button");
+          inspect.type = "button";
+          inspect.addEventListener("click", async () => {
+            inspect.disabled = true;
+            try {
+              const evidence = await domainRequest("/api/v1/skills/install/inspect", "POST", { request_id: item.request_id });
+              let details = node.querySelector(".skill-recovery-details");
+              if (!details) {
+                details = domainText("div", "", "skill-recovery-details"); node.append(details);
+                details.setAttribute("role", "status");
+              }
+              details.replaceChildren(domainText("p", evidence.message));
+              if (["proven_no_effect", "verified_complete"].includes(evidence.decision)) {
+                const apply = domainText("button", evidence.decision === "verified_complete" ? "Confirm installation" : "Close failed attempt", "text-button");
+                apply.type = "button";
+                apply.addEventListener("click", async () => {
+                  apply.disabled = true;
+                  try {
+                    await domainRequest("/api/v1/skills/install/reconcile", "POST", { request_id: item.request_id, fingerprint: evidence.fingerprint });
+                    await loadOperations();
+                    byId("domain-operations").querySelector(`[data-operation-id="${item.request_id}"]`)?.focus({ preventScroll: true });
+                  } catch (error) { domainError(error); apply.disabled = false; }
+                });
+                details.append(apply);
+              }
+            } catch (error) { domainError(error); }
+            finally { inspect.disabled = false; }
+          });
+          node.append(inspect);
+        }
+      }
       if (window.MaterialLoadingCircle && ["accepted", "running", "cancelling"].includes(item.state)) {
         node.dataset.working = "true";
         node.prepend(MaterialLoadingCircle.create({ size: "medium" }));
@@ -2830,6 +3031,35 @@ async function loadOperations() {
 byId("nav-library").addEventListener("click", () => showView("library"));
 byId("nav-integrations").addEventListener("click", () => showView("integrations"));
 byId("library-refresh").addEventListener("click", () => refreshDomain("library"));
+byId("library-edit").append(libraryIcon("edit"));
+byId("library-edit").addEventListener("click", () => {
+  if (fileEditing) finishFileEditing();
+  else { fileEditing = true; fileSelectionVersion += 1; renderFileSelection(); }
+});
+byId("library-edit-done").append(libraryIcon("close"));
+byId("library-delete-selected").append(libraryIcon("trash"));
+byId("library-edit-done").addEventListener("click", () => {
+  finishFileEditing(); byId("library-edit").focus();
+});
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape" || event.defaultPrevented || !fileEditing ||
+      currentView !== "library" || document.querySelector("dialog[open]")) return;
+  event.preventDefault();
+  finishFileEditing(); byId("library-edit").focus();
+});
+byId("library-delete-selected").addEventListener("click", async () => {
+  if (!fileEditing || !fileSelection.size || fileSelectionPreparing || reviewDialog.open) return;
+  const version = fileSelectionVersion, epoch = authEpoch;
+  const current = () => authenticated && authEpoch === epoch && fileEditing &&
+    version === fileSelectionVersion && currentView === "library";
+  fileSelectionPreparing = true; renderFileSelection();
+  try {
+    await prepareChange({ operation: "delete-selected", targets: [...fileSelection.values()] }, {
+      current, onAccepted: () => { if (current()) finishFileEditing(); },
+    });
+  } catch (error) { if (current()) domainError(error); }
+  finally { if (current()) { fileSelectionPreparing = false; renderFileSelection(); } }
+});
 for (const button of byId("file-view-modes").children) {
   button.append(libraryIcon(button.dataset.fileView));
   button.addEventListener("click", () => {
@@ -3003,6 +3233,7 @@ document.addEventListener("klaude-view", (event) => {
     if (new URLSearchParams(location.search).get("library") === "knowledge") { showView("integrations"); return; }
     restoreLibraryLocation(); rememberLibraryLocation(true); loadLibrary();
   } else {
+    finishFileEditing();
     cancelDroppedImports(); importDialog.close();
     clearTimeout(fileSearchTimer);
     fileRead?.abort();
@@ -3020,6 +3251,7 @@ document.addEventListener("klaude-view", (event) => {
   if (["library", "integrations", "activity"].includes(event.detail)) loadOperations();
 });
 document.addEventListener("klaude-auth-reset", () => {
+  finishFileEditing(); fileSelectionScope = "";
   knowledgeSource = ""; knowledgeChunkPage = null; knowledgeDeletePending = null; knowledgeOrigin = null;
   knowledgeSourceNames.clear();
   cancelDroppedImports();
@@ -3112,6 +3344,7 @@ document.addEventListener("klaude-auth-reset", () => {
   byId("knowledge-status").textContent = "";
 });
 window.addEventListener("popstate", () => {
+  finishFileEditing();
   integrationAddDialog.close();
   if (!authenticated) return;
   if (artifactDialog.open) artifactDialog.close();
@@ -3125,7 +3358,9 @@ window.addEventListener("popstate", () => {
     restoreLibraryLocation();
     if (currentView !== "library") showView("library", { restore: true }); else loadLibrary();
   } else {
-    const view = viewNames.includes(query.get("view")) ? query.get("view") : "chat";
+    const requestedView = canonicalViewName(query.get("view"));
+    const view = viewNames.includes(requestedView) ? requestedView : "chat";
+    canonicalizeStoreLocation();
     if (currentView !== view) showView(view, { restore: true });
     else if (view === "settings") showSettingsSection(query.get("settings") || settingsSection, { restore: true });
   }

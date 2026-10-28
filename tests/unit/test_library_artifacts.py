@@ -7,6 +7,8 @@ import os
 import queue
 import sqlite3
 import struct
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from klaude_cli.background_worker import execute
@@ -51,6 +53,47 @@ def png():
     return base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC"
     )
+
+
+def test_reupload_image_keeps_original_added_time_and_metadata(tmp_path, monkeypatch):
+    now = [1_700_000_000.0]
+    monkeypatch.setattr("klaude_core.library_artifacts.time.time", lambda: now[0])
+    store = ArtifactStore(tmp_path / "library")
+    source = tmp_path / "original.png"
+    source.write_bytes(png())
+    first = store.import_file(source, "media")
+    tagged = store.change(first["id"], first["revision"], "tags", "saved")
+    expected = store.change(tagged["id"], tagged["revision"], "source_link",
+                            "https://example.com/original")
+    now[0] += 86_400
+    reopened = ArtifactStore(store.root)
+    assert reopened.import_bytes(png(), "media", "renamed.png") == expected
+    assert reopened.get(first["id"]) == expected
+    assert reopened.listing("media")["items"] == [
+        {key: value for key, value in expected.items() if key != "source_url"}
+    ]
+    # A changed image with the same filename is a new addition, not a timestamp edit.
+    output = io.BytesIO()
+    Image.new("RGB", (2, 2), "teal").save(output, "PNG")
+    changed = reopened.import_bytes(output.getvalue(), "media", source.name)
+    assert changed["id"] != first["id"] and changed["created"] == now[0]
+    assert reopened.get(first["id"])["created"] == first["created"]
+
+
+def test_concurrent_image_reuploads_reuse_one_added_record(tmp_path):
+    root = tmp_path / "library"
+    with ArtifactStore(root).database(write=True):
+        pass
+    gate = threading.Barrier(2)
+
+    def upload(index):
+        gate.wait(timeout=3)
+        return ArtifactStore(root).import_bytes(png(), "media", f"copy-{index}.png")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = pool.map(upload, range(2))
+    assert first == second
+    assert len(ArtifactStore(root).listing("media")["items"]) == 1
 
 
 @pytest.mark.parametrize("mode,options,chunk", [

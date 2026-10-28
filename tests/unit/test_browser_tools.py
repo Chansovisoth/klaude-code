@@ -58,6 +58,63 @@ def test_browser_search_keeps_all_links_when_provider_payloads_are_large(search_
     assert result["metadata"]["successful_providers"] == ["exa"]
 
 
+def test_skill_inventory_keeps_late_names_before_verbose_descriptions(search_tools, monkeypatch):
+    items = tuple(SimpleNamespace(name=f"skill-{i}", description="Verbose metadata. " * 100)
+                  for i in range(20))
+    items += (SimpleNamespace(name="weather", description="Weather instructions"),)
+    monkeypatch.setattr(search_tools.skill_reader, "catalog", lambda: items)
+    prompt = search_tools.prompt("Host instructions")
+    inventory = prompt.partition("Installed Skills (read relevant guidance with read_skill):\n")[2]
+    assert "Enabled Skills in this bounded inventory: 21" in inventory
+    assert "weather" in inventory.partition("Descriptions are metadata")[0]
+    assert len(inventory) <= 4200
+
+
+def test_old_task_memory_is_data_and_forgetting_it_removes_prompt_context(tmp_path, monkeypatch):
+    from copy import deepcopy
+
+    from klaude_core import config
+    from klaude_webhost import main
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "config")
+    cfg = Config(models={"coder": "fixture"})
+    captured = []
+
+    class Runtime(ScriptedRuntime):
+        def chat(self, model, messages, tools=None, **kwargs):
+            captured.append(deepcopy(messages))
+            return super().chat(model, messages, tools, **kwargs)
+
+    runtime = Runtime([{"role": "assistant", "content": "Updated."},
+                       {"role": "assistant", "content": "Ready."}])
+    monkeypatch.setattr(main, "load_config", lambda: cfg)
+    monkeypatch.setattr(main, "OllamaRuntime", lambda _: runtime)
+    app = main.create_application(tmp_path)
+    old = "Plan CedarLedger, currency USD. Never upload data. Suggest a first milestone."
+    app.memory.remember(old)
+
+    async def exercise():
+        try:
+            first = app.submit("Correction: use JuniperVault and KHR.")
+            assert await first.join(timeout=5)
+            assert first.failure is None
+            assert all("CedarLedger" not in m["content"] for m in captured[0]
+                       if m["role"] == "system")
+            assert any(m.get("memory_context") and old.rstrip(".") in m["content"]
+                       for m in captured[0])
+            entry = app.memory.search_facts("CedarLedger")[0]
+            assert app.memory.forget(entry.id).removed == 1
+            second = app.submit("What is the current plan?")
+            assert await second.join(timeout=5)
+            assert second.failure is None
+            assert "CedarLedger" not in str(captured[1])
+        finally:
+            await app.close()
+
+    asyncio.run(exercise())
+
+
 def test_browser_search_explains_provider_and_filter_failures(search_tools):
     attempts = [
         {"provider": "brave", "status": "degraded", "reason": "Provider unavailable"},

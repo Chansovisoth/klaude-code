@@ -150,8 +150,8 @@ async def verify(host, service, root, chrome, image, mode, calls, *_):
                     "Emulation.setDeviceMetricsOverride",
                     {"width": width, "height": 844, "deviceScaleFactor": 1, "mobile": False},
                 )
-                if await tab.js("artifactDialog.dataset.details!=='closed'"):
-                    await tab.click("#preview-sidebar-toggle")
+                if width <= 850 and await tab.js("artifactDialog.dataset.details!=='closed'"):
+                    await tab.click("#preview-sheet-handle")
                 await tab.click("#image-lens")
                 await tab.wait("!byId('lens-overlay').hidden && !byId('lens-search').disabled")
                 assert await tab.js("""(() => {
@@ -177,9 +177,9 @@ async def verify(host, service, root, chrome, image, mode, calls, *_):
                                "document.activeElement===byId('image-lens') && "
                                "byId('lens-canvas').width===1")
                 await enter_lens_mode()
+                before = await tab.js("lensSubmits.length")
                 await drag(105, 65, 215, 135)
-                await tab.wait("!byId('lens-search').disabled")
-                await tab.click("#lens-search")
+                await tab.wait(f"lensSubmits.length==={before + 1}")
                 await tab.wait("byId('lens-overlay').hidden && "
                                "byId('image-lens').getAttribute('aria-pressed')==='false' && "
                                "document.activeElement===byId('image-lens')")
@@ -198,20 +198,9 @@ async def verify(host, service, root, chrome, image, mode, calls, *_):
                     image.close();return result;
                 })()""")
                 await enter_lens_mode()
-                await drag(215, 135, 205, 125)
-                await tab.wait("!byId('lens-search').disabled")
-                assert await tab.js("byId('lens-selection').textContent.includes('100 by 60')")
-                await drag(150, 90, 155, 95)
-                assert await tab.js(
-                    "byId('lens-selection').textContent.includes('left 110, top 70')"
-                )
-                await key("ArrowRight")
                 await key("ArrowLeft", shift=True)
-                assert await tab.js(
-                    "byId('lens-selection').textContent.includes('left 111') && "
-                    "byId('lens-selection').textContent.includes('99 by 60')"
-                )
                 await tab.wait("!byId('lens-search').disabled")
+                assert await tab.js("byId('lens-selection').textContent.includes('399 by 240')")
                 shot = await tab.command("Page.captureScreenshot", {"format": "png"})
                 (output / f"inline-crop-{width}.png").write_bytes(base64.b64decode(shot["data"]))
                 await key("Home")
@@ -244,7 +233,7 @@ async def verify(host, service, root, chrome, image, mode, calls, *_):
                 "layouts": layouts,
                 "direct_form_handoff": "intercepted; no private upload",
                 "full_image_and_exact_crop": "passed",
-                "drag_move_resize_keyboard": "passed",
+                "automatic_crop_and_keyboard": "passed",
                 "inline_search_geometry_escape_logout": "passed",
                 "browser_exceptions": len(tab.errors),
             }

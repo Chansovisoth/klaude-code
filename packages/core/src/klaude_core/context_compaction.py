@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,7 +25,19 @@ class RecapEntry:
 
 def public_excerpt(content: str) -> str:
     text = " ".join(content.split())
-    return text if len(text) <= 600 else text[:350] + " … " + text[-240:]
+    if len(text) <= 600:
+        return text
+    # Preserve bounded, verbatim requirement/correction clauses even when they
+    # occur in the middle of a long request. Do not invent a semantic summary.
+    clauses = re.split(r"\n+|(?<=[.!?])\s+", content)
+    important = [" ".join(clause.split()) for clause in clauses if re.search(
+        r"(?i)\b(?:must|never|do not|don't|constraint|requirement|correction|instead|"
+        r"rename|decided|agreed)\b", clause,
+    )]
+    if not important:
+        return text[:350] + " … " + text[-240:]
+    middle = " … ".join(important)[:280]
+    return text[:180] + " … " + middle + " … " + text[-120:]
 
 
 def public_entries(messages: list[dict[str, Any]]) -> list[RecapEntry]:
@@ -88,6 +101,14 @@ def build_recap(messages: list[dict[str, Any]], limit: int) -> dict[str, Any] | 
     users = [i for i, entry in enumerate(entries) if entry.role == "user"]
     user_indexes = set(users)
     priority = ([users[0]] if users else []) + list(reversed(users))
+    # A short correction/choice depends on the preceding answer. Reserve its
+    # attributed public excerpt before older user turns fill the entire recap.
+    if users:
+        latest = users[-1]
+        preceding = next((i for i in range(latest - 1, -1, -1)
+                          if entries[i].role == "assistant"), None)
+        if preceding is not None:
+            priority = [users[0], latest, preceding, *priority]
     priority += [i for i in reversed(range(len(entries))) if i not in user_indexes]
     selected: set[int] = set()
     for i in priority:

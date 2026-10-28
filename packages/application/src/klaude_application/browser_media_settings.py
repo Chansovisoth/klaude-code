@@ -14,6 +14,7 @@ from klaude_core.model_management import reference_parts
 from klaude_core.vision import inspect_model
 
 from .browser_models import BrowserModels
+from .image_model_selection import OPERATIONS as IMAGE_MODEL_OPERATIONS
 from .image_settings import image_settings_resource, recover_image_settings, save_image_settings
 from .model_capabilities import BATCH_SIZE, read_capabilities
 from .model_default_settings import (
@@ -24,8 +25,8 @@ from .model_default_settings import (
 from .operation_journal import OperationConflict, OperationJournal
 
 OPERATIONS = frozenset({"defaults-save", "image-settings-save",
-                        "defaults-recover", "image-settings-recover"})
-WITNESSED = frozenset({"defaults-save", "image-settings-save"})
+                        "defaults-recover", "image-settings-recover"}) | IMAGE_MODEL_OPERATIONS
+WITNESSED = frozenset({"defaults-save", "image-settings-save", "image-model-load"})
 FIELDS = frozenset({"chat", "utility", "research", "vision", "fallbacks", "vision_fallbacks",
                     "vision_enabled", "output_tokens"})
 
@@ -44,7 +45,9 @@ def media_settings(cfg: Config) -> dict[str, Any]:
             "connections": BrowserModels(cfg).inventory(), "pending": pending}
 
 
-def default_model_catalog(cfg: Config, identity: str) -> list[dict[str, Any]]:
+def default_model_catalog(
+    cfg: Config, identity: str, *, image_generation: bool = False,
+) -> list[dict[str, Any]]:
     """Role hints from metadata, with exact checks still required at review time.
 
     Unknown capabilities remain explicit rather than guessing from model names.
@@ -94,6 +97,12 @@ def default_model_catalog(cfg: Config, identity: str) -> list[dict[str, Any]]:
             "vision": False if item.backend not in IMAGE_BACKENDS or not standard
                 or completion is False else images,
         }
+        if image_generation:
+            declared = declarations.get(item.model_id)
+            roles["image-generation"] = (
+                "image" in declared if connection.backend == "ollama" and declared is not None
+                else None
+            )
         result.append({"id": item.ref, "name": item.display_name, "roles": roles})
     # Reject definitions/credentials changed while the metadata batches ran.
     if models:
@@ -124,6 +133,10 @@ def prepare_media_setting(
     cfg: Config, draft: dict[str, Any],
 ) -> tuple[dict[str, Any], str, str]:
     operation = draft["operation"]
+    if operation in IMAGE_MODEL_OPERATIONS:
+        from .image_model_selection import prepare
+
+        return prepare(cfg, draft)
     if operation in {"defaults-recover", "image-settings-recover"}:
         if set(draft) != {"operation", "target"}:
             raise ValueError("Choose an exact unconfirmed save")
@@ -151,6 +164,11 @@ def prepare_media_setting(
         if provider not in {"sdcpp", "ollama"}:
             raise ValueError("Choose stable-diffusion.cpp or Ollama")
         evidence = inspect(url, provider, draft.get("model", "")) if draft["enabled"] else None
+        if (evidence and provider == "sdcpp" and draft.get("model")
+                and evidence["model"] != draft["model"]):
+            raise ValueError(
+                "The selected image model is not loaded; choose the current server model"
+            )
         image_candidate = {"enabled": draft["enabled"], "endpoint": url,
                            "model": (evidence["model"] if evidence else
                                      draft.get("model", image_current["model"])),
@@ -192,6 +210,10 @@ def prepare_media_setting(
 
 
 def run_media_setting(cfg: Config, request: dict[str, Any]) -> dict[str, bool]:
+    if request["operation"] in IMAGE_MODEL_OPERATIONS:
+        from .image_model_selection import run
+
+        return run(cfg, request)
     journal = OperationJournal(cfg.data_dir / "operations.db")
     if request["operation"] in {"defaults-recover", "image-settings-recover"}:
         recover = (recover_model_defaults if request["operation"] == "defaults-recover"

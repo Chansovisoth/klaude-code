@@ -244,7 +244,8 @@ row is absent. Inputs remain busy until the read succeeds or fails, and a failed
 or superseded read cannot leave the introductory loader stuck.
 
 The isolated `scripts/webui_review_loading_smoke.py` passed at 320/768/1440px in
-light and dark themes. It checks the shared introduction, a 48px normal loader,
+light and dark themes. It checks the shared introduction, a 40px normal loader
+centered in the unchanged 48px rounded container,
 absence of the old inline loading row, busy inputs, the distinct generating
 indicator, read failure and late results after closing. No model generation was
 invoked and no browser exceptions occurred. Screenshots are under
@@ -252,7 +253,8 @@ invoked and no browser exceptions occurred. Screenshots are under
 passed.
 
 During analysis, the existing centered introduction shows the configured
-48px generating indicator and “Generating review”. Review image becomes Cancel
+40px generating indicator centered in the same 48px rounded container and
+“Generating review”. Review image becomes Cancel
 review, using the existing owned-operation cancellation path. Other inputs remain
 locked while pending; the previous review returns after cancellation or failure.
 Tag-suggestion requests keep their separate presentation.
@@ -318,3 +320,39 @@ route. The Expressive CSS bundler includes upstream tabs CSS before the local
 adapters. Browser fixture checks measure active label/indicator centers and
 widths at desktop/phone sizes and exercise keyboard selection, then run the
 existing editing, AI generation, clear/save and dismissal checks.
+
+
+### Loading wave pause/resume — 2026-10-28
+
+The AI Review circular loader keeps its 40px graphic in the unchanged 48px
+rounded container. A Material canvas created while reduced motion was enabled
+was explicitly frozen but had no resume path. The shared circular-loader owner
+now pauses/resumes the existing renderer for application/system reduced motion
+and document visibility, and destroys renderer instances when their nodes are
+removed. It does not change the selected loading style or override reduced motion.
+
+The focused review-loading browser fixture compares canvas frames after initial
+render, after enabling motion and again later, including application/system
+pause/resume. It also measures the graphic/container, checks loader identity and
+runs existing mobile/desktop light/dark, error and late-result checks. This uses
+held fixture reads, without real model generation. Reproduce with
+`scripts/webui_review_loading_smoke.py`; evidence is in
+`/tmp/klaude-review-wave-motion.log` and `/tmp/klaude-review-loading/`.
+
+The shared material-loading walkthrough was also attempted; it currently stops
+at sign-in because its older fixture omits the username, before testing loaders.
+The focused AI Review walkthrough supplies the current credentials and passes;
+no broader loading-suite pass is claimed for this change.
+
+### Inspector header actions — 2026-10-28
+
+File options now shares the preview header row with Close, immediately to its
+left. The inspector sidebar toggle is removed, and the mobile sheet handle is
+centered without its former action-balancing inset. Existing Details, sheet
+gestures and mobile dismissal remain available.
+
+`scripts/webui_source_editor_smoke.py` passed at 1440px and 390px, checking
+header action order, alignment, touch targets, menu dismissal/focus return and
+the existing source/tag/AI Review flows with isolated fixtures. JavaScript
+syntax and diff whitespace checks passed. Evidence:
+`/tmp/klaude-inspector-header-smoke.log`. No full-suite pass is claimed.

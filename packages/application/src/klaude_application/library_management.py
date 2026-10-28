@@ -47,6 +47,7 @@ from .browser_media_settings import WITNESSED, prepare_media_setting, run_media_
 from .browser_vision import OPERATIONS as VISION_OPERATIONS
 from .browser_vision import READ_OPERATIONS as VISION_READ_OPERATIONS
 from .browser_vision import prepare_vision_operation, run_vision_operation
+from .integration_store import IntegrationStore
 from .library_inventory import knowledge_inventory, knowledge_search
 from .library_knowledge import KnowledgeAction, knowledge_worker_request, source_inventory
 from .mcp_inventory import read_mcp_inventory
@@ -90,12 +91,19 @@ class ManagementReview:
     request_id: str = ""
 
     def public(self) -> dict[str, Any]:
-        return {
+        result = {
             "review_id": self.id,
             "operation": self.operation,
             "summary": self.summary,
             "expires_at": self.expires_at,
         }
+        if self.operation == "image-settings-save":
+            candidate = self.fields["candidate"]
+            result["image_settings"] = {
+                "endpoint": candidate["endpoint"], "enabled": candidate["enabled"],
+                "provider": candidate.get("provider", "sdcpp"), "model": candidate["model"],
+            }
+        return result
 
 
 class LibraryManagement:
@@ -118,6 +126,7 @@ class LibraryManagement:
         self._model_progress: dict[str, dict[str, Any]] = {}
         self._model_recovery: dict[str, float] = {}
         self._model_activity = ModelActivity()
+        self.integration_store = IntegrationStore(cfg)
         self._closed = False
         self._stop = threading.Event()
         self._keeper: threading.Thread | None = None
@@ -338,6 +347,9 @@ class LibraryManagement:
             if not isinstance(draft, dict) or not isinstance(draft.get("operation"), str):
                 raise ValueError("Choose an operation")
             operation = draft["operation"]
+            if operation == "mcp-store-add":
+                draft = self.integration_store.mcp_draft(draft)
+                operation = draft["operation"]
             fields: dict[str, Any] = {}
             snapshot = None
             try:
@@ -432,6 +444,31 @@ class LibraryManagement:
                                 f"Index {filename} into {library} "
                                 "using the configured embedding model."
                             )
+                elif operation == "delete-selected":
+                    targets = draft.get("targets")
+                    if (set(draft) != {"operation", "targets"}
+                            or not isinstance(targets, list) or not 1 <= len(targets) <= 100):
+                        raise ValueError("Select between 1 and 100 files")
+                    selected: list[dict[str, Any]] = []
+                    names = []
+                    identities = set()
+                    for target in targets:
+                        if (not isinstance(target, dict) or set(target) != {"target", "revision"}
+                                or not isinstance(target["target"], str)
+                                or type(target["revision"]) is not int
+                                or target["target"] in identities):
+                            raise ValueError("Invalid file selection")
+                        item = self.artifacts.get(target["target"])
+                        if item["revision"] != target["revision"]:
+                            raise ValueError("A selected file changed; reload and select it again")
+                        identities.add(item["id"])
+                        selected.append({"target": item["id"], "revision": item["revision"]})
+                        names.append(item["name"])
+                    fields = {"targets": selected}
+                    resource = "artifact-selection"
+                    summary = (f"Permanently delete {len(selected)} selected "
+                               f"file{'s' if len(selected) != 1 else ''}: " + ", ".join(names) +
+                               ". This removes the private saved copies and cannot be undone.")
                 elif operation in {
                     "tags", "archive", "restore", "delete", "clear_ai_tags", "source_link"
                 }:
@@ -476,6 +513,8 @@ class LibraryManagement:
                         summary += (
                             " Permanently removes the private saved copy. This cannot be undone."
                         )
+                elif operation == "skill-store-install":
+                    fields, resource, summary = self.integration_store.skill_fields(draft)
                 elif operation in {"skill-enabled", "skill-delete"}:
                     if set(draft) - {
                         "operation",
@@ -599,7 +638,8 @@ class LibraryManagement:
             return bool(review and review.owner == owner
                         and (review.operation in model_store.OPERATIONS
                              or review.operation in browser_model_settings.OPERATIONS
-                             or review.operation in MEDIA_SETTINGS_OPERATIONS))
+                             or review.operation in MEDIA_SETTINGS_OPERATIONS
+                             or review.operation == "skill-store-install"))
 
     def model_busy(self) -> bool:
         if self._journal is None and not (self.data / "operations.db").exists():
@@ -615,6 +655,8 @@ class LibraryManagement:
             return False
         if pending.owner_id != OWNER or pending.receipt.kind not in model_store.OPERATIONS:
             return True
+        if pending.receipt.kind == "model-image-download":
+            return False
         # Native weight operations cannot change a cloud runtime. Deletion stays
         # conservative across native aliases; pulls only affect their exact tag.
         if info.backend != "ollama":
@@ -651,7 +693,7 @@ class LibraryManagement:
     def cancel_model(self, identity: str) -> dict[str, Any]:
         with self._lock:
             receipt = self.status(identity)
-            if receipt["kind"] != "model-pull":
+            if receipt["kind"] not in {"model-pull", "model-image-download"}:
                 raise ValueError("Only a model download can be cancelled")
             if receipt["state"] in {"completed", "failed", "cancelled"}:
                 return receipt
@@ -673,7 +715,8 @@ class LibraryManagement:
         # another mutation. Missing proof leaves the normal unknown fence intact.
         try:
             receipt = self.status(identity)
-            if receipt["kind"] == "model-pull" and receipt["state"] == "unknown":
+            if (receipt["kind"] in {"model-pull", "model-image-download"}
+                    and receipt["state"] == "unknown"):
                 model_store.reconcile(self.cfg, self.journal, identity, require_end_proof=True)
             return True
         except Exception:
@@ -707,6 +750,23 @@ class LibraryManagement:
             return False
         return self.journal.resource_busy(f"session:{session_id}")
 
+    def submit_image(self, spec: dict[str, Any], request_id: str) -> dict[str, Any]:
+        """Submit an already authorized, durable image intent through the shared owner."""
+        with self._lock:
+            try:
+                return self.status(request_id)
+            except ValueError:
+                pass
+            token = secrets.token_hex(16)
+            self._reviews[token] = ManagementReview(
+                token, "chat-image", "image-generate", f"image:{spec['id']}",
+                {"spec": spec}, "Authorized chat image", time.time() + 300,
+            )
+            try:
+                return self.submit("chat-image", token, request_id)
+            finally:
+                self._reviews.pop(token, None)
+
     def submit(
         self, owner: str, token: str, request_id: str, *,
         before_start: Callable[[], None] | None = None,
@@ -730,14 +790,18 @@ class LibraryManagement:
             intent = {key: value for key, value in review.fields.items() if key != "source"}
             if review.operation in {"knowledge-url", "knowledge-refresh"}:
                 intent["source"] = review.fields["source"]
+            conflicts = [] if model_operation else [model_store.RESOURCE]
+            if review.resource.startswith("artifact:"):
+                conflicts.append("artifact-selection")
             receipt = self.journal.admit(
                 request_id=request_id,
                 owner_id=OWNER,
                 kind=review.operation,
                 resource=review.resource,
                 payload={"review": review.id, **intent},
-                conflicts_with=() if model_operation else (model_store.RESOURCE,),
-                exclusive=model_operation or model_definition,
+                conflicts_with=tuple(conflicts),
+                exclusive=(model_operation or model_definition
+                           or review.operation == "delete-selected"),
             )
             if receipt.created:
                 review.submitted = True
@@ -753,11 +817,17 @@ class LibraryManagement:
                         raise
                 if model_operation:
                     model_store.save_target(self.cfg, request_id, review.fields)
-                    final_installed = review.operation == "model-pull"
+                    final_installed = review.operation != "model-delete"
                     self.journal.record_witness(
                         request_id, OWNER, receipt.fence,
                         before=model_store.witness(review.fields, not final_installed),
                         after=model_store.witness(review.fields, final_installed),
+                    )
+                if review.operation == "skill-store-install":
+                    from .skill_store_operations import initial
+
+                    self.journal.save_evidence(
+                        request_id, OWNER, receipt.fence, initial(review.fields["record"]),
                     )
                 request = {
                     "kind": "library_management_operation",
@@ -879,6 +949,16 @@ class LibraryManagement:
             return
         fence, review = active
         try:
+            if review.operation == "skill-store-install":
+                from .skill_store_operations import read_evidence
+
+                evidence = read_evidence(self.journal, identity)
+                # The boolean from a worker alone is not proof of a safe rejection.
+                rejected = bool(rejected and evidence.get("schema_version") == 1
+                                and evidence.get("effect_started") is False
+                                and evidence.get("failure"))
+                success = bool(success and evidence.get("stage") == "verify_postcondition"
+                               and not evidence.get("failure"))
             if success or rejected:
                 self.journal.finish(
                     identity,
@@ -904,12 +984,27 @@ class LibraryManagement:
         receipt = self.journal.status(identity, OWNER)
         if receipt is None:
             raise ValueError("Operation unavailable")
-        return asdict(receipt)
+        result = asdict(receipt)
+        if receipt.kind == "skill-store-install":
+            from .skill_store_operations import public, read_evidence
+
+            result.update(public(read_evidence(self.journal, identity), receipt.state))
+        return result
 
     def operations(self) -> dict[str, Any]:
         if self._journal is None and not (self.data / "operations.db").exists():
             return {"items": []}
-        return {"items": [asdict(item) for item in self.journal.recent(OWNER, limit=30)]}
+        return {"items": [self.status(item.request_id)
+                          for item in self.journal.recent(OWNER, limit=30)]}
+
+    def reconcile_skill(self, identity: str, *, apply: bool = False,
+                        fingerprint: str = "") -> dict[str, Any]:
+        from .skill_store_operations import reconcile
+
+        if not re.fullmatch(r"[a-f0-9]{32}", identity):
+            raise ValueError("Invalid operation ID")
+        return reconcile(self.cfg, self.journal, identity, apply=apply,
+                         expected_fingerprint=fingerprint)
 
     def cancel_vision(self, identity: str) -> dict[str, Any]:
         with self._lock:
@@ -988,6 +1083,11 @@ def run_management_operation(request: dict[str, Any], progress=None) -> dict[str
             store.import_bytes(content, request["artifact_kind"], request["filename"])
         except ValueError:
             return {"rejected": True}
+    elif operation == "delete-selected":
+        try:
+            store.delete_many(request["targets"])
+        except ValueError:
+            return {"rejected": True}
     elif operation in {"tags", "archive", "restore", "delete", "clear_ai_tags", "source_link"}:
         try:
             store.change(
@@ -997,6 +1097,10 @@ def run_management_operation(request: dict[str, Any], progress=None) -> dict[str
             )
         except ValueError:
             return {"rejected": True}
+    elif operation == "skill-store-install":
+        from .integration_store import install_skill
+
+        return install_skill(cfg, request)
     elif operation in {"skill-enabled", "skill-delete", "skill-import"}:
         from klaude_knowledge.skill_management import (
             delete_installed_skill,

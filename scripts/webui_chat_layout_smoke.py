@@ -93,7 +93,7 @@ async def verify(host, root):
             await tab.wait(
                 'latest?.session_id && document.documentElement.dataset.startup==="ready"'
             )
-            await tab.js("""stream?.close();stream=null;clearInterval(pollTimer);
+            await tab.js("""stream?.close();stream=null;clearInterval(pollTimer);connect=()=>{};
               window.chatLayoutBase=structuredClone(latest);
               window.chatLayoutState=structuredClone(latest);
               window.chatLayoutFetch=fetch;window.chatLayoutWrites=[];
@@ -128,7 +128,7 @@ async def verify(host, root):
                     )
                 if kind == "active-draft":
                     await tab.js("prompt.value='Try a more compact layout';resizePrompt()")
-                await tab.js("snapshot()")
+                await tab.js("(window.chatLayoutSnapshot=snapshot())")
 
             for theme in ("light", "dark"):
                 await tab.js(
@@ -150,7 +150,7 @@ async def verify(host, root):
                       return {bar:height('.topbar'),modelRow:height('.chat-toolbar'),
                         title:height('#mobile-chat-title')};})()""")
                     assert header["bar"] == (56 if width <= 850 else 64), header
-                    assert (header["modelRow"] == 0) == (width <= 850), header
+                    assert header["modelRow"] == (0 if width <= 850 else 52), header
                     assert (header["title"] > 0) == (width <= 850), header
                     for kind in ("empty", "conversation", "active", "active-draft"):
                         await state(kind)
@@ -211,6 +211,62 @@ async def verify(host, root):
                         )
                         if width in (1440, 390, 320) and height != 430:
                             await shot(f"{kind}-{theme}-{width}")
+
+                    # One full-width scroll owner, with a stationary composer and header.
+                    await state("conversation")
+                    await tab.js("""chatLayoutState.messages[1].content=
+                      'A long conversation paragraph.'+String.fromCharCode(10,10);
+                      chatLayoutState.messages[1].content=
+                        chatLayoutState.messages[1].content.repeat(80);(window.chatLayoutSnapshot=snapshot())""")
+                    await tab.wait('nearLatestMessage()')
+                    scrolling = await tab.js("""(()=>{
+                      const pane=byId('chat-view').getBoundingClientRect();
+                      const viewport=chatScroller.getBoundingClientRect();
+                      window.scrollFixtureComposer=byId('composer').getBoundingClientRect().top;
+                      window.scrollFixtureHeader=document.querySelector('.chat-toolbar')
+                        .getBoundingClientRect().top;
+                      chatScroller.scrollTop=0;
+                      return {outerEdge:Math.abs(pane.right-viewport.right)<1,
+                        reachesBottom:Math.abs(pane.bottom-viewport.bottom)<1,
+                        long:chatScroller.scrollHeight>chatScroller.clientHeight+500,
+                        oneScroller:getComputedStyle(messages).overflowY==='visible' &&
+                          messages.scrollHeight<=messages.clientHeight+1,
+                        fits:document.documentElement.scrollWidth<=innerWidth &&
+                          chatScroller.scrollWidth<=chatScroller.clientWidth,
+                        centered:Math.abs((pane.left+pane.right)/2-
+                          (messages.getBoundingClientRect().left+
+                            messages.getBoundingClientRect().right)/2)<1};
+                    })()""")
+                    assert all(scrolling.values()), (theme, width, height, scrolling)
+                    await tab.wait('!byId("scroll-to-latest").hidden')
+                    await tab.js("""chatLayoutState.messages[1].content+=
+                      String.fromCharCode(10,10)+'An additional response paragraph.';
+                      (window.chatLayoutSnapshot=snapshot())""")
+                    assert await tab.js('chatScroller.scrollTop===0 && '
+                                        '!nearLatestMessage()')
+                    await tab.click("#scroll-to-latest")
+                    await tab.wait('nearLatestMessage() && byId("scroll-to-latest").hidden')
+                    assert await tab.js("""Math.abs(byId('composer').getBoundingClientRect().top-
+                      scrollFixtureComposer)<1 && Math.abs(document.querySelector('.chat-toolbar')
+                        .getBoundingClientRect().top-scrollFixtureHeader)<1""")
+                    await tab.js("""chatLayoutState.messages[1].content+=
+                      (String.fromCharCode(10,10)+'Follow this new response.').repeat(12);
+                      (window.chatLayoutSnapshot=snapshot())""")
+                    await tab.wait('nearLatestMessage()')
+                    assert await tab.js("""messages.lastElementChild.getBoundingClientRect()
+                      .bottom<=byId('composer').getBoundingClientRect().top+.5""")
+                    await tab.js("""prompt.value=Array(6).fill('A growing draft')
+                      .join(String.fromCharCode(10));resizePrompt()""")
+                    await tab.wait("""nearLatestMessage() &&
+                      messages.lastElementChild.getBoundingClientRect().bottom<=
+                        byId('composer').getBoundingClientRect().top+.5""")
+                    await tab.js("prompt.value='';resizePrompt()")
+                    await tab.wait('nearLatestMessage()')
+                    if width in (1440, 390) and height > 430:
+                        await shot(f"outer-scroll-{theme}-{width}")
+                    report.setdefault("outer_scroll_layouts", []).append(
+                        {"theme": theme, "width": width, "height": height, **scrolling}
+                    )
 
                     # Native top-layer details, passive reads, resize and Escape focus return.
                     await state("conversation")
@@ -283,14 +339,15 @@ async def verify(host, root):
             await viewport(1440, 960)
             await state("conversation")
             await tab.js('''chatLayoutState.chat_model_blocked=true;
-              prompt.value='Keep this draft';resizePrompt();snapshot()''')
+              prompt.value='Keep this draft';resizePrompt();
+              (window.chatLayoutSnapshot=snapshot())''')
             assert await tab.js('''!byId('chat-availability').hidden && byId('send').disabled &&
               !byId('model-picker').disabled &&
               byId('chat-availability-action').textContent==='Check Downloads' ''')
             await tab.js('sendMessage("send")')
             assert await tab.js('prompt.value==="Keep this draft" && chatLayoutWrites.length===0')
             await tab.js('''chatLayoutState.chat_model_blocked=false;
-              chatLayoutState.state='interrupted';snapshot()''')
+              chatLayoutState.state='interrupted';(window.chatLayoutSnapshot=snapshot())''')
             assert await tab.js('byId("send").disabled && '
                                 'byId("chat-availability-action").textContent==="New chat"')
             await state("conversation")
@@ -305,11 +362,15 @@ async def verify(host, root):
             await tab.wait('byId("chat-info-panel").matches(":popover-open")')
             await tab.click("#model-picker")
             await tab.wait(
-                'byId("model-menu").open && !byId("chat-info-panel").matches(":popover-open")'
+                'byId("mobile-model-sheet").open && '
+                '!byId("chat-info-panel").matches(":popover-open")'
             )
+            await tab.click("#mobile-model-close")
+            await tab.wait('!byId("mobile-model-sheet").open')
             await tab.click("#chat-info-toggle")
             await tab.wait(
-                'byId("chat-info-panel").matches(":popover-open") && !byId("model-menu").open'
+                'byId("chat-info-panel").matches(":popover-open") && '
+                '!byId("mobile-model-sheet").open'
             )
             await tab.js('document.dispatchEvent(new Event("klaude-chat-session-changed"))')
             await tab.wait('!byId("chat-info-panel").matches(":popover-open")')

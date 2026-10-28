@@ -336,23 +336,38 @@ window.KlaudeExpressive = (() => {
       if (target) {
         const descriptions = (target.getAttribute('aria-describedby') || '').split(/\s+/).filter(id => id && id !== tooltip.id);
         if (descriptions.length) target.setAttribute('aria-describedby', descriptions.join(' ')); else target.removeAttribute('aria-describedby');
-        if (nativeTitle && !target.title) target.title = nativeTitle;
+        if (nativeTitle && !target.getAttribute('title')) target.setAttribute('title', nativeTitle);
       }
       target = null; nativeTitle = ''; if (tooltip.matches(':popover-open')) tooltip.hidePopover();
+      tooltip.textContent = '';
     }
     function show(element) {
       if (!element || element === target) return;
-      hide(); const label = element.title || element.getAttribute('aria-label');
+      hide(); const label = element.getAttribute('data-tooltip') || element.getAttribute('title') || element.getAttribute('aria-label');
       if (!label) return;
-      target = element; nativeTitle = element.title; if (nativeTitle) element.title = '';
+      target = element; nativeTitle = element.getAttribute('title') || ''; if (nativeTitle) element.setAttribute('title', '');
       tooltip.textContent = label;
       element.setAttribute('aria-describedby', [element.getAttribute('aria-describedby'), tooltip.id].filter(Boolean).join(' '));
+      const viewport = window.visualViewport, inset = 8, gap = 10;
+      const viewportLeft = viewport?.offsetLeft || 0, viewportTop = viewport?.offsetTop || 0;
+      const width = viewport?.width || innerWidth, height = viewport?.height || innerHeight;
+      tooltip.style.maxWidth = `${Math.max(0, Math.min(280, width - inset * 2))}px`;
+      // Measure from an unconstrained position after viewport/anchor changes.
+      tooltip.style.left = `${viewportLeft + inset}px`; tooltip.style.top = `${viewportTop + inset}px`;
       tooltip.showPopover();
       const rect = element.getBoundingClientRect(), box = tooltip.getBoundingClientRect();
-      tooltip.style.left = `${Math.max(8, Math.min(innerWidth - box.width - 8, rect.left + (rect.width - box.width) / 2))}px`;
-      tooltip.style.top = `${rect.bottom + box.height + 12 < innerHeight ? rect.bottom + 6 : Math.max(8, rect.top - box.height - 6)}px`;
+      const left = Math.max(viewportLeft + inset, Math.min(viewportLeft + width - box.width - inset,
+        rect.left + (rect.width - box.width) / 2));
+      const above = rect.top - viewportTop - inset, below = viewportTop + height - inset - rect.bottom;
+      const placeBelow = below >= box.height + gap || above < box.height + gap && below >= above;
+      tooltip.dataset.placement = placeBelow ? 'bottom' : 'top';
+      tooltip.style.left = `${left}px`;
+      tooltip.style.top = `${Math.max(viewportTop + inset, Math.min(viewportTop + height - box.height - inset,
+        placeBelow ? rect.bottom + gap : rect.top - box.height - gap))}px`;
+      tooltip.style.setProperty('--tooltip-arrow-x', `${Math.max(10, Math.min(box.width - 10,
+        rect.left + rect.width / 2 - left))}px`);
     }
-    const owner = event => closest(event.target, 'button[title], .icon-button[aria-label], [data-tooltip]');
+    const owner = event => closest(event.target, '[title], .icon-button[aria-label], [data-tooltip]');
     document.addEventListener('pointerover', event => { if (event.pointerType !== 'touch') show(owner(event)); });
     document.addEventListener('pointerout', event => { if (target && !target.contains(event.relatedTarget)) hide(); });
     document.addEventListener('focusin', event => { if (event.target instanceof Element && event.target.matches(':focus-visible')) show(owner(event)); });
@@ -360,6 +375,9 @@ window.KlaudeExpressive = (() => {
     document.addEventListener('pointerdown', hide);
     document.addEventListener('scroll', hide, true);
     document.addEventListener('keydown', event => { if (event.key === 'Escape') hide(); });
+    window.addEventListener('resize', hide);
+    window.visualViewport?.addEventListener('resize', hide);
+    window.visualViewport?.addEventListener('scroll', hide);
     document.addEventListener('klaude-auth-reset', hide);
   }
   function setupCommands() {
@@ -398,7 +416,7 @@ window.KlaudeExpressive = (() => {
       ['File preview', 'Previous / next image', '← / →'], ['File preview', 'Zoom', '+ / −'],
     ];
     function commands() {
-      const pages = [['chat', 'Chat'], ['workspace', 'Workspaces'], ['library', 'Library'], ['models', 'Models'],
+      const pages = [['chat', 'Chat'], ['workspace', 'Workspaces'], ['library', 'Library'], ['store', 'Store'],
         ['integrations', 'Integrations'], ['activity', 'Activity'], ['settings', 'Settings']];
       const available = pages.map(([page, label]) => ({ group: 'Navigate', label: `Open ${label}`, run: () => showView(page) }));
       available.push({ group: 'Chat', label: 'Switch model', run: () => { showView('chat'); window.MobileChatUI?.openModels(); } },
@@ -532,4 +550,92 @@ window.KlaudeExpressive = (() => {
   }
   document.addEventListener('DOMContentLoaded', setup, { once: true });
   return Object.freeze({ shape, themePreview, reduced, workspace });
+})();
+
+// Shared credential decoration. Native password controls remain the sole owner
+// of secret values, selection, form submission and password-manager integration.
+window.KlaudeSecretFields = (() => {
+  const sequence = ['clover-4', 'arrow', 'pill', 'soft-burst', 'diamond', 'clam-shell', 'pentagon'];
+  const fields = new Map();
+  function sync(input, state) {
+    if (input.type !== 'password') return;
+    const length = input.value.length, start = input.selectionStart ?? length, end = input.selectionEnd ?? length;
+    const focused = document.activeElement === input;
+    const css = getComputedStyle(input), left = parseFloat(css.paddingLeft) + parseFloat(css.borderLeftWidth);
+    const right = parseFloat(css.paddingRight) + parseFloat(css.borderRightWidth);
+    const width = Math.max(0, input.offsetWidth - left - right);
+    state.mask.style.left = `${left}px`; state.mask.style.right = `${right}px`;
+    let scroll = input.scrollLeft;
+    if (focused && start === end) {
+      if (end * 20 - scroll > width - 2) scroll = Math.max(0, end * 20 - width + 2);
+      else if (end * 20 < scroll) scroll = end * 20;
+      input.scrollLeft = scroll;
+    }
+    // Render only visible slots, even for long pasted API credentials.
+    const first = Math.max(0, Math.floor(scroll / 20)), last = Math.min(length, first + Math.ceil(width / 20) + 1);
+    const key = [first, last, start, end, scroll, focused, width].join(':');
+    if (state.key === key) return;
+    state.key = key;
+    // Keep overlapping slots mounted so typing, selection and focus changes
+    // do not restart every shape's entry animation.
+    for (const slot of [...state.shapes.children]) {
+      const position = Number(slot.dataset.position);
+      if (position < first || position >= last) slot.remove();
+    }
+    let next = state.shapes.firstElementChild;
+    for (let i = first; i < last; i++) {
+      let slot;
+      if (next && Number(next.dataset.position) === i) {
+        slot = next; next = next.nextElementSibling;
+      } else {
+        slot = document.createElement('span'); slot.className = 'password-shape-slot';
+        slot.dataset.position = String(i);
+        slot.append(window.KlaudeExpressive.shape(sequence[i % sequence.length], 64));
+        state.shapes.insertBefore(slot, next);
+      }
+      slot.classList.toggle('selected', i >= start && i < end);
+    }
+    state.shapes.style.transform = `translateX(${first * 20 - scroll}px)`;
+    state.cursor.style.transform = `translateX(${Math.max(0, Math.min(width - 2, end * 20 - scroll))}px)`;
+    state.cursor.hidden = !focused || start !== end || !length;
+  }
+  function enhance(input) {
+    if (input.id === 'login-password' || fields.has(input)) return;
+    try {
+      if (!sequence.every(name => window.KlaudeExpressive.shape(name, 64).querySelector('path[d]'))) return;
+    } catch { return; }
+    const wrapper = document.createElement('span'); wrapper.className = 'secret-shape-field';
+    const mask = document.createElement('span'); mask.className = 'secret-shape-mask'; mask.setAttribute('aria-hidden', 'true');
+    const shapes = document.createElement('span'); shapes.className = 'secret-shape-slots';
+    const cursor = document.createElement('span'); cursor.className = 'shape-password-cursor'; cursor.hidden = true;
+    input.before(wrapper); wrapper.append(input, mask); mask.append(shapes, cursor);
+    const state = { mask, shapes, cursor, key: '' }; fields.set(input, state);
+    for (const event of ['input', 'select', 'click', 'keyup', 'focus', 'blur', 'scroll', 'compositionend'])
+      input.addEventListener(event, () => sync(input, state));
+    sync(input, state);
+  }
+  function refresh() {
+    document.querySelectorAll('input[type="password"]').forEach(enhance);
+    for (const [input, state] of fields) {
+      if (!input.isConnected) { fields.delete(input); continue; }
+      if (input.getClientRects().length) sync(input, state);
+    }
+  }
+  function setup() {
+    refresh();
+    // Covers dynamically mounted dialogs and credential fields, without watching
+    // our decorative child nodes and recursively triggering the observer.
+    new MutationObserver(records => {
+      if (records.some(record => record.type === 'attributes' || [...record.addedNodes].some(node =>
+        node.nodeType === 1 && (node.matches('input[type="password"]') || node.querySelector('input[type="password"]'))))) refresh();
+    }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['type'] });
+    document.addEventListener('selectionchange', refresh);
+    document.addEventListener('reset', () => setTimeout(refresh, 0));
+    window.addEventListener('resize', refresh);
+    // Autofill and application-owned .value assignments need not emit input.
+    setInterval(() => { if (!document.hidden) refresh(); }, 250);
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', setup, { once: true });
+  else setup();
+  return Object.freeze({ refresh });
 })();

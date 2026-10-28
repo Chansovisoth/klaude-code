@@ -65,7 +65,8 @@ async def verify(host, service, root, chrome, image, _mode, calls, _set_default)
                 if (fixturePending) result.pending=fixturePending;
                 return holdReview ? new Promise((resolve,reject)=>
                   reviewReads.push({resolve,reject,result})) : result;
-              };document.documentElement.dataset.motion='reduced';showView('library');""")
+              };document.documentElement.dataset.motion='full';
+              document.documentElement.dataset.loadingCircleStyle='material';showView('library');""")
 
             async def open_image(item):
                 await tab.js("openArtifact(" + json.dumps(item["id"]) + ")")
@@ -80,7 +81,40 @@ async def verify(host, service, root, chrome, image, _mode, calls, _set_default)
                     "read.result.pending=fixturePending;read.resolve(read.result)}"
                 )
 
+            await tab.js("applyAppearance({...appearance,reduced:true},true)")
             await open_image(image)
+            await tab.js("""byId('vision-empty-icon').scrollIntoView({block:'center'});
+              window.reviewCanvas=byId('vision-empty-icon').querySelector('canvas');""")
+            await asyncio.sleep(.2)
+            await tab.js("window.reviewFirstFrame=reviewCanvas.toDataURL()")
+            await asyncio.sleep(.35)
+            assert await tab.js("reviewFirstFrame===reviewCanvas.toDataURL()"), (
+                "Reduced motion must keep the review loader still")
+            await tab.js("applyAppearance({...appearance,reduced:false},true)")
+            await asyncio.sleep(.2)
+            await tab.js("window.reviewFirstFrame=reviewCanvas.toDataURL()")
+            await asyncio.sleep(.4)
+            assert await tab.js("reviewFirstFrame!==reviewCanvas.toDataURL()"), (
+                "The wavy loading graphic must resume after reduced motion is disabled")
+            await tab.js("window.reviewFirstFrame=reviewCanvas.toDataURL()")
+            await asyncio.sleep(.4)
+            assert await tab.js("reviewFirstFrame!==reviewCanvas.toDataURL()"), (
+                "The wave must keep playing after the initial render")
+            await tab.command("Emulation.setEmulatedMedia", {"features":[{
+                "name":"prefers-reduced-motion", "value":"reduce"}]})
+            await asyncio.sleep(.2)
+            await tab.js("window.reviewFirstFrame=reviewCanvas.toDataURL()")
+            await asyncio.sleep(.3)
+            assert await tab.js("reviewFirstFrame===reviewCanvas.toDataURL()")
+            await tab.command("Emulation.setEmulatedMedia", {"features":[{
+                "name":"prefers-reduced-motion", "value":"no-preference"}]})
+            await asyncio.sleep(.2)
+            await tab.js("window.reviewFirstFrame=reviewCanvas.toDataURL()")
+            await asyncio.sleep(.4)
+            assert await tab.js("reviewFirstFrame!==reviewCanvas.toDataURL() && "
+                                "reviewCanvas===byId('vision-empty-icon').querySelector('canvas')")
+            await tab.js("applyAppearance({...appearance,reduced:true},true)")
+            await asyncio.sleep(.2)
             for theme in ("light", "dark"):
                 for width in (320, 768, 1440):
                     await tab.command(
@@ -92,18 +126,25 @@ async def verify(host, service, root, chrome, image, _mode, calls, _set_default)
                             "mobile": False,
                         },
                     )
-                    await tab.js("document.documentElement.dataset.theme=" + json.dumps(theme))
+                    await tab.js("applyAppearance({...appearance,reduced:true,theme:"
+                                 + json.dumps(theme) + "},true)")
                     await tab.js(
                         "if(artifactDialog.dataset.details==='closed')byId('image-details').click()"
                     )
                     assert await tab.js("""(() => {
                       const intro=byId('vision-empty'), icon=byId('vision-empty-icon');
-                      const r=icon.firstElementChild.getBoundingClientRect();
+                      const r=icon.firstElementChild.querySelector('svg,canvas')
+                        .getBoundingClientRect();
+                      const frame=icon.getBoundingClientRect();
                       return !intro.hidden &&
                         intro.querySelector('h3').textContent==='Loading AI Review…' &&
                         icon.querySelector('.loading-circle-indicator') &&
                         !icon.querySelector('.material-loading') &&
-                        r.width===48 && r.height===48 && !byId('vision-status').textContent &&
+                        Math.abs(r.width-40)<.01 && Math.abs(r.height-40)<.01 &&
+                        frame.width===48 && frame.height===48 &&
+                        Math.abs(r.left+r.width/2-frame.left-frame.width/2)<.5 &&
+                        Math.abs(r.top+r.height/2-frame.top-frame.height/2)<.5 &&
+                        !byId('vision-status').textContent &&
                         !byId('vision-status').children.length && byId('vision-submit').disabled &&
                         byId('vision-analyze').getAttribute('aria-busy')==='true' &&
                         document.documentElement.scrollWidth<=innerWidth;
@@ -124,6 +165,10 @@ async def verify(host, service, root, chrome, image, _mode, calls, _set_default)
                 "byId('vision-empty').querySelector('h3').textContent==="
                 "'Understand this image'&&!byId('vision-submit').disabled"
             )
+            await tab.js("window.reviewRemovedFrame=reviewCanvas.toDataURL()")
+            await asyncio.sleep(.3)
+            assert await tab.js("!reviewCanvas.isConnected && "
+                                "reviewRemovedFrame===reviewCanvas.toDataURL()")
             await tab.js("holdReview=true")
             await open_image(other)
             await release(
@@ -141,6 +186,24 @@ async def verify(host, service, root, chrome, image, _mode, calls, _set_default)
                 "byId('vision-empty-icon').querySelector('.material-loading')!==null&&"
                 "!byId('vision-empty-icon').querySelector('.loading-circle-indicator')"
             )
+            assert await tab.js("""(()=>{
+              const frame=byId('vision-empty-icon').getBoundingClientRect();
+              const indicator=byId('vision-empty-icon').querySelector('.material-loading svg')
+                .getBoundingClientRect();
+              return frame.width===48 && frame.height===48 && Math.abs(indicator.width-40)<.01 &&
+                Math.abs(indicator.height-40)<.01 &&
+                Math.abs(indicator.left+20-frame.left-24)<.5 &&
+                Math.abs(indicator.top+20-frame.top-24)<.5;
+            })()""")
+            for theme in ("light", "dark"):
+                for style in ("classic", "expressive"):
+                    await tab.js("applyAppearance({...appearance,theme:" + json.dumps(theme) +
+                                 ",loadingStyle:" + json.dumps(style) + "})")
+                    assert await tab.js("""(() => {
+                      const frame=byId('vision-empty-icon');
+                      const indicator=frame.querySelector('.material-loading');
+                      return getComputedStyle(indicator).color===getComputedStyle(frame).color;
+                    })()"""), (theme, style)
             await tab.js("fixturePending=null;holdReview=true")
             await open_image(image)
             await tab.js(
@@ -162,8 +225,9 @@ async def verify(host, service, root, chrome, image, _mode, calls, _set_default)
             assert not tab.errors, tab.errors
             return {
                 "initial_review_layout": "passed",
-                "normal_loader_48px": "passed",
-                "generation_loader_preserved": "passed",
+                "live_wave_and_motion_pause_resume": "passed",
+                "normal_loader_40px_in_48px_container": "passed",
+                "generation_loader_40px_in_48px_container": "passed",
                 "failure_and_late_read": "passed",
                 "viewports": [320, 768, 1440],
                 "themes": ["light", "dark"],

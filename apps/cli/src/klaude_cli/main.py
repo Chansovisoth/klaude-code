@@ -33,6 +33,7 @@ import queue
 import re
 import shlex
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -343,6 +344,7 @@ from .settings_panel import (
 )
 from .settings_writer import SettingsWriter
 from .skill_discovery import DETAIL_KIND, INSTALL_KIND, SEARCH_KIND, SkillDiscovery
+from .skill_store import app as skill_store_app
 from .skills_panel import (
     skill_delete_confirmation_page,
     skill_delete_page,
@@ -396,6 +398,7 @@ mcp_app = typer.Typer(
     invoke_without_command=True,
 )
 app.add_typer(mcp_app, name="mcp")
+app.add_typer(skill_store_app, name="skill-store")
 app.add_typer(model_connections_app, name="model-connections")
 app.add_typer(library_app, name="library")
 app.add_typer(research_app, name="research")
@@ -407,6 +410,14 @@ mcp_app.add_typer(mcp_auth_app, name="auth")
 @app.callback(invoke_without_command=True)
 def default_command(ctx: typer.Context) -> None:
     """Launch the interactive session when no subcommand is supplied."""
+    if threading.current_thread() is threading.main_thread():
+        previous = signal.getsignal(signal.SIGTERM)
+
+        def terminate(_signum, _frame):
+            raise KeyboardInterrupt
+
+        signal.signal(signal.SIGTERM, terminate)
+        ctx.call_on_close(lambda: signal.signal(signal.SIGTERM, previous))
     if ctx.invoked_subcommand is None:
         chat(model="", legacy=False, no_tui=False)
 
@@ -3064,6 +3075,13 @@ CLI_COMMANDS = (
     CommandSpec("sessions-reconcile", CommandSurface.CLI,
                 "sessions reconcile SESSION_ID",
                 "Review an interrupted turn before allowing new work in its session."),
+    CommandSpec("skill-store", CommandSurface.CLI, "skill-store",
+                "Inspect and reconcile uncertain Skill Store installs."),
+    CommandSpec("skill-store-inspect", CommandSurface.CLI, "skill-store inspect REQUEST_ID",
+                "Inspect local Skill install evidence without replaying the operation."),
+    CommandSpec("skill-store-reconcile", CommandSurface.CLI,
+                "skill-store reconcile REQUEST_ID --apply",
+                "Review and apply a proven Skill install recovery."),
     CommandSpec(
         "sessions-delete",
         CommandSurface.CLI,
@@ -4353,18 +4371,20 @@ def _system_prompt(
     runtime_context: str = "",
     configuration_context: str = "",
 ) -> str:
+    from klaude_core.request_context import memory_context_block
+
     template = (resources.files("klaude_core") / "prompts" / "system.md").read_text()
     auto = "enabled" if memory.auto_memory_enabled() else "disabled"
-    return (
-        template.replace("{MEMORY}", memory.facts() or "(none)")
-        .replace("{AUTO_MEMORY}", auto)
-        .replace("{COMMANDS}", COMMAND_REFERENCE_SYSTEM_HINT)
-        .replace(
-            "{CONFIGURATION}",
-            configuration_context or "(active configuration unavailable)",
-        )
-        .replace("{RUNTIME_CONTEXT}", runtime_context or "(runtime context unavailable)")
-    )
+    values = {
+        "MEMORY": memory_context_block(memory.facts()), "AUTO_MEMORY": auto,
+        "COMMANDS": COMMAND_REFERENCE_SYSTEM_HINT,
+        "CONFIGURATION": configuration_context or "(active configuration unavailable)",
+        "RUNTIME_CONTEXT": runtime_context or "(runtime context unavailable)",
+    }
+    # Substitute host placeholders once; literal braces inside saved notes are
+    # data and must not expand into policy/configuration or invalidate the JSON.
+    return re.sub(r"\{(MEMORY|AUTO_MEMORY|COMMANDS|CONFIGURATION|RUNTIME_CONTEXT)\}",
+                  lambda match: values[match[1]], template)
 
 
 def _runtime_context_result(cfg, workdir: Path, *, refresh: bool = False):

@@ -78,7 +78,7 @@ def hub_repo_search(
     if sort:
         params["sort"] = sort
     if filter_tag:
-        if filter_tag != "gguf" or endpoint != "models":
+        if filter_tag not in {"gguf", "text-to-image"} or endpoint != "models":
             raise ValueError("Unsupported model discovery filter")
         params["filter"] = filter_tag
         params["direction"] = -1
@@ -207,7 +207,9 @@ def _readme_revisions(
     return candidates
 
 
-def hub_gguf_files(base_url: str, api_key: str, repo_id: str) -> dict[str, Any]:
+def hub_gguf_files(
+    base_url: str, api_key: str, repo_id: str, *, image: bool = False,
+) -> dict[str, Any]:
     """Bounded metadata for exact top-level GGUF files, never weight downloads."""
     import json
     import re
@@ -243,7 +245,10 @@ def hub_gguf_files(base_url: str, api_key: str, repo_id: str) -> dict[str, Any]:
         name = row.get("rfilename", "")
         if (
             not isinstance(name, str)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.gguf", name, re.I)
+            or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]*\.(?:gguf|safetensors)" if image
+                else r"[A-Za-z0-9][A-Za-z0-9_.-]*\.gguf", name, re.I,
+            )
             or re.search(r"-\d+-of-\d+\.gguf$", name, re.I)
             or name.lower().startswith("mmproj")
             or len(f"hf.co/{repo_id}:{name}") > 200
@@ -252,9 +257,16 @@ def hub_gguf_files(base_url: str, api_key: str, repo_id: str) -> dict[str, Any]:
         lfs = row.get("lfs")
         lfs = lfs if isinstance(lfs, dict) else {}
         size = row.get("size", lfs.get("size"))
-        files.append(
-            {"filename": name, "size": size if type(size) is int and 0 <= size < 2**63 else None}
-        )
+        if image and (
+            re.search(r"-\d+-of-\d+\.", name)
+            or type(size) is not int or not 0 < size <= 64 * 1024**3
+            or not re.fullmatch(r"[a-f0-9]{64}", str(lfs.get("sha256", "")))
+        ):
+            continue
+        files.append({
+            "filename": name, "size": size if type(size) is int and 0 <= size < 2**63 else None,
+            **({"sha256": lfs["sha256"]} if image else {}),
+        })
         if len(files) == 64:
             break
     card = value.get("cardData")
@@ -262,6 +274,7 @@ def hub_gguf_files(base_url: str, api_key: str, repo_id: str) -> dict[str, Any]:
     license_name = card.get("license")
     return {
         "id": repo_id,
+        **({"revision": value.get("sha", "")} if image else {}),
         "files": files,
         "pipeline_tag": value.get("pipeline_tag")
         if isinstance(value.get("pipeline_tag"), str)

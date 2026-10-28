@@ -203,18 +203,24 @@ class TurnCapabilities:
             "</turn_capabilities>"
         )
 
-    def render_execution_for_model(self) -> str:
+    def render_execution_for_model(self, *, include_registry: bool = True) -> str:
         """Request-relevant policies; the complete snapshot remains auditable."""
         policies = dict(self.effective_permissions)
         unavailable = {
             name: reason for name, reason in self.unavailable_tools
             if reason != "turn routing"
         }
+        registry = (
+            f"Globally enabled registry: {_names(self.globally_enabled_tools)}.\n"
+            if include_registry else
+            f"Enabled tools in registry: {len(self.globally_enabled_tools)}. "
+            "Use discover_tools to find tools omitted by routing.\n"
+        )
         return (
             "<turn_capabilities>\n"
             f"Turn scope: {self.scope.value}. Provider: {self.provider_backend}/"
             f"{self.provider_model}; context={self.provider_context_window}.\n"
-            f"Globally enabled registry: {_names(self.globally_enabled_tools)}.\n"
+            f"{registry}"
             f"Callable this request: {_names(self.callable_tools)}.\n"
             "Only supplied schemas are callable. Other enabled tools are omitted by "
             "turn routing, not globally unavailable. "

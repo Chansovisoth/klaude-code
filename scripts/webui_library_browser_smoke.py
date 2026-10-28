@@ -330,8 +330,6 @@ async def verify(host, root, chrome):
                            '!previewNavigation')
             await tab.command("Input.dispatchKeyEvent", {"type": "keyDown", "key": "ArrowLeft"})
             await tab.wait(f'selectedArtifact?.id==={json.dumps(first)} && !previewNavigation')
-            await tab.click("#preview-sidebar-toggle")
-            assert await tab.js('byId("artifact-detail").dataset.details === "closed"')
             for event_type in ("keyDown", "keyUp"):
                 await tab.command("Input.dispatchKeyEvent", {
                     "type": event_type, "key": "Escape", "code": "Escape",
@@ -457,7 +455,8 @@ async def verify(host, root, chrome):
                     await tab.click(".file-item button")
                     await tab.wait('selectedArtifact && '
                                    'byId("artifact-preview").querySelector("img")?.naturalWidth>0')
-                    await tab.js("byId(artifactDialog.dataset.details==='closed' ? 'image-details' : 'preview-sidebar-toggle').click()")
+                    if await tab.js("artifactDialog.dataset.details==='closed'"):
+                        await tab.click("#image-details")
                     assert await tab.js('''(() => {
                       const dialog=byId('artifact-detail'), rect=dialog.getBoundingClientRect();
                       return rect.left>=0 && rect.right<=innerWidth &&

@@ -321,6 +321,63 @@ window.ContextPanel = (() => {
   let changesKey = "", detailsKey = "";
   const eventSignatures = new WeakMap();
   const items = byId("cp-file-items"), status = byId("cp-library-status");
+  let fileDrag;
+  function clearFileDrag() {
+    if (!fileDrag) return;
+    cancelAnimationFrame(fileDrag.frame);
+    fileDrag.row.classList.remove("is-dragging");
+    fileDrag.preview.remove();
+    fileDrag.nativeImage.remove();
+    fileDrag = null;
+  }
+  function moveFileDrag(event) {
+    if (!fileDrag || event.type === "drag" && !event.clientX && !event.clientY) return;
+    const {preview, x, y, padding} = fileDrag;
+    preview.style.left = `${event.clientX - x - padding}px`;
+    preview.style.top = `${event.clientY - y - padding}px`;
+  }
+  for (const event of ["drag", "dragover"]) document.addEventListener(event, moveFileDrag);
+  function pickUpFile(row, event) {
+    clearFileDrag();
+    const bounds = row.getBoundingClientRect(), padding = 16;
+    const x = Math.max(0, Math.min(bounds.width, event.clientX - bounds.left));
+    const y = Math.max(0, Math.min(bounds.height, event.clientY - bounds.top));
+    const preview = document.createElement("div");
+    preview.className = "cp-file-items cp-drag-preview";
+    preview.dataset.view = view;
+    preview.setAttribute("aria-hidden", "true");
+    preview.inert = true;
+    preview.style.width = `${bounds.width + padding * 2}px`;
+    const card = row.cloneNode(true);
+    card.draggable = false;
+    card.style.transformOrigin = `${x}px ${y}px`;
+    for (const image of card.querySelectorAll("img")) {
+      image.loading = "eager";
+      image.decoding = "sync";
+      image.classList.remove("image-pending");
+    }
+    preview.append(card);
+    // Keep native transfer/drop semantics, but draw the visible preview in CSS
+    // coordinates. Browser drag bitmaps can shift padded/transformed snapshots.
+    const nativeImage = document.createElement("canvas");
+    nativeImage.width = nativeImage.height = 1;
+    nativeImage.setAttribute("aria-hidden", "true");
+    nativeImage.style.cssText = "position:fixed;left:0;top:0;pointer-events:none";
+    document.body.append(preview, nativeImage);
+    fileDrag = {row, preview, nativeImage, x, y, padding};
+    moveFileDrag(event);
+    event.dataTransfer.setDragImage(nativeImage, 0, 0);
+    fileDrag.frame = requestAnimationFrame(() => {
+      nativeImage.remove();
+      if (event.defaultPrevented) clearFileDrag();
+      else row.classList.add("is-dragging");
+    });
+  }
+  for (const event of ["dragend", "drop", "klaude-auth-reset", "klaude-chat-session-changed",
+    "klaude-view", "klaude-context-panel"]) document.addEventListener(event, clearFileDrag);
+  document.addEventListener("keydown", event => { if (event.key === "Escape") clearFileDrag(); });
+  window.addEventListener("blur", clearFileDrag);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) clearFileDrag(); });
   const mobileAttachments = matchMedia("(max-width: 850px)");
   const desktopHint = "Drag a file into chat to attach it.";
   const touchHint = "Use the chat attachment menu to add files.";
@@ -565,6 +622,7 @@ window.ContextPanel = (() => {
         id: item.id, revision: item.revision, session: latest.session_id,
       }));
       event.dataTransfer.setData("text/plain", item.name);
+      pickUpFile(row, event);
     });
     return row;
   }
@@ -579,6 +637,7 @@ window.ContextPanel = (() => {
       query: byId("cp-search").value, offset, images: view === "gallery" ? "1" : "0", references });
     const key = `${latest.session_id}:${query}`;
     if (key === loadedKey) return;
+    clearFileDrag();
     loadedKey = key; controller?.abort(); controller = new AbortController();
     const read = ++libraryRead, epoch = authEpoch, current = latest.session_id;
     const valid = () => read === libraryRead && epoch === authEpoch && current === latest?.session_id && authenticated;
@@ -601,9 +660,19 @@ window.ContextPanel = (() => {
         nodes.push(fileRow(item));
       }
       items.replaceChildren(...nodes);
+      if (!result.items.length) {
+        const searching = Boolean(byId("cp-search").value.trim());
+        collectionEmpty(items, searching ? "No files match this search" :
+          view === "gallery" ? "No images yet" : scope === "current" ?
+            "No files in this conversation" : "No uploads yet",
+          searching ? "Try a different search." : view === "gallery" ?
+            "Try List or Grid to see other files." : scope === "current" ?
+              "Switch to All to browse your Library." : "Add a file in Library to get started.",
+          view === "gallery" ? "image" : "file");
+        items.firstElementChild.setAttribute("role", "status");
+      }
       status.textContent = (result.scope_limited ? "Older attachment links may only appear in All. " : "") +
-        (result.items.length ? attachmentHint() :
-          scope === "current" ? "No matching files linked to this conversation. Try All." : "No matching saved files.");
+        (result.items.length ? attachmentHint() : "");
       byId("cp-previous").disabled = offset === 0; byId("cp-next").disabled = !result.more;
       byId("cp-page").textContent = `Page ${Math.floor(offset / 20) + 1}${result.total ? ` of ${Math.ceil(result.total / 20)}` : ""}`;
     } catch (error) {

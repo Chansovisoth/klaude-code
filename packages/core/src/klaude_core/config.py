@@ -675,6 +675,7 @@ class Config:
 
 
 DEFAULT_PERMISSIONS = {
+    "generate_image": "allow",
     "run_shell": "ask",
     "storage_usage": "ask",
     "write_file": "ask",

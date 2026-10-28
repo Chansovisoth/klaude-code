@@ -83,6 +83,26 @@ def _partials(root: Path) -> dict[str, tuple[int, int, int]]:
     return result
 
 
+def _image_partials(root: Path) -> dict[str, tuple[int, int, int]]:
+    """Observe model-file writes, without opening their contents."""
+    result = {}
+    with os.scandir(root) as entries:
+        for index, entry in enumerate(entries):
+            if index >= 10000:
+                raise OSError("Image model observation limit")
+            if (len(entry.name) > 200 or not entry.name.isascii()
+                    or not all(c.isprintable() for c in entry.name)
+                    or not re.search(
+                        r"\.(?:safetensors|gguf|ckpt|sft)(?:\.(?:part|partial|incomplete))?$",
+                        entry.name, re.IGNORECASE,
+                    )):
+                continue
+            info = entry.stat(follow_symlinks=False)
+            if stat.S_ISREG(info.st_mode):
+                result[entry.name] = (info.st_ino, info.st_mtime_ns, info.st_blocks)
+    return result
+
+
 class ModelActivity:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -90,6 +110,9 @@ class ModelActivity:
         self._store: tuple[Path, int] | None = None
         self._previous: dict[str, tuple[int, int, int]] = {}
         self._seen: dict[str, float] = {}
+        self._image_previous: dict[str, tuple[int, int, int]] = {}
+        self._image_seen: dict[str, float] = {}
+        self._image_root: Path | None = None
 
     @staticmethod
     def _shared(cfg: Any, endpoints: dict, owned: list[dict]) -> list[dict]:
@@ -152,6 +175,33 @@ class ModelActivity:
         endpoints = {key: value for key, value in connections(cfg).items()
                      if value.enabled and value.backend == "ollama" and value.source == "Local"}
         observed = self._shared(cfg, endpoints, owned)
+        image_root = Path(os.environ.get("KLAUDE_IMAGE_MODEL_DIR", "/mnt/HDD1/klaude-image/models"))
+        try:
+            if not image_root.is_absolute():
+                raise OSError("Image model directory must be absolute")
+            if image_root != self._image_root:
+                self._image_previous = {}
+                self._image_seen = {}
+                self._image_root = image_root
+            current_images = _image_partials(image_root)
+            for name, fingerprint in current_images.items():
+                previous = self._image_previous.get(name)
+                if ((previous is not None and previous != fingerprint)
+                        or previous is None and -2 <= now - fingerprint[1] / 1e9 <= 10):
+                    self._image_seen[name] = now
+            self._image_previous = current_images
+            self._image_seen = {name: stamp for name, stamp in self._image_seen.items()
+                                if name in current_images and now - stamp <= 60}
+            for name, stamp in sorted(self._image_seen.items())[:30]:
+                model = re.sub(r"\.(?:part|partial|incomplete)$", "", name, flags=re.IGNORECASE)
+                identity = hashlib.sha256((str(image_root) + "\0" + name).encode()).hexdigest()[:32]
+                observed.append({"id": identity, "source": "sdcpp",
+                                 "connection": "Stable Diffusion", "model": model,
+                                 "state": "recent" if now - stamp <= 15 else "quiet",
+                                 "progress": {}})
+        except OSError:
+            self._image_previous = {}
+            self._image_seen = {}
         if time.monotonic() - self._discovered > 30:
             self._store = _local_store()
             self._discovered = time.monotonic()

@@ -11,6 +11,7 @@ EventKind = Literal[
     "user_input.required", "user_input.resolved", "turn.completed",
     "turn.partial", "turn.failed", "turn.cancelled", "turn.interrupted",
     "queue.changed", "settings.changed", "stream.reset_required", "activity.changed",
+    "image.changed",
 ]
 
 

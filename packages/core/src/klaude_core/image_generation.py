@@ -175,6 +175,7 @@ def inspect(url: str, provider: str = "sdcpp", model: str = "") -> dict:
         "scheduler": scheduler,
         "cancel_queued": features.get("cancel_queued") is True,
         "cancel_generating": features.get("cancel_generating") is True,
+        "img2img": features.get("init_image") is True,
     }
     evidence["revision"] = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
     return evidence
@@ -207,6 +208,9 @@ def prepare(
     steps: int = 20,
     seed: int = -1,
     session: str = "",
+    source: dict | None = None,
+    strength: float = 0.35,
+    negative_prompt: str = "",
 ) -> dict:
     settings = read(cfg)
     if not settings["enabled"]:
@@ -232,6 +236,16 @@ def prepare(
         raise ValueError("Sampling steps must be 1–50")
     if type(seed) is not int or not -1 <= seed <= 2**32 - 1:
         raise ValueError("Seed must be -1 (random) or 0–4294967295")
+    extra: dict[str, Any] = {}
+    if negative_prompt:
+        extra["negative_prompt"] = text(negative_prompt, 2000)
+    if source is not None:
+        if settings.get("provider", "sdcpp") != "sdcpp" or not evidence.get("img2img"):
+            raise ValueError("This saved image service does not support image-to-image")
+        if type(strength) not in {int, float} or not 0 < strength <= 1:
+            raise ValueError("Image edit strength must be greater than zero and at most one")
+        source_pixels(cfg, source, session)
+        extra.update(source=source, strength=float(strength))
     return {
         "id": uuid.uuid4().hex,
         "settings": settings,
@@ -242,7 +256,35 @@ def prepare(
         "steps": steps,
         "seed": secrets.randbelow(2**32) if seed == -1 else seed,
         "session": text(session, 100, empty=True),
+        **extra,
     }
+
+
+def source_pixels(cfg: Any, source: dict, session: str) -> bytes:
+    """Read one exact, session-bound managed source; never accept a path or URL."""
+    if not isinstance(source, dict) or set(source) != {"id", "revision", "sha256"}:
+        raise ValueError("Choose an exact managed source image")
+    store = ArtifactStore(cfg.data_dir / "library")
+    item = store.get(source["id"])
+    if (not session or item["session"] != session or item["archived"]
+            or item["revision"] != source["revision"] or item["sha256"] != source["sha256"]
+            or item["size"] > IMAGE_LIMIT or item["mime"] not in {"image/png", "image/jpeg"}
+            or not item["width"] or not item["height"]
+            or item["width"] * item["height"] > 4_000_000):
+        raise ValueError("Source image changed, is unavailable or belongs to another conversation")
+    with store.database() as db:
+        row = db.execute("SELECT content,revision,sha256,archived FROM artifacts WHERE id=?",
+                         (source["id"],)).fetchone()
+        if (row is None or row["revision"] != source["revision"]
+                or row["sha256"] != source["sha256"] or row["archived"]):
+            raise ValueError("Source image changed")
+        data = bytes(row["content"])
+    if hashlib.sha256(data).hexdigest() != source["sha256"]:
+        raise ValueError("Source image checksum failed")
+    from .image_preparation import prepare_image
+
+    _, pixels = prepare_image(data, preserve_alpha=True)
+    return pixels
 
 
 def job_path(cfg: Any, identity: str) -> Path:
@@ -351,11 +393,28 @@ def cancel(cfg: Any, identity: str) -> dict:
     }
 
 
+def matching_evidence(observed: dict, reviewed: dict) -> bool:
+    """Keep existing text-to-image receipts valid across additive edit capability."""
+    if "img2img" not in reviewed and "img2img" in observed:
+        observed = {
+            key: value for key, value in observed.items() if key not in {"img2img", "revision"}
+        }
+        observed["revision"] = hashlib.sha256(
+            json.dumps(observed, sort_keys=True).encode()
+        ).hexdigest()
+    return observed == reviewed
+
+
 def reviewed_binding(cfg: Any, spec: dict) -> None:
     check = prepare(
-        cfg, spec["prompt"], **{k: spec[k] for k in ("width", "height", "steps", "seed", "session")}
+        cfg,
+        spec["prompt"],
+        **{k: spec[k] for k in ("width", "height", "steps", "seed", "session")},
+        **{k: spec[k] for k in ("source", "strength", "negative_prompt") if k in spec},
     )
-    if check["settings"] != spec["settings"] or check["evidence"] != spec["evidence"]:
+    if check["settings"] != spec["settings"] or not matching_evidence(
+        check["evidence"], spec["evidence"]
+    ):
         raise ValueError("Image settings or server capabilities changed; review again")
 
 
@@ -380,7 +439,12 @@ def store_output(cfg: Any, spec: dict, remote: str, result: dict) -> dict:
         or (width, height) != (spec["width"], spec["height"])
     ):
         raise ValueError("Generated PNG does not match the reviewed size")
-    if read(cfg) != spec["settings"] or inspect_settings(spec["settings"]) != spec["evidence"]:
+    from .image_preparation import prepare_image
+
+    prepare_image(data, preserve_alpha=True)
+    if read(cfg) != spec["settings"] or not matching_evidence(
+        inspect_settings(spec["settings"]), spec["evidence"]
+    ):
         raise ValueError("Image service changed during generation; output was not saved")
     with settings_lock(cfg.config_dir / "image-generation.json"):
         if read(cfg) != spec["settings"]:
@@ -534,15 +598,40 @@ def run(cfg: Any, spec: dict, progress=lambda _: None) -> dict:
                 "output_format": "png",
                 "embed_image_metadata": False,
                 "preview": "none",
+                **(
+                    {"negative_prompt": spec["negative_prompt"]}
+                    if spec.get("negative_prompt")
+                    else {}
+                ),
+                **(
+                    {
+                        "init_image": base64.b64encode(
+                            source_pixels(
+                                cfg,
+                                spec["source"],
+                                spec["session"],
+                            )
+                        ).decode(),
+                        "strength": spec["strength"],
+                    }
+                    if spec.get("source")
+                    else {}
+                ),
                 "hires": {"enabled": False},
                 "sample_params": {
                     # Native capabilities use "default" for automatic model-
                     # dependent selection, outside the explicit sampler catalog.
                     # Omit that field to retain the reviewed server default.
-                    **({"sample_method": spec["evidence"]["sampler"]}
-                       if spec["evidence"]["sampler"] != "default" else {}),
-                    **({"scheduler": spec["evidence"]["scheduler"]}
-                       if spec["evidence"]["scheduler"] != "default" else {}),
+                    **(
+                        {"sample_method": spec["evidence"]["sampler"]}
+                        if spec["evidence"]["sampler"] != "default"
+                        else {}
+                    ),
+                    **(
+                        {"scheduler": spec["evidence"]["scheduler"]}
+                        if spec["evidence"]["scheduler"] != "default"
+                        else {}
+                    ),
                     "sample_steps": spec["steps"],
                 },
             },
@@ -568,6 +657,8 @@ def run(cfg: Any, spec: dict, progress=lambda _: None) -> dict:
             if status == "completed":
                 break
             if status in {"failed", "cancelled"}:
+                record.update(status=status)
+                publish(cfg, record)
                 raise ValueError("Image server job " + status + "; no output saved")
             if status not in {"queued", "generating"}:
                 raise ValueError("Image server returned an invalid job state")

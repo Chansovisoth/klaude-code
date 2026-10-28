@@ -110,7 +110,7 @@ async def verify(host, root, state, *, legacy=False):
                 }
                 stage.remove(); return true;
             })()""")
-            await tab.click("#nav-models")
+            await tab.click("#nav-store")
             if await tab.js("Boolean(window.ModelStoreUI)"):
                 await tab.js("showView('settings', {section:'models'}); byId('models-configured').open=true")
             await tab.wait("byId('models-items').querySelectorAll('.models-model').length===20")
@@ -342,7 +342,7 @@ async def verify(host, root, state, *, legacy=False):
                 "getComputedStyle(byId('thinking-menu').querySelector('summary')).backgroundColor===getComputedStyle(byId('plan-toggle')).backgroundColor")
             await tab.click("#plan-toggle")
             await tab.wait("latest.plan_mode===false")
-            await tab.click("#nav-models")
+            await tab.click("#nav-store")
             if await tab.js("Boolean(window.ModelStoreUI)"):
                 await tab.js("showView('settings', {section:'models'}); byId('models-configured').open=true")
             await tab.wait("!byId('configured-models-refresh').disabled")
@@ -397,7 +397,7 @@ async def verify(host, root, state, *, legacy=False):
                           const b=row.querySelector('button').getBoundingClientRect();
                           return b.width>=44 && b.height>=44 && b.right<=r.right+1;
                         }),phoneNav:innerWidth>560 ||
-                          getComputedStyle(byId('nav-models')).display==='none'};
+                          getComputedStyle(byId('nav-store')).display==='none'};
                     })()""")
                     if not layout["fits"]:
                         print(await tab.js("""(() => {
@@ -413,7 +413,7 @@ async def verify(host, root, state, *, legacy=False):
                     assert layout["fits"] and layout["pairs"] and layout["phoneNav"], layout
                     geometry.append({"theme": theme, **layout})
                     if width in (390, 1440):
-                        await tab.js("Promise.all(byId('models-view').getAnimations().map("
+                        await tab.js("Promise.all(byId('store-view').getAnimations().map("
                                      "a=>a.finished.catch(()=>{})))")
                         capture = await tab.command("Page.captureScreenshot", {"format": "png"})
                         (output / f"{theme}-{width}-models.png").write_bytes(
@@ -445,16 +445,16 @@ async def verify(host, root, state, *, legacy=False):
             await tab.click("#nav-chat")
             await tab.click("#nav-more")
             await tab.wait("navigationMore.matches(':popover-open')")
-            await tab.js("navigationMore.querySelector('[data-app-view=models]').focus()")
+            await tab.js("navigationMore.querySelector('[data-app-view=store]').focus()")
             await asyncio.sleep(.1)
-            assert await tab.js("document.activeElement===navigationMore.querySelector('[data-app-view=models]')"), await tab.js("({active:document.activeElement.id,view:currentView,open:navigationMore.matches(':popover-open')})")
+            assert await tab.js("document.activeElement===navigationMore.querySelector('[data-app-view=store]')"), await tab.js("({active:document.activeElement.id,view:currentView,open:navigationMore.matches(':popover-open')})")
             for kind in ("keyDown", "keyUp"):
                 await tab.command("Input.dispatchKeyEvent", {
                     "type": kind, "key": "Enter", "code": "Enter",
                     "windowsVirtualKeyCode": 13,
                     **({"text": "\r"} if kind == "keyDown" else {}),
                 })
-            await tab.wait("currentView==='models' && !navigationMore.matches(':popover-open')")
+            await tab.wait("currentView==='store' && !navigationMore.matches(':popover-open')")
             await tab.wait("!byId('configured-models-refresh').disabled")
 
             await tab.js("showView('settings', {section:'models'}); byId('models-configured').open=true")

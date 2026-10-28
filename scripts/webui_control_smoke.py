@@ -159,17 +159,18 @@ async def verify_composer_controls(tab):
             state = await tab.js("""(()=>{
               const cancel=byId('cancel'),steer=byId('steer'),latest=byId('scroll-to-latest');
               const send=byId('send');
-              const nodes=[...messages.childNodes],scroll=messages.scrollTop,hidden=latest.hidden;
+              const nodes=[...messages.childNodes],scroll=chatScroller.scrollTop;
+              const hidden=latest.hidden;
               try {
                 const article=ChatMarkdown.create('assistant',
                   'A readable message.\\n\\n'.repeat(80)+'Last visible line.','composer-fixture');
-                messages.replaceChildren(article);messages.scrollTop=0;latest.hidden=false;
+                messages.replaceChildren(article);chatScroller.scrollTop=0;latest.hidden=false;
                 const rects=[latest,steer,cancel,send].map(button=>button.getBoundingClientRect());
                 const hits=[latest,steer,cancel,send].every((button,i)=>button.contains(
                   document.elementFromPoint(rects[i].left+22,rects[i].top+22)));
                 const composer=byId('composer').getBoundingClientRect();
                 const [jump,direction,stop,queue]=rects;
-                messages.scrollTop=messages.scrollHeight;
+                chatScroller.scrollTop=chatScroller.scrollHeight;
                 const last=article.querySelector('.message-body').getBoundingClientRect();
                 return {inComposer:byId('composer').contains(cancel) &&
                     byId('composer').contains(steer) &&
@@ -184,7 +185,7 @@ async def verify_composer_controls(tab):
                     steer.getAttribute('aria-label')==='Steer'};
               } finally {
                 latest.hidden=hidden;
-                messages.replaceChildren(...nodes);messages.scrollTop=scroll;
+                messages.replaceChildren(...nodes);chatScroller.scrollTop=scroll;
               }
             })()""")
             assert all(state.values()), (theme, width, height, state)

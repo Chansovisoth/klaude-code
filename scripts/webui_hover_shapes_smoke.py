@@ -81,7 +81,7 @@ async def verify(host, root):
             await tab.js('byId("login-password").value=' + json.dumps(host.accounts.initial_password()) + ';byId("account-login").requestSubmit()')
             await tab.wait('latest?.session_id&&document.documentElement.dataset.startup==="ready"')
             await tab.js('stream?.close();stream=null;clearInterval(pollTimer);window.savedShapeSnapshot=latest;applyAppearance(appearance={...appearance,reduced:false},true)')
-            await tab.js('showView("models")')
+            await tab.js('showView("store")')
             await tab.wait('byId("models-items").querySelectorAll(".models-model").length===20')
 
             async def sample(label):
@@ -106,13 +106,13 @@ async def verify(host, root):
                 selector = f'#models-connections [data-row-key="{provider}"]'
                 await tab.click(selector)
                 await tab.wait('byId("models-catalog-title").textContent===' + json.dumps({"openai": "OpenAI", "openrouter": "OpenRouter", "ollama": "Local Ollama"}[provider]))
-                await tab.wait('!byId("models-refresh").disabled && byId("models-items").querySelectorAll(".models-model").length===20')
+                await tab.wait('!byId("store-refresh").disabled && byId("models-items").querySelectorAll(".models-model").length===20')
                 selected = await exit_pointer(selector, provider + " selected")
                 assert await tab.js('document.querySelector(' + json.dumps(selector) + ').getAttribute("aria-pressed")==="true"')
                 report["providers"].append({"provider": provider, **selected})
 
             await tab.click('#models-connections [data-row-key="openai"]')
-            await tab.wait('byId("models-catalog-title").textContent==="OpenAI" && !byId("models-refresh").disabled && byId("models-items").querySelectorAll(".models-model").length===20')
+            await tab.wait('byId("models-catalog-title").textContent==="OpenAI" && !byId("store-refresh").disabled && byId("models-items").querySelectorAll(".models-model").length===20')
             for width in (320, 390, 850, 1440):
                 await tab.command("Emulation.setDeviceMetricsOverride", {"width": width, "height": 1000, "deviceScaleFactor": 1, "mobile": False})
                 for theme in ("light", "dark"):
@@ -120,14 +120,14 @@ async def verify(host, root):
                     await asyncio.sleep(.2)
                     geometry = await tab.js("""(()=>{const rows=[...byId('models-items').querySelectorAll('.models-model')];return {
                       shared:rows.length===20&&rows.every(r=>r.matches('.library-card.collection-row')&&r.querySelector('.collection-icon svg')),
-                      fits:document.documentElement.scrollWidth<=innerWidth&&byId('models-view').scrollWidth<=byId('models-view').clientWidth,
+                      fits:document.documentElement.scrollWidth<=innerWidth&&byId('store-view').scrollWidth<=byId('store-view').clientWidth,
                       contained:rows.every(r=>{const b=r.querySelector('button').getBoundingClientRect(),box=r.getBoundingClientRect();return b.right<=box.right&&b.left>=box.left&&b.width>=44&&b.height>=44}),
                       current:rows[0].dataset.current==='true'&&rows[0].querySelector('button').textContent==='Current',
                       metadata:rows.every(r=>r.querySelector('.models-model-ref')&&r.querySelector('.model-capabilities'))};})()""")
                     assert all(geometry.values()), (width, theme, geometry)
                     report["models_layouts"].append({"width": width, "theme": theme, **geometry})
                     if width in (320, 1440):
-                        await tab.js('byId("models-view").scrollTop=0')
+                        await tab.js('byId("store-view").scrollTop=0')
                         data = await tab.command("Page.captureScreenshot", {"format": "png"})
                         (OUT / f"models-{theme}-{width}.png").write_bytes(base64.b64decode(data["data"]))
 
@@ -175,7 +175,7 @@ async def verify(host, root):
                                 await tab.wait('byId("knowledge-items").querySelectorAll(".collection-row").length===3')
                     else:
                         if page == "models":
-                            await tab.wait('!byId("models-refresh").disabled&&byId("models-items").querySelectorAll(".models-model").length===20')
+                            await tab.wait('!byId("store-refresh").disabled&&byId("models-items").querySelectorAll(".models-model").length===20')
                         await audit(f"{page}/{width}")
                 for section in ("account", "theme", "agent", "models", "memory"):
                     await tab.js('showView("settings",{section:' + json.dumps(section) + '})')

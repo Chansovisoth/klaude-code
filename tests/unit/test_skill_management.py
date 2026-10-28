@@ -476,3 +476,29 @@ def test_import_without_files_reports_no_new_skill_file(tmp_path, monkeypatch):
     assert writer.submit(SkillAction("import"))
     assert writer.close(wait=True)
     assert events[0][1][2] == "No new skill file."
+
+
+def test_remote_skill_effect_gate_rejects_publication_after_download(tmp_path, monkeypatch):
+    from klaude_knowledge import skill_management
+
+    cfg = FakeConfig(tmp_path)
+    record = SkillRecord(
+        "skillsmp", "one", "demo", repository="org/repo",
+        source_url="https://github.com/org/repo/tree/main/skills/demo",
+        skill_path="skills/demo/SKILL.md", revision="a" * 40,
+    )
+    downloaded = []
+
+    def download(*_args, **_kwargs):
+        downloaded.append(True)
+        return {"SKILL.md": b"# Demo"}
+
+    def reject():
+        assert downloaded
+        raise ValueError("Effect gate closed")
+
+    monkeypatch.setattr(skill_management, "download_resolved_skill", download)
+    with pytest.raises(ValueError, match="Effect gate closed"):
+        import_remote_skill(cfg, record, before_effect=reject)
+    assert not (cfg.skills_dir / "demo").exists()
+    assert not list(cfg.skills_dir.glob(".remote-*"))

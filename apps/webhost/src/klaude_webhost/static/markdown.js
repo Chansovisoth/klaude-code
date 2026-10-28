@@ -1090,7 +1090,7 @@ window.ChatMarkdown = (() => {
     state.source = content;
     article.setAttribute("aria-busy", String(streaming));
     if (state.actions) {
-      for (const button of state.actions.children) button.disabled = streaming || !content.trim() || (button === state.speak && !state.speechSupported);
+      for (const button of state.actions.querySelectorAll('button')) button.disabled = streaming || !content.trim() || (button === state.speak && !state.speechSupported);
     }
     if (state.renderedSource !== content) {
       if (streaming) schedule(state);
@@ -1129,8 +1129,8 @@ window.ChatMarkdown = (() => {
         captions.push(`Avg ${stats.average_tokens_per_second.toLocaleString(undefined, {minimumFractionDigits:1, maximumFractionDigits:1})} tokens/s`);
       if (captions.length) {
         if (!state.worked) {
-          state.worked = node("p", undefined, "message-worked muted");
-          state.body.after(state.worked);
+          state.worked = node("span", undefined, "message-worked muted");
+          state.actions.append(state.worked);
         }
         state.worked.textContent = captions.join(' · ');
         state.worked.title = stats ? stats.timing === 'provider' ?
@@ -1144,7 +1144,6 @@ window.ChatMarkdown = (() => {
       const summary = node("summary", undefined, "previous-response-summary");
       summary.append(icon("chevron"), node("span", "Previous response"));
       disclosure.append(summary, state.body);
-      if (state.worked) disclosure.append(state.worked);
       if (state.actions) disclosure.append(state.actions);
       article.classList.add("previous-response-message");
       article.append(disclosure);
@@ -1152,7 +1151,6 @@ window.ChatMarkdown = (() => {
       if (wasFocused) summary.focus({ preventScroll: true });
     } else if (options.previousResponse === false && state.previousDetails) {
       article.append(state.body);
-      if (state.worked) article.append(state.worked);
       if (state.actions) article.append(state.actions);
       state.previousDetails.remove();
       state.previousDetails = null;

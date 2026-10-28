@@ -9,8 +9,7 @@ the bottom center of the image stage. Cancel sits at its top right. The image
 search button toggles the mode and exposes aria-pressed.
 
 Search immediately uses the whole image unless the user adjusts the selection.
-Drag to select, drag within a partial selection to move it, and drag a corner to
-resize. Corner hit regions are larger than their visible handles. Arrow keys
+Drag to select a rectangular crop; releasing submits it immediately. Arrow keys
 move a selection and Shift-arrows resize it; Home selects all and Enter searches.
 The focusable canvas describes those keys and announces selection bounds.
 Submitting Search exits crop mode and restores focus to the image-search toolbar
@@ -21,10 +20,11 @@ image navigation remain out of the crop surface's way.
 The overlay tracks image fit and stage resizing, including letterboxing. Its
 annotated display canvas is separate from the source canvas used for output,
 so dimming, outlines and handles never enter uploaded pixels. PNG preparation
-is debounced after adjustments, with stale callbacks rejected. No Library file
-or model setting changes. No external request occurs before Search.
+is debounced after keyboard adjustments, with stale callbacks rejected. Crop
+release encodes synchronously so the new tab is opened from the user gesture.
+No Library file or model setting changes.
 
-Only Search submits multipart encoded_image to the fixed Google Lens upload
+Search or crop release submits multipart encoded_image to the fixed Google Lens upload
 endpoint in a new tab with noopener/noreferrer and a generic filename. No local
 URL, page text or source filename accompanies it. Preview pixels are bounded to
 a 2048px side and prepared PNGs to 8 MiB. Cancellation, preview navigation,
@@ -57,3 +57,8 @@ results redirect. Google results remain an external service.
   nosniff and the narrow form-action policy. No physical-device testing or
   recognition-quality testing is claimed. Package smoke requires the script,
   icon and provenance files; no full package build was run for this change.
+
+
+Crop release and square borders updated 2026-10-28. The isolated Lens browser
+fixture passed at 320, 390, 768 and 1440px, checking automatic crop submission,
+exact pixels, full-image Search and keyboard controls; no private upload was sent.

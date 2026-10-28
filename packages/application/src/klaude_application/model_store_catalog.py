@@ -7,7 +7,7 @@ import json
 import re
 import threading
 import time
-from typing import Any
+from typing import Any, cast
 
 from klaude_core.settings_store import atomic_write_private
 from klaude_web.huggingface import hub_gguf_files, hub_repo_search
@@ -57,9 +57,11 @@ def _cache(cfg, key, read, refresh, *, metadata_version=None):
         return {**data, "stale": False}
 
 
-def catalog(cfg, query="", sort="downloads", *, refresh=False, page=1, limit=20):
+def catalog(cfg, query="", sort="downloads", *, refresh=False, page=1, limit=20,
+            runtime="ollama"):
     if (
-        not isinstance(query, str)
+        runtime not in {"ollama", "sdcpp"}
+        or not isinstance(query, str)
         or len(query) > 200
         or any(not c.isprintable() for c in query)
         or sort not in {"downloads", "lastModified"}
@@ -73,7 +75,7 @@ def catalog(cfg, query="", sort="downloads", *, refresh=False, page=1, limit=20)
     def read():
         cursor = ""
         if page > 1:
-            previous_key = (
+            previous_key = ("sdcpp:" if runtime == "sdcpp" else "") + (
                 "list:" + sort + ":" + query + ":limit:" + str(limit) + ":page:" + str(page - 1)
             )
             previous_digest = hashlib.sha256(
@@ -85,17 +87,19 @@ def catalog(cfg, query="", sort="downloads", *, refresh=False, page=1, limit=20)
             if not previous or not previous.get("next_cursor"):
                 raise ValueError("No further catalog page is available")
             cursor = previous["next_cursor"]
-        models, seen = [], set()
+        models: list[dict[str, Any]] = []
+        seen: set[str] = set()
         next_cursor = ""
         # Hub can return a short batch or entries outside our identity bounds.
         # Fill from its continuation without dropping valid models or guessing a
         # page-number offset. Retain a small, explicit metadata request budget.
         for _ in range(4):
             remaining = limit - len(models)
-            rows, next_cursor = hub_repo_search(
-                cfg.huggingface_base_url, "", "model", query, remaining, sort, filter_tag="gguf",
+            rows, next_cursor = cast(tuple[list[dict[str, Any]], str], hub_repo_search(
+                cfg.huggingface_base_url, "", "model", query, remaining, sort,
+                filter_tag="text-to-image" if runtime == "sdcpp" else "gguf",
                 cursor=cursor, with_cursor=True,
-            )
+            ))
             if len(rows) > remaining:
                 raise ValueError("Catalog returned more models than requested")
             for row in rows:
@@ -115,7 +119,9 @@ def catalog(cfg, query="", sort="downloads", *, refresh=False, page=1, limit=20)
                         "publisher": identity.split("/")[0],
                         "task": _text(row.get("pipeline_tag"), 80),
                         "summary": _text(row["summary"], 240)
-                        or "Community GGUF. Read its model card and choose an exact file.",
+                        or ("Image model weights. Check the model card and required components."
+                            if runtime == "sdcpp" else
+                            "Community GGUF. Read its model card and choose an exact file."),
                         "categories": [],
                         "capabilities": [],
                         "variants": [],
@@ -133,22 +139,31 @@ def catalog(cfg, query="", sort="downloads", *, refresh=False, page=1, limit=20)
         return {"models": models, "sort": sort, "query": query, "page": page,
                 "page_size": limit, "more": bool(next_cursor), "next_cursor": next_cursor}
 
-    key = "list:" + sort + ":" + query + ":limit:" + str(limit) + ":page:" + str(page)
-    return _cache(cfg, key, read, refresh, metadata_version=2)
+    key = ("sdcpp:" if runtime == "sdcpp" else "") + (
+        "list:" + sort + ":" + query + ":limit:" + str(limit) + ":page:" + str(page))
+    result = _cache(cfg, key, read, refresh, metadata_version=2)
+    return {**result, "source": "Hugging Face text-to-image"} if runtime == "sdcpp" else result
 
 
-def detail(cfg, identity, *, refresh=False):
+def detail(cfg, identity, *, refresh=False, runtime="ollama"):
+    if runtime not in {"ollama", "sdcpp"}:
+        raise ValueError("Choose a supported runtime")
     if not isinstance(identity, str) or not identity.startswith("hf:"):
         raise ValueError("Choose a Hugging Face model")
     repo = identity[3:]
 
     def read():
-        data = hub_gguf_files(cfg.huggingface_base_url, "", repo)
+        data = hub_gguf_files(cfg.huggingface_base_url, "", repo, image=True) if (
+            runtime == "sdcpp") else hub_gguf_files(cfg.huggingface_base_url, "", repo)
         return {
             "id": identity,
             "name": repo.split("/")[-1],
             "publisher": repo.split("/")[0],
-            "summary": "Community GGUF model. Capabilities and device fit are not verified.",
+            "summary": ("Image model weights. Check the model card for stable-diffusion.cpp "
+                        "compatibility and any required text encoders or VAE. Downloading "
+                        "does not load the model into the image server."
+                        if runtime == "sdcpp" else
+                        "Community GGUF model. Capabilities and device fit are not verified."),
             "source_url": "https://huggingface.co/" + repo,
             "license": data["license"],
             "task": _text(data.get("pipeline_tag"), 80),
@@ -168,4 +183,5 @@ def detail(cfg, identity, *, refresh=False):
             ],
         }
 
-    return _cache(cfg, "detail:" + repo, read, refresh)
+    return _cache(cfg, ("sdcpp:" if runtime == "sdcpp" else "") + "detail:" + repo,
+                  read, refresh)

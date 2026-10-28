@@ -88,8 +88,10 @@ async def verify(host, root, chrome, runtime):
             await tab.send("Read note.txt")
             await tab.wait('byId("agent-activity-label").textContent === "Needs input"')
             identity = await tab.js('latest.approvals[0].id')
+            await tab.js('window.activityReload=true')
             await tab.command("Page.reload")
-            await tab.wait('typeof latest !== "undefined" && latest?.approvals.length === 1')
+            await tab.wait('!window.activityReload && typeof latest !== "undefined" && '
+                           'latest?.approvals.length === 1')
             assert await tab.js('byId("agent-activity-label").textContent') == "Needs input"
             assert await tab.js('latest.approvals[0].id') == identity
             await tab.click("#approvals button")
@@ -116,8 +118,10 @@ async def verify(host, root, chrome, runtime):
             await tab.send("Fail")
             await tab.idle()
             await tab.wait('byId("agent-activity-label").textContent === "Error"')
+            await tab.js('window.activityReload=true')
             await tab.command("Page.reload")
-            await tab.wait('typeof latest !== "undefined" && latest?.activity.label === "Error"')
+            await tab.wait('!window.activityReload && typeof latest !== "undefined" && '
+                           'latest?.activity.label === "Error"')
             # Presentation fixtures cover labels for tools unavailable to browser
             # chat today. Execution classification is covered by Python tests.
             for width in (1440, 768, 390, 320):

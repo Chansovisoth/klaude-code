@@ -1488,15 +1488,16 @@ def test_contextual_storage_followup_ignores_unavailable_shell_hint_in_scoped_tu
         Tool("run_shell", "run shell", {}, lambda: pytest.fail("shell unavailable")),
     ]
     agent = make_agent(runtime, tools, selector=_select_tool_names)
-    # Force user-boundary compaction to drop the earlier exchange. The routing
-    # decision and required host preflight must survive independently.
-    agent.messages[0]["content"] = "system " + ("x" * 20_000)
+    # Apply pressure through prior dialogue, rather than an impossible fixed
+    # policy (which must now be rejected). Routing/preflight survive compaction.
+    agent.messages[0]["content"] = "system " + ("x" * 1_000)
     agent.messages.extend(
         [
             {"role": "user", "content": "How can I inspect disk usage safely?"},
             {
                 "role": "assistant",
-                "content": "Use read-only storage diagnostics such as df and du.",
+                "content": ("Use read-only storage diagnostics such as df and du."
+                            + " detail" * 3000),
             },
         ]
     )

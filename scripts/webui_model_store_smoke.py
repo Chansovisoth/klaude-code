@@ -198,7 +198,7 @@ async def verify(host, root):
                 "typeof latest !== 'undefined' && authenticated && latest && "
                 "document.documentElement.dataset.startup==='ready'"
             )
-            await tab.js("showView('models')")
+            await tab.js("showView('store')")
             await tab.wait("byId('store-content').querySelectorAll('.store-feature').length===3")
             await tab.wait("byId('store-endpoint').options.length===1")
             await tab.js(
@@ -229,7 +229,7 @@ async def verify(host, root):
                 for theme in ["light", "dark"]:
                     await tab.js(f"applyAppearance({{...appearance, theme:'{theme}'}})")
                     await tab.js(
-                        "Promise.all(byId('models-view').getAnimations({subtree:true})"
+                        "Promise.all(byId('store-view').getAnimations({subtree:true})"
                         ".filter(a=>a.effect.getTiming().iterations!==Infinity)"
                         ".map(a=>a.finished.catch(()=>{})))"
                     )
@@ -246,13 +246,13 @@ async def verify(host, root):
                     assert await tab.js("""(() => {
                       const tabs=[...byId('store-sections').children]
                         .map(b=>b.getBoundingClientRect());
-                      const view=byId('models-view').getBoundingClientRect();
+                      const view=byId('store-view').getBoundingClientRect();
                       const art=byId('store-content').querySelector('.store-feature')
                         .getBoundingClientRect();
                       return tabs.length===3 &&
                         Math.max(...tabs.map(b=>b.width))-Math.min(...tabs.map(b=>b.width))<1 &&
                         tabs[2].right<=view.right && art.top<innerHeight-120 &&
-                        !byId('models-view').querySelector('.models-current') &&
+                        !byId('store-view').querySelector('.models-current') &&
                         !byId('store-endpoint-label').getClientRects().length &&
                         byId('store-content').querySelectorAll('.store-cover-art').length===3;
                     })()"""), (width, theme, "V2 hierarchy")
@@ -295,7 +295,7 @@ async def verify(host, root):
             shot = await tab.command("Page.captureScreenshot", {"format": "png"})
             (captures / "downloads-empty.png").write_bytes(base64.b64decode(shot["data"]))
             await tab.click("[data-section=discover]")
-            await tab.click("#models-refresh")
+            await tab.click("#store-refresh")
             await tab.click("#store-filters-open")
             await tab.wait("!byId('store-download-open').disabled")
             await tab.click("#store-download-open")
@@ -313,7 +313,12 @@ async def verify(host, root):
             await tab.click(".store-row")
             await tab.wait("!byId('store-detail').hidden")
             assert await tab.js("location.search.includes('models-detail=qwen2.5-coder')")
-            await tab.click("#store-detail-back")
+            await tab.command("Input.dispatchKeyEvent", {
+                "type": "keyDown", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27,
+            })
+            await tab.command("Input.dispatchKeyEvent", {
+                "type": "keyUp", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27,
+            })
             await tab.wait("byId('store-detail').hidden")
             await tab.wait("document.activeElement.dataset.storeModel==='qwen2.5-coder'")
             await tab.js("history.forward()")
@@ -378,7 +383,7 @@ async def verify(host, root):
                 }
                 for i in range(140)
             )
-            await tab.click("#models-refresh")
+            await tab.click("#store-refresh")
             await tab.wait(
                 "!byId('store-installed-pages').hidden && "
                 "byId('store-installed-numbers').dataset.last==='8'"
@@ -427,10 +432,10 @@ async def verify(host, root):
                 "byId('store-query').value=''; "
                 "byId('store-query').dispatchEvent(new Event('input'))"
             )
-            await tab.click("#models-refresh")
+            await tab.click("#store-refresh")
             await tab.wait("byId('store-content').querySelectorAll('.store-row').length===1")
             Native.offline = True
-            await tab.click("#models-refresh")
+            await tab.click("#store-refresh")
             await tab.wait("byId('store-content').textContent.includes('Cached')")
             assert await tab.js("byId('store-content').textContent.includes('qwen3:4b')")
             Native.offline = False
@@ -483,10 +488,7 @@ async def verify(host, root):
                 ), width
                 result = await tab.command("Page.captureScreenshot", {"format": "png"})
                 (captures / f"studio-{width}.png").write_bytes(base64.b64decode(result["data"]))
-            await tab.js(
-                "byId('image-ratio').value='768,512';"
-                "byId('image-ratio').dispatchEvent(new Event('change'))"
-            )
+            await tab.js("byId('image-ratio-quick').querySelector('[value=\"3:2\"]').click()")
             assert await tab.js(
                 "byId('image-width').value==='768' && byId('image-height').value==='512'"
             )
@@ -506,7 +508,7 @@ async def verify(host, root):
             assert await tab.js("byId('domain-review-summary').textContent.includes('seed 42')")
             await tab.click("#domain-review-confirm")
             await tab.wait(
-                "byId('image-jobs').textContent.includes('complete') "
+                "byId('image-jobs').textContent.includes('Completed') "
                 "&& !BrowserManagement.hasPending()"
             )
             await tab.click("#image-add")
@@ -516,6 +518,7 @@ async def verify(host, root):
                 ".textContent==='Generate again').click()"
             )
             assert await tab.js("byId('image-seed').value==='42'")
+            await tab.js("byId('image-jobs').querySelector('details').open=true")
             await tab.click("#image-jobs button")
             await tab.wait("byId('artifact-detail').open")
             await tab.click("#artifact-close")

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from klaude_application import HeadlessApplication, open_local_session
 from klaude_application.browser_models import BrowserModels
+from klaude_application.browser_tool_routing import configure_browser_routing
 from klaude_application.browser_tools import BrowserTools
 from klaude_application.library_management import LibraryManagement
 from klaude_application.workspace_reads import WorkspaceReadService
@@ -24,6 +25,7 @@ from klaude_core.settings_store import read_settings
 from .accounts import AccountStore
 from .host import READ_ONLY_TOOLS, LocalWebHost
 from .hosting import WEBUI_PORT, ManagedControl
+from .system_control import SystemControl
 
 WEB_CHAT_FORMATTING = (
     "Browser replies support CommonMark Markdown, tables, strikethrough and task lists. "
@@ -50,6 +52,7 @@ def create_application(workdir: Path, *, session_id: str | None = None) -> Headl
                        if name in READ_ONLY_TOOLS}
         browser_tools = BrowserTools(cfg, memory)
         agent.tools.update({tool.name: tool for tool in browser_tools.tools()})
+        configure_browser_routing(agent)
         agent.skill_reader = browser_tools.skill_reader
         agent.browser_tools = browser_tools  # type: ignore[attr-defined]
         agent.browser_models = BrowserModels(cfg)  # type: ignore[attr-defined]
@@ -137,6 +140,8 @@ def main() -> None:
     except BaseException:
         asyncio.run(app.close())
         raise
+    system = SystemControl(host, load_config(), args.workspace.resolve(), managed=args.managed)
+    host.system_control = system
     control = None
     if args.managed:
         try:
@@ -186,6 +191,7 @@ def main() -> None:
         finally:
             if control is not None:
                 control.close()
+    system.finish()
 
 
 if __name__ == "__main__":
