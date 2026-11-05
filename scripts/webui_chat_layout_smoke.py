@@ -104,7 +104,7 @@ async def verify(host, root):
                 return chatLayoutFetch(input,options);
               };document.fonts.ready""")
             assert await tab.js(
-                'byId("model-control").closest(".chat-toolbar") && '
+                'byId("model-control").closest(".topbar") && '
                 'byId("composer").contains(byId("attach-file")) && '
                 'byId("composer").contains(byId("cancel")) && '
                 '!byId("composer").contains(byId("model-control"))'
@@ -149,8 +149,8 @@ async def verify(host, root):
                         .getBoundingClientRect().height;
                       return {bar:height('.topbar'),modelRow:height('.chat-toolbar'),
                         title:height('#mobile-chat-title')};})()""")
-                    assert header["bar"] == (56 if width <= 850 else 64), header
-                    assert header["modelRow"] == (0 if width <= 850 else 52), header
+                    assert header["bar"] == (56 if width <= 850 else 48), header
+                    assert header["modelRow"] == 0, header
                     assert (header["title"] > 0) == (width <= 850), header
                     for kind in ("empty", "conversation", "active", "active-draft"):
                         await state(kind)
@@ -275,6 +275,7 @@ async def verify(host, root):
                         await tab.wait('byId("mobile-chat-menu").matches(":popover-open")')
                         await tab.click('[data-mobile-chat-action="details"]')
                     else:
+                        await tab.js("setContextPanel(true)")
                         await tab.click("#chat-info-toggle")
                     await tab.wait(
                         'byId("chat-info-panel").matches(":popover-open") && '
@@ -292,6 +293,8 @@ async def verify(host, root):
                     await tab.wait('!byId("chat-info-panel").matches(":popover-open")')
                     focus = "mobile-chat-more" if width <= 850 else "chat-info-toggle"
                     assert await tab.js(f'document.activeElement===byId("{focus}")')
+                    if width > 850:
+                        await tab.js("setContextPanel(false, true)")
 
             for width in (320, 390):
                 await viewport(width, 844)
@@ -358,6 +361,7 @@ async def verify(host, root):
             assert await tab.js('byId("composer").scrollWidth<=byId("composer").clientWidth')
             await shot("context-panel-dark-1440")
             await tab.js("setContextPanel(false)")
+            await tab.js("setContextPanel(true)")
             await tab.click("#chat-info-toggle")
             await tab.wait('byId("chat-info-panel").matches(":popover-open")')
             await tab.click("#model-picker")

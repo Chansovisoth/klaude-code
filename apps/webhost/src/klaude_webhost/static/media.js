@@ -2798,7 +2798,7 @@ window.ModelStoreUI = (() => {
       const button = byId(`store-tab-${name}`), total = counts[name];
       let badge = button.querySelector('.tab-count');
       if (!Number.isSafeInteger(total)) { badge?.remove(); continue; }
-      if (!badge) { badge = domainText('span', '', 'tab-count'); button.prepend(badge); }
+      if (!badge) { badge = domainText('span', '', 'tab-count'); button.append(badge); }
       const text = total.toLocaleString();
       if (badge.textContent !== text) badge.textContent = text;
     }

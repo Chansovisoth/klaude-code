@@ -71,7 +71,8 @@ async def verify(host, root):
                         view:view.scrollWidth<=view.clientWidth+1,
                         nav:innerWidth<=700?byId('store-view-heading').hidden ||
                           byId('store-mobile-location').offsetHeight>=44:
-                          [...byId('store-kind-nav').children].every(n=>n.offsetHeight>=44)};
+                          [...byId('store-kind-nav').children].every(n=>n.offsetHeight>=(
+                            innerWidth>850&&!matchMedia('(any-pointer:coarse)').matches?36:44))};
                     })()"""
                 )
                 assert all(result.values()), (name, result)

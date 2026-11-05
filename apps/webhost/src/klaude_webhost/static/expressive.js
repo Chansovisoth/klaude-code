@@ -420,7 +420,10 @@ window.KlaudeExpressive = (() => {
         ['integrations', 'Integrations'], ['activity', 'Activity'], ['settings', 'Settings']];
       const available = pages.map(([page, label]) => ({ group: 'Navigate', label: `Open ${label}`, run: () => showView(page) }));
       available.push({ group: 'Chat', label: 'Switch model', run: () => { showView('chat'); window.MobileChatUI?.openModels(); } },
-        { group: 'Chat', label: 'Find a conversation', run: () => { toggleSessions(true); byId('session-search').focus(); } },
+        { group: 'Chat', label: 'Find a conversation', run: () => {
+          showView('chat');
+          if (currentView === 'chat') { toggleSessions(true); showSessionSearch(); }
+        } },
         { group: 'Chat', label: 'Toggle Context Panel', run: () => byId('inspector-toggle').click() },
         { group: 'Help', label: 'Show keyboard shortcuts', run: () => open('shortcuts') });
       if (!byId('new-session').disabled) available.push({ group: 'Chat', label: 'New conversation', run: () => byId('new-session').click() });

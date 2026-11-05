@@ -128,7 +128,11 @@ async def verify(host, root, chrome):
                 await asyncio.sleep(0.08)
 
             async def key(side, value, **fields):
-                await tab.js(f'byId("chat-resize-{side}").focus()')
+                focused = await tab.js(f'''(()=>{{const e=byId("chat-resize-{side}");e.focus();
+                  return {{focus:document.activeElement.id,tabindex:e.tabIndex,
+                    inert:Boolean(e.closest('[inert]')),display:getComputedStyle(e).display,
+                    visibility:getComputedStyle(e).visibility,rect:e.getBoundingClientRect().toJSON()}};}})()''')
+                assert focused['focus'] == f'chat-resize-{side}', focused
                 await tab.command(
                     "Input.dispatchKeyEvent", {"type": "keyDown", "key": value, **fields}
                 )
@@ -138,11 +142,12 @@ async def verify(host, root, chrome):
             await tab.command("Page.navigate", {"url": host.origin})
             await tab.wait('typeof byId!=="undefined" && !byId("local-access").hidden')
             await tab.js(
-                'byId("login-password").value='
+                'byId("login-username").value="admin";byId("login-password").value='
                 + json.dumps(host.accounts.initial_password())
                 + ';byId("account-login").requestSubmit()'
             )
-            await tab.wait("window.ChatLayoutUI && latest?.session_id && !layout.inert")
+            await tab.wait("window.ChatLayoutUI && latest?.session_id && !layout.inert && "
+                           "document.documentElement.dataset.startup==='ready'")
             await tab.js(
                 'toggleSessions(true);setContextPanel(true);prompt.value="Keep this draft"'
             )
@@ -189,13 +194,14 @@ async def verify(host, root, chrome):
             restored = await geometry()
             expected = json.loads(stored)
             assert abs(restored["left"]["width"] - expected["left"]) <= 1, restored
-            assert abs(restored["right"]["width"] + 12 - expected["right"]) <= 1, restored
+            assert abs(restored["right"]["width"] - expected["right"]) <= 1, restored
 
             await tab.js("window.beforeResizeReload=true")
             await tab.command("Page.reload")
             await tab.wait(
                 "!window.beforeResizeReload && window.ChatLayoutUI && "
-                "latest?.session_id && !layout.inert"
+                "latest?.session_id && !layout.inert && "
+                "document.documentElement.dataset.startup==='ready'"
             )
             await tab.js("toggleSessions(true);setContextPanel(true)")
             await asyncio.sleep(0.1)
@@ -213,18 +219,58 @@ async def verify(host, root, chrome):
             await tab.js("toggleSessions(true);setContextPanel(true)")
             await tab.wait('!byId("chat-resize-left").hidden && !byId("chat-resize-right").hidden')
             await key("left", "Enter")
-            assert abs((await geometry())["left"]["width"] - 260) <= 1
+            assert abs((await geometry())["left"]["width"] - 288) <= 1, await geometry()
             await key("right", "Enter")
-            assert abs((await geometry())["right"]["width"] - 328) <= 1
+            assert abs((await geometry())["right"]["width"] - 340) <= 1
 
             await tab.js(
                 "window.resizeSetItem=Storage.prototype.setItem;"
                 'Storage.prototype.setItem=()=>{throw new Error("Fixture storage blocked")};'
             )
             await key("left", "ArrowRight")
-            assert abs((await geometry())["left"]["width"] - 270) <= 1
+            assert abs((await geometry())["left"]["width"] - 298) <= 1
             await tab.js("Storage.prototype.setItem=resizeSetItem")
             await key("left", "Enter")
+
+            # Settings and Store expose independently draggable sidebar edges.
+            await viewport(1920)
+            await tab.js("showView('settings');toggleSessions(true);setContextPanel(false)")
+            await tab.wait('!byId("chat-resize-left").hidden && !byId("chat-resize-workspace").hidden && byId("chat-resize-left").parentElement.id==="session-sidebar"')
+            await asyncio.sleep(0.1)
+            async def sidebars():
+                return await tab.js("""(()=>{const r=id=>byId(id).getBoundingClientRect().width;
+                  return {left:r('session-sidebar'), workspace:r('workspace-sidebar')};})()""")
+            alignment = await tab.js("""(()=>{const edge=id=>{const r=byId(id).getBoundingClientRect();return r.left+r.width/2;};
+              return {session:Math.abs(edge('chat-resize-left')-byId('session-sidebar').getBoundingClientRect().right),
+                workspace:Math.abs(edge('chat-resize-workspace')-byId('workspace-sidebar').getBoundingClientRect().right)};})()""")
+            assert alignment['session'] <= 1 and alignment['workspace'] <= 1, alignment
+            before = await sidebars()
+            await drag('left', 40)
+            left_changed = await sidebars()
+            assert abs(left_changed['left'] - before['left'] - 40) <= 1 and abs(left_changed['workspace'] - before['workspace']) <= 1, left_changed
+            await drag('workspace', 35)
+            workspace_changed = await sidebars()
+            assert abs(workspace_changed['workspace'] - left_changed['workspace'] - 35) <= 1 and abs(workspace_changed['left'] - left_changed['left']) <= 1, workspace_changed
+            await tab.js("window.beforeSidebarReload=true")
+            await tab.command("Page.reload")
+            await tab.wait("!window.beforeSidebarReload && window.ChatLayoutUI && latest?.session_id && !layout.inert && document.documentElement.dataset.startup==='ready'")
+            await tab.js("showView('settings');toggleSessions(true);setContextPanel(false)")
+            await tab.wait('!byId("chat-resize-workspace").hidden')
+            await asyncio.sleep(0.15)
+            after_reload = await sidebars()
+            assert abs(after_reload['left'] - workspace_changed['left']) <= 1 and abs(after_reload['workspace'] - workspace_changed['workspace']) <= 1, after_reload
+            await tab.js("showView('store')")
+            await asyncio.sleep(0.15)
+            assert abs((await sidebars())['workspace'] - workspace_changed['workspace']) <= 1
+            await tab.js("toggleSessions(false)")
+            await tab.wait('byId("chat-resize-left").hidden && !byId("chat-resize-workspace").hidden')
+            await key('workspace', 'ArrowRight')
+            assert abs((await sidebars())['workspace'] - workspace_changed['workspace'] - 10) <= 1
+            await key('workspace', 'Enter')
+            assert abs((await sidebars())['workspace'] - 216) <= 1
+            await tab.js("showView('chat');toggleSessions(true);setContextPanel(true)")
+            await tab.wait('byId("chat-resize-workspace").hidden && byId("chat-resize-left").parentElement.classList.contains("chat-frame")')
+            await key('left', 'Enter')
 
             layouts = []
             for theme in ("light", "dark"):
@@ -246,11 +292,20 @@ async def verify(host, root, chrome):
                     state = await geometry()
                     assert state["fits"] and state["leftHidden"] is (width <= 850), state
                     assert state["rightHidden"] is (width <= 1240), state
-                    borders = await tab.js("""['inspector']
-                      .concat(['cp-task','cp-header','cp-library-controls','cp-pagination'].map(x=>'.'+x))
-                      .map(x=>{const node=x.startsWith('.')?document.querySelector(x):byId(x);
-                        const s=getComputedStyle(node);return [s.borderLeftWidth,s.borderRightWidth,
-                          s.borderTopWidth,s.borderBottomWidth].every(v=>parseFloat(v)===0)}).every(Boolean)""")
+                    borders = await tab.js("""(()=>{
+                      const panel=getComputedStyle(byId('inspector'));
+                      const panelBoundary=innerWidth>1240
+                        ? parseFloat(panel.borderLeftWidth)===1
+                        : parseFloat(panel.borderLeftWidth)===0;
+                      const task=getComputedStyle(document.querySelector('.cp-task'));
+                      const taskBorder=[task.borderLeftWidth,task.borderRightWidth,
+                        task.borderTopWidth,task.borderBottomWidth]
+                        .every(v=>parseFloat(v)===1);
+                      const interiors=['cp-header','cp-library-controls','cp-pagination']
+                        .map(x=>getComputedStyle(document.querySelector('.'+x)))
+                        .every(s=>[s.borderLeftWidth,s.borderRightWidth,s.borderTopWidth,
+                          s.borderBottomWidth].every(v=>parseFloat(v)===0));
+                      return panelBoundary&&taskBorder&&interiors;})()""")
                     assert borders, (width, theme)
                     if width > 1240:
                         assert (

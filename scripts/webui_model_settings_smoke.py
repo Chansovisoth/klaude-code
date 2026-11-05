@@ -75,6 +75,16 @@ async def verify(host, root):
                 "ment.documentElement.dataset.startup==='ready'"
             )
             await tab.js("showView('settings', {section:'models'})")
+            # Grouped hover rows share the inner curve of their 14px container.
+            for selector, corners in (("[data-model-screen=connections]", ["13px", "13px", "0px", "0px"]),
+                                      ("[data-model-screen=catalog]", ["0px", "0px", "13px", "13px"]),
+                                      ("[data-model-screen=image]", ["13px"] * 4)):
+                point = await tab.js("""(()=>{const r=document.querySelector(""" + json.dumps(selector) + """).getBoundingClientRect();
+                  return {x:r.left+r.width/2,y:r.top+r.height/2};})()""")
+                await tab.command("Input.dispatchMouseEvent", {"type":"mouseMoved", **point})
+                actual = await tab.js("""(()=>{const s=getComputedStyle(document.querySelector(""" + json.dumps(selector) + """));
+                  return [s.borderTopLeftRadius,s.borderTopRightRadius,s.borderBottomRightRadius,s.borderBottomLeftRadius];})()""")
+                assert actual == corners, (selector, actual)
             await tab.click('#settings-search-open')
             await tab.wait("byId('settings-search-dialog').open && "
                            "!byId('settings-search-status').textContent.includes('Loading')")

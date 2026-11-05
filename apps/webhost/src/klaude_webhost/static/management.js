@@ -370,6 +370,47 @@ window.BrowserManagement = (() => {
   const connectionDialog = byId("connection-detail");
   let selectedSession = null;
   const sessionDialog = byId("session-management");
+  const sessionMenu = domainText('div', '', 'message-menu sidebar-action-menu');
+  sessionMenu.id = 'session-actions-menu';
+  sessionMenu.setAttribute('popover', 'auto');
+  sessionMenu.setAttribute('aria-label', 'Conversation actions');
+  document.body.append(sessionMenu);
+  let sessionMenuTrigger;
+  const hideSessionMenu = () => {
+    if (sessionMenu.matches(':popover-open')) sessionMenu.hidePopover();
+  };
+  const renameAction = domainButton('Rename', () => {
+    hideSessionMenu(); sessionDialog.showModal(); byId('session-name').focus();
+  }, 'message-action');
+  renameAction.prepend(libraryIcon('edit'));
+  sessionMenu.append(renameAction);
+  const downloadAction = domainText('a', '', 'message-action');
+  downloadAction.append(libraryIcon('download'), domainText('span', 'Download conversation'));
+  downloadAction.setAttribute('download', '');
+  downloadAction.addEventListener('click', hideSessionMenu);
+  sessionMenu.append(domainText('div', '', 'message-menu-divider'), downloadAction,
+    domainText('div', '', 'message-menu-divider'));
+  for (const [action, label, icon] of [['archive', 'Archive', 'archive'], ['delete', 'Delete', 'trash']]) {
+    const control = domainButton(label, () => {
+      hideSessionMenu(); byId(`session-${action}`).click();
+    }, 'message-action' + (action === 'delete' ? ' destructive' : ''));
+    control.dataset.sessionAction = action;
+    control.prepend(libraryIcon(icon)); sessionMenu.append(control);
+  }
+  sessionMenu.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      event.preventDefault(); event.stopPropagation(); hideSessionMenu(); sessionMenuTrigger?.focus();
+    }
+  });
+  sessionMenu.addEventListener('toggle', () => {
+    sessionMenuTrigger?.setAttribute('aria-expanded', String(sessionMenu.matches(':popover-open')));
+  });
+  for (const name of ['klaude-auth-reset', 'klaude-chat-session-changed', 'klaude-view'])
+    document.addEventListener(name, hideSessionMenu);
+  window.addEventListener('resize', hideSessionMenu);
+  document.addEventListener('klaude-auth-reset', () => {
+    downloadAction.removeAttribute('href'); sessionMenuTrigger = null;
+  });
   const restartHint = "Restart the Web UI host and reload this page to use these controls.";
   const generationDialog = byId("image-generate-panel");
   const generationAdd = byId("image-add");
@@ -1338,6 +1379,9 @@ window.BrowserManagement = (() => {
     if (!latest?.profile_management) return button;
     const wrapper = domainText("div", "", "session-row");
     const manage = domainButton("", () => {
+      if (sessionMenuTrigger === manage && sessionMenu.matches(':popover-open')) {
+        hideSessionMenu(); return;
+      }
       selectedSession = item;
       byId("session-management-status").textContent = "";
       byId("session-name").value = item.title || "";
@@ -1346,13 +1390,27 @@ window.BrowserManagement = (() => {
         domainText("span", item.archived ? "Restore" : "Archive"));
       renderSessionControls();
       byId("session-delete").hidden = false;
-      sessionDialog.showModal();
-      byId("session-management-close").focus();
+      hideSessionMenu(); sessionMenuTrigger = manage;
+      downloadAction.href = byId('session-export').href;
+      renameAction.disabled = byId('session-name').disabled;
+      for (const action of ['archive', 'delete']) {
+        const control = sessionMenu.querySelector(`[data-session-action="${action}"]`);
+        control.disabled = byId(`session-${action}`).disabled;
+        if (action === 'archive') control.replaceChildren(libraryIcon('archive'),
+          domainText('span', item.archived ? 'Restore' : 'Archive'));
+      }
+      sessionMenu.showPopover();
+      const rect = manage.getBoundingClientRect(), menu = sessionMenu.getBoundingClientRect();
+      sessionMenu.style.left = `${Math.max(8, Math.min(innerWidth-menu.width-8, rect.left))}px`;
+      sessionMenu.style.top = `${Math.max(8, Math.min(innerHeight-menu.height-8, rect.bottom+4))}px`;
     });
     button.disabled ||= item.archived;
     button.disabled ||= busy(`session:${item.session_id}`);
     manage.append(libraryIcon("more"));
     manage.setAttribute("aria-label", `Manage conversation: ${item.title || item.session_id}`);
+    manage.setAttribute('aria-haspopup', 'menu');
+    manage.setAttribute('aria-controls', 'session-actions-menu');
+    manage.setAttribute('aria-expanded', 'false');
     manage.disabled = busy(`session:${item.session_id}`);
     wrapper.append(button, manage);
     return wrapper;

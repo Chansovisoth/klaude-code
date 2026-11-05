@@ -1483,7 +1483,62 @@ window.KlaudeExpressive = (() => {
   function setup() {
     for (const element of document.querySelectorAll('[data-material-shape]')) element.append(shape(element.dataset.materialShape));
     const emblem = document.querySelector('.welcome-emblem');
-    if (emblem) { const backing = shape('cookie', 90); backing.classList.add('welcome-shape'); emblem.prepend(backing); }
+    if (emblem) {
+      const backing = shape('cookie', 90);
+      backing.classList.add('welcome-shape'); emblem.prepend(backing);
+      emblem.addEventListener('pointerdown', event => {
+        if (!event.isPrimary || event.button !== 0 || reduced()) return;
+        const animation = backing.getAnimations().find(item => item.effect?.getTiming().duration > 0);
+        if (!animation) return;
+        event.preventDefault();
+        const duration = Number(animation.effect.getTiming().duration);
+        const current = Number(animation.currentTime) || 0;
+        const phase = ((current % duration) + duration) % duration;
+        const baseTime = duration * 1000 + phase;
+        animation.pause(); animation.currentTime = baseTime;
+        const rect = emblem.getBoundingClientRect();
+        const pointerAngle = Math.atan2(event.clientY - rect.top - rect.height / 2,
+          event.clientX - rect.left - rect.width / 2) * 180 / Math.PI;
+        emblem.setPointerCapture(event.pointerId);
+        emblem.classList.add('is-spinning');
+        emblem._welcomeSpin = { animation, duration, baseTime, pointerAngle, pointerId: event.pointerId, totalAngle: 0,
+          lastTime: event.timeStamp, velocity: 0 };
+      });
+      emblem.addEventListener('pointermove', event => {
+        const drag = emblem._welcomeSpin;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        const rect = emblem.getBoundingClientRect();
+        const angle = Math.atan2(event.clientY - rect.top - rect.height / 2,
+          event.clientX - rect.left - rect.width / 2) * 180 / Math.PI;
+        const delta = ((angle - drag.pointerAngle + 540) % 360) - 180;
+        const elapsed = Math.max(1, event.timeStamp - drag.lastTime);
+        drag.totalAngle += delta; drag.velocity = delta * 1000 / elapsed;
+        drag.animation.currentTime = drag.baseTime + drag.totalAngle * drag.duration / 360;
+        drag.pointerAngle = angle; drag.lastTime = event.timeStamp;
+      });
+      const releaseSpin = event => {
+        const drag = emblem._welcomeSpin;
+        if (!drag || event.pointerId !== drag.pointerId) return;
+        emblem._welcomeSpin = null; emblem.classList.remove('is-spinning');
+        const idleSpeed = 360 / drag.duration * 1000;
+        const initialRate = Math.max(-120, Math.min(120, drag.velocity / idleSpeed));
+        drag.animation.playbackRate = Math.abs(initialRate) < 1.25 ? 1 : initialRate;
+        drag.animation.play();
+        const startRate = drag.animation.playbackRate, started = performance.now();
+        const coastDuration = Math.max(1400, Math.min(5000, 1100 + Math.abs(startRate) * 34));
+        const settle = now => {
+          if (reduced() || drag.animation.playState !== 'running') { drag.animation.playbackRate = 1; return; }
+          const progress = Math.min(1, (now - started) / coastDuration);
+          drag.animation.playbackRate = startRate + (1 - startRate) * progress;
+          if (progress < 1) requestAnimationFrame(settle);
+          else drag.animation.playbackRate = 1;
+        };
+        requestAnimationFrame(settle);
+      };
+      emblem.addEventListener('pointerup', releaseSpin);
+      emblem.addEventListener('pointercancel', releaseSpin);
+      emblem.addEventListener('lostpointercapture', releaseSpin);
+    }
     themePreview(appearance, true);
     const loadingVisibility = new MutationObserver(() => syncLoadingPreview());
     for (const element of [byId('settings-view'), byId('theme-settings'), document.querySelector('.layout')])
@@ -1711,7 +1766,10 @@ window.KlaudeExpressive = (() => {
         ['integrations', 'Integrations'], ['activity', 'Activity'], ['settings', 'Settings']];
       const available = pages.map(([page, label]) => ({ group: 'Navigate', label: `Open ${label}`, run: () => showView(page) }));
       available.push({ group: 'Chat', label: 'Switch model', run: () => { showView('chat'); window.MobileChatUI?.openModels(); } },
-        { group: 'Chat', label: 'Find a conversation', run: () => { toggleSessions(true); byId('session-search').focus(); } },
+        { group: 'Chat', label: 'Find a conversation', run: () => {
+          showView('chat');
+          if (currentView === 'chat') { toggleSessions(true); showSessionSearch(); }
+        } },
         { group: 'Chat', label: 'Toggle Context Panel', run: () => byId('inspector-toggle').click() },
         { group: 'Help', label: 'Show keyboard shortcuts', run: () => open('shortcuts') });
       if (!byId('new-session').disabled) available.push({ group: 'Chat', label: 'New conversation', run: () => byId('new-session').click() });
@@ -2858,6 +2916,112 @@ window.KlaudeLockScreen = (() => {
 const byId = (id) => document.getElementById(id);
 const messages = byId("messages");
 const chatScroller = messages.closest(".chat-content");
+const chatTimeline = document.createElement("nav");
+chatTimeline.className = "chat-timeline";
+chatTimeline.setAttribute("aria-label", "Conversation timeline");
+const chatTimelinePreview = document.createElement("div");
+chatTimelinePreview.className = "chat-timeline-preview";
+chatTimelinePreview.setAttribute("aria-hidden", "true");
+chatTimelinePreview.hidden = true;
+chatTimelinePreview.innerHTML = '<strong></strong><span></span>';
+chatTimeline.append(chatTimelinePreview);
+document.querySelector("#chat-view").append(chatTimeline);
+let chatTimelineFrame = 0;
+let chatTimelineTurns = [];
+function renderChatTimeline() {
+  const turns = [...messages.querySelectorAll(":scope > .message.user")];
+  const rebuild = turns.length !== chatTimelineTurns.length || turns.some((turn, index) => turn !== chatTimelineTurns[index]);
+  if (rebuild) {
+    chatTimeline.querySelectorAll(".chat-timeline-tick").forEach(tick => tick.remove());
+    chatTimelineTurns = turns;
+    chatTimelinePreview.hidden = true;
+  }
+  const scrollerRect = chatScroller.getBoundingClientRect();
+  const viewportStart = chatScroller.scrollTop;
+  const viewportEnd = viewportStart + chatScroller.clientHeight;
+  const starts = turns.map(message => message.getBoundingClientRect().top - scrollerRect.top + viewportStart);
+  const markerGap = 10;
+  const markerStart = Math.max(12, (chatScroller.clientHeight - (turns.length - 1) * markerGap) / 2);
+  for (const [index, message] of turns.entries()) {
+    const tick = rebuild ? document.createElement("button") : chatTimeline.querySelectorAll(".chat-timeline-tick")[index];
+    tick.type = "button";
+    tick.className = "chat-timeline-tick";
+    tick.style.top = `${markerStart + index * markerGap}px`;
+    const turnEnd = starts[index + 1] ?? chatScroller.scrollHeight;
+    const visible = starts[index] < viewportEnd && turnEnd > viewportStart;
+    tick.classList.toggle("is-visible", visible);
+    tick.setAttribute("aria-current", visible ? "true" : "false");
+    const prompt = message.querySelector(".message-prompt, .markdown-body, pre")?.textContent?.trim() || message.textContent.trim();
+    const excerpt = prompt.replace(/\s+/g, " ").slice(0, 180);
+    const label = `Turn ${index + 1} of ${turns.length}`;
+    tick.setAttribute("aria-label", `Jump to ${label}: ${excerpt}`);
+    if (!rebuild) continue;
+    const showPreview = () => {
+      tick.classList.add("is-hovered");
+      const ticks = [...chatTimeline.querySelectorAll(".chat-timeline-tick")];
+      ticks.forEach((item, position) => {
+        const distance = Math.abs(position - index);
+        item.style.setProperty("--timeline-tick-width", `${7 + Math.max(0, 18 * (1 - (distance / 4) ** 2))}px`);
+      });
+      const title = message.querySelector(".message-prompt, .message-body, pre")?.textContent?.trim() || label;
+      let next = message.nextElementSibling;
+      let reply = "";
+      while (next && !next.classList.contains("user")) {
+        if (next.classList.contains("assistant")) {
+          reply = next.querySelector(".message-body, pre")?.textContent?.trim() || "";
+          if (reply) break;
+        }
+        next = next.nextElementSibling;
+      }
+      chatTimelinePreview.querySelector("strong").textContent = title.replace(/\s+/g, " ");
+      chatTimelinePreview.querySelector("span").textContent = reply.replace(/\s+/g, " ");
+      chatTimelinePreview.querySelector("span").hidden = !reply;
+      chatTimelinePreview.style.top = `clamp(60px, ${tick.style.top}, calc(100% - 60px))`;
+      chatTimelinePreview.hidden = false;
+    };
+    const hidePreview = () => {
+      tick.classList.remove("is-hovered");
+      chatTimelinePreview.hidden = true;
+      chatTimeline.querySelectorAll(".chat-timeline-tick").forEach(item => item.style.removeProperty("--timeline-tick-width"));
+    };
+    tick.showTimelinePreview = showPreview;
+    tick.hideTimelinePreview = hidePreview;
+    tick.addEventListener("focus", showPreview);
+    tick.addEventListener("blur", hidePreview);
+    tick.addEventListener("click", () => message.scrollIntoView({ block: "start", behavior: "instant" }));
+    chatTimeline.insertBefore(tick, chatTimelinePreview);
+  }
+  chatTimeline.hidden = currentView !== "chat" || turns.length < 2 || chatScroller.clientHeight === 0;
+}
+function scheduleChatTimeline() {
+  if (chatTimelineFrame) return;
+  chatTimelineFrame = requestAnimationFrame(() => { chatTimelineFrame = 0; renderChatTimeline(); });
+}
+chatScroller.addEventListener("scroll", scheduleChatTimeline, { passive: true });
+chatTimeline.addEventListener("pointermove", event => {
+  if (event.pointerType === "touch") return;
+  const ticks = [...chatTimeline.querySelectorAll(".chat-timeline-tick")];
+  if (!ticks.length) return;
+  const nearest = ticks.reduce((best, tick) => {
+    const rect = tick.getBoundingClientRect();
+    const distance = Math.abs(event.clientY - (rect.top + rect.height / 2));
+    return !best || distance < best.distance ? { tick, distance } : best;
+  }, null);
+  if (chatTimeline._hoveredTick === nearest.tick) return;
+  chatTimeline._hoveredTick?.hideTimelinePreview();
+  chatTimeline._hoveredTick = nearest.tick;
+  nearest.tick.showTimelinePreview();
+});
+chatTimeline.addEventListener("pointerleave", () => {
+  chatTimeline._hoveredTick?.hideTimelinePreview();
+  chatTimeline._hoveredTick = null;
+});
+chatTimeline.addEventListener("click", event => {
+  if (event.target === chatTimeline && chatTimeline._hoveredTick) chatTimeline._hoveredTick.click();
+});
+new MutationObserver(scheduleChatTimeline).observe(messages, { childList: true, subtree: true, characterData: true });
+new ResizeObserver(scheduleChatTimeline).observe(messages);
+document.addEventListener("klaude-view", scheduleChatTimeline);
 const chatResponseStatus = byId("chat-response-status");
 const notice = byId("notice");
 const prompt = byId("prompt");
@@ -2893,6 +3057,7 @@ const viewNames = ["chat", "workspace", "library", "store", "integrations", "act
 let runtimeChoiceInFlight = false;
 let currentView = "chat";
 let sessions = [];
+let sidebarChatTitle = { sessionId: null, title: 'New chat' };
 let approvalSignature = "";
 let questionSignature = "";
 const layout = document.querySelector(".layout");
@@ -2997,7 +3162,11 @@ document.addEventListener("klaude-auth-reset", () => {
   sessionsQuery = "";
   clearTimeout(sessionsSearchTimer);
   byId("session-search").value = "";
+  byId('session-search-field').hidden = true;
+  byId('session-search-toggle').setAttribute('aria-expanded', 'false');
+  byId('session-list-label').textContent = 'Chats';
   sessions = [];
+  sidebarChatTitle = { sessionId: null, title: 'New chat' };
   localModels = [];
   byId("session-list").replaceChildren();
   byId("model-status").textContent = "";
@@ -3023,10 +3192,22 @@ function nearLatestMessage() {
 
 let chatScrollFrame = 0;
 let latestScrollPending = false;
+let pendingSessionScroll = "";
 function interruptLatestScroll() {
   if (!latestScrollPending) return;
   latestScrollPending = false;
   chatScroller.scrollTo({ top: chatScroller.scrollTop, behavior: "instant" });
+}
+function scrollOpenedSessionToLatest() {
+  const sessionId = pendingSessionScroll;
+  if (!sessionId || latest?.session_id !== sessionId || currentView !== "chat" || !chatScroller.clientHeight) return;
+  pendingSessionScroll = "";
+  const scroll = () => {
+    if (latest?.session_id === sessionId && currentView === "chat")
+      chatScroller.scrollTo({ top: chatScroller.scrollHeight, behavior: "instant" });
+  };
+  scroll();
+  requestAnimationFrame(scroll);
 }
 function renderChatScrollIndicator(working) {
   const button = byId("scroll-to-latest");
@@ -3094,7 +3275,11 @@ const chatScrollContent = new MutationObserver((changes) => {
 });
 chatScrollContent.observe(messages, { childList: true, subtree: true, characterData: true,
   attributes: true, attributeFilter: ["hidden"] });
-document.addEventListener("klaude-view", () => { interruptLatestScroll(); scheduleChatScrollControl(); });
+document.addEventListener("klaude-view", () => {
+  interruptLatestScroll();
+  if (currentView === "chat") requestAnimationFrame(scrollOpenedSessionToLatest);
+  scheduleChatScrollControl();
+});
 document.addEventListener("klaude-chat-session-changed", interruptLatestScroll);
 byId("scroll-to-latest").addEventListener("click", () => {
   const reduced = systemMotion.matches || document.documentElement.dataset.motion === "reduced";
@@ -3343,6 +3528,95 @@ function setConnection(connected, label) {
   document.querySelector(".topbar-context").dataset.connected = String(connected);
 }
 
+// Reuse the actual controls in both desktop chrome and the phone drawer.
+// Moving them preserves their handlers, state, IDs and native focus semantics.
+const desktopSidebarNodes = [byId('nav-settings'), byId('account-shortcut')]
+  .map(node => { const anchor = document.createComment('responsive sidebar control'); node.before(anchor); return { node, anchor }; });
+const workspaceSidebar = document.createElement('div');
+workspaceSidebar.id = 'workspace-sidebar';
+workspaceSidebar.hidden = true;
+layout.insertBefore(workspaceSidebar, document.querySelector('.chat-frame'));
+const workspaceSidebarNodes = [
+  { view: 'store', node: byId('store-sidebar') },
+  { view: 'settings', node: document.querySelector('.settings-view-heading') },
+  { view: 'settings', node: byId('settings-sections') },
+].map(item => {
+  const anchor = document.createComment('responsive category navigation');
+  item.node.before(anchor);
+  return { ...item, anchor };
+});
+const topbar = document.querySelector('.topbar');
+const railChatActions = document.createElement('div');
+railChatActions.id = 'rail-chat-actions';
+byId('nav-chat').before(railChatActions);
+const railToggleLogo = document.querySelector('.topbar .brand .brand-mark').cloneNode(true);
+railToggleLogo.classList.add('rail-toggle-logo');
+railToggleLogo.setAttribute('aria-hidden', 'true');
+byId('sessions-toggle').querySelector('.rail-action-face').append(railToggleLogo);
+const newChatAnchor = document.createComment('phone new chat shortcut');
+byId('new-session-shortcut').before(newChatAnchor);
+const chatHeaderNodes = [byId('model-control'), byId('chat-info-toggle')].map(node => {
+  const anchor = document.createComment('phone chat control');
+  node.before(anchor);
+  return { node, anchor };
+});
+function arrangeSidebar() {
+  const focused = document.activeElement;
+  const desktop = !narrowScreen.matches;
+  const headerParent = document.querySelector(desktop ? '.chat-frame' : '.shell');
+  if (topbar.parentElement !== headerParent) headerParent.prepend(topbar);
+  for (const { node, anchor } of desktopSidebarNodes) {
+    if (desktop && node.parentElement !== byId('rail-utilities')) byId('rail-utilities').append(node);
+    else if (!desktop && node.parentElement !== anchor.parentElement) anchor.after(node);
+  }
+  const sectionNavigation = desktop && ['settings', 'store'].includes(currentView);
+  const expanded = desktop && !layout.classList.contains('sessions-collapsed');
+  workspaceSidebar.hidden = !sectionNavigation;
+  for (const { view, node, anchor } of workspaceSidebarNodes) {
+    const destination = desktop && currentView === view ? workspaceSidebar : anchor.parentElement;
+    if (node.parentElement !== destination) {
+      if (destination === workspaceSidebar) destination.append(node);
+      else anchor.after(node);
+    }
+  }
+  byId('store-workspace').classList.toggle('sidebar-detached', desktop && currentView === 'store');
+  byId('settings-view').classList.toggle('sidebar-detached', desktop && currentView === 'settings');
+  const toggleParent = desktop ? railChatActions : topbar;
+  if (byId('sessions-toggle').parentElement !== toggleParent) {
+    toggleParent.prepend(byId('sessions-toggle'));
+  }
+  if (desktop && byId('new-session-shortcut').parentElement !== railChatActions)
+    railChatActions.append(byId('new-session-shortcut'));
+  else if (!desktop && byId('new-session-shortcut').parentElement !== newChatAnchor.parentElement)
+    newChatAnchor.after(byId('new-session-shortcut'));
+  for (const { node, anchor } of chatHeaderNodes) {
+    const destination = desktop ? node.id === 'model-control' ? topbar :
+      document.querySelector('.topbar-actions') : anchor.parentElement;
+    if (node.parentElement !== destination) {
+      if (desktop && node.id === 'chat-info-toggle') byId('inspector-toggle').before(node);
+      else if (desktop) destination.prepend(node);
+      else anchor.after(node);
+    }
+  }
+  if (focused?.isConnected && focused !== document.activeElement && !focused.closest('[inert], [hidden]'))
+    focused.focus({ preventScroll: true });
+  if (desktop) {
+    const label = `${expanded ? 'Hide' : 'Show'} conversations`;
+    byId('sessions-toggle').setAttribute('aria-label', label);
+    byId('sessions-toggle').title = label;
+  }
+}
+function updateSidebarTitle() {
+  const selected = sessions.find(item => item.session_id === latest?.session_id);
+  if (sidebarChatTitle.sessionId !== latest?.session_id)
+    sidebarChatTitle = { sessionId: latest?.session_id, title: 'New chat' };
+  if (selected?.title) sidebarChatTitle.title = selected.title;
+  const title = currentView === 'chat' ?
+    sidebarChatTitle.title :
+    { workspace: 'Workspaces', library: 'Library', integrations: 'Integrations', store: 'Store', activity: 'Activity', settings: 'Settings' }[currentView] || 'Klaude';
+  byId('desktop-page-title').textContent = title;
+  byId('desktop-page-title').hidden = currentView === 'chat';
+}
 function toggleSessions(open) {
   const restoreFocus = !open && (byId("session-sidebar").contains(document.activeElement) ||
     document.activeElement === byId("drawer-scrim"));
@@ -3350,6 +3624,9 @@ function toggleSessions(open) {
   if (!narrowScreen.matches) layout.classList.toggle("sessions-collapsed", !open);
   byId("session-sidebar").inert = !open;
   byId("sessions-toggle").setAttribute("aria-expanded", String(open));
+  byId("sessions-toggle").setAttribute("aria-label", open ? "Hide conversations" : "Show conversations");
+  byId("sessions-toggle").title = open ? "Hide conversations" : "Show conversations";
+  arrangeSidebar();
   byId("drawer-scrim").hidden = !narrowScreen.matches || !open;
   if (open && narrowScreen.matches) byId("new-session").focus();
   else if (restoreFocus) byId("sessions-toggle").focus();
@@ -3357,6 +3634,43 @@ function toggleSessions(open) {
 byId("sessions-toggle").addEventListener("click", () => toggleSessions(narrowScreen.matches ?
   !layout.classList.contains("sessions-open") : layout.classList.contains("sessions-collapsed")));
 byId("drawer-scrim").addEventListener("click", () => toggleSessions(false));
+byId('new-session-shortcut').addEventListener('click', () => byId('new-session').click());
+const conversationSearch = byId('conversation-search');
+let conversationSearchOpener;
+function showSessionSearch(open = true) {
+  if (!open) { if (conversationSearch.open) conversationSearch.close(); return; }
+  if (conversationSearch.open) return;
+  conversationSearchOpener = document.activeElement;
+  byId('session-search-field').hidden = false;
+  byId('session-search-toggle').setAttribute('aria-expanded', 'true');
+  conversationSearch.showModal();
+  renderSessionList();
+  byId('session-search').focus();
+}
+conversationSearch.addEventListener('close', () => {
+  byId('session-search-field').hidden = true;
+  byId('session-search-toggle').setAttribute('aria-expanded', 'false');
+  byId('session-search').value = '';
+  byId('session-search').dispatchEvent(new Event('input'));
+  if (authenticated && conversationSearchOpener?.isConnected &&
+      !conversationSearchOpener.closest('[hidden], [inert]')) conversationSearchOpener.focus();
+});
+byId('conversation-search-close').addEventListener('click', () => showSessionSearch(false));
+document.addEventListener('klaude-auth-reset', () => showSessionSearch(false));
+byId('session-search-toggle').addEventListener('click', () => showSessionSearch(byId('session-search-field').hidden));
+byId('session-search').addEventListener('keydown', event => {
+  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); showSessionSearch(false); }
+});
+byId('session-options').addEventListener('click', event => {
+  if (event.target.closest('button')) byId('session-options').hidePopover();
+});
+byId('session-options').addEventListener('toggle', event => {
+  if (event.newState !== 'open') return;
+  const anchor = byId('session-options-toggle').getBoundingClientRect();
+  const menu = byId('session-options'), box = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(innerWidth - box.width - 8, anchor.right - box.width))}px`;
+  menu.style.top = `${Math.max(8, Math.min(innerHeight - box.height - 8, anchor.bottom + 4))}px`;
+});
 let contextPanelOpen;
 try { contextPanelOpen = JSON.parse(sessionStorage.getItem("klaude.context-panel.open")); } catch { /* Use viewport default. */ }
 if (typeof contextPanelOpen !== "boolean" || narrowScreen.matches) contextPanelOpen = false;
@@ -3391,13 +3705,14 @@ narrowScreen.addEventListener("change", () => {
 });
 updatePanelLayout();
 
-// Resize the central surface from its own edges; side panels have no split lines.
+// Resize each visible panel from its own edge.
 window.ChatLayoutUI = (() => {
   const key = "klaude.webui.chat-width.v1";
   const main = byId("main-content");
-  const handles = { left: byId("chat-resize-left"), right: byId("chat-resize-right") };
-  const limits = { left: [216, 420], right: [280, 560] };
-  const css = { left: "--session-width", right: "--context-width" };
+  const workspaceKey = "klaude.webui.workspace-width.v1";
+  const handles = { left: byId("chat-resize-left"), workspace: byId("chat-resize-workspace"), right: byId("chat-resize-right") };
+  const limits = { left: [216, 420], workspace: [216, 420], right: [280, 560] };
+  const css = { left: "--session-width", workspace: "--workspace-width", right: "--context-width" };
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
   let frame, drag, geometry;
   function read(value) {
@@ -3409,9 +3724,21 @@ window.ChatLayoutUI = (() => {
     } catch { /* Browser storage is optional. */ }
     return { left: null, right: null };
   }
-  let preference = read();
+  function readWorkspace(value) {
+    try {
+      const raw = value === undefined ? localStorage.getItem(workspaceKey) : value;
+      if (raw === null) return null;
+      const parsed = JSON.parse(raw);
+      return Number.isFinite(parsed) && parsed >= limits.workspace[0] && parsed <= limits.workspace[1] ? parsed : null;
+    } catch { return null; }
+  }
+  let preference = { ...read(), workspace: readWorkspace() };
   function save() {
-    try { localStorage.setItem(key, JSON.stringify({ version: 1, ...preference })); }
+    try {
+      localStorage.setItem(key, JSON.stringify({ version: 1, left: preference.left, right: preference.right }));
+      if (preference.workspace === null) localStorage.removeItem(workspaceKey);
+      else localStorage.setItem(workspaceKey, JSON.stringify(preference.workspace));
+    }
     catch { /* Keep the chosen layout for this page when storage is unavailable. */ }
   }
   function paint() {
@@ -3420,11 +3747,20 @@ window.ChatLayoutUI = (() => {
     const style = getComputedStyle(layout);
     const available = layout.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) -
       parseFloat(style.getPropertyValue("--rail-width"));
+    const workspaceVisible = !narrowScreen.matches && !workspaceSidebar.hidden;
+    const leftParent = workspaceVisible ? byId("session-sidebar") : document.querySelector(".chat-frame");
+    if (handles.left.parentElement !== leftParent) leftParent.append(handles.left);
+    const rightParent = byId("inspector");
+    if (handles.right.parentElement !== rightParent) rightParent.append(handles.right);
+    handles.left.setAttribute("aria-label", workspaceVisible ? "Resize conversations sidebar" : "Resize chat from left edge");
+    handles.left.title = workspaceVisible ? "Resize conversations. Arrow keys adjust; double-click or Enter resets." : "Drag to resize chat. Arrow keys adjust; double-click or Enter resets.";
     const visible = { left: !narrowScreen.matches && !layout.classList.contains("sessions-collapsed"),
+      workspace: workspaceVisible,
       right: !compactInspector.matches && contextPanelOpen };
     if (drag && !visible[drag.side]) finish(false);
     const sizes = {
       left: clamp(preference.left ?? parseFloat(style.getPropertyValue("--session-default-width")), ...limits.left),
+      workspace: clamp(preference.workspace ?? limits.workspace[0], ...limits.workspace),
       right: clamp(preference.right ?? parseFloat(style.getPropertyValue("--context-default-width")), ...limits.right),
     };
     // Preserve at least 400px for chat. A smaller viewport temporarily reduces
@@ -3444,17 +3780,19 @@ window.ChatLayoutUI = (() => {
     const chatWidth = Math.round(main.getBoundingClientRect().width);
     geometry = { visible, sizes, available, bounds: {} };
     for (const side of Object.keys(handles)) {
-      const other = side === "left" ? "right" : "left";
-      const remaining = available - (visible[other] ? sizes[other] : 0);
+      const remaining = available - Object.keys(handles).reduce((sum, other) => sum + (other !== side && visible[other] ? sizes[other] : 0), 0);
       const max = Math.max(limits[side][0], Math.min(limits[side][1], remaining - 400));
       geometry.bounds[side] = [limits[side][0], max];
       const handle = handles[side], focused = document.activeElement === handle;
       handle.hidden = !visible[side];
       if (!visible[side] && focused) main.focus({ preventScroll: true });
-      handle.setAttribute("aria-valuemin", String(Math.round(remaining - max)));
-      handle.setAttribute("aria-valuemax", String(Math.round(remaining - limits[side][0])));
-      handle.setAttribute("aria-valuenow", String(chatWidth));
-      handle.setAttribute("aria-valuetext", `Chat ${chatWidth} pixels; ${side === "left" ? "conversations" : "context"} ${Math.round(sizes[side])} pixels`);
+      const sidebarHandle = side === "workspace" || side === "left" && workspaceVisible;
+      handle.setAttribute("aria-valuemin", String(Math.round(sidebarHandle ? limits[side][0] : remaining - max)));
+      handle.setAttribute("aria-valuemax", String(Math.round(sidebarHandle ? max : remaining - limits[side][0])));
+      handle.setAttribute("aria-valuenow", String(Math.round(sidebarHandle ? sizes[side] : chatWidth)));
+      handle.setAttribute("aria-valuetext", sidebarHandle ?
+        `${side === "left" ? "Conversations" : "Navigation"} ${Math.round(sizes[side])} pixels` :
+        `Chat ${chatWidth} pixels; ${side === "left" ? "conversations" : "context"} ${Math.round(sizes[side])} pixels`);
     }
   }
   function refresh() { if (!frame) frame = requestAnimationFrame(paint); }
@@ -3487,7 +3825,7 @@ window.ChatLayoutUI = (() => {
     });
     handle.addEventListener("pointermove", event => {
       if (!drag || drag.side !== side || drag.pointer !== event.pointerId) return;
-      const delta = (event.clientX - drag.x) * (side === "left" ? 1 : -1);
+      const delta = (event.clientX - drag.x) * (side === "right" ? -1 : 1);
       if (Math.abs(delta) < 2 && !drag.moved) return;
       drag.moved = true; change(side, drag.size + delta);
     });
@@ -3503,7 +3841,7 @@ window.ChatLayoutUI = (() => {
       if (event.key === "Enter") { event.preventDefault(); reset(); return; }
       let value;
       if (["ArrowLeft", "ArrowRight"].includes(event.key))
-        value = geometry.sizes[side] + (event.key === "ArrowRight" ? step : -step) * (side === "left" ? 1 : -1);
+        value = geometry.sizes[side] + (event.key === "ArrowRight" ? step : -step) * (side === "right" ? -1 : 1);
       else if (event.key === "Home") value = geometry.bounds[side][1];
       else if (event.key === "End") value = geometry.bounds[side][0];
       else return;
@@ -3516,9 +3854,13 @@ window.ChatLayoutUI = (() => {
   window.addEventListener("blur", () => finish(false));
   document.addEventListener("klaude-auth-reset", () => finish(false));
   window.addEventListener("storage", event => {
-    if (event.key !== key && event.key !== null) return;
-    finish(false); preference = read(event.key === null ? null : event.newValue); refresh();
+    if (![key, workspaceKey, null].includes(event.key)) return;
+    finish(false);
+    if (event.key === key || event.key === null) Object.assign(preference, read(event.key === null ? null : event.newValue));
+    if (event.key === workspaceKey || event.key === null) preference.workspace = readWorkspace(event.key === null ? null : event.newValue);
+    refresh();
   });
+  document.addEventListener("klaude-view", refresh);
   new ResizeObserver(refresh).observe(layout);
   new MutationObserver(refresh).observe(layout, { attributes: true, attributeFilter: ["class", "hidden"] });
   for (const media of [narrowScreen, compactInspector]) media.addEventListener("change", refresh);
@@ -3569,6 +3911,15 @@ document.addEventListener("click", (event) => {
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
+    if (conversationSearch.open) {
+      event.preventDefault(); showSessionSearch(false); return;
+    }
+    if (byId('session-options').matches(':popover-open')) {
+      byId('session-options').hidePopover();
+      byId('session-options-toggle').focus();
+      event.preventDefault();
+      return;
+    }
     if (chatInfoPanel.matches(":popover-open")) {
       closeChatInfo(); (window.MobileChatUI?.infoTrigger() || chatInfoToggle).focus({ preventScroll: true }); event.preventDefault(); return;
     }
@@ -3581,8 +3932,10 @@ document.addEventListener("keydown", (event) => {
       setContextPanel(false, true);
     }
   }
-  if (event.key === "Tab" && narrowScreen.matches && layout.classList.contains("sessions-open")) {
-    const controls = [...byId("session-sidebar").querySelectorAll('button:not(:disabled), input')];
+  if (event.key === "Tab" && narrowScreen.matches && layout.classList.contains("sessions-open") &&
+      !document.querySelector('dialog[open]')) {
+    const controls = [...byId("session-sidebar").querySelectorAll('button:not(:disabled), input')]
+      .filter(control => control.getClientRects().length);
     const first = controls[0], last = controls.at(-1);
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
@@ -4006,7 +4359,9 @@ async function snapshot() {
   snapshotApplied = request;
   const previousModel = latest?.model;
   const previousSession = latest?.session_id;
-  if (latest && latest.session_id !== data.session_id) {
+  const sessionChanged = Boolean(latest && latest.session_id !== data.session_id);
+  if (sessionChanged) {
+    pendingSessionScroll = data.session_id;
     document.dispatchEvent(new Event("klaude-chat-session-changed"));
     linkedMessage = null;
     if (stream) stream.close();
@@ -4070,6 +4425,7 @@ async function snapshot() {
   byId("enable-edits").disabled = Boolean(data.active_turn_id);
   byId("new-session").disabled = !data.parallel_sessions && (Boolean(data.active_turn_id) ||
     Boolean(data.queue?.length));
+  byId('new-session-shortcut').disabled = byId('new-session').disabled;
   renderModelOptions();
   const busy = Boolean(data.active_turn_id);
   byId("cancel").hidden = !busy;
@@ -4087,7 +4443,7 @@ async function snapshot() {
   }
   byId("steer").disabled = pending;
   byId("cancel").disabled = pending;
-  const nearBottom = nearLatestMessage();
+  const nearBottom = sessionChanged || nearLatestMessage();
   renderApprovals(data.approvals || []);
   renderQuestions(data.questions || []);
   renderQueue(data.queue || []);
@@ -4172,6 +4528,7 @@ async function snapshot() {
   placeChatResponseStatus();
   renderSessionList();
   if (nearBottom) chatScroller.scrollTop = chatScroller.scrollHeight;
+  if (sessionChanged) scrollOpenedSessionToLatest();
   document.dispatchEvent(new CustomEvent("klaude-snapshot", { detail: data }));
   connect();
 }
@@ -4457,7 +4814,7 @@ async function refreshSessions({ quiet = false } = {}) {
   const load = ++sessionsLoad;
   const epoch = authEpoch;
   const query = byId("session-search").value.trim().slice(0, 200);
-  const finish = quiet ? () => {} : beginLoading(byId("session-list"), { kind: "rows", count: 5, preserve: sessionsLoaded, label: "Loading conversations…" });
+  const finish = quiet ? () => {} : beginLoading(byId(conversationSearch.open ? "session-search-list" : "session-list"), { kind: "rows", count: 5, preserve: sessionsLoaded, label: "Loading conversations…" });
   if (!sessionsLoaded) byId("session-empty").hidden = true;
   try {
     const url = `/api/v1/sessions?archived=${byId("archived-sessions").getAttribute("aria-pressed") === "true"}`;
@@ -4478,12 +4835,15 @@ async function refreshSessions({ quiet = false } = {}) {
 }
 
 function renderSessionList() {
-  const list = byId("session-list");
+  const list = byId(conversationSearch.open ? "session-search-list" : "session-list");
   if (!sessionsLoaded && loadingStates.has(list)) return;
   const indicators = new Map([...list.querySelectorAll(".session-running")].map(node =>
     [node.closest("[data-session-open]").dataset.sessionOpen, node]));
   list.replaceChildren();
   const filter = byId("session-search").value.trim().toLowerCase();
+  byId('conversation-search-label').textContent = filter ? 'Search results' :
+    byId('archived-sessions').getAttribute('aria-pressed') === 'true' ? 'Archived chats' : 'Recent chats';
+  updateSidebarTitle();
   for (const item of sessions) {
     if (filter && sessionsQuery !== filter && !filter.split(/\s+/).every(term =>
       `${item.title || ""} ${item.preview || ""} ${item.session_id}`.toLowerCase().includes(term))) continue;
@@ -4498,6 +4858,12 @@ function renderSessionList() {
       snippet.textContent = item.preview; titleNode.append(snippet);
     }
     button.append(titleNode);
+    if (conversationSearch.open) {
+      const icon = document.createElement('span');
+      icon.className = 'conversation-search-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      button.prepend(icon);
+    }
     if (item.active) {
       const indicator = indicators.get(item.session_id) || document.createElement("span");
       indicator.className = "session-running"; indicator.setAttribute("aria-hidden", "true");
@@ -4507,18 +4873,24 @@ function renderSessionList() {
     }
     button.title = item.active ? "Conversation is running" : item.resumable ? item.preview : "Requires this session's model and mode";
     button.className = item.session_id === latest?.session_id ? "selected" : "";
-    button.disabled = !item.resumable || item.session_id === latest?.session_id ||
+    const isCurrent = item.session_id === latest?.session_id;
+    button.disabled = isCurrent ? currentView === "chat" : !item.resumable ||
       !latest?.parallel_sessions && (Boolean(latest?.active_turn_id) || Boolean(latest?.queue?.length));
-    button.addEventListener("click", () => switchSession(item.session_id));
+    button.addEventListener("click", () => {
+      showSessionSearch(false);
+      showView("chat");
+      if (currentView === "chat" && item.session_id !== latest?.session_id) switchSession(item.session_id);
+    });
     list.append(window.BrowserManagement?.sessionRow(item, button) || button);
   }
-  byId("session-empty").hidden = Boolean(list.children.length);
-  byId("session-empty").textContent = filter ? "No matching conversations." :
+  const empty = byId(conversationSearch.open ? "session-search-empty" : "session-empty");
+  empty.hidden = Boolean(list.children.length);
+  empty.textContent = filter ? "No matching conversations." :
     byId("archived-sessions").getAttribute("aria-pressed") === "true" ? "No archived conversations." :
       "Your conversations will appear here.";
 }
 byId("session-search").maxLength = 200;
-byId("session-search").placeholder = "Search conversations…";
+byId("session-search").placeholder = "Search…";
 byId("session-search").addEventListener("input", () => {
   sessionsLoad++;
   clearTimeout(sessionsSearchTimer);
@@ -4529,7 +4901,10 @@ byId("archived-sessions").addEventListener("click", () => {
   const button = byId("archived-sessions");
   const archived = button.getAttribute("aria-pressed") !== "true";
   button.setAttribute("aria-pressed", String(archived));
+  byId('session-list-label').textContent = archived ? 'Archived chats' : 'Chats';
   button.title = archived ? "Show saved conversations" : "Show archived conversations";
+  button.setAttribute('aria-label', button.title);
+  button.querySelector('span').textContent = archived ? 'All conversations' : 'Archived conversations';
   byId("session-list").setAttribute("aria-label", archived ? "Archived conversations" : "Saved conversations");
   sessions = [];
   sessionsLoaded = false;
@@ -4560,7 +4935,10 @@ async function switchSession(sessionId, { fromLink = false } = {}) {
   } catch (error) { showError(error); await snapshot().catch(showError); return false; }
   finally { finish(); }
 }
-byId("new-session").addEventListener("click", () => switchSession(""));
+byId("new-session").addEventListener("click", () => {
+  showView("chat");
+  if (currentView === "chat") switchSession("");
+});
 byId("refresh-sessions").addEventListener("click", () => refreshSessions().catch(showError));
 
 async function performMessageAction(action, article) {
@@ -4930,6 +5308,9 @@ function showView(view, { restore = false, section = null } = {}) {
       { duration: 400, easing: "cubic-bezier(.05,.7,.1,1)" });
   }
   currentView = view;
+  arrangeSidebar();
+  updateSidebarTitle();
+  if (changed) renderSessionList();
   if (view === "settings") showSettingsSection(section ||
     (restore ? new URLSearchParams(location.search).get("settings") : null) || settingsSection, { restore: true });
   const more = byId("nav-more"), moreMenu = byId("navigation-more");
@@ -5002,10 +5383,66 @@ navigationMore.addEventListener("keydown", (event) => {
   if (next !== null) { event.preventDefault(); buttons[next].focus(); }
   if (event.key === "Escape") { event.preventDefault(); navigationMore.hidePopover(); byId("nav-more").focus(); }
 });
-byId("account-shortcut").addEventListener("click", () => {
-  showView("settings", { section: "account" });
-  byId("account-heading").focus({ preventScroll: true });
+const profileMenu = document.createElement('div');
+profileMenu.id = 'profile-menu'; profileMenu.className = 'message-menu sidebar-action-menu profile-menu';
+profileMenu.setAttribute('popover', 'auto'); profileMenu.setAttribute('aria-label', 'Profile menu');
+document.body.append(profileMenu);
+const closeProfileMenu = () => { if (profileMenu.matches(':popover-open')) profileMenu.hidePopover(); };
+const profileDestination = section => {
+  closeProfileMenu(); showView('settings', { section });
+};
+const identity = document.createElement('button'); identity.type = 'button';
+identity.className = 'profile-menu-identity';
+const avatar = byId('account-initial').cloneNode(true); avatar.removeAttribute('id');
+const identityCopy = document.createElement('span');
+const profileName = document.createElement('strong'), profileKind = document.createElement('small');
+profileKind.textContent = 'Local account'; identityCopy.append(profileName, profileKind);
+identity.append(avatar, identityCopy); identity.addEventListener('click', () => profileDestination('account'));
+profileMenu.append(identity);
+const profileDivider = () => { const line = document.createElement('div'); line.className = 'message-menu-divider'; profileMenu.append(line); };
+const profileRow = (label, iconSource, action) => {
+  const button = document.createElement('button'); button.type = 'button'; button.className = 'message-action';
+  const icon = document.querySelector(iconSource)?.cloneNode(true); if (icon) button.append(icon);
+  button.dataset.profileAction = label.toLowerCase();
+  const text = document.createElement('span'); text.textContent = label; button.append(text);
+  button.addEventListener('click', action); profileMenu.append(button); return button;
+};
+profileDivider();
+profileRow('Personalization', '#nav-activity svg', () => profileDestination('memory'));
+profileRow('Profile', '#nav-chat svg', () => profileDestination('account'));
+profileRow('Settings', '#nav-settings svg', () => { closeProfileMenu(); showView('settings'); });
+profileDivider();
+profileRow('Help', '#nav-integrations svg', () => {
+  closeProfileMenu(); byId('command-open').click();
+  byId('command-palette').querySelector('[data-mode="shortcuts"]').click();
 });
+const logoutControl = byId('logout');
+logoutControl.classList.remove('icon-button'); logoutControl.classList.add('message-action');
+const logoutLabel = document.createElement('span'); logoutLabel.textContent = 'Log out';
+logoutControl.append(logoutLabel); profileMenu.append(logoutControl);
+logoutControl.addEventListener('click', closeProfileMenu);
+byId('account-shortcut').setAttribute('aria-controls', 'profile-menu');
+byId('account-shortcut').setAttribute('aria-haspopup', 'menu');
+byId('account-shortcut').addEventListener('click', () => {
+  if (narrowScreen.matches) { profileDestination('account'); return; }
+  if (profileMenu.matches(':popover-open')) { closeProfileMenu(); return; }
+  profileName.textContent = byId('mobile-chat-profile-name').textContent;
+  avatar.textContent = byId('account-initial').textContent;
+  profileMenu.showPopover();
+  const r = byId('account-shortcut').getBoundingClientRect(), m = profileMenu.getBoundingClientRect();
+  profileMenu.style.left = `${Math.max(8, Math.min(innerWidth-m.width-8, r.right+8))}px`;
+  profileMenu.style.top = `${Math.max(8, Math.min(innerHeight-m.height-8, r.bottom-m.height))}px`;
+});
+profileMenu.addEventListener('toggle', () => byId('account-shortcut').setAttribute('aria-expanded', String(profileMenu.matches(':popover-open'))));
+profileMenu.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    event.preventDefault(); event.stopPropagation(); closeProfileMenu(); byId('account-shortcut').focus();
+  }
+});
+document.addEventListener('klaude-auth-reset', () => {
+  closeProfileMenu(); profileName.textContent = ''; avatar.textContent = '';
+});
+window.addEventListener('resize', closeProfileMenu);
 byId("enable-edits").addEventListener("click", async () => {
   if (!latest) return;
   const button = byId("enable-edits");
@@ -5115,6 +5552,7 @@ async function openConversationLink() {
     }
     if (!await switchSession(target, { fromLink: true })) return;
   }
+  if (messageId !== null) pendingSessionScroll = "";
   if (!openedBefore && currentView === previousView) showView("chat");
   if (messageId !== null) {
     if (!latest.messages.some(message => message.id === messageId)) {
@@ -5186,7 +5624,7 @@ async function initialize() {
     byId("account-initial").textContent = Array.from(username)[0].toLocaleUpperCase();
     byId("mobile-chat-profile-initial").textContent = byId("account-initial").textContent;
     byId("mobile-chat-profile-name").textContent = username;
-    byId("account-shortcut").setAttribute("aria-label", `Account settings for ${username}`);
+    byId("account-shortcut").setAttribute("aria-label", `Profile menu for ${username}`);
   }
   const client = await jsonRequest("/api/v1/clients", "POST", {});
   if (epoch !== authEpoch) return;

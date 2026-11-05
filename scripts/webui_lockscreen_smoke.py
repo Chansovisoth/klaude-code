@@ -50,6 +50,19 @@ async def verify(host, root, gates, failures):
             assert await tab.js('getComputedStyle(byId("local-access")).fontFamily.includes("Readex Pro")')
             assert await tab.js('''(async()=>{const response=await fetch('/lockscreen-bg.jpg');if(response.status!==200||!response.headers.get('Content-Type').startsWith('image/jpeg'))return false;const image=new Image();image.src='/lockscreen-bg.jpg';await image.decode();return image.naturalWidth>0&&image.naturalHeight>0&&document.fonts.check('17px "Readex Pro"')&&document.fonts.check('68px "Space Grotesk"');})()'''), 'The real wallpaper and fonts must load before authentication; font-family declarations alone cannot verify assets'
             report['wallpaper_and_reference_fonts_load_before_sign_in'] = True
+            # Both decorative shapes rotate, while app and system reduced motion stop them.
+            await tab.js("window.savedShapeMotion=document.documentElement.dataset.motion;document.documentElement.dataset.motion='full'")
+            shape_animations = """(()=>['.welcome-emblem .welcome-shape','.cookie-clock-face'].map(s=>{
+              const style=getComputedStyle(document.querySelector(s));return [style.animationName,style.animationDuration];}))()"""
+            assert await tab.js(shape_animations) == [['klaude-welcome-shape-rotation','45s'], ['klaude-clock-shape-rotation','60s']]
+            await tab.js("document.documentElement.dataset.motion='reduced'")
+            assert all(item[0] == 'none' for item in await tab.js(shape_animations))
+            await tab.js("document.documentElement.dataset.motion='full'")
+            await tab.command('Emulation.setEmulatedMedia', {'features':[{'name':'prefers-reduced-motion','value':'reduce'}]})
+            assert all(item[0] == 'none' for item in await tab.js(shape_animations))
+            await tab.command('Emulation.setEmulatedMedia', {'features':[]})
+            await tab.js("document.documentElement.dataset.motion=window.savedShapeMotion")
+            report['shape_rotation_and_reduced_motion'] = True
             quote = await tab.js('document.querySelector(".lock-quote").dataset.quoteId')
             assert await tab.js('KlaudeLockQuoteCollection.quotes.some(q=>String(q.id)===document.querySelector(".lock-quote").dataset.quoteId&&q.quote===byId("lock-quote-text").textContent&&q.attribution===byId("lock-quote-attribution").textContent&&(q.source_url||null)===document.querySelector(".lock-quote").getAttribute("cite"))')
             assert await tab.js('byId("lock-quote-attribution").classList.contains("visually-hidden")&&getComputedStyle(byId("lock-quote-attribution")).clipPath==="inset(50%)"'), 'Attribution is retained without the visible English Proverb label'
@@ -348,8 +361,9 @@ async def verify(host, root, gates, failures):
             state = await tab.js('KlaudeLockScreen.clockState(new Date("2026-12-31T17:00:00Z"))')
             assert (state['hour'],state['day'],state['month']) == ('12','31','12'), state
             await tab.command('Page.removeScriptToEvaluateOnNewDocument', {'identifier':frozen['identifier']})
+            await tab.js('window.beforeClockReload=true')
             await tab.command('Page.reload', {'ignoreCache':True})
-            await tab.wait('typeof KlaudeLockScreen!=="undefined"&&document.documentElement.dataset.startup==="ready"')
+            await tab.wait('!window.beforeClockReload && typeof byId!=="undefined" && typeof KlaudeLockScreen!=="undefined" && document.documentElement?.dataset.startup==="ready"')
             assert await tab.js('byId("lock-clock-hour").textContent===String(new Date().getHours()).padStart(2,"0")')
             assert await tab.js('document.querySelector(".lock-quote").dataset.quoteId') != next_quote, 'Reload resumes the bag without repeating the previous quote'
             report['timezone_midnight_and_live_reload'] = True

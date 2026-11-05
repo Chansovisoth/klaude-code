@@ -240,10 +240,10 @@ Workspace layout:
   and removes the whole selection in one SQLite transaction; any changed/missing
   file rejects the deletion without removing other files. The owned journal keeps
   uncertain outcomes fenced. Folder moves remain deferred.
-- Store uses a dedicated desktop sidebar with Explore, Installed, Downloads, Chat
+- Store uses a dedicated desktop sidebar beside the independently collapsible chat
+  sessions sidebar, with Explore, Installed, Downloads, Chat
   models, Image models, MCP servers, Skills and Advanced model files. Phones use
-  a native location chooser and hierarchical Back actions. Store and Models omit
-  the conversation sidebar. Explore has visual category entries and bounded
+  a native location chooser and hierarchical Back actions. Store and Settings keep the conversation sidebar available and preserve the open context panel when navigating. Explore has visual category entries and bounded
   shelves; Filters contains technical catalog and exact-reference controls.
   Shared model/MCP/Skill detail headers lead with identity and one primary action;
   long descriptions, source facts, permissions and install options use native
@@ -430,6 +430,47 @@ Workspace layout:
   next actionable stage. The `model_connection_setup` capability gates this flow;
   older hosts retain the existing individual editor actions. Current-chat edit
   protections, credential writer, tests, enable validation and recovery stay intact.
+- The compact WebUI workspace uses a 48px desktop header, a 52px icon rail with
+  accessible names and shared tooltips, and dedicated Settings navigation alongside
+  the independently collapsible conversation sidebar. All Settings categories share a centered 800px maximum reading column and stable scrollbar space; grouped row highlights match their container corners; phone tabs and
+  touch targets remain responsive. Desktop controls tighten only when no coarse
+  pointer is available. Palette choices remain intact. Edit `static/compact.css`
+  under `apps/webhost/src/klaude_webhost`, then regenerate/check it with
+  `scripts/bundle_webui_expressive.py`; the compact block follows existing CSS.
+  On desktop the rail and 288px conversation panel fill the window height; the
+  active page header belongs to the content column. On desktop the model picker
+  leads that header; conversation titles and the second model row are omitted.
+  Conversation details sits immediately left of the context panel toggle in the
+  header. Shared context menus and Conversation details use compact spacing;
+  touch menu actions retain 44px minimum targets. The original controls return to their phone locations.
+  The conversation panel has
+  Klaude, Search, New chat, and compact Chats rows. Desktop collapse/expand
+  and New chat icon controls live at the top of the left rail. The toggle shows
+  the Klaude logo at rest and its sidebar icon on hover or keyboard focus. These
+  use the same 44px targets, 36px hover faces and 20px icons as the other rail
+  destinations. Search
+  opens a centered native dialog with Recent chats and compact icon rows; Escape
+  clears it and returns focus. Refresh and archived chats
+  live in Conversation options. Settings and profile controls sit at the rail
+  foot; Log out lives inside the profile popover. Existing controls move back into the phone shell at the 850px breakpoint,
+  retaining their IDs, handlers and state. Collapsing preserves the rail and its
+  expand and New chat controls. Session management and backend scope
+  are unchanged; reference-only project and pinned groupings are not fabricated.
+  Session overflow opens an anchored menu for Rename, Download conversation,
+  Archive/Restore and Delete. Rename opens its existing editor; archive/delete
+  keep their reviewed operations. Profile opens a divided popover with account
+  identity, Personalization (Memory), Profile (Account), Settings, Help (shortcuts)
+  and the existing Log out control. These menus omit unsupported reference-only
+  subscription, pin, share and project actions. Sign-out clears their visible state.
+  Desktop session overflow buttons appear only on row hover or visible keyboard
+  focus. Mouse focus alone does not keep them visible. Phone and touch-only
+  devices retain visible overflow controls, including hybrid desktops when used
+  without hover capability.
+  Store and Settings share that full-height desktop navigation panel, including
+  its 288px width, heading, neutral row selection, divider, scrolling and collapse
+  control. Their existing navigation nodes return to their original parents on
+  smaller screens; Store retains its location chooser and Settings its horizontal
+  keyboard tabs. The content header and reviewed settings actions remain separate.
 - WebUI spacing follows the existing Material surfaces and a 4px-based rhythm:
   preserve responsive page gutters, inset text and controls within interactive
   rows, group related controls tightly and separate distinct sections. Check
@@ -1002,14 +1043,17 @@ Workspace layout:
   approvals retain their single chat decision path. The panel preserves the
   user's open/closed choice across viewport changes and supports a phone drawer.
   Tapping its outside scrim on mobile closes it and returns focus to the header menu.
-  Docked panel space is adjustable from the chat surface's two edges, with
-  invisible resize zones and hover/focus grips instead of permanent dividers.
+  Docked panel space is adjustable with invisible resize zones and hover/focus
+  grips instead of permanent dividers. In Store and Settings the conversation
+  sidebar and the section navigation sidebar have separate resize handles; their
+  widths persist independently.
   Widths are saved locally, constrained to keep chat at least 400px wide, and
   temporarily clamped on smaller windows without losing saved sizes. Keyboard
   arrows/Home/End adjust chat width; Enter/double-click resets an edge and Escape
   cancels a drag. Drawer layouts keep their existing widths and hide chat resize
-  controls. The Context Panel has no extra close button; its navbar toggle remains
-  authoritative. Evidence: `docs/webui/chat-resize-validation.md`.
+  controls. The Context Panel uses compact neutral tabs and task controls; its
+  file layouts retain their existing presentation. It has no extra close button;
+  its navbar toggle remains authoritative. Evidence: `docs/webui/chat-resize-validation.md`.
   Its Library has Current/All scopes, independent List/Grid/Gallery preferences,
   search, pagination and the existing authenticated preview. Current filters
   stored session ownership plus original Library IDs in up to 500 recent public
@@ -1589,7 +1633,8 @@ Workspace layout:
   password changes revoke sessions, and sign-out returns to the sign-in form.
   The actual sign-in screen follows the supplied end-4 lockscreen: warm supplied
   blurred wallpaper, a live 230px cookie clock with date bubbles, a short quote and
-  three bottom toolbar islands. All UI colors inherit Theme Settings' generated
+  three bottom toolbar islands. The clock and new-chat emblem backings rotate slowly
+  while their foregrounds stay still; app and system reduced motion stop both. All UI colors inherit Theme Settings' generated
   Material roles, including light/dark/system, preset/custom/image accents and
   palette variants, restored before sign-in by the existing appearance bootstrap.
   The wallpaper keeps its source image with a themed tint; text containers are

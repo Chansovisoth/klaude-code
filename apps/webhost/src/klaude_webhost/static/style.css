@@ -4032,7 +4032,7 @@ button.store-category-launcher[data-category=mcps], button.store-category-launch
 /* Keep each active draft's actions at the bottom of Settings on large screens too. */
 @media (min-width:851px) {
   #settings-view { padding-bottom:calc(var(--settings-bottom-padding) + var(--settings-actions-size, 0px)); scroll-padding-bottom:calc(var(--settings-actions-size, 0px) + 16px); }
-  #settings-action-dock { position:fixed; z-index:8; box-sizing:border-box; min-width:0; max-height:calc(var(--settings-viewport-size, 100dvh) * .6); overflow-y:auto; overscroll-behavior:contain; background:var(--surface-container); border-top:1px solid var(--outline-variant); border-radius:0 0 var(--round-xl) var(--round-xl); box-shadow:0 -2px 8px rgb(0 0 0 / .06); }
+  #settings-action-dock { position:fixed; z-index:8; box-sizing:border-box; min-width:0; max-height:calc(var(--settings-viewport-size, 100dvh) * .6); overflow-y:auto; overscroll-behavior:contain; background:var(--surface-container); border-top:1px solid var(--outline-variant); border-radius:0; box-shadow:0 -2px 8px rgb(0 0 0 / .06); }
   #settings-action-dock > :is(.settings-save-bar,.theme-actions) { position:static; box-sizing:border-box; display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; width:100%; min-width:0; margin:0; gap:8px 12px; padding:12px 24px; background:transparent; border:0; border-radius:0; box-shadow:none; }
   #settings-action-dock .settings-save-summary, #settings-action-dock #theme-status { flex:1 1 12rem; min-width:0; max-height:calc(var(--settings-viewport-size, 100dvh) * .18); overflow-y:auto; font-size:13px; overflow-wrap:anywhere; }
   #settings-action-dock .settings-conflicts { max-height:calc(var(--settings-viewport-size, 100dvh) * .2); }
@@ -4240,3 +4240,479 @@ button.store-category-launcher[data-category=mcps], button.store-category-launch
 /* Companion offers keep filenames readable beside their install action. */
 .image-dependencies .setting-row > div { min-width:0; overflow-wrap:anywhere; }
 .image-dependencies .setting-row > button { flex:0 0 auto; }
+
+/* BEGIN KLAUDE COMPACT */
+/* Compact desktop workspace, informed by the supplied Windows Codex references.
+ * Bundled last by scripts/bundle_webui_expressive.py. Keep palette roles and
+ * native controls; density follows the available space and pointing device. */
+:root { --app-header-height: 48px; --topbar-height: var(--app-header-height); }
+.shell { background: var(--background); }
+.shell :is(.view-heading h1, .settings-view-heading h1) { font-weight: 600; letter-spacing: -.5px; }
+.shell .topbar { gap: 12px; }
+.shell .brand { gap: 8px; min-width: 180px; }
+.shell .brand strong { font-size: 20px; letter-spacing: -.6px; font-weight: 650; }
+.shell .brand-mark { width: 28px; height: 28px; border-radius: 8px; }
+.shell #main-content { border-radius: 12px; }
+.shell .context-panel { border-radius: 12px; }
+.shell #chat-view { position: relative; }
+.chat-timeline { position: absolute; z-index: 4; inset: 0 auto 0 16px; width: 44px; pointer-events: auto; }
+.chat-timeline-tick { position: absolute; top: 0; left: 0; width: var(--timeline-tick-width, 7px); height: 2px; min-height: 0; padding: 0; border: 0; border-radius: 2px; background: color-mix(in srgb, var(--on-surface) 22%, transparent); pointer-events: auto; transform: translateY(-50%); transition: width 140ms ease; }
+.chat-timeline-tick.is-visible { background: var(--on-surface); }
+.chat-timeline-tick:is(:hover, :focus-visible, .is-hovered) { height: 3px; background: var(--on-surface); }
+.chat-timeline-preview { position: absolute; left: 36px; width: min(320px, calc(100vw - 100px)); padding: 10px; border: 1px solid color-mix(in srgb, var(--outline-variant) 45%, transparent); border-radius: 12px; background: var(--surface-container-high); box-shadow: 0 8px 24px #0003; color: var(--on-surface); transform: translateY(-50%); pointer-events: none; }
+.chat-timeline-preview[hidden] { display: none; }
+.chat-timeline-preview strong, .chat-timeline-preview span { display: block; overflow: hidden; text-overflow: ellipsis; }
+.chat-timeline-preview strong { font-size: 12px; line-height: 1.5; font-weight: 600; white-space: nowrap; }
+.chat-timeline-preview span:not([hidden]) { display: -webkit-box; margin-top: 4px; color: var(--muted); font-size: 13px; line-height: 1.5; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.chat-timeline-preview span[hidden] { display: none; }
+.shell .new-chat { background: transparent; color: var(--on-surface); border-radius: 8px; }
+.shell .new-chat:hover:not(:disabled) { background: var(--surface-container-high); border-radius: 8px; }
+.shell #session-list button { border-radius: 8px; font-weight: 450; }
+.shell #session-list button.selected { background: var(--surface-container-high); color: var(--on-surface); }
+.shell .session-search { border-radius: 8px; }
+.shell #composer { border-radius: 18px; }
+.shell .message.user { border-radius: 16px; }
+.shell :is(.message-menu, .thinking-effort-menu) { border: 1px solid var(--outline-variant); border-radius: 12px; }
+.shell .message-menu button { border-radius: 6px; }
+
+/* Quiet selection surfaces keep color for actions, switches and status. */
+#settings-view #settings-sections [role='tab'] { border-radius: 8px; }
+#settings-view #settings-sections [aria-selected='true'] { background: var(--surface-container-high); color: var(--on-surface); }
+#settings-view :is(.settings-row-group, #model-settings-connections),
+#settings-view #agent-settings-fields > .settings-disclosure > .settings-group-body,
+#settings-view #default-model-fields .settings-fallbacks { border-radius: 14px; }
+#settings-view #theme-settings :is(.theme-option-surface, .theme-variant-options) { border-radius: 14px; }
+#settings-view .settings-heading > .icon { color: var(--muted); }
+#settings-view #settings-sections .icon { width: 17px; height: 17px; }
+#settings-view .settings-controls > :is(input, select) { border-color: var(--outline-variant); border-radius: 8px; background: var(--surface-container-high); }
+#settings-view .settings-controls > :is(input, select):focus-visible { border-color: var(--primary); }
+#settings-view .settings-controls > button { border-radius: 8px; }
+#settings-view #models-settings #default-model-fields .settings-role-grid .model-default-card { min-height: 104px; padding: 16px; border-radius: 14px; gap: 8px; }
+#settings-view #models-settings #default-model-fields .model-default-card .model-role-value { font-size: 16px; }
+#settings-view #models-settings #image-service-model-row.settings-role-container .image-choice-card { min-height: 112px; padding: 16px; border-radius: 14px; gap: 16px; }
+#settings-view .image-choice-copy > .model-role-value { font-size: 18px; }
+#settings-view #models-image-link .settings-navigation-row { min-height: 64px; }
+
+@media (min-width: 851px) {
+  .shell { --topbar-height: var(--app-header-height); }
+  .shell .layout { --rail-width: 52px; --session-default-width: 288px; padding-inline-end: 8px; padding-bottom: 8px; }
+  .shell .rail { gap: 4px; padding: 8px 6px; border-inline-end: 1px solid var(--outline-variant); }
+  .shell .nav-item { width: 44px; min-height: 44px; padding: 0; gap: 0; border-radius: 8px; justify-content: center; }
+  /* Text remains the accessible name; tooltips are supplied by the shell. */
+  .shell .nav-item > span:last-child { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .shell .nav-icon { width: 36px; height: 36px; border-radius: 8px; }
+  .shell .nav-icon > .icon { width: 20px; height: 20px; }
+  .shell .nav-item.selected .nav-icon { border-radius: 8px; background: var(--surface-container-high); color: var(--on-surface); }
+  .shell .session-sidebar { padding: 8px; }
+  .shell .session-actions { margin-bottom: 0; }
+  .shell #session-list { gap: 2px; }
+  .shell .layout:has(#settings-view:not([hidden])) { grid-template-columns: var(--rail-width) minmax(0, 1fr); }
+  .layout:has(#settings-view:not([hidden])) > #session-sidebar,
+  .layout:has(#settings-view:not([hidden])) > .inspector { display: none; }
+  body:has(#settings-view:not([hidden])) #sessions-toggle { visibility: hidden; }
+  #settings-view { grid-template-columns: 196px minmax(0, 1fr); grid-template-rows: 44px auto; column-gap: 32px; padding-inline: 20px 32px; }
+  #settings-view > .settings-view-heading { grid-column: 1; align-self: start; }
+  #settings-view .settings-view-heading h1 { font-size: 18px; }
+  #settings-view #settings-sections { gap: 2px; }
+  #settings-view #settings-sections [role='tab'] { min-height: 40px; padding: 8px 12px; font-size: 13px; }
+  #settings-view > [role='tabpanel'],
+  #settings-view :is(#theme-settings, #models-settings) { grid-row: 1 / span 2; max-width: 800px; width: 100%; margin-inline: auto; }
+  #settings-view h2.settings-heading { font-size: 24px; line-height: 1.35; font-weight: 600; }
+  #settings-view .settings-section > h3,
+  #settings-view #agent-settings-fields > .settings-disclosure > summary .settings-heading { font-size: 14px; }
+  #settings-view #agent-settings-fields > .settings-disclosure { margin-block: 24px; }
+  #settings-view #agent-settings-fields > .settings-disclosure > summary { min-height: 36px; }
+}
+
+@container (min-width: 760px) {
+  #settings-view #theme-settings .theme-studio { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (min-width: 851px) and (any-pointer: coarse) {
+  #settings-view #settings-sections [role='tab'] { min-height: 44px; }
+}
+
+/* Mouse users get denser controls; touch and hybrid devices keep 44px targets. */
+@media (min-width: 851px) and (not (any-pointer: coarse)) {
+  .shell #session-list button { min-height: 34px; padding-block: 6px; }
+  .shell .session-search input { min-height: 36px; }
+  #settings-view .setting-row { padding-block: 8px; }
+  #settings-view .settings-controls > :is(input, select, button) { min-height: 36px; padding-block: 6px; font-size: 13px; }
+  #settings-view .settings-controls > .icon-button { width: 36px; height: 36px; }
+}
+
+/* Conversation chrome follows the desktop reference: a full-height icon rail,
+ * a single chat panel and the active page's header in the content column. */
+.desktop-chat-control, .rail-utilities { display: none; }
+.session-panel-heading { display: flex; align-items: center; flex: none; gap: 0; min-width: 0; min-height: 44px; }
+.session-panel-heading > strong { flex: 1; min-width: 0; padding-inline: 10px; font-size: 18px; font-weight: 600; letter-spacing: -.3px; }
+.session-panel-heading .icon { width: 18px; height: 18px; }
+.session-list-heading { display: flex; align-items: center; flex: none; justify-content: space-between; gap: 8px; min-height: 44px; padding-inline-start: 10px; margin-top: 8px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.session-list-heading .icon { width: 18px; height: 18px; }
+.session-options { width: min(240px, calc(100vw - 24px)); }
+.session-options > button { display: flex; align-items: center; gap: 10px; width: 100%; text-align: start; }
+.session-options > button[aria-pressed='true'] { background: var(--surface-container-highest); color: var(--on-surface); }
+.shell .session-actions .new-chat { justify-content: flex-start; padding-inline: 10px; gap: 10px; }
+.shell #session-list { padding-block: 0 8px; }
+.shell #session-list button { padding-inline: 10px; }
+.shell #session-list .session-row { position: relative; border-radius: 8px; }
+.shell #session-list .session-row:has(.selected) { background: var(--surface-container-high); }
+.shell #session-list .session-row > button:first-child { padding-inline-end: 36px; }
+.shell #session-list .session-row > button:last-child { position: absolute; inset-inline-end: 0; top: 0; width: 36px; height: 100%; min-height: 0; padding: 6px; background: transparent; }
+.shell #session-list .session-row > button:last-child .icon { width: 16px; height: 16px; }
+.shell #session-list .session-row:has(.selected) > button:first-child { opacity: 1; color: var(--on-surface); }
+.shell #session-list button:disabled { opacity: .65; }
+
+@media (min-width: 851px) {
+  .shell .layout { padding: 0; }
+  .shell .chat-frame { flex-direction: column; overflow: visible; background: var(--surface-container-low); }
+  .shell .chat-frame > .topbar { box-sizing: border-box; height: var(--app-header-height); min-height: var(--app-header-height); flex: 0 0 var(--app-header-height); align-items: center; width: 100%; min-width: 0; gap: 6px; padding-block: 0; padding-inline: 12px; border-bottom: 1px solid color-mix(in srgb, var(--outline-variant) 45%, transparent); }
+  .shell .topbar > .brand { display: none; }
+  .shell .topbar-context { margin-inline-start: auto; gap: 6px; }
+  .shell .topbar-context .topbar-divider, .shell .topbar-context > span:last-child { display: none; }
+  .desktop-chat-control { display: inline-grid; }
+  #desktop-page-title { display: none; }
+  .shell .rail { gap: 0; padding: 8px 3px 8px 4px; background: var(--background); border-inline-end: 1px solid color-mix(in srgb, var(--outline-variant) 45%, transparent); }
+  .shell .rail > .nav-item { flex: 0 0 44px; }
+  .shell .rail .nav-icon { width: 36px; height: 36px; border-radius: 8px; }
+  .shell .rail-utilities { display: flex; flex-direction: column; align-items: center; flex: 0 0 auto; gap: 4px; margin-block-start: auto; padding-top: 12px; width: 44px; }
+  .shell .rail-utilities > button { width: 44px; height: 44px; min-height: 44px; border-radius: 8px; }
+  .shell .rail-utilities .account-initial { width: 26px; height: 26px; font-size: 12px; }
+  .shell .rail-utilities #account-shortcut:hover:not(:disabled) { background: transparent; }
+  .shell .session-sidebar { gap: 0; padding: 0 8px 8px; background: var(--surface-container-low); border-inline-end: 1px solid color-mix(in srgb, var(--outline-variant) 45%, transparent); }
+  .shell .session-panel-heading { box-sizing: border-box; height: var(--app-header-height); min-height: var(--app-header-height); margin: 0 -8px 8px; padding-inline: 8px; border-bottom: 1px solid color-mix(in srgb, var(--outline-variant) 45%, transparent); }
+  .shell .session-sidebar .session-search { margin-block: 8px 0; }
+  .shell .session-actions .new-chat { min-height: 36px; font-weight: 450; }
+  .shell #session-list button { font-size: 13px; line-height: 20px; color: var(--on-surface); }
+  .shell #session-list .session-row > button:first-child { min-height: 32px; padding-block: 6px; }
+  .shell #session-list .session-row > button:last-child { opacity: 0; }
+  .shell #session-list .session-row:is(:hover, :has(:focus-visible)) > button:last-child { opacity: 1; }
+  .shell #main-content { border-radius: 12px; background: var(--background); }
+  .shell .layout:has(#workspace-sidebar) .topbar #sessions-toggle { visibility: visible; }
+}
+@media (min-width: 851px) and (any-pointer: coarse) {
+  .shell .session-actions .new-chat, .shell #session-list .session-row > button:first-child { min-height: 44px; }
+}
+@media (min-width: 851px) and (any-hover: none) and (any-pointer: coarse) {
+  .shell #session-list .session-row > button:last-child { opacity: 1; }
+}
+@media (max-width: 850px) {
+  :root { --app-header-height: 56px; --topbar-height: var(--app-header-height); }
+  .chat-timeline { display: none; }
+  .session-panel-heading > strong { font-size: 18px; }
+  .session-panel-heading { box-sizing: border-box; height: var(--app-header-height); min-height: var(--app-header-height); margin: -16px -24px 8px; padding: 0 24px; border-bottom: 1px solid color-mix(in srgb, var(--outline-variant) 45%, transparent); }
+  .shell .session-sidebar { gap: 0; }
+  .shell #session-list .session-row > button:last-child { width: 44px; }
+  .shell #session-list .session-row > button:first-child { padding-inline-end: 44px; }
+}
+
+/* Store and Settings add their own navigation alongside conversations. */
+@media (min-width: 851px) {
+  .shell .layout:has(> #workspace-sidebar:not([hidden])):has(#main-content) {
+    grid-template-columns: var(--rail-width) var(--session-width, var(--session-default-width)) var(--workspace-width, 216px) minmax(0, 1fr);
+  }
+  .shell .layout.sessions-collapsed:has(> #workspace-sidebar:not([hidden])):has(#main-content) { grid-template-columns: var(--rail-width) var(--workspace-width, 216px) minmax(0, 1fr); }
+  .shell .layout:not(.sessions-collapsed):has(> #workspace-sidebar:not([hidden])) > #session-sidebar { display: flex; }
+  #workspace-sidebar[hidden] { display: none; }
+  #workspace-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 0 8px 8px; background: var(--surface-container-low); border-inline-end: 1px solid color-mix(in srgb, var(--outline-variant) 45%, transparent); }
+  #workspace-sidebar > .settings-view-heading, #workspace-sidebar .store-panel-heading { box-sizing: border-box; display: flex; align-items: center; flex: none; gap: 0; width: calc(100% + 16px); min-width: 0; height: var(--app-header-height); min-height: var(--app-header-height); margin: 0 -8px 8px; padding-inline: 8px; border-bottom: 1px solid color-mix(in srgb, var(--outline-variant) 45%, transparent); }
+  #workspace-sidebar .store-panel-heading { position: sticky; top: 0; z-index: 1; background: var(--surface-container-low); }
+  .shell .layout #workspace-sidebar #sessions-toggle { visibility: visible; }
+  #workspace-sidebar :is(.settings-view-heading h1, .store-brand) { flex: 1; min-width: 0; width: auto; margin: 0; padding-inline: 10px; color: var(--on-surface); font-size: 18px; font-weight: 600; letter-spacing: -.3px; line-height: 1.35; text-decoration: none; }
+  #workspace-sidebar :is(.settings-view-heading, .store-panel-heading) .icon { width: 18px; height: 18px; }
+  #workspace-sidebar #store-sidebar { display: flex; flex: 1; min-width: 0; min-height: 0; height: 100%; position: static; padding: 0; gap: 0; border: 0; background: transparent; overflow-y: auto; }
+  #workspace-sidebar #settings-sections { display: flex; flex: 1; flex-direction: column; align-items: stretch; min-height: 0; gap: 0; width: 100%; position: static; margin: 0; padding: 0; border: 0; background: transparent; overflow-y: auto; }
+  #workspace-sidebar :is(#store-sections, .store-kind-nav) { display: flex; flex-direction: column; gap: 0; width: 100%; margin: 0; padding: 0; background: transparent; }
+  #workspace-sidebar :is(#store-sections > button, .store-kind-nav > button, #store-advanced-files, #settings-sections > button) { display: flex; flex: none; align-items: center; justify-content: flex-start; gap: 10px; width: 100%; min-width: 0; min-height: 36px; padding: 6px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--on-surface); font-size: 13px; font-weight: 450; line-height: 20px; text-align: start; white-space: nowrap; transform: none; }
+  #workspace-sidebar :is(#store-sections > button, .store-kind-nav > button, #store-advanced-files, #settings-sections > button):hover { background: var(--surface-container-high); }
+  #workspace-sidebar :is(#store-sections > .is-current, .store-kind-nav > [aria-current='page'], #store-advanced-files.is-current, #settings-sections > [aria-selected='true']) { background: var(--surface-container-high); color: var(--on-surface); }
+  #workspace-sidebar :is(#store-sections, .store-kind-nav, #settings-sections) .icon { width: 18px; height: 18px; flex: none; }
+  #workspace-sidebar #store-sections .tab-count { margin-inline-start: auto; }
+  #workspace-sidebar .store-nav-label { min-height: 20px; margin: 24px 10px 8px; color: var(--muted); font-size: 12px; font-weight: 600; line-height: 20px; text-transform: none; letter-spacing: normal; }
+  #workspace-sidebar #store-advanced-files { margin-top: 20px; }
+  #store-workspace.sidebar-detached { grid-template-columns: minmax(0, 1fr); }
+  #settings-view.sidebar-detached { display: block; padding-inline: 32px; }
+}
+@media (min-width: 851px) and (any-pointer: coarse) {
+  #workspace-sidebar :is(#store-sections > button, .store-kind-nav > button, #store-advanced-files, #settings-sections > button) { min-height: 44px; }
+}
+
+/* Desktop chat actions stay available in the rail when any panel is collapsed. */
+#rail-chat-actions { display: none; }
+.rail-action-face { display: contents; }
+@media (min-width: 851px) {
+  #rail-chat-actions { display: flex; flex: none; flex-direction: column; width: 44px; }
+  #rail-chat-actions > button { display: flex; flex: 0 0 44px; align-items: center; justify-content: center; width: 44px; height: 44px; min-height: 44px; padding: 0; border-radius: 8px; background: transparent; color: var(--muted); }
+  #rail-chat-actions .rail-action-face { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 8px; }
+  #rail-chat-actions > button:hover:not(:disabled) { background: transparent; }
+  #rail-chat-actions > button:hover:not(:disabled) .rail-action-face { background: color-mix(in srgb, var(--on-surface) 8%, var(--surface-container-low)); }
+  #rail-chat-actions .icon { width: 20px; height: 20px; }
+  .shell .layout #rail-chat-actions #sessions-toggle { visibility: visible; }
+}
+
+/* One desktop chat header with conversation details beside the context toggle. */
+@media (min-width: 851px) {
+  #chat-view .chat-toolbar { display: none; }
+  .topbar #model-control { --chat-action-bg: transparent; --chat-action-fg: var(--on-surface); flex: 0 1 auto; min-width: 0; max-width: min(50%, 400px); gap: 0; }
+  .topbar #model-picker { min-width: 0; font-size: 14px; padding-inline: 8px; }
+  .topbar #model { max-width: 100%; }
+  .topbar #model-control > button, .topbar #model-menu > summary { border-radius: 8px; }
+  .topbar #model-menu > summary:hover, .topbar #model-picker:hover:not(:disabled) { background: var(--surface-container-high); }
+  .topbar-actions > #chat-info-toggle { color: var(--muted); }
+  body:not(:has(#chat-view:not([hidden]))) :is(.topbar #model-control, .topbar #chat-info-toggle) { display: none; }
+}
+
+/* Conversation search is a quiet centered sheet with native dialog semantics. */
+#conversation-search { box-sizing: border-box; width: min(720px, calc(100vw - 32px)); height: min(460px, calc(100dvh - 48px)); max-height: calc(100dvh - 48px); inset: 0; margin: auto; padding: 16px; border: 1px solid color-mix(in srgb, var(--outline-variant) 45%, transparent); border-radius: 16px; background: var(--surface-container-low); color: var(--on-surface); }
+#conversation-search[open] { display: flex; flex-direction: column; }
+#conversation-search::backdrop { background: rgb(0 0 0 / .25); }
+.conversation-search-heading { display: flex; align-items: center; gap: 8px; flex: none; }
+#conversation-search #session-search-field { display: flex; flex: 1; min-width: 0; margin: 0; padding: 0 8px; border: 0; border-radius: 0; background: transparent; outline: none; }
+#conversation-search #session-search-field > svg { display: none; }
+#conversation-search #session-search { flex: 1; min-width: 0; min-height: 44px; padding: 8px 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; outline: none; font-size: 14px; color: var(--on-surface); }
+#conversation-search-close { flex: none; }
+#conversation-search-label { flex: none; margin: 14px 8px 8px; font-size: 12px; }
+#conversation-search-results { flex: 1; min-height: 0; overflow-y: auto; }
+#conversation-search #session-search-list { flex: none; padding: 0; gap: 0; overflow: visible; }
+#conversation-search #session-search-list .session-row { flex: none; background: transparent; }
+#conversation-search #session-search-list .session-row > button:last-child { display: none; }
+#conversation-search #session-search-list button { display: flex; align-items: center; gap: 16px; width: 100%; min-height: 48px; padding: 10px 16px; border-radius: 8px; background: transparent; font-size: 13px; font-weight: 450; color: var(--on-surface); text-align: start; }
+#conversation-search #session-search-list button:hover:not(:disabled), #conversation-search #session-search-list button:focus-visible { background: var(--surface-container-high); }
+.conversation-search-icon { display: inline-block; flex: 0 0 18px; width: 18px; height: 18px; background: currentColor; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M21 11.5a8.5 8.5 0 0 1-8.5 8.5 10 10 0 0 1-4-.9L3 21l1.8-5.5a8.5 8.5 0 1 1 16.2-4Z' fill='none' stroke='black' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat; }
+#conversation-search #session-search-empty { margin: 16px 8px; font-size: 13px; }
+@media (max-width: 560px) {
+  #conversation-search { width: calc(100vw - 24px); height: min(460px, calc(100dvh - 32px)); max-height: calc(100dvh - 32px); padding: 12px; }
+}
+
+/* Anchored conversation and account menus share compact, divided action rows. */
+.sidebar-action-menu { width: min(240px, calc(100vw - 24px)); padding: 8px; border: 1px solid color-mix(in srgb, var(--outline-variant) 40%, transparent); border-radius: 16px; background: var(--surface-container-high); box-shadow: 0 8px 28px #0003; }
+.sidebar-action-menu .message-action { min-height: 40px; padding: 8px 10px; gap: 10px; border-radius: 8px; font-size: 13px; text-decoration: none; }
+.sidebar-action-menu .message-action > .icon { width: 18px; height: 18px; flex: none; }
+.sidebar-action-menu .message-action.destructive { color: var(--error); }
+.sidebar-action-menu .message-menu-divider { margin: 8px 10px; }
+.profile-menu { width: min(264px, calc(100vw - 24px)); }
+.profile-menu-identity { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 8px 10px; border: 0; border-radius: 10px; background: var(--surface-container-highest); color: var(--on-surface); text-align: start; }
+.profile-menu-identity > span:last-child { display: grid; gap: 2px; }
+.profile-menu-identity strong { font-size: 13px; font-weight: 550; }
+.profile-menu-identity small { font-size: 11px; color: var(--muted); }
+.profile-menu .account-initial { width: 26px; height: 26px; font-size: 12px; }
+.account-initial { border-radius: 7px; box-shadow: 0 0 0 3px var(--surface-container-low), 0 0 0 4px var(--outline-variant); }
+@media (any-pointer: coarse) { .sidebar-action-menu .message-action { min-height: 44px; } }
+
+.rail-toggle-logo { display: none; }
+@media (min-width: 851px) {
+  #rail-chat-actions #sessions-toggle .rail-toggle-logo { display: grid; width: 28px; height: 28px; border-radius: 8px; }
+  #rail-chat-actions #sessions-toggle .rail-action-face > .icon { display: none; }
+  #rail-chat-actions #sessions-toggle:is(:hover, :focus-visible) .rail-toggle-logo { display: none; }
+  #rail-chat-actions #sessions-toggle:is(:hover, :focus-visible) .rail-action-face > .icon { display: block; }
+}
+
+/* Keep icon-only controls consistent with the compact workspace. */
+:is(button.icon-button, a.icon-button, button.send-button, .turn-actions button, .store-download-actions > button, .pagination button[aria-current='page'], .image-job-menu > summary, .lock-help summary, button:has(> svg:only-child)) { border-radius: 8px; }
+.turn-actions button:hover:not(:disabled) { border-radius: 8px; }
+
+/* Match the sidebar's 36px icon face on desktop; retain phone touch targets. */
+@media (min-width: 851px) {
+  :is(#main-content, dialog) :is(.icon-button, .send-button, .scroll-to-latest, .store-download-actions > button) {
+    box-sizing: border-box; width: 36px; height: 36px; min-width: 36px; min-height: 36px; flex-basis: 36px; padding: 7px;
+  }
+  #main-content .send-button { padding: 0; }
+  #main-content .scroll-to-latest { left: calc(50% - 18px); }
+}
+
+@media (min-width: 851px) {
+  .shell .topbar .icon-button {
+    box-sizing: border-box; width: 36px; height: 36px; min-width: 36px; min-height: 36px; flex: 0 0 36px; padding: 7px; border-radius: 8px;
+  }
+}
+
+/* A compact rounded-square connection indicator. */
+.connection-dot { width: 8px; height: 8px; border-radius: 2px; }
+
+@media (min-width: 1241px) {
+  .shell .layout > .context-panel {
+    position: relative;
+    z-index: 6;
+    overflow: visible;
+    margin: 0;
+    border-inline-start: 1px solid color-mix(in srgb, var(--outline-variant) 45%, transparent);
+    border-radius: 0;
+  }
+  .context-panel > #chat-resize-right { left: -5px; right: auto; }
+}
+@media (min-width: 1241px) and (any-pointer: coarse) {
+  .context-panel > #chat-resize-right { left: -8px; }
+}
+
+/* Keep an open context panel available across Store and Settings. */
+.layout.inspector-open:has(:is(#store-view, #settings-view):not([hidden])) > .inspector,
+.layout.inspector-open:has(#settings-view:not([hidden]) #models-settings:not([hidden])) > .inspector { display: flex; }
+@media (min-width: 1241px) {
+  .shell .layout.inspector-open:has(> #workspace-sidebar:not([hidden])):has(#main-content) {
+    grid-template-columns: var(--rail-width) var(--session-width, var(--session-default-width)) var(--workspace-width, 216px) minmax(0, 1fr) var(--context-width, var(--context-default-width));
+  }
+  .shell .layout.inspector-open.sessions-collapsed:has(> #workspace-sidebar:not([hidden])):has(#main-content) {
+    grid-template-columns: var(--rail-width) var(--workspace-width, 216px) minmax(0, 1fr) var(--context-width, var(--context-default-width));
+  }
+}
+
+/* Models' legacy selectors must not hide the conversation column or its toggle. */
+@media (min-width: 851px) {
+  .shell .layout:not(.sessions-collapsed):has(#settings-view:not([hidden]) #models-settings:not([hidden])) > #session-sidebar { display: flex; }
+  body:has(#settings-view:not([hidden]) #models-settings:not([hidden])) #sessions-toggle { visibility: visible; }
+}
+
+/* All Settings categories share one centered, responsive reading column. */
+#settings-view > :is(#account-settings, #theme-settings, #agent-settings, #models-settings, #memory-settings, #system-settings) {
+  box-sizing: border-box; width: 100%; max-width: 800px; min-width: 0; margin-inline: auto;
+}
+#settings-view { scrollbar-gutter: stable; }
+@container (max-width: 240px) {
+  #settings-view #agent-settings .tool-policy-form label { flex-basis: 100%; }
+}
+@container (min-width: 500px) {
+  #settings-view #theme-settings .theme-studio { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@container (max-width: 499px) {
+  #settings-view #theme-settings .theme-studio { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Compact shared menus and conversation details, with touch-sized rows on phones. */
+:is(.message-menu, .thinking-effort-menu, .context-action-menu) {
+  box-sizing: border-box; width: min(240px, calc(100vw - 24px)); max-height: calc(100dvh - 24px);
+  overflow-y: auto; padding: 6px; border: 1px solid var(--outline-variant);
+  border-radius: 14px; background: var(--surface-container-high); color: var(--on-surface);
+}
+:is(.message-menu, .thinking-effort-menu, .context-action-menu) .message-action {
+  box-sizing: border-box; min-height: 32px; padding: 6px 10px; gap: 9px; border-radius: 7px;
+  font-size: 13px; line-height: 20px;
+}
+:is(.message-menu, .thinking-effort-menu, .context-action-menu) .message-action:is(:hover, :focus-visible) { border-radius: 7px; }
+:is(.message-menu, .thinking-effort-menu, .context-action-menu) .menu-action-icon {
+  flex: 0 0 18px; width: 18px; height: 18px; border-radius: 0; background: transparent; color: inherit;
+}
+:is(.message-menu, .thinking-effort-menu, .context-action-menu) :is(.menu-action-icon .icon, .message-action > .icon) { width: 18px; height: 18px; }
+:is(.message-menu, .thinking-effort-menu, .context-action-menu) .message-menu-divider { margin: 5px 6px; }
+.message-menu .message-menu-time { padding: 6px 10px; }
+.message-menu .message-menu-worked { padding: 0 10px 6px; }
+.profile-menu .profile-menu-identity { min-height: 42px; padding: 6px 10px; }
+.chat-info-panel { width: min(260px, calc(100vw - 24px)); padding: 12px; border: 1px solid var(--outline-variant); border-radius: 14px; }
+.chat-info-panel h2 { margin: 0; font-size: 13px; line-height: 20px; }
+.chat-info-panel dl { margin: 6px 0 0; }
+.chat-info-panel dl > div { grid-template-columns: 88px minmax(0, 1fr); align-items: start; gap: 8px; margin: 0; padding: 6px 0; line-height: 18px; }
+@media (any-pointer: coarse) {
+  :is(.message-menu, .thinking-effort-menu, .context-action-menu) .message-action { min-height: 44px; }
+  .profile-menu .profile-menu-identity { min-height: 44px; }
+}
+
+/* The floating latest-message control remains a solid circle. */
+#chat-view #scroll-to-latest { border-radius: 50%; background: var(--surface-raised); }
+#chat-view #scroll-to-latest:hover:not(:disabled) { border-radius: 50%; background: var(--surface-high); }
+
+/* Match grouped row highlights to the inside edge of the 14px group border. */
+#settings-view .settings-row-group > .settings-navigation-row:first-child,
+#settings-view :is(#model-settings-connections, #memory-items) > :is(.model-connection-row, .memory-row):first-child:is(:hover, :focus-within) {
+  border-radius: 13px 13px 0 0;
+}
+#settings-view .settings-row-group > .settings-navigation-row:last-child,
+#settings-view :is(#model-settings-connections, #memory-items) > :is(.model-connection-row, .memory-row):last-child:is(:hover, :focus-within) {
+  border-radius: 0 0 13px 13px;
+}
+#settings-view .settings-row-group > .settings-navigation-row:only-child,
+#settings-view :is(#model-settings-connections, #memory-items) > :is(.model-connection-row, .memory-row):only-child:is(:hover, :focus-within) {
+  border-radius: 13px;
+}
+#settings-view :is(#model-settings-connections, #memory-items) > :is(.model-connection-row, .memory-row):not(:first-child):not(:last-child):is(:hover, :focus-within) { border-radius: 0; }
+
+/* The conversation and page navigation panels each own their boundary. */
+@media (min-width: 851px) {
+  .shell #session-sidebar { position: relative; }
+  #session-sidebar > #chat-resize-left { left: auto; right: -10px; z-index: 10; }
+}
+
+/* Sidebar search buttons match the other compact desktop icon controls. */
+@media (min-width: 851px) and (any-pointer: fine) {
+  :is(#session-search-toggle, #settings-search-open) {
+    box-sizing: border-box; width: 36px; height: 36px; min-width: 36px; min-height: 36px;
+    flex: 0 0 36px; padding: 7px; border-radius: 8px;
+  }
+}
+
+/* Center the resize hit area and visible grip on each panel boundary. */
+@media (min-width: 851px) {
+  .chat-resize-edge[data-edge='left'] { left: -5px; }
+  .chat-resize-edge[data-edge='right'] { right: -5px; }
+  #session-sidebar > #chat-resize-left { left: auto; right: -5px; }
+  .chat-resize-edge::after { left: 50%; transform: translate(-50%, -50%); }
+}
+@media (min-width: 851px) and (any-pointer: coarse) {
+  .chat-resize-edge[data-edge='left'] { left: -8px; }
+  .chat-resize-edge[data-edge='right'] { right: -8px; }
+  #session-sidebar > #chat-resize-left { left: auto; right: -8px; }
+}
+
+/* Shared subtle scrollbars; keep native high-contrast colors and touch visibility. */
+@media (forced-colors: none) {
+  * { scrollbar-color: transparent transparent; }
+  *:is(:hover, :focus-within) { scrollbar-color: color-mix(in srgb, var(--on-surface) 20%, transparent) transparent; }
+}
+@media (forced-colors: none) and (any-hover: none) {
+  * { scrollbar-color: color-mix(in srgb, var(--on-surface) 20%, transparent) transparent; }
+}
+
+/* Rotate the decorative backings while leaving the logo and clock dial still. */
+@keyframes klaude-welcome-shape-rotation {
+  from { transform: rotate(-12deg); }
+  to { transform: rotate(348deg); }
+}
+@keyframes klaude-clock-shape-rotation {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.welcome-emblem .welcome-shape { animation: klaude-welcome-shape-rotation 20s linear infinite; transform-origin: center; }
+.welcome-emblem { cursor: grab; touch-action: none; user-select: none; }
+.welcome-emblem.is-spinning { cursor: grabbing; }
+.cookie-clock-face { animation: klaude-clock-shape-rotation 60s linear infinite; transform-origin: center; }
+:root[data-motion='reduced'] :is(.welcome-emblem .welcome-shape, .cookie-clock-face) { animation: none !important; }
+:root[data-motion='reduced'] .welcome-emblem { cursor: default; touch-action: auto; }
+@media (prefers-reduced-motion: reduce) {
+  :is(.welcome-emblem .welcome-shape, .cookie-clock-face) { animation: none !important; }
+  .welcome-emblem { cursor: default; touch-action: auto; }
+}
+
+/* Compact context-panel chrome, keeping the existing file layouts intact. */
+.shell .context-panel { background: var(--surface-container-low); }
+.context-panel .cp-header { padding: 0 8px; }
+.context-panel .cp-header > .cp-tabs { flex: 1 1 auto; width: auto; margin-inline: -8px; }
+.context-panel .cp-tabs.inspector-tabs { display: flex; width: 100%; gap: 0; }
+.context-panel .inspector-tabs .mtrl-tabs__divider { background-color: color-mix(in srgb, var(--outline-variant) 45%, transparent); }
+.context-panel .cp-tabs.inspector-tabs > button {
+  flex: 1 1 0; min-width: 0; max-width: none;
+  height: 48px; min-height: 48px; padding: 0 16px; border-radius: 0; background: transparent;
+  color: var(--muted); font-size: 14px; line-height: 20px; font-weight: 500; letter-spacing: .1px; transform: none;
+}
+.context-panel .cp-tabs.inspector-tabs > button[aria-selected='true'] { background: transparent; color: var(--primary); }
+.context-panel .cp-tabs.inspector-tabs > button:hover:not(:disabled) { background: color-mix(in srgb, var(--on-surface) 8%, transparent); }
+.context-panel .cp-tabs.inspector-tabs > button[aria-selected='true']:hover:not(:disabled) { background: color-mix(in srgb, var(--primary) 8%, transparent); }
+.context-panel .cp-tabs.inspector-tabs > button:is(:focus-visible, :active):not(:disabled) { background: color-mix(in srgb, var(--primary) 10%, transparent); }
+.context-panel .cp-view-modes > button[aria-pressed='true'] { background: var(--surface-container-high); color: var(--on-surface); border-radius: 8px; }
+.context-panel .cp-view-modes > button:hover:not(:disabled) { background: var(--surface-container-high); border-radius: 8px; }
+.context-panel .cp-task { margin: 12px 8px; padding: 12px; border: 1px solid var(--outline-variant); border-radius: 12px; background: var(--surface-container); }
+.context-panel .cp-task p { margin-top: 6px; }
+.context-panel .cp-meta { margin-top: 8px; }
+.context-panel .cp-status { padding: 3px 7px; border-radius: 6px; }
+.context-panel .cp-subtabs { padding: 0; }
+.context-panel .cp-event { border-radius: 8px; }
+.context-panel .cp-event > summary { min-height: 40px; padding: 8px 10px; border-radius: inherit; }
+.context-panel .cp-event[open] { border-radius: 8px; }
+.context-panel .cp-search input { min-height: 36px; border-radius: 8px; }
+.context-panel .cp-view-modes > button { border-radius: 8px; }
+.context-panel .cp-library-controls > .cp-library-toolbar:first-child {
+  width: calc(100% + 24px); margin-inline: -12px;
+}
+.context-panel .cp-library-controls { padding: 0 12px 8px; }
+@media (any-pointer: coarse) {
+  .context-panel .cp-event > summary { min-height: 44px; }
+  .context-panel .cp-search input { min-height: 44px; }
+}
+/* END KLAUDE COMPACT */

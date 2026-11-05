@@ -1072,7 +1072,7 @@ function createFileTile(item, onOpen) {
   card.dataset.fileId = item.id;
   const open = domainButton("", () => onOpen(open), "file-open");
   open.setAttribute("aria-label", `Open ${item.name}`);
-  open.title = item.name;
+  open.dataset.fileName = item.name;
   const art = domainText("span", "", "file-artwork");
   art.setAttribute("aria-hidden", "true");
   art.append(canPreviewImage(item) ? artifactImage(item) : fileIcon(item));
@@ -1084,7 +1084,6 @@ function createFileTile(item, onOpen) {
     domainText("span", `${label} · ${fileSize(item.size)}`, "file-secondary"));
   const date = domainText("time", fileDate(item.created), "file-added");
   date.dateTime = new Date(item.created * 1000).toISOString();
-  date.title = `Added ${new Date(item.created * 1000).toLocaleString()}`;
   open.append(art, detail, domainText("span", label, "file-type"),
     domainText("span", fileSize(item.size), "file-size"), date);
   card.append(open);
@@ -1106,7 +1105,7 @@ function renderFileSelection() {
     card.classList.toggle("file-bulk-selected", fileEditing && selected);
     button.disabled = fileSelectionPreparing;
     if (fileEditing) {
-      button.setAttribute("aria-label", `Select ${button.title}`);
+      button.setAttribute("aria-label", `Select ${button.dataset.fileName}`);
       button.setAttribute("aria-pressed", String(selected));
       if (!button.querySelector(".file-selection-mark")) {
         const mark = domainText("span", "", "file-selection-mark");
@@ -1114,7 +1113,7 @@ function renderFileSelection() {
         button.querySelector(".file-artwork").append(mark);
       }
     } else {
-      button.setAttribute("aria-label", `Open ${button.title}`);
+      button.setAttribute("aria-label", `Open ${button.dataset.fileName}`);
       button.removeAttribute("aria-pressed");
       button.querySelector(".file-selection-mark")?.remove();
     }
@@ -1675,6 +1674,7 @@ function primaryTabIndicator(tabs) {
   document.fonts?.ready.then(() => position(undefined, true));
   return position;
 }
+window.KlaudePrimaryTabIndicator = primaryTabIndicator;
 
 // Presentation and gestures remain local to the existing native file dialog.
 const artifactViewer = (() => {
@@ -2097,7 +2097,7 @@ const artifactViewer = (() => {
     const image = canPreviewImage(item);
     artifactDialog.classList.toggle("is-image", image);
     byId("artifact-detail-title").textContent = item.name;
-    byId("artifact-detail-title").title = item.name;
+    byId("artifact-detail-title").removeAttribute("title");
     const language = sourceLanguage(item);
     byId("artifact-subtitle").textContent = `${chat ? "Chat attachment" : librarySection === "outputs" ? "Generated" : "Uploads"} · ${image ? "Image" : language === "text" ? fileType(item)[1] : language.toUpperCase()} · ${fileSize(item.size)}`;
     const source = typeof data.source_text === "string" ? data.source_text : data.lines.join("\n");

@@ -1,4 +1,4 @@
-"""Bundle the shared Expressive CSS using the existing static route.
+"""Bundle shared Expressive and compact CSS using the existing static route.
 
 Preserves all existing rules outside its owned block. No runtime build system.
 """
@@ -11,12 +11,18 @@ from pathlib import Path
 STATIC = Path(__file__).resolve().parents[1] / "apps/webhost/src/klaude_webhost/static"
 START = "/* BEGIN KLAUDE EXPRESSIVE: python3 scripts/bundle_webui_expressive.py */"
 END = "/* END KLAUDE EXPRESSIVE */"
+COMPACT_START = "/* BEGIN KLAUDE COMPACT */"
+COMPACT_END = "/* END KLAUDE COMPACT */"
 
 
 def bundle(check: bool = False) -> None:
     target = STATIC / "style.css"
     original = target.read_text()
     base = original
+    if COMPACT_START in base:
+        assert base.count(COMPACT_START) == base.count(COMPACT_END) == 1
+        before, owned = base.split(COMPACT_START, 1)
+        base = before.rstrip() + owned.split(COMPACT_END, 1)[1]
     after = "\n"
     if START in base:
         assert base.count(START) == base.count(END) == 1
@@ -36,6 +42,16 @@ def bundle(check: bool = False) -> None:
         + "\n"
         + END
         + after
+    )
+    output = (
+        output.rstrip()
+        + "\n\n"
+        + COMPACT_START
+        + "\n"
+        + (STATIC / "compact.css").read_text().rstrip()
+        + "\n"
+        + COMPACT_END
+        + "\n"
     )
     if check:
         assert output == original, "Run python3 scripts/bundle_webui_expressive.py"

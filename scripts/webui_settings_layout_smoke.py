@@ -210,6 +210,19 @@ async def verify(host, root, chrome):
             assert all(
                 hex_check[key] for key in ("same", "committed", "invalid", "cancelled", "blurred")
             ), hex_check
+            # Every Settings category uses the same responsive reading column.
+            for width in (390, 1440):
+                await tab.command("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": 900, "deviceScaleFactor": 1, "mobile": width < 600,
+                })
+                columns = []
+                for category in ("account", "theme", "agent", "models", "memory", "system"):
+                    await tab.js("showSettingsSection(" + json.dumps(category) + ")")
+                    columns.append(await tab.js("""(()=>{const r=byId(settingsSection+'-settings').getBoundingClientRect();
+                      return {left:r.left,width:r.width};})()"""))
+                assert all(abs(c['width']-columns[0]['width']) < 1 and
+                           abs(c['left']-columns[0]['left']) < 1 for c in columns), (width, columns)
+
             reports = []
             for theme in ("light", "dark"):
                 for width, height in (
@@ -317,6 +330,7 @@ async def verify(host, root, chrome):
                                   columns:getComputedStyle(list).gridTemplateColumns
                                     .split(' ').length,
                                   width:group.clientWidth,
+                                  containerWidth:byId('agent-settings').clientWidth,
                                   bottomBorder:parseFloat(getComputedStyle(list).borderBottomWidth),
                                   cards};
                               });
@@ -324,7 +338,7 @@ async def verify(host, root, chrome):
                             assert all(
                                 item["left"] < 1.5 and item["right"] < 1.5 and
                                 item["bottomBorder"] == 1 and item["columns"] == (
-                                    2 if width > 768 and item["width"] >= 496 else 1
+                                    2 if width > 768 and item["containerWidth"] >= 496 else 1
                                 )
                                 and all(card["padding"] >= 16 and
                                         all(segment >= 44 for segment in card["segments"])
@@ -513,11 +527,12 @@ async def verify(host, root, chrome):
                 assert await tab.js("""(() => {
                   const group=byId('image-service-save'), bounds=group.getBoundingClientRect();
                   return [...group.querySelectorAll(':scope > .setting-row')]
-                    .filter(row=>row.getClientRects().length).every((row,i)=>{
+                    .filter(row=>row.getClientRects().length).every(row=>{
                       const r=row.getBoundingClientRect(), style=getComputedStyle(row);
                       return Math.abs(r.left-bounds.left-1)<1.5 &&
                         Math.abs(bounds.right-r.right-1)<1.5 &&
-                        parseFloat(style.borderTopWidth)===(i ? 1 : 0) &&
+                        parseFloat(style.borderTopWidth)===(
+                          row.previousElementSibling?.matches('.setting-row') ? 1 : 0) &&
                         parseFloat(style.paddingLeft)>=16;
                     });
                 })()"""), width

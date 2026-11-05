@@ -54,6 +54,7 @@ async def verify(host, root, chrome):
             await tab.js("refreshSessions()")
             await tab.js("toggleSessions(true)")
             await tab.click("#session-list .session-row button:last-child")
+            await tab.click("#session-actions-menu > button:first-child")
             await tab.wait("byId('session-management').open")
             assert await tab.js("!byId('session-archive').disabled && "
                                 "!byId('session-rename').querySelector('button')")
@@ -117,6 +118,7 @@ async def verify(host, root, chrome):
             assert not host.application.memory.session_archived(original)
 
             await tab.click("#session-list .session-row button:last-child")
+            await tab.click("#session-actions-menu > button:first-child")
             await tab.click("#session-archive")
             await tab.wait("reviewDialog.open")
             await tab.js("""window.sessionFetch=fetch.bind(window);
@@ -138,9 +140,11 @@ async def verify(host, root, chrome):
             await tab.js("domainRequest('/api/v1/library/submit','POST',sessionArchiveBody)")
             assert host.application.session_id == selected
             await tab.js("toggleSessions(true)")
+            await tab.click("#session-options-toggle")
             await tab.click("#archived-sessions")
             await tab.wait("byId('session-list').textContent.includes('Renamed conversation')")
             await tab.click("#session-list .session-row button:last-child")
+            await tab.click("#session-actions-menu > button:first-child")
             assert await tab.js("byId('session-archive').textContent.includes('Restore')")
             await tab.click("#session-archive")
             await tab.wait("reviewDialog.open")
@@ -148,6 +152,7 @@ async def verify(host, root, chrome):
             await tab.wait("!reviewDialog.open && !BrowserManagement.hasPending()")
             assert not host.application.memory.session_archived(original)
             assert host.application.session_id == selected
+            await tab.click("#session-options-toggle")
             await tab.click("#archived-sessions")
             await tab.wait("byId('session-list').textContent.includes('Renamed conversation')")
             assert not tab.errors, tab.errors

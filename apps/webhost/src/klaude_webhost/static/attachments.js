@@ -382,6 +382,7 @@ window.ContextPanel = (() => {
   const desktopHint = "Drag a file into chat to attach it.";
   const touchHint = "Use the chat attachment menu to add files.";
   const attachmentHint = () => mobileAttachments.matches ? touchHint : desktopHint;
+  const primaryTabPositions = new WeakMap();
   function updateAttachmentHint() {
     for (const hint of [desktopHint, touchHint]) {
       if (status.textContent.endsWith(hint)) {
@@ -399,9 +400,18 @@ window.ContextPanel = (() => {
   const duration = seconds => seconds < 1 ? "<1s" : seconds < 60 ? `${Math.round(seconds)}s` :
     `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
   function tabs(ids, chosen, activate) {
+    const container = byId(ids[0]).parentElement;
+    let position = primaryTabPositions.get(container);
+    if (!position) {
+      position = window.KlaudePrimaryTabIndicator(container);
+      primaryTabPositions.set(container, position);
+    }
+    let selected;
     ids.forEach(id => {
       const button = byId(id), active = id === chosen;
       button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1;
+      button.classList.toggle("mtrl-tab--active", active);
+      if (active) selected = button;
       button.onclick = () => activate(id);
       button.onkeydown = event => {
         let index = ids.indexOf(id);
@@ -413,6 +423,7 @@ window.ContextPanel = (() => {
         event.preventDefault(); activate(ids[index]); byId(ids[index]).focus();
       };
     });
+    position(selected);
   }
   function choosePanel(value) {
     panel = value; saveNavigationChoice("context-panel-tab", value);
