@@ -165,15 +165,16 @@ Workspace layout:
   capability-gated on older or embedded hosts. Evidence:
   `docs/webui/system-settings-validation.md`.
   Models opens a
-  single-column overview with Connections first, followed by Defaults and Image generation;
+  model preferences dashboard with Connections first, followed by Default models and Image generation;
   the Models heading and refresh lead the overview, while management screens
   show a Models breadcrumb with a return action and the current destination.
   Manage connections, Connected models and Image generation are dedicated
   destinations under Models, restored by `models-screen` URL state. Connected
   models remains available through Settings search and existing links, with
-  provider filtering, search and paging; the overview omits its redundant link.
-  Conversation selection stays in Chat. Primary default roles use whole-row model
-  choosers; fallbacks, token tuning and Vision enable live in Advanced defaults.
+  provider filtering, search and paging; the overview exposes a Connected models
+  row beneath Manage connections.
+  Conversation selection stays in Chat. Primary default roles use full-card model
+  choosers in two desktop columns and one phone column; fallbacks, token tuning and Vision enable live in Advanced defaults.
   Each fallback uses the same full-width chooser row as the primary roles;
   these rows use a 64px minimum height consistent with other settings controls.
   Advanced-default setting dividers extend across the card while content stays inset.
@@ -184,7 +185,7 @@ Workspace layout:
   Image generation exposes its model chooser for Stable Diffusion as well as
   Ollama. Stable Diffusion uses the shared Model Roles dialog to choose the
   currently loaded model or a server recipe and its exact component files.
-  The image setting uses the same whole-row label/value/chevron as Model Roles;
+  The main image setting uses a large selected-model card with a Change action;
   picker rows retain shared model icons and current-selection state. Metadata browsing does not load weights. Refresh explicitly rescans the
   server's model catalog. Required components, category agreement and alternative
   component groups are validated; file IDs come from the server, never guessed
@@ -239,6 +240,196 @@ Workspace layout:
   and removes the whole selection in one SQLite transaction; any changed/missing
   file rejects the deletion without removing other files. The owned journal keeps
   uncertain outcomes fenced. Folder moves remain deferred.
+- Store uses a dedicated desktop sidebar with Explore, Installed, Downloads, Chat
+  models, Image models, MCP servers, Skills and Advanced model files. Phones use
+  a native location chooser and hierarchical Back actions. Store and Models omit
+  the conversation sidebar. Explore has visual category entries and bounded
+  shelves; Filters contains technical catalog and exact-reference controls.
+  Shared model/MCP/Skill detail headers lead with identity and one primary action;
+  long descriptions, source facts, permissions and install options use native
+  disclosures. Full installation reviews remain unchanged. Installed links to
+  the separate MCP/Skill managers. Research and focused browser evidence:
+  `docs/webui/store-package-manager-redesign.md`.
+  The Store redesign preserves model detail, exact variant and
+  focus when a download review is cancelled; accepted downloads open Downloads.
+  Exact-reference cancellation restores its input draft. Opening details cancels
+  pending debounced search navigation. Downloaded image files expose Configure
+  model and setup-unchecked guidance rather than claiming runtime readiness.
+  Connections exposes text Add connection, Test and Manage actions, and explains
+  current-chat edit restrictions. Image-service testing is labeled Check service
+  connection. Image Stop tooltips distinguish partial-data discard; Remove from
+  history never deletes weights. Failed/unconfirmed transfers expose inline status.
+  Evidence and remaining redesign scope: `docs/webui/store-models-redesign-progress.md`.
+- The Stable Diffusion picker offers Save setup and per-server Saved setups.
+  Versioned immutable drafts retain exact recipe metadata and selected server
+  file IDs across browser reloads in a bounded private atomic inventory.
+  Check setup refreshes file/recipe/runtime evidence and compares saved defaults;
+  changed recipes, unavailable files and uncertain loads remain explicit and
+  block unsafe load attempts. Compatibility and inference remain unverified.
+  Forget saved setup removes only draft metadata. These actions do not authorize
+  downloads, load weights or save defaults; existing reviewed actions remain
+  separate. The administrator/Origin/CSRF-protected endpoint is gated through
+  `image_setup_drafts`. Store image details and the image composer now enter the
+  same picker through a contextual Image generation handoff. Return restores the
+  source Store URL/variant or reopens the composer; prompt/options remain in
+  memory only. The selected saved setup ID and return context survive reload,
+  while prompt text is never written to URL/history/storage. After reload the
+  composer opens with its normal empty draft. Missing endpoints request service
+  configuration; older hosts show saved-setup guidance. Loading and Apply changes
+  stay explicit.
+- Store image details offer Plan installation for the selected exact file.
+  File-only and explicitly chosen curated FLUX.3 Klein/Klein Base profiles show
+  the primary and companions, pinned source links, sizes, checksums, destination
+  categories and total bytes before any transfer. The primary uses diffusion_models
+  for these curated profiles; direct/file-only downloads retain checkpoints.
+  Recent 50 immutable metadata plans persist on the host and restore through
+  `models-plan`. Reopening never refreshes or substitutes their source metadata.
+  Each Install retains the existing separate review and worker. Review compares
+  the plan's exact source/destination fingerprint before admitting a transfer;
+  source revisions, hashes, sizes and root identity changes require rebuilding.
+  Existing destinations remain unverified and are never overwritten. Free-space
+  evidence is dated, is not a reservation, and each transfer rechecks disk space.
+  Exact receipt fingerprints connect plan rows to independent progress, Pause,
+  Resume, Stop and recovery controls. Accepted plan transfers stay in the plan;
+  Downloads offers Return to installation plan across reloads. The bounded recent
+  transfer list is not a complete filesystem inventory. Completion never implies
+  compatibility, server visibility, loading, defaults or verified generation.
+  Configure model enters the existing handoff, which waits for the latest
+  settings read without starting a competing refresh. Plans are metadata only, capped
+  at 50 snapshots, and require `image_install_plans`. A grouped approval can
+  review the exact remaining files in one dialog; the server preflights each
+  pinned artifact and full-file free space, then admits stable, individually
+  fenced child downloads. Partial dispatch identifies each admitted and
+  unsubmitted child; repeating the same review/request ID never replays an
+  admitted transfer. Existing per-file controls and reviews remain available.
+  `image_install_plan_group` gates the grouped control on older hosts. This
+  still installs files only; server mapping and model selection remain separate.
+- Installation-plan Configure model carries its plan into the existing image
+  picker via `models-install-plan`. Check planned files explicitly rescans server
+  metadata and reports unique path candidates, ambiguous matches and paths not
+  visible on that server. Category agreement is required; matching paths never
+  certify file content or remote root equivalence. Use visible files explicitly
+  fills a recipe/component draft; file-only plans retain manual recipe selection.
+  Load and Apply remain separate reviewed actions. Saved setups optionally retain
+  their originating plan ID without changing legacy identities. This association
+  is provenance, not certification that an edited selection matches the plan.
+  Missing/evicted plans offer manual file selection; service failures clear stale
+  catalog evidence. The `image_install_plan_setup` capability gates the bridge.
+- Shared image readiness is available on Store detail/Installed, Settings > Models
+  > Image generation and the image composer. Saved image setups lists at most 50
+  drafts and 50 plans, searches locally and pages ten rows at a time. Continue
+  setup restores exact saved IDs and server context; View downloads opens owned
+  transfer controls. Composer return retains the in-memory prompt/options draft.
+  A different saved server stages service fields without applying defaults and
+  refuses to replace an existing conflicting service draft. Settings can return
+  to its originating image settings screen.
+  The administrator/Origin/CSRF-protected image-readiness API lists only local
+  metadata and recent receipts; explicit Check setup refreshes one selected
+  server. Bounded private observations are always shown as dated Last check
+  evidence. Saved settings changes invalidate cached checks; current download
+  activity and unknown/load fences override historical success. Only the latest
+  receipt per exact artifact contributes status. Plan provenance does not lend
+  another primary file's readiness to a Store model. Unavailable inventories
+  preserve available sources with errors. Refreshing the local inventory never
+  loads models or probes all saved servers. Existing picker Save/Check records
+  observations through a best-effort presentation cache, without changing its
+  save/recovery outcome. Compatibility and generation stay unverified.
+  `image_readiness_inventory` gates the UI; sign-out clears the browser inventory.
+- The image model picker presents the currently loaded server model first,
+  then saved setups, then downloaded files that still need setup. File rows say
+  Needs setup and open a separate recipe/component screen; a loaded row only
+  creates a settings draft, with Apply remaining separate. The shared picker
+  fills phone screens and retains its role-picker keyboard and review behavior.
+  ComfyUI is the user-selected free, open-source managed-runtime integration
+  target for the install-to-select path, superseding LocalAI/InvokeAI proposals.
+  The initial managed SD1.5 bundle is implemented behind `image_comfyui`.
+  Store and Image generation settings expose one complete Install/repair review
+  for pinned ComfyUI 0.43.0, a hash-locked Linux x86_64 Python 3.12 CUDA 12.6
+  environment and the pinned 4.27 GB checkpoint. It verifies and reuses matching
+  existing weights, uses resumable transfers and private per-profile runtime
+  paths, and runs built-in nodes with custom nodes and external APIs disabled.
+  Installation publishes a selectable bundle only after file and runtime/schema
+  checks; it does not load weights, generate or change defaults. Pause retains
+  partial work; uncertain installs require Check installation before continuing.
+  Inherited installer locks and exact journal evidence prevent unsafe recovery.
+  An incomplete repair hides the old bundle until setup completes. Unfinished
+  ComfyUI receipts and any queued/running work prevent engine replacement.
+  Choose model stages a draft; Apply saves provider `comfyui`, symbolic endpoint
+  `managed` and immutable bundle ID. Normal users need no server URL, component
+  picker, graph editor or Load action. Legacy stable-diffusion.cpp controls live
+  in Advanced image service; existing weights, plans and setups remain intact.
+  Generation submits one fixed SD1.5 graph and saves the exact acknowledged UUID.
+  Recovery only observes/retrieves that job; cancellation uses the pinned scoped
+  job API, never global interrupt or queue clear. Output must match the reviewed
+  graph, client, node and filename before existing pixel/provenance checks publish
+  it to Library. Only an actual generation records inference evidence.
+  Real installation, 512px GPU generation and Store-to-picker/Apply/reload/browser
+  generation passed on GTX 1650 4 GB with Torch 2.9.1+cu126 in an isolated profile.
+  The production host/defaults have not been switched. Other architectures,
+  updates and uninstall remain outside this first bundle. The bounded read-only
+  `comfyui_probe.py` and private `comfy_probe` command remain development tools;
+  metadata checks alone never certify installed content or successful inference.
+  Design: `docs/webui/comfyui-bundle-installation-design.md`; evidence:
+  `docs/webui/comfyui-validation.md`.
+  The managed path also adopts completed, witnessed Store safetensors downloads,
+  and offers one Install for image generation review before downloading a supported
+  new checkpoint. Bounded pinned HTTP Range reads and a safetensors header parser
+  detect complete SD1.5/SDXL UNet, text encoder(s) and VAE; tensor byte ranges,
+  sizes and full-file hashes are checked again during materialization. Pickle,
+  GGUF, split weights, adapters and unknown families are not implicitly converted.
+  Immutable checkpoint IDs and content-addressed model names support multiple
+  models and shared verified weights. The runtime is reused for additional models;
+  the starter checkpoint is not required for a custom checkpoint installation.
+  SDXL is explicitly device-unverified; only SD1.5 has real GTX 1650 inference evidence.
+  The normal image chooser lists installed managed models first. Legacy service
+  models are reached through Advanced service models; contextual legacy setup
+  handoffs preserve their previous destination. No image model stages generation
+  off and clears its default, with Apply remaining explicit. Saves reject removed
+  managed models even when generation is disabled. Remove model reviews only the
+  private copy and refuses a selected default. It keeps shared weights, Store
+  originals, runtime and Library output. A tombstone and exact file signatures
+  support checked interrupted cleanup without replaying installation. Private
+  source snapshots survive worker environment changes; partial drafts retain a
+  repair path. Interrupted checked reads have their own witnessed recovery, and
+  reloading while a check runs continues observing it. A positively acknowledged
+  queued cancellation is confirmed after bounded queue/history checks; it no
+  longer requires abandoning a receipt solely because dequeued jobs lack history.
+  Custom Store install/select/generate/remove and retained legacy UI passed real
+  browser checks at 320/390/768/1440px. Runtime updates/removal and FLUX/GGUF recipes
+  remain separate from the implemented checkpoint lifecycle. In particular, the
+  existing Unsloth FLUX 3 GGUF is not a supported managed bundle; see
+  `docs/webui/comfyui-gguf-gap.md`. See `docs/webui/managed-image-runtime-plan.md`.
+  Native Ollama image generation remains experimental: its official announcement
+  describes macOS-only support, and release 0.32.6 temporarily removed its
+  runner. Klaude's existing Ollama image adapter checks model metadata but
+  cannot establish runtime availability on Linux or turn arbitrary Store image
+  files into Ollama models. Require actual generation evidence before calling
+  an Ollama image model usable.
+  Settings > Models > Image generation leads with the selected model card,
+  generation toggle and Get more image models entry. Service controls and manual
+  IDs live in Advanced; explicitly selected advanced providers retain their
+  catalog. Complete managed installers live in Store rather than repeating in
+  Settings. Choosing a model still stages an independent Apply/Discard draft.
+  On managed-capable hosts the installed image picker remains available without
+  a server URL; legacy services retain their explicit connection setup.
+- Connections Add now uses one guided editor for the existing disabled definition,
+  write-only credential, test and reviewed enable stages. Each mutation retains
+  its separate exact review and journal. The Add review exposes only its generated
+  connection ID, which binds accepted work to its inventory entry without name
+  matching. Completed definitions collapse into an expandable summary; credentials
+  retain the same native input across rerenders. Cancel keeps definition drafts
+  and clears reviewed secrets for explicit re-entry. Tests remain read-only and
+  enabling always uses the existing backend rechecks.
+  Disabled connections expose Continue setup. `connection-setup` and
+  `connection-request` restore exact saved/request identities across reloads;
+  credentials never enter URLs or browser storage. Accepted stages are followed
+  by receipt and inventory reads. Unknown outcomes stay blocked and offer the
+  existing witnessed saved-state recovery without automatic replay. Closing/Done
+  clears resume parameters before a late read can reopen the editor. Phone editors
+  fill the viewport; desktop retains the existing dialog. Focus advances to the
+  next actionable stage. The `model_connection_setup` capability gates this flow;
+  older hosts retain the existing individual editor actions. Current-chat edit
+  protections, credential writer, tests, enable validation and recovery stay intact.
 - WebUI spacing follows the existing Material surfaces and a 4px-based rhythm:
   preserve responsive page gutters, inset text and controls within interactive
   rows, group related controls tightly and separate distinct sections. Check
@@ -416,14 +607,14 @@ Workspace layout:
   This composition uses existing routes and requires no host restart. Stable
   Diffusion uses Hugging Face text-to-image discovery with independent catalog,
   continuation and detail caches, retaining the same cards, full details, exact-file
-  review and Downloads UI. It offers top-level, unsplit GGUF and Safetensors files
+  review and Downloads UI. It offers bounded, unsplit GGUF and Safetensors files
   with published sizes and SHA256 metadata, pinned to an exact repository commit.
   Signed-in administrators can download these files to the host's existing
   `KLAUDE_IMAGE_MODEL_DIR` (default `/mnt/HDD1/klaude-image/models`), beneath
   `checkpoints/OWNER/REPOSITORY/`. The directory must already exist and be writable.
   Transfers use the shared owned worker and witnessed operation journal, bounded
   streaming, disk checks, checksum verification, no-overwrite atomic publication,
-  symlink rejection and a directory-scoped process lock. Stop reaps the owned worker;
+  symlink rejection and per-destination process locks. Stop reaps the owned worker;
   recovery checks the exact local file and cleans its owned partial without another
   network request. Changed files, missing/replaced roots and active workers remain
   fenced. Installed lists bounded local file metadata. Downloads never load the
@@ -5802,3 +5993,88 @@ Development state at handoff:
 - Continue controlled subagent orchestration with live behavioral evaluation
   before considering an implementation-worker role. Do not add
   background/cloud workers or broad write concurrency as part of that work.
+
+Skill Store failure reporting uses typed pinned-source rejection codes and fixed
+public messages. Unknown worker acknowledgements show OUTCOME_UNCONFIRMED without
+inventing a cause. Generic operation reconciliation rechecks resource ownership
+and generation in the same transaction before settling an unknown receipt.
+See `docs/webui/skill-store-recovery-validation.md` for recovery limits.
+
+The native Image Model picker lists installed checkpoint/diffusion weight files
+and the currently loaded model. Setup recipes are chosen only after selecting a
+file; compatible component categories and reviewed loading remain required.
+Known text-to-image/image-to-image Hub cards open the Stable Diffusion download
+lane even when discovered in Ollama GGUF results. Arbitrary image weights are
+not sent to Ollama for installation.
+
+Image weight downloads retain their shared model-work fence and directory lock
+but do not request journal-wide exclusivity: unrelated unknown Skill receipts
+remain fenced without blocking an independent weight-file transfer. Explicitly
+MLX-named variants are excluded from SD metadata and download reviews; image
+detail cache versioning refreshes the older variant lists.
+
+Image model load/recovery and image-default save/recovery can run alongside a
+model-image-download. The journal checks compatible conflict kinds atomically;
+other model-work kinds still block these actions. The image server's own runtime
+resource fence still serializes competing loads. Selecting an unpublished partial
+weight file remains unsupported. Download workers and image controls share the
+existing bounded worker capacity.
+
+System’s Restart Klaude action restarts the Web UI and hosted agent, preserving
+the conversation, workspace and LAN settings. Terminal sessions remain running;
+this scope is stated in the row description and confirmation. Settings search
+finds the action by Restart Klaude or Web UI. Existing lifecycle guards apply.
+
+Failed/cancelled image-download history offers Resume for the original witnessed
+immutable target under a new request ID; unknown receipts require reconciliation. Ordinary transfer
+failures retain a SHA256-keyed partial under the locked target directory. Retry
+rehashes retained bytes and requests an exact validated HTTP range; a server that
+ignores Range restarts the file. Size/checksum failures discard corrupt partials,
+and publication still requires the reviewed full size/SHA256 with no overwrite.
+Pause persists its intent before reaping the worker; reconciliation retains
+paused partials. Stop retains its explicit owned-partial cleanup behavior.
+
+Owned image downloads show Pause, then the Stop cross while running, and Resume,
+then the history-removal cross when settled. Pause retains the partial and is
+reconstructed across host restarts from private target metadata. Resume uses the
+old terminal receipt's HMAC-authenticated target without a new source lookup or
+confirmation; it admits a new, deduplicated request and keeps admin/Origin/CSRF,
+active-conversation and resource fencing checks. Older hosts omit Pause through
+the model_download_pause capability.
+
+Legacy Skill installs with no witnesses/evidence have an explicit local retirement
+workflow: `klaude skill-store retire REQUEST_ID --reason REASON --apply`. It holds
+the Skill mutation lock, rejects any package/Knowledge state, rechecks fingerprint
+and generation, creates consistent private SQLite backups, and records a separate
+retired_unverified audit row while leaving the historical receipt unknown.
+Confirmation is mandatory for CLI apply. No automatic retirement/replay occurs.
+Activity identifies retired history and permits fresh reviewed requests; an old
+worker cannot cross its effect gate. Skill installs can coexist with independent
+image-file downloads, while conflicting Ollama maintenance remains blocked.
+REA was successfully installed from the user's pinned morluto/rea source; see
+`docs/webui/skill-store-recovery-validation.md` for exact receipts and verification.
+
+Opening the native Image Model picker rescans the configured server's file
+metadata before listing installed weights, so downloads completed since its last
+scan become visible. This scan does not load weights. Rows distinguish checkpoint
+and diffusion-weight categories; the existing exact component reviews still apply.
+
+Recognized native image setups can offer missing dependencies in the Image Model
+picker. FLUX.3 Image Klein and Base initially have curated Qwen3-VL 4B Q4_K_M
+encoder and FLUX.2 VAE sources. The admin-only, CSRF-protected dependency plan
+reads bounded metadata, reports exact sizes and installed alternatives, and never
+downloads or loads weights. Each Install action opens the existing exact-file
+review. Accepted component transfers use the same journaled Pause/Resume worker,
+with category included in its private witness and no-overwrite destination.
+Bounded nested image files are supported through descriptor-relative directories;
+components publish under text_encoders or vae rather than checkpoints. Existing
+receipt witnesses without category remain compatible. Independent image files
+can download concurrently within the shared four-worker limit; duplicate targets
+remain fenced. Per-target locks share a migration gate with older workers, and
+legacy global unknown receipts still require reconciliation. The picker retains
+all dependency rows with individual progress and Pause/Resume controls. Completion
+rescans the server and fills an empty slot for the component approved here;
+existing alternatives still offer Use installed. Model loading retains its separate
+review. Unknown recipes never acquire guessed dependencies or scripts. Older
+hosts omit the offer via image_model_dependencies. Details and limits:
+`docs/webui/image-model-dependencies-validation.md`.

@@ -11,6 +11,7 @@ import hashlib
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import tempfile
 import threading
@@ -47,6 +48,7 @@ from .browser_media_settings import WITNESSED, prepare_media_setting, run_media_
 from .browser_vision import OPERATIONS as VISION_OPERATIONS
 from .browser_vision import READ_OPERATIONS as VISION_READ_OPERATIONS
 from .browser_vision import prepare_vision_operation, run_vision_operation
+from .comfyui_install import OPERATIONS as COMFY_OPERATIONS
 from .integration_store import IntegrationStore
 from .library_inventory import knowledge_inventory, knowledge_search
 from .library_knowledge import KnowledgeAction, knowledge_worker_request, source_inventory
@@ -97,6 +99,8 @@ class ManagementReview:
             "summary": self.summary,
             "expires_at": self.expires_at,
         }
+        if self.operation == "model-connection-add":
+            result["connection_id"] = self.fields["value"]["id"]
         if self.operation == "image-settings-save":
             candidate = self.fields["candidate"]
             result["image_settings"] = {
@@ -591,6 +595,45 @@ class LibraryManagement:
                     )
                 elif operation in browser_model_settings.OPERATIONS:
                     fields, resource, summary = browser_model_settings.prepare(self.cfg, draft)
+                elif operation == "model-image-install-plan":
+                    from . import image_install_plans
+
+                    if set(draft) != {"operation", "plan_id", "slots"}:
+                        raise ValueError("Choose exact plan files")
+                    plan = image_install_plans.get(self.cfg, draft["plan_id"])
+                    components = plan["selection"]["components"]
+                    slots = draft["slots"]
+                    available = {row["slot"]: row for row in components}
+                    if (not isinstance(slots, list) or not slots or len(slots) > len(components)
+                            or any(not isinstance(slot, str) or slot not in available
+                                   for slot in slots) or len(set(slots)) != len(slots)):
+                        raise ValueError("Choose distinct files from this plan")
+                    selected = [available[slot] for slot in slots]
+                    busy_artifacts = {row.get("artifact_id") for row in self.model_jobs()["items"]
+                                      if row.get("kind") == "model-image-download"}
+                    if any(row["artifact_id"] in busy_artifacts for row in selected):
+                        raise OperationConflict(
+                            "A selected file has transfer history; check Downloads"
+                        )
+                    children = []
+                    for row in selected:
+                        child_fields, child_resource, _ = model_store.prepare(
+                            self.cfg, row["draft"])
+                        children.append({"slot": row["slot"], "fields": child_fields,
+                                         "resource": child_resource})
+                    if (shutil.disk_usage(children[0]["fields"]["root"]).free
+                            < sum(row["size"] for row in selected) + 16 * 1024**2):
+                        raise ValueError(
+                            "Not enough free space for all selected files; choose files separately"
+                        )
+                    fields = {"plan_id": plan["id"], "children": children}
+                    resource = "image-install-plan:" + plan["id"]
+                    summary = (f"Approve {len(children)} pinned image file downloads "
+                               f"({sum(row['size'] for row in selected):,} bytes): " +
+                               "; ".join(f"{row['label']} — {row['filename']} "
+                                         f"to {row['destination']}" for row in selected) +
+                               ". Each transfer has its own receipt and controls. "
+                               "No model is loaded or selected automatically.")
                 elif operation in model_store.OPERATIONS:
                     fields, resource, summary = model_store.prepare(self.cfg, draft)
                 elif operation in GENERATED_OPERATIONS:
@@ -630,6 +673,8 @@ class LibraryManagement:
             review = self._reviews.get(token)
             return bool(review and review.owner == owner
                         and (review.operation in model_store.OPERATIONS
+                             or review.operation == "model-image-install-plan"
+                             or review.operation in COMFY_OPERATIONS
                              or review.operation in browser_model_settings.OPERATIONS))
 
     def admin_model_review(self, owner: str, token: str) -> bool:
@@ -637,6 +682,8 @@ class LibraryManagement:
             review = self._reviews.get(token)
             return bool(review and review.owner == owner
                         and (review.operation in model_store.OPERATIONS
+                             or review.operation == "model-image-install-plan"
+                             or review.operation in COMFY_OPERATIONS
                              or review.operation in browser_model_settings.OPERATIONS
                              or review.operation in MEDIA_SETTINGS_OPERATIONS
                              or review.operation == "skill-store-install"))
@@ -644,7 +691,8 @@ class LibraryManagement:
     def model_busy(self) -> bool:
         if self._journal is None and not (self.data / "operations.db").exists():
             return False
-        return self.journal.resource_busy(model_store.RESOURCE)
+        return (self.journal.resource_busy(model_store.RESOURCE)
+                or self.journal.kind_busy("model-image-download"))
 
     def model_chat_blocked(self, info: ModelInfo) -> bool:
         """Keep model maintenance fenced without stopping unrelated chat models."""
@@ -689,6 +737,68 @@ class LibraryManagement:
                 item["cancellable"] = item["request_id"] in self._active
         result.update(self._model_activity.read(self.cfg, result["items"]))
         return result
+
+    def resume_model(self, identity: str, request_id: str) -> dict[str, Any]:
+        with self._lock:
+            receipt = self.status(identity)
+            if (receipt["kind"] != "model-image-download"
+                    or receipt["state"] not in {"failed", "cancelled"}):
+                raise OperationConflict("Only a settled image download can be resumed")
+            target = model_store.read_record(model_store.target_path(self.cfg, identity),
+                                             limit=16_384)
+            try:
+                fields = model_store.private_target(target)
+            except (KeyError, TypeError):
+                raise OperationConflict("Download target unavailable") from None
+            if not self.journal.settled_witness_after_matches(
+                identity, OWNER, candidate=model_store.witness(fields, True),
+            ):
+                raise OperationConflict("Download target differs from the reviewed file")
+            # Resume the exact immutable target already authorized by its original
+            # review. Admission and the worker recheck resource/root ownership.
+            from .image_model_store import resource as image_resource
+
+            token = hashlib.sha256(f"resume:{identity}:{request_id}".encode()).hexdigest()[:32]
+            self._reviews[token] = ManagementReview(
+                token, "model-resume", "model-image-download", image_resource(fields),
+                fields, "Resume the previously reviewed image file.", time.time() + 120,
+            )
+            try:
+                result = self.submit("model-resume", token, request_id)
+            finally:
+                self._reviews.pop(token, None)
+            try:
+                model_store.dismiss(self.cfg, self.journal, identity)
+            except (OSError, ValueError, RuntimeError):
+                pass  # History cleanup must not hide an admitted resume receipt.
+            return result
+
+    def pause_model(self, identity: str) -> dict[str, Any]:
+        with self._lock:
+            receipt = self.status(identity)
+            if receipt["kind"] != "model-image-download":
+                raise ValueError("Only image-file downloads support pausing")
+            if receipt["state"] in {"completed", "failed", "cancelled"}:
+                return receipt
+            if identity not in self._active:
+                raise OperationConflict("Download unconfirmed; check its inventory")
+            # Persist intent before stopping, so recovery preserves the partial
+            # even if this host exits before processing the worker's stop event.
+            model_store.mark_paused(self.cfg, identity)
+            return self.cancel_model(identity)
+
+    def pause_comfy(self, identity: str) -> dict[str, Any]:
+        with self._lock:
+            receipt = self.status(identity)
+            if (receipt["kind"] not in {"comfy-install", "comfy-import", "comfy-repair",
+                                       "comfy-store-install"} or identity not in self._active):
+                raise OperationConflict("Choose an active managed image installation")
+            current = self.journal.evidence(identity, OWNER)
+            self.journal.save_evidence(identity, OWNER, self._active[identity][0],
+                                       {**current, "pause_requested": True}, expected=current)
+            self.journal.request_cancel(identity, OWNER)
+            self._jobs.cancel(identity)
+            return self.status(identity)
 
     def cancel_model(self, identity: str) -> dict[str, Any]:
         with self._lock:
@@ -776,21 +886,31 @@ class LibraryManagement:
             review = self._reviews.get(token)
             if self._closed or review is None or review.owner != owner:
                 raise ValueError("Review expired; review the operation again")
+            if review.operation == "model-image-install-plan":
+                return self._submit_image_plan(review, request_id)
             if review.submitted and review.request_id != request_id:
                 raise OperationConflict("Review already accepted; check its operation status")
             if len(self._active) >= 4 and request_id not in self._active:
                 raise OperationConflict("Library operations busy; retry when one finishes")
+            image_controls = {"image-model-load", "image-model-recover",
+                              "image-settings-save", "image-settings-recover", *COMFY_OPERATIONS}
+            independent_download = (review.operation in image_controls
+                                    or review.operation == "skill-store-install")
             model_operation = review.operation in model_store.OPERATIONS
             model_definition = review.operation in browser_model_settings.WRITES
             if ((model_operation or model_definition)
-                    and any(key != request_id for key in self._active)):
+                    and any(key != request_id and not (
+                        review.operation == "model-image-download" and active[1].operation
+                        in image_controls | {"model-image-download", "skill-store-install"})
+                        for key, active in self._active.items())):
                 raise OperationConflict("Finish active operations before managing model weights")
-            if not model_operation and self.model_busy():
+            if not model_operation and not independent_download and self.model_busy():
                 raise OperationConflict("Model work is active or unconfirmed; check Downloads")
             intent = {key: value for key, value in review.fields.items() if key != "source"}
             if review.operation in {"knowledge-url", "knowledge-refresh"}:
                 intent["source"] = review.fields["source"]
-            conflicts = [] if model_operation else [model_store.RESOURCE]
+            conflicts = ([] if model_operation and review.operation != "model-image-download"
+                         else [model_store.RESOURCE])
             if review.resource.startswith("artifact:"):
                 conflicts.append("artifact-selection")
             receipt = self.journal.admit(
@@ -800,7 +920,14 @@ class LibraryManagement:
                 resource=review.resource,
                 payload={"review": review.id, **intent},
                 conflicts_with=tuple(conflicts),
-                exclusive=(model_operation or model_definition
+                compatible_conflict_kinds=(
+                    ("model-image-download",) if independent_download else ()
+                ),
+                # Image weights publish only into their locked download directory.
+                # Unrelated unknown Skills must retain their fences without
+                # blocking this independent file transfer.
+                exclusive=((model_operation and review.operation != "model-image-download")
+                           or model_definition
                            or review.operation == "delete-selected"),
             )
             if receipt.created:
@@ -873,6 +1000,7 @@ class LibraryManagement:
                            operation_timeout(review.operation, review.fields))
                 self._jobs.submit(request_id, request, timeout=timeout,
                                   notify_cancel=(model_operation or
+                                                 review.operation in COMFY_OPERATIONS or
                                                  review.operation in VISION_READ_OPERATIONS))
                 if self._keeper is None:
                     self._keeper = threading.Thread(
@@ -880,6 +1008,47 @@ class LibraryManagement:
                     )
                     self._keeper.start()
             return self.status(request_id)
+
+    def _submit_image_plan(self, review: ManagementReview, request_id: str) -> dict[str, Any]:
+        """Admit independently fenced children after one exact group review.
+
+        Child IDs are stable for this approval. An interrupted dispatch can be
+        inspected without replaying an admitted transfer.
+        """
+        from .image_install_plans import child_request_id
+
+        if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
+            raise ValueError("Invalid installation request ID")
+        if review.submitted and review.request_id != request_id:
+            raise OperationConflict("Review already accepted; check Downloads")
+        review.submitted = True
+        review.request_id = request_id
+        results = []
+        for child in review.fields["children"]:
+            identity = child_request_id(request_id, review.fields["plan_id"], child["slot"])
+            try:
+                result = self.status(identity)
+            except ValueError:
+                token = secrets.token_hex(16)
+                self._reviews[token] = ManagementReview(
+                    token, review.owner, "model-image-download", child["resource"],
+                    child["fields"], "Pinned file from approved installation plan.",
+                    review.expires_at,
+                )
+                try:
+                    result = self.submit(review.owner, token, identity)
+                except (ValueError, OperationConflict, OSError) as exc:
+                    results.append({"slot": child["slot"], "request_id": identity,
+                                    "state": "not_submitted", "message": str(exc)[:240]})
+                    break
+                finally:
+                    self._reviews.pop(token, None)
+            results.append({"slot": child["slot"], "request_id": identity,
+                            "state": result["state"]})
+        return {"kind": "model-image-install-plan", "plan_id": review.fields["plan_id"],
+                "request_id": request_id, "children": results,
+                "state": "partial" if len(results) != len(review.fields["children"])
+                or any(row["state"] == "not_submitted" for row in results) else "accepted"}
 
     def _keep_leases(self) -> None:
         while not self._stop.wait(3):
@@ -900,7 +1069,7 @@ class LibraryManagement:
             identity, _, progress = value
             with self._lock:
                 active = self._active.get(identity)
-                if active and active[1].operation in model_store.OPERATIONS:
+                if active and active[1].operation in model_store.OPERATIONS | COMFY_OPERATIONS:
                     self._model_progress[identity] = {
                         key: progress[key] for key in ("stage", "completed", "total")
                         if key in progress
@@ -910,6 +1079,9 @@ class LibraryManagement:
             identity = value[0]
             with self._lock:
                 active = self._active.get(identity)
+                if active is not None and active[1].operation in COMFY_OPERATIONS:
+                    self._finish(identity, False)
+                    return
                 if active is not None and active[1].operation in model_store.OPERATIONS:
                     self._finish(identity, False)
                     if not self._reconcile_stopped_model(identity):
@@ -985,10 +1157,15 @@ class LibraryManagement:
         if receipt is None:
             raise ValueError("Operation unavailable")
         result = asdict(receipt)
+        if receipt.kind in COMFY_OPERATIONS and identity in self._model_progress:
+            result["progress"] = self._model_progress[identity]
         if receipt.kind == "skill-store-install":
             from .skill_store_operations import public, read_evidence
 
             result.update(public(read_evidence(self.journal, identity), receipt.state))
+            if self.journal.retirement(identity, OWNER):
+                result.update(retired_unverified=True, retry_policy="retry_allowed",
+                              message="Historical outcome unverified; retired for a new install.")
         return result
 
     def operations(self) -> dict[str, Any]:
@@ -1155,6 +1332,10 @@ def run_management_operation(request: dict[str, Any], progress=None) -> dict[str
             return run_generated_operation(cfg, request)
         except ValueError:
             return {"rejected": True}
+    elif operation in COMFY_OPERATIONS:
+        from .comfyui_install import run
+
+        return run(cfg, request, progress)
     elif operation in MEDIA_SETTINGS_OPERATIONS:
         from klaude_core.settings_store import SettingsConflictError
 

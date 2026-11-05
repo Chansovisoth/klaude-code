@@ -57,12 +57,14 @@ def read(cfg: Any) -> dict:
     data = {**DEFAULTS, **read_settings(path)}
     if type(data["enabled"]) is not bool or not isinstance(data["revision"], str):
         raise ValueError("Image generation settings are invalid; review configuration")
-    if data["endpoint"]:
+    if data["endpoint"] and data.get("provider") != "comfyui":
         data["endpoint"] = endpoint(data["endpoint"])
     text(data["model"], 200, empty=True)
     provider = data.get("provider", "sdcpp")
-    if provider not in {"sdcpp", "ollama"}:
-        raise ValueError("Choose stable-diffusion.cpp or Ollama")
+    if provider not in {"sdcpp", "ollama", "comfyui"}:
+        raise ValueError("Choose stable-diffusion.cpp, Ollama or managed ComfyUI")
+    if provider == "comfyui" and data["endpoint"] != "managed":
+        raise ValueError("Managed ComfyUI uses the local installed runtime")
     if data["enabled"] and not (data["endpoint"] and data["model"]):
         raise ValueError("Test and save an image server/model before enabling generation")
     # Preserve the canonical old settings/witness shape for existing SD jobs.
@@ -82,14 +84,22 @@ def save(
             raise ValueError("Image generation settings changed; Reload before saving")
         value = {key: candidate[key] for key in DEFAULTS if key != "revision"}
         provider = candidate.get("provider", "sdcpp")
-        if provider not in {"sdcpp", "ollama"}:
-            raise ValueError("Choose stable-diffusion.cpp or Ollama")
+        if provider not in {"sdcpp", "ollama", "comfyui"}:
+            raise ValueError("Choose stable-diffusion.cpp, Ollama or managed ComfyUI")
         if provider != "sdcpp":
             value["provider"] = provider
         if type(value["enabled"]) is not bool:
             raise ValueError("Invalid generation enable switch")
-        value["endpoint"] = endpoint(value["endpoint"]) if value["endpoint"] else ""
+        if provider == "comfyui":
+            if value["endpoint"] != "managed":
+                raise ValueError("Managed ComfyUI uses the local installed runtime")
+        else:
+            value["endpoint"] = endpoint(value["endpoint"]) if value["endpoint"] else ""
         value["model"] = text(value["model"], 200, empty=not value["enabled"])
+        if provider == "comfyui" and value["model"]:
+            from .comfyui_managed import installed
+            installed(cfg, model=value["model"])
+
         if value["enabled"] and not value["endpoint"]:
             raise ValueError("Choose an image server before enabling generation")
         value["revision"] = uuid.uuid4().hex
@@ -136,7 +146,7 @@ def inspect(url: str, provider: str = "sdcpp", model: str = "") -> dict:
 
         return inspect_model(endpoint(url), model)
     if provider != "sdcpp":
-        raise ValueError("Choose stable-diffusion.cpp or Ollama")
+        raise ValueError("Choose stable-diffusion.cpp, Ollama or managed ComfyUI")
     url = endpoint(url)
     data = packet(url, "/sdcpp/v1/capabilities")
     if "img_gen" not in data.get("supported_modes", []) or "png" not in data.get(
@@ -181,7 +191,15 @@ def inspect(url: str, provider: str = "sdcpp", model: str = "") -> dict:
     return evidence
 
 
-def inspect_settings(settings: dict) -> dict:
+def inspect_settings(settings: dict, cfg: Any = None) -> dict:
+    if settings.get("provider") == "comfyui":
+        from .comfyui_managed import inspect_bundle
+
+        if settings.get("endpoint") != "managed":
+            raise ValueError("ComfyUI uses the managed local engine")
+        if cfg is None:
+            raise ValueError("Managed ComfyUI requires the exact profile installation")
+        return inspect_bundle(cfg, settings["model"], launch=True)
     if settings.get("provider", "sdcpp") == "sdcpp":
         return inspect(settings["endpoint"])
     return inspect(settings["endpoint"], settings["provider"], settings["model"])
@@ -215,7 +233,7 @@ def prepare(
     settings = read(cfg)
     if not settings["enabled"]:
         raise ValueError("Image generation is OFF; configure Model Defaults → Image generation")
-    evidence = inspect_settings(settings)
+    evidence = inspect_settings(settings, cfg)
     if evidence["model"] != settings["model"]:
         raise ValueError(
             "The server's loaded model changed; test and save the new model explicitly"
@@ -349,6 +367,10 @@ def cancel(cfg: Any, identity: str) -> dict:
                 "recoverable": False,
                 "message": "Local stream stopped. Ollama cleanup is unconfirmed; "
                            "lost output cannot be recovered. No retry was sent."}
+    if record["settings"].get("provider") == "comfyui":
+        from .comfyui_images import cancel as cancel_comfy
+
+        return cancel_comfy(cfg, record)
     remote = record.get("remote_id")
     outcome, terminal, observed = "Unconfirmed", "", ""
     if isinstance(remote, str) and REMOTE_ID.fullmatch(remote):
@@ -443,7 +465,7 @@ def store_output(cfg: Any, spec: dict, remote: str, result: dict) -> dict:
 
     prepare_image(data, preserve_alpha=True)
     if read(cfg) != spec["settings"] or not matching_evidence(
-        inspect_settings(spec["settings"]), spec["evidence"]
+        inspect_settings(spec["settings"], cfg), spec["evidence"]
     ):
         raise ValueError("Image service changed during generation; output was not saved")
     with settings_lock(cfg.config_dir / "image-generation.json"):
@@ -485,6 +507,10 @@ def recover(cfg: Any, identity: str, expected: dict | None = None) -> dict:
         )
     ):
         raise ValueError("Image receipt changed; review recovery again")
+    if record["settings"].get("provider") == "comfyui":
+        from .comfyui_images import recover as recover_comfy
+
+        return recover_comfy(cfg, record)
     result = packet(
         record["settings"]["endpoint"], f"/sdcpp/v1/jobs/{record['remote_id']}", limit=RESULT_LIMIT
     )
@@ -516,10 +542,12 @@ def history(cfg: Any, offset: int = 0) -> dict:
             items.append({
                 "job": record["id"], "status": text(record["status"], 40),
                 "created": created, "model": text(record["settings"]["model"], 200),
-                "endpoint": endpoint(record["settings"]["endpoint"]),
+                "endpoint": ("managed" if record["settings"].get("provider") == "comfyui"
+                             else endpoint(record["settings"]["endpoint"])),
                 "artifact": record.get("artifact", ""),
                 "recoverable": record["settings"].get("provider") != "ollama"
-                               and bool(record.get("remote_id")),
+                               and bool(record.get("remote_id"))
+                               and not record.get("queue_cancelled", False),
             })
         except (ValueError, OSError, KeyError, TypeError):
             invalid += 1
@@ -532,6 +560,10 @@ def refresh(cfg: Any, identity: str) -> dict:
     record = job(cfg, identity)
     if stored := saved_output(cfg, record):
         return stored
+    if record["settings"].get("provider") == "comfyui":
+        from .comfyui_images import refresh as refresh_comfy
+
+        return refresh_comfy(cfg, record)
     if record["settings"].get("provider") == "ollama":
         raise ValueError("Ollama has no generation job lookup; no retry was sent")
     remote = record.get("remote_id")
@@ -581,6 +613,10 @@ def run(cfg: Any, spec: dict, progress=lambda _: None) -> dict:
         record = {**spec, "status": "submitting", "created": time.time()}
         atomic_write_private(path, json.dumps(record) + "\n")
     url, remote = spec["settings"]["endpoint"], ""
+    if spec["settings"].get("provider") == "comfyui":
+        from .comfyui_images import generate as generate_comfy
+
+        return generate_comfy(cfg, record, progress)
     if spec["settings"].get("provider") == "ollama":
         from .ollama_images import generate
 
@@ -681,12 +717,14 @@ def execute(request: dict) -> dict:
         if op == "read":
             return {"settings": read(cfg)}
         if op == "inspect":
-            return {"evidence": inspect(request["endpoint"], request.get("provider", "sdcpp"),
-                                        request.get("model", ""))}
+            return {"evidence": inspect_settings({
+                "endpoint": request["endpoint"], "provider": request.get("provider", "sdcpp"),
+                "model": request.get("model", ""),
+            }, cfg)}
         if op == "save":
             candidate = request["settings"]
             if candidate["enabled"]:
-                evidence = inspect_settings(candidate)
+                evidence = inspect_settings(candidate, cfg)
                 if evidence["model"] != candidate["model"]:
                     raise ValueError("Loaded model changed; Test again")
             return {"settings": save(cfg, candidate, request["revision"])}

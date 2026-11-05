@@ -503,6 +503,14 @@ class LocalWebHost:
             "system_control": self.system_control is not None,
             "media_management": self.library is not None,
             "image_model_selection": self.library is not None,
+            "image_comfyui": self.library is not None,
+            "image_setup_drafts": self.library is not None,
+            "image_model_dependencies": self.library is not None,
+            "image_install_plans": self.library is not None,
+            "image_install_plan_group": self.library is not None,
+            "image_install_plan_setup": self.library is not None,
+            "image_readiness_inventory": self.library is not None,
+            "image_model_parallel_downloads": self.library is not None,
             "model_store": self.library is not None,
             "integration_store": self.library is not None,
             "integration_store_stars": self.library is not None,
@@ -510,10 +518,12 @@ class LocalWebHost:
             "model_store_sdcpp": self.library is not None,
             "model_store_sdcpp_revision": 1 if self.library is not None else 0,
             "model_download_dismissal": self.library is not None,
+            "model_download_pause": self.library is not None,
             "model_download_recovery": self.library is not None,
             "image_studio": self.library is not None,
             "chat_image_generation": self.application.images is not None,
             "model_settings": self.library is not None,
+            "model_connection_setup": self.library is not None,
             "model_store_catalog": self.library is not None,
             "chat_auto_queue": True,
             "chat_model_blocked": bool(self.library is not None and
@@ -1129,7 +1139,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._headers(HTTPStatus.OK, "image/jpeg", len(payload))
             self.wfile.write(payload)
             return
-        if path in ("/", "/app.js", "/library.js", "/management.js", "/media.js", "/attachments.js",
+        if path in ("/", "/app.js", "/library.js", "/management.js", "/media.js",
+                    "/comfyui.js", "/attachments.js",
                     "/style.css", "/markdown.js", "/lens.js", "/ai-icons.js",
                     "/loading-indicator.js", "/vendor/material-loading-shapes.js",
                     "/vendor/markdown-it.min.js", "/vendor/prism.min.js", "/vendor/katex.min.js"):
@@ -1137,6 +1148,7 @@ class _Handler(BaseHTTPRequestHandler):
                     "/attachments.js": "attachments.js",
                     "/management.js": "management.js",
                     "/media.js": "media.js",
+                    "/comfyui.js": "comfyui.js",
                     "/ai-icons.js": "ai-icons.js", "/style.css": "style.css",
                     "/markdown.js": "markdown.js", "/lens.js": "lens.js",
                     "/loading-indicator.js": "loading-indicator.js",
@@ -1657,7 +1669,13 @@ class _Handler(BaseHTTPRequestHandler):
         elif path in {
             "/api/v1/settings/model-connections/test",
             "/api/v1/settings/models/image-test",
+            "/api/v1/settings/models/image-bundles",
+            "/api/v1/settings/models/image-bundle-pause",
             "/api/v1/settings/models/image-models",
+            "/api/v1/settings/models/image-dependencies",
+            "/api/v1/settings/models/image-setups",
+            "/api/v1/settings/models/image-readiness",
+            "/api/v1/settings/models/image-install-plans",
         }:
             if not self._admin_management_allowed():
                 self._error(
@@ -1670,7 +1688,79 @@ class _Handler(BaseHTTPRequestHandler):
                 service = self.owner.library
                 if service is None:
                     raise ValueError("Model settings unavailable")
-                if path.endswith("image-models"):
+                if path.endswith("image-bundle-pause"):
+                    if set(body) != {"request_id"} or not isinstance(body["request_id"], str):
+                        raise ValueError("Choose an exact active image installation")
+                    result = service.pause_comfy(body["request_id"])
+                elif path.endswith("image-bundles"):
+                    from klaude_application.comfyui_install import inventory
+
+                    if body == {"action": "list"}:
+                        result = inventory(service.cfg)
+                    elif set(body) == {"action", "model"} and body["action"] == "inspect":
+                        from klaude_application.comfyui_models import inspect_source
+                        result = inspect_source(service.cfg, body["model"])
+                    elif set(body) == {"action", "model"} and body["action"] == "check":
+                        from klaude_core import comfyui_managed as managed
+                        from klaude_core.comfyui_bundle import digest
+                        record = managed.installed(service.cfg, model=body["model"], full=True)
+                        result = {"model": body["model"], "revision": digest(record),
+                                  "files_verified": True, "checked_at": time.time(),
+                                  "message": "Checkpoint verified. The engine starts on Generate."}
+                    else:
+                        raise ValueError("Choose the image bundle inventory or an exact model")
+                elif path.endswith("image-readiness"):
+                    from klaude_application import image_readiness
+
+                    if body == {"action": "list"}:
+                        result = image_readiness.listing(service.cfg, service.journal)
+                    elif (body.get("action") == "check" and
+                          set(body) in ({"action", "kind", "id"},
+                                        {"action", "kind", "id", "endpoint"})):
+                        result = image_readiness.check(service.cfg, body["kind"], body["id"],
+                                                       body.get("endpoint", ""))
+                    else:
+                        raise ValueError("Choose a readiness action")
+                elif path.endswith("image-install-plans"):
+                    from klaude_application import image_install_plans
+
+                    if (body.get("action") == "create"
+                            and set(body) == {"action", "model", "profile"}):
+                        result = image_install_plans.create(
+                            service.cfg, body["model"], body["profile"])
+                    elif body.get("action") == "get" and set(body) == {"action", "id"}:
+                        result = image_install_plans.get(service.cfg, body["id"])
+                    elif (body.get("action") == "check-server"
+                          and set(body) == {"action", "id", "endpoint"}):
+                        result = image_install_plans.check_server(
+                            service.cfg, body["id"], body["endpoint"])
+                    else:
+                        raise ValueError("Choose an install plan action")
+                elif path.endswith("image-setups"):
+                    from klaude_application import image_setups
+
+                    action = body.get("action")
+                    if action == "save":
+                        result = image_setups.save(service.cfg, {
+                            key: value for key, value in body.items() if key != "action"
+                        })
+                    elif action == "list" and set(body) == {"action", "endpoint"}:
+                        result = image_setups.listing(service.cfg, body["endpoint"])
+                    elif action == "forget" and set(body) == {"action", "id"}:
+                        result = image_setups.forget(service.cfg, body["id"])
+                    elif action == "check" and set(body) == {"action", "id"}:
+                        result = image_setups.check(service.cfg, body["id"])
+                    else:
+                        raise ValueError("Choose a saved setup action")
+                elif path.endswith("image-dependencies"):
+                    from klaude_application.image_dependencies import plan
+
+                    if (set(body) != {"endpoint", "recipe", "models"}
+                            or not isinstance(body["endpoint"], str)
+                            or not isinstance(body["recipe"], str)):
+                        raise ValueError("Choose a model setup and component selection")
+                    result = plan(service.cfg, body["endpoint"], body["recipe"], body["models"])
+                elif path.endswith("image-models"):
                     from klaude_application.image_model_selection import catalog
 
                     if (set(body) - {"endpoint", "refresh"}
@@ -1685,8 +1775,15 @@ class _Handler(BaseHTTPRequestHandler):
                     if (set(body) - {"endpoint", "provider", "model"}
                             or not isinstance(body.get("endpoint"), str)):
                         raise ValueError("Choose an image-service address")
-                    evidence = inspect(body["endpoint"], body.get("provider", "sdcpp"),
-                                       body.get("model", ""))
+                    if body.get("provider") == "comfyui":
+                        from klaude_core.comfyui_managed import inspect_bundle
+
+                        if body["endpoint"] != "managed":
+                            raise ValueError("ComfyUI uses the managed local engine")
+                        evidence = inspect_bundle(service.cfg, body.get("model", ""), launch=True)
+                    else:
+                        evidence = inspect(body["endpoint"], body.get("provider", "sdcpp"),
+                                           body.get("model", ""))
                     result = {key: evidence[key] for key in (
                         "model", "limits", "sampler", "scheduler",
                         "cancel_queued", "cancel_generating",
@@ -1695,9 +1792,25 @@ class _Handler(BaseHTTPRequestHandler):
                     from klaude_application.browser_model_settings import test_connection
 
                     result = test_connection(service.cfg, body)
+                if (path.endswith("image-setups") and body.get("action") in {"save", "check"}
+                        and "readiness" in result):
+                    from klaude_application.image_readiness import record
+
+                    try:
+                        record(service.cfg, "setup:" + result["id"], result["readiness"])
+                    except (ValueError, OSError):
+                        pass  # A presentation cache cannot change the saved draft outcome.
                 self._json(HTTPStatus.OK, result)
             except Exception:
                 self._error(HTTPStatus.BAD_REQUEST, "model_unavailable",
+                            "Readiness unavailable; refresh and try again."
+                            if path.endswith("image-readiness") else
+                            "Install plan unavailable; check its directory/source and rebuild."
+                            if path.endswith("image-install-plans") else
+                            "Saved setup unavailable or changed; refresh and try again."
+                            if path.endswith("image-setups") else
+                            "Dependency details unavailable; refresh the inventory or try again."
+                            if path.endswith("image-dependencies") else
                             "Service test unavailable; check its address and credentials")
         elif path in {"/api/v1/skills/install/inspect", "/api/v1/skills/install/reconcile"}:
             if not self._admin_management_allowed():
@@ -1720,7 +1833,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.CONFLICT, "skill_unconfirmed",
                             "Recovery unavailable: the Skill is active or its evidence changed. "
                             "Inspect again after active work finishes.")
-        elif path in {"/api/v1/models/cancel", "/api/v1/models/reconcile",
+        elif path in {"/api/v1/models/cancel", "/api/v1/models/pause", "/api/v1/models/resume",
+                      "/api/v1/models/reconcile",
                       "/api/v1/models/dismiss"}:
             if not self._admin_management_allowed():
                 self._error(HTTPStatus.FORBIDDEN, "forbidden",
@@ -1729,11 +1843,22 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 with self.owner._lock:
                     service = self.owner.library
-                    if (service is None or set(body) != {"request_id"}
-                            or not isinstance(body["request_id"], str)):
+                    fields = ({"request_id", "new_request_id"} if path.endswith("/resume")
+                              else {"request_id"})
+                    if (service is None or set(body) != fields
+                            or not isinstance(body["request_id"], str)
+                            or path.endswith("/resume") and not isinstance(
+                                body["new_request_id"], str)):
                         raise ValueError("Choose an exact model operation")
-                    if path.endswith("/dismiss"):
+                    if path.endswith("/resume"):
+                        if any(self.owner._application_busy(app)
+                               for app in self.owner._applications):
+                            raise OperationConflict("Finish active conversations before model work")
+                        result = service.resume_model(body["request_id"], body["new_request_id"])
+                    elif path.endswith("/dismiss"):
                         result = service.dismiss_model(body["request_id"])
+                    elif path.endswith("/pause"):
+                        result = service.pause_model(body["request_id"])
                     elif path.endswith("/cancel"):
                         result = service.cancel_model(body["request_id"])
                     else:
@@ -1743,7 +1868,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.CONFLICT, "model_unconfirmed",
                             "Stop the active download before removing its history."
                             if path.endswith("/dismiss") else
-                            "Model outcome not confirmed. Check Downloads and the Ollama server.")
+                            "Model outcome not confirmed. Check Downloads.")
         elif path == "/api/v1/auth/logout":
             if body:
                 self._error(HTTPStatus.BAD_REQUEST, "invalid_argument", "Unexpected fields")

@@ -61,3 +61,8 @@ Validation:
   identities and saved settings remained unchanged, with zero console errors.
   The temporary verification session was signed out. Live Shutdown was not
   invoked.
+
+The restart row, button, confirmation and transition now say **Restart Klaude**.
+The row and confirmation specify Web UI/hosted-agent scope with terminal sessions
+retained. Settings search recognizes Restart Klaude and Web UI. The underlying
+reviewed lifecycle operation remains the existing restart action.

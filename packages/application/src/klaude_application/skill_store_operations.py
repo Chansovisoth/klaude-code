@@ -35,6 +35,11 @@ STAGES = frozenset({"download", "install_package", "knowledge_index", "finalize_
 MESSAGES = {
     "SOURCE_UNAVAILABLE": "The pinned source could not be downloaded. Check connectivity.",
     "SOURCE_RATE_LIMIT": "GitHub's request limit was reached. Wait before trying again.",
+    "SOURCE_INTEGRITY_FAILED": "The downloaded content does not match the pinned source.",
+    "SKILL_MANIFEST_INVALID": "The pinned folder must contain a UTF-8 SKILL.md file.",
+    "PACKAGE_INSTALL_FAILED": "The local package write could not be confirmed. Inspect recovery.",
+    "OUTCOME_UNCONFIRMED": ("The worker's final result was not confirmed. "
+                            "Inspect recovery before retrying."),
     "SOURCE_REJECTED": "The pinned source failed package or integrity validation.",
     "PACKAGE_FILE_LIMIT": "The package exceeds the limit of 100 files or directories.",
     "PACKAGE_SIZE_LIMIT": "The source exceeds a 2 MB file or 16 MB package download limit.",
@@ -56,16 +61,12 @@ def failure(exc, stage):
     if isinstance(exc, CatalogFailure):
         code = "SOURCE_RATE_LIMIT" if exc.status == "rate_limit" else "SOURCE_UNAVAILABLE"
     elif stage == "download" and isinstance(exc, SkillSourceError):
-        # Exact fixed messages from the trusted validator; never publish arbitrary exceptions.
-        code = {
-            "Skill package has too many directories": "PACKAGE_FILE_LIMIT",
-            "Skill package has too many files": "PACKAGE_FILE_LIMIT",
-            "Skill package exceeds download limits": "PACKAGE_SIZE_LIMIT",
-            "Skill file is too large or has unknown size": "PACKAGE_SIZE_LIMIT",
-            "Skill contains a symlink, submodule, or unsupported file": "PACKAGE_UNSUPPORTED_ENTRY",
-        }.get(str(exc), "SOURCE_REJECTED")
+        # Only fixed application templates reach receipts, even for unknown codes.
+        code = exc.code if exc.code in MESSAGES else "SOURCE_REJECTED"
     elif isinstance(exc, FileExistsError):
         code = "DESTINATION_EXISTS"
+    elif stage == "install_package":
+        code = "PACKAGE_INSTALL_FAILED"
     elif stage == "knowledge_index":
         code = "INDEX_WRITE_FAILED"
     elif stage in {"finalize_package", "verify_postcondition"}:
@@ -79,6 +80,8 @@ def public(evidence, state=None):
     error = error if isinstance(error, dict) else {}
     code = error.get("code")
     code = code if isinstance(code, str) else ""
+    if not code and state == "unknown":
+        code = "OUTCOME_UNCONFIRMED"
     stage = evidence.get("stage")
     stage = stage if isinstance(stage, str) and stage in STAGES else "unavailable"
     failure_stage = error.get("stage")
@@ -321,6 +324,10 @@ def reconcile(cfg, journal, rid, *, apply=False, expected_fingerprint=""):
     with skill_mutation_lock(cfg, blocking=False):
         receipt = journal.status(rid, OWNER)
         evidence = read_evidence(journal, rid)
+        if journal.retirement(rid, OWNER):
+            return {"decision": "retired_unverified", "state": receipt.state,
+                    "request_id": rid, "message": "Historical outcome remains unverified. "
+                    "The old attempt was retired to permit a new reviewed installation."}
         if receipt.state != "unknown":
             return {"decision": "settled" if receipt.state in {"completed", "failed", "cancelled"}
                     else "active", "state": receipt.state, "request_id": rid,
@@ -366,4 +373,57 @@ def reconcile(cfg, journal, rid, *, apply=False, expected_fingerprint=""):
                                  if final.state == "completed"
                                  else "No installation effect started. Attempt closed as failed.")
             result["state"] = final.state
+        return result
+
+
+def retire_legacy(cfg, journal, rid, *, reason, apply=False, expected_fingerprint=""):
+    """Explicit local retirement after empty-state inspection, without replay."""
+    from klaude_knowledge.skill_management import skill_mutation_lock
+
+    with skill_mutation_lock(cfg, blocking=False):
+        receipt = journal.status(rid, OWNER)
+        if (receipt is None or receipt.kind != "skill-store-install"
+                or receipt.state != "unknown" or journal.retirement(rid, OWNER)):
+            raise OperationConflict("Choose an unresolved legacy Skill install")
+        name = receipt.resource.removeprefix("skill:")
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name):
+            raise ValueError("Invalid Skill resource")
+        package = cfg.skills_dir / name
+        if package.exists() or package.is_symlink() or owner_state(cfg, name):
+            raise OperationConflict("Package or Knowledge state exists; inspect before retirement")
+        database = cfg.data_dir / "knowledge.lance" / "fts.db"
+        if database.exists():
+            with closing(sqlite3.connect(database.resolve().as_uri()+"?mode=ro", uri=True)) as db:
+                if db.execute("SELECT 1 FROM source_versions WHERE owner=? LIMIT 1",
+                              (f"skill:{name}",)).fetchone():
+                    raise OperationConflict("Historical Knowledge state requires inspection")
+        fingerprint = hashlib.sha256(json.dumps(
+            [rid, receipt.resource, receipt.fence, str(cfg.skills_dir.resolve()), "empty"],
+        ).encode()).hexdigest()
+        result = {"request_id": rid, "resource": receipt.resource,
+                  "fingerprint": fingerprint, "decision": "retire_unverified",
+                  "message": "No local package or Knowledge state exists. Historical outcome "
+                             "remains unknown; explicit retirement permits a new reviewed install."}
+        if apply:
+            if fingerprint != expected_fingerprint:
+                raise OperationConflict("Inspect the current state before retirement")
+            import tempfile
+            from pathlib import Path
+
+            backup = Path(tempfile.mkdtemp(prefix=f"skill-retirement-{rid}-", dir=cfg.data_dir))
+            for source in (journal.path, database):
+                if not source.exists():
+                    continue
+                destination = backup / source.name
+                descriptor = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                os.close(descriptor)
+                with closing(sqlite3.connect(
+                    source.resolve().as_uri()+"?mode=ro", uri=True,
+                )) as src:
+                    with closing(sqlite3.connect(destination)) as dst:
+                        src.backup(dst)
+            journal.retire_legacy_skill(rid, OWNER, resource=receipt.resource,
+                                        fence=receipt.fence, reason=reason,
+                                        fingerprint=fingerprint)
+            result.update(retired=True, backup=str(backup))
         return result

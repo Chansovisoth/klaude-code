@@ -20,13 +20,13 @@ def image_capabilities(cfg: Config) -> dict[str, Any]:
 
     settings = read(cfg)
     backend = ("Ollama (experimental)" if settings.get("provider") == "ollama"
-               else "stable-diffusion.cpp")
+               else "ComfyUI" if settings.get("provider") == "comfyui" else "stable-diffusion.cpp")
     result: dict[str, Any] = {"backend": backend, "model": settings["model"],
                               "enabled": settings["enabled"], "available": False}
     if not settings["enabled"]:
         return {**result, "message": "Enable and test an image service in Settings → Models."}
     try:
-        observed = inspect_settings(settings)
+        observed = inspect_settings(settings, cfg)
         if (observed["model"] != settings["model"]
                 or not observed["cancel_queued"] and settings.get("provider") != "ollama"):
             return {**result, "message": "Service capabilities changed; test and save in Settings."}
@@ -202,6 +202,8 @@ def run_generated_operation(cfg: Config, request: dict[str, Any]) -> dict[str, b
 
 
 def operation_timeout(operation: str, fields: dict[str, Any]) -> int:
+    if operation in {"comfy-install", "comfy-import", "comfy-repair", "comfy-store-install"}:
+        return 3600
     if operation == "image-model-load":
         return 630
     if operation in {"vision-analyze", "vision-tags"}:

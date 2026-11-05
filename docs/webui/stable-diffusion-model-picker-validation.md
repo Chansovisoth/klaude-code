@@ -74,3 +74,74 @@ rows use the shared model icon geometry, the current choice exposes pressed
 state, and Refresh stays right-aligned when Connection is hidden. Recipe rows
 are disabled during a shared load. The native responsive browser smoke passed
 again at 320/390/768/1440px with zero console errors.
+
+## Installed-file picker and download routing, 2026-10-29
+
+The picker lists installed checkpoint/diffusion filenames and the loaded runtime,
+not built-in recipe names. Selecting a file opens explicit setup selection and
+preselects that file in the matching primary slot. Components, exact reviews,
+fencing and default saves retain their existing checks. Category agreement alone
+does not establish architectural compatibility.
+
+Image-to-image/text-to-image Hub cards found by Ollama GGUF discovery now enter
+the Stable Diffusion detail, inventory and download-review flow. A browser
+regression proves this produces model-image-download rather than model-pull.
+
+Both browser smokes passed at 320/390/768/1440px with zero console errors. Store
+validation includes actual fixture worker transfers, cancellation/retry, checksum
+publication, history/reload and All-runtime navigation. A live pinned leejet
+FLUX-3 Q2_K range request followed the allowed Hugging Face CDN and read 1 KB;
+no complete FLUX-3 weight download or runtime load is claimed.
+
+Correction to the initial live diagnosis: the server's working directory is
+/mnt/HDD1/klaude-image, so its default models root already agrees with Klaude.
+The existing SD 1.5 file was top-level, outside category directories. A no-overwrite
+hard link now exposes it as checkpoints/local/v1-5-pruned-emaonly.safetensors.
+Refreshing server metadata reported this installed file; weights were not copied
+or reloaded. New downloads already publish under checkpoints. Component-based
+models still require compatible encoders/VAE and the correct server setup.
+Official gated model access and directory-bundle installation remain unsupported.
+
+Final focused validation: 22 image download/selection unit tests passed; touched
+smoke scripts passed Ruff, JavaScript syntax and whitespace checks passed.
+
+## Load an installed model during image download, 2026-10-29
+
+Image-runtime load/recovery and image-default save/recovery admit an independent
+image-file download as a compatible conflicting kind. Compatibility is checked
+in the journal admission transaction against the conflicting operation record;
+an unresolved download fence is retained. The target runtime's own resource
+cannot be bypassed by this exception. Other model-work kinds remain conflicting.
+The in-process reverse order also permits starting an image download alongside
+these image controls, within the existing four-worker bound.
+
+Validation: 35 image download/selection/shared-journal tests passed. A real slow
+fixture download remained running while a second worker loaded an installed
+model and the default was saved; the transfer then completed with exact bytes.
+Tests also verify an unresolved image download retains its fence while permitting
+loading, and an unresolved model-pull remains blocked. Ruff and whitespace checks
+passed. No live download was stopped and no live host/server was restarted.
+
+These backend changes activate after restarting WebUI. The current host refuses
+restart during owned active downloads; finish or explicitly stop that work first.
+
+## Discover completed downloads from stale server metadata, 2026-10-29
+
+Opening the native picker now requests an explicit metadata refresh before
+reading file choices. Previously it only read the server's cached inventory, so
+a completed Store download could remain invisible until manual Refresh. Rows
+now distinguish Checkpoint and Diffusion weights rather than presenting category
+aliases with identical subtitles. A browser fixture starts with no scanned files
+and reveals newly downloaded weights on refresh; opening the picker discovers
+them without loading a model. The responsive walkthrough passed with zero console
+errors, including explicit loading, empty inventory and older-host behavior.
+
+Live diagnosis found the completed 4,799,886,240-byte FLUX-3 Q6_K file under the
+Store's checkpoint directory, but the server still listed only SD 1.5. A
+no-overwrite hard link exposes the same file under diffusion_models/unsloth/
+flux-3-image-klein-GGUF/flux-3-image-klein-Q6_K.gguf, the category required by the
+server's flux3-klein recipe. The original downloaded path and receipt are retained;
+no bytes were copied or model loaded. Server metadata was refreshed and now lists
+both category references. Choose the Diffusion weights entry for the FLUX setup.
+This does not supply its required text encoder or VAE, and future downloads still
+use the current Store checkpoint destination unless separately organized.

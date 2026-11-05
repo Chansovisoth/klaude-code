@@ -128,7 +128,7 @@ async def verify(root, controller, first, terminal, unrelated):
             # Settings search opens System without executing the matching action.
             await tab.js("showSettingsSection('theme')")
             await tab.click('#settings-search-open')
-            await tab.js("byId('settings-search-query').value='Restart Web UI';"
+            await tab.js("byId('settings-search-query').value='Restart Klaude';"
                          "byId('settings-search-query').dispatchEvent(new Event('input'))")
             await wait("byId('settings-search-results').querySelector('button')")
             await tab.click('#settings-search-results button')

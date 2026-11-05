@@ -31,6 +31,10 @@ class ImageNative(store.Native):
         ImageNative.calls.append(self.path)
         url = urlsplit(self.path)
         params = parse_qs(url.query)
+        if url.path == "/api/models" and params.get("search") == ["image-route"]:
+            self.reply([{"id": "fixture/Image", "pipeline_tag": "text-to-image",
+                         "downloads": 123}])
+            return
         if url.path == "/api/models" and ImageNative.paged_catalog:
             tag = params.get("filter", ["gguf"])[0]
             total = 38
@@ -197,6 +201,7 @@ async def verify_all(tab, image_root, wait):
     await wait("byId('store-variant-list').querySelectorAll('input').length===1")
     await tab.click("#store-variant-0")
     await wait("!byId('store-variant-install').disabled")
+    await tab.js("byId('store-variant-install').focus()")
     await tab.click("#store-variant-install")
     await wait("reviewDialog.open")
     assert await tab.js(
@@ -205,6 +210,9 @@ async def verify_all(tab, image_root, wait):
     )
     await tab.click("#domain-review-cancel")
     await wait("!reviewDialog.open")
+    await wait("!byId('store-detail').hidden && byId('store-variant-0').checked && "
+                        "document.activeElement===byId('store-variant-install')")
+    await tab.click("#store-detail-back")
     await tab.click("#store-tab-installed")
     await tab.js(
         "byId('store-runtime').value='all';byId('store-runtime').dispatchEvent(new Event('change'))"
@@ -228,9 +236,9 @@ async def verify_all(tab, image_root, wait):
     await tab.click("#store-refresh")
     await wait("byId('store-content').textContent.includes('existing.safetensors')")
     await tab.click('[data-store-model="existing.safetensors"]')
-    await wait("byId('store-detail-install').textContent==='Installed'")
+    await wait("byId('store-detail-install').textContent==='Configure model'")
     assert await tab.js(
-        "location.search.includes('models-runtime=sdcpp') && byId('store-detail-install').disabled"
+        "location.search.includes('models-runtime=sdcpp') && !byId('store-detail-install').disabled"
     )
     await tab.click("#store-detail-back")
     await wait("byId('store-detail').hidden && byId('store-runtime').value==='all'")
@@ -282,7 +290,17 @@ async def verify(host, root):
             tab = Tab(ws)
 
             async def wait(expression):
-                await tab.wait("Boolean(" + expression + ")")
+                try:
+                    await tab.wait("Boolean(" + expression + ")")
+                except AssertionError:
+                    print(await tab.js("JSON.stringify({url:location.href, "
+                                       "status:byId('store-status').textContent, "
+                                       "detail:byId('store-detail').hidden, "
+                                       "imageStatus:byId('image-settings-status').textContent, "
+                                       "imageUrl:byId('image-service-url').value, "
+                                       "setupDisabled:byId('image-setup-choose')?.disabled, "
+                                       "picker:byId('role-model-picker').open})"), flush=True)
+                    raise
 
             await tab.command("Runtime.enable")
             await tab.command("Page.enable")
@@ -304,6 +322,42 @@ async def verify(host, root):
                 "byId('store-content').querySelector('[data-store-model=\"hf:fixture/Small-GGUF\"]')"
             )
             await verify_all(tab, image_root, wait)
+            # Exact-reference review cancellation restores its draft and focus.
+            await wait("!byId('store-download-open').disabled")
+            await tab.click('#store-download-open')
+            await tab.js("byId('store-download-tag').value='manual:tag';"
+                         "byId('store-download-form').requestSubmit()")
+            await wait('reviewDialog.open')
+            await tab.click('#domain-review-cancel')
+            await wait("byId('store-download-dialog').open && "
+                       "byId('store-download-tag').value==='manual:tag' && "
+                       "document.activeElement===byId('store-download-tag')")
+            assert ImageNative.pulls == 0
+            await tab.click('#store-download-close')
+
+            # An image GGUF found through the Ollama catalog must use SD's
+            # checksum-verified file lane, never Ollama's model pull.
+            await tab.js("byId('store-query').value='image-route';"
+                         "byId('store-query').dispatchEvent(new Event('input'))")
+            await wait("byId('store-content').querySelector("
+                       "'[data-store-model=\"hf:fixture/Image\"]')")
+            await tab.click('[data-store-model="hf:fixture/Image"]')
+            await wait("byId('store-runtime').value==='sdcpp' && "
+                       "byId('store-variant-list').querySelectorAll('input').length===1")
+            await tab.click('#store-variant-0')
+            await wait("!byId('store-variant-install').disabled")
+            await tab.js("byId('store-variant-install').focus()")
+            await tab.click('#store-variant-install')
+            await wait('reviewDialog.open')
+            assert await tab.js("managementReview.operation==='model-image-download'")
+            assert ImageNative.pulls == 0 and ImageNative.transfers == 0
+            await tab.click('#domain-review-cancel')
+            await wait('!reviewDialog.open')
+            await wait(
+                "!byId('store-detail').hidden && byId('store-variant-0').checked && "
+                                "document.activeElement===byId('store-variant-install')")
+            await tab.click('#store-detail-back')
+            await tab.click('#store-tab-discover')
             await tab.js(
                 "byId('store-runtime').value='sdcpp';byId('store-runtime')"
                 ".dispatchEvent(new Event('change'))"
@@ -382,34 +436,62 @@ async def verify(host, root):
                 "[...byId('store-content').querySelectorAll('.store-download-status')]"
                 ".some(node=>node.textContent.includes(' / '))"
             )
-            await tab.click("[data-download-action=stop]")
-            await wait("!byId('store-content').querySelector('[data-download-action=stop]')")
+            assert await tab.js("document.querySelector('[data-download-action=pause]')"
+                                ".getBoundingClientRect().left < "
+                                "document.querySelector('[data-download-action=stop]')"
+                                ".getBoundingClientRect().left")
+            await tab.click("[data-download-action=pause]")
+            await wait("byId('store-content').textContent.includes('Paused')")
             for _ in range(100):
                 if not host.library.model_busy():
                     break
                 await asyncio.sleep(0.05)
             assert not host.library.model_busy()
-            assert not list(image_root.rglob("*.part"))
+            assert list(image_root.rglob("*.part"))
+            assert await tab.js("document.querySelector('[data-download-action=resume]')"
+                                ".getBoundingClientRect().left < "
+                                "document.querySelector('[data-download-action=remove]')"
+                                ".getBoundingClientRect().left")
             ImageNative.image_slow = False
-            await tab.click("#store-tab-discover")
-            await tab.click('[data-store-model="hf:fixture/Image"]')
-            await wait("byId('store-variant-list').querySelectorAll('input').length===1")
-            await tab.click("#store-variant-0")
-            await wait("!byId('store-variant-install').disabled")
-            await tab.click("#store-variant-install")
-            await wait("reviewDialog.open")
-            await tab.click("#domain-review-confirm")
+            await wait("byId('store-content').querySelector('[data-download-action=resume]')")
+            await tab.click('[data-download-action=resume]')
             await wait("byId('store-content').textContent.includes('Complete')")
+            assert not await tab.js("reviewDialog.open")
             saved = image_root / "checkpoints/fixture/Image/checkpoint.safetensors"
             assert saved.read_bytes() == PAYLOAD
             await tab.click("#store-tab-installed")
             await wait("byId('store-content').textContent.includes('checkpoint.safetensors')")
             await tab.click('[data-store-model="hf.co/fixture/Image:checkpoint.safetensors"]')
             assert await tab.js(
-                "byId('store-detail-install').textContent==='Installed' && "
-                "byId('store-detail-install').disabled"
+                "byId('store-detail-install').textContent==='Configure model' && "
+                "!byId('store-detail-install').disabled"
+            )
+            assert await tab.js(
+                "byId('store-image-readiness').textContent.includes('Weights downloaded')"
             )
             assert not await tab.js("byId('store-detail-body').textContent.includes('Use model')")
+            source_url = await tab.js('location.href')
+            await tab.click('#store-detail-install')
+            await wait("currentView==='settings' && !byId('image-setup-handoff').hidden")
+            await wait("!byId('image-setup-choose').disabled && "
+                       "!byId('image-service-url').disabled && byId('role-model-picker').open && "
+                       "Boolean(SettingsDrafts.value('image-service','image_service'))")
+            await tab.js("byId('role-model-picker').close();"
+                         "byId('image-service-url').value='';"
+                         "byId('image-service-url').dispatchEvent(new Event('input'))")
+            await tab.click('#image-setup-choose')
+            await wait("byId('image-settings-status').textContent.includes('URL')")
+            assert not await tab.js("byId('role-model-picker').open")
+            await tab.js('window.returnReloadWitness=true')
+            await tab.command('Page.reload')
+            await wait("typeof showView==='function' && "
+                       "typeof returnReloadWitness==='undefined' && authenticated && "
+                       "!byId('image-setup-handoff').hidden")
+            await tab.click('#image-setup-return')
+            await wait("currentView==='store' && !byId('store-detail').hidden && "
+                       "byId('store-detail-install')?.textContent==='Configure model'")
+            assert await tab.js('location.href') == source_url
+
             await tab.click("#store-detail-back")
             await wait("byId('store-detail').hidden")
             # Switching back reloads the Ollama catalog rather than reusing SD entries.

@@ -246,6 +246,7 @@ def hub_gguf_files(
         if (
             not isinstance(name, str)
             or not re.fullmatch(
+                r"(?:[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/){0,5}"
                 r"[A-Za-z0-9][A-Za-z0-9_.-]*\.(?:gguf|safetensors)" if image
                 else r"[A-Za-z0-9][A-Za-z0-9_.-]*\.gguf", name, re.I,
             )
@@ -258,7 +259,8 @@ def hub_gguf_files(
         lfs = lfs if isinstance(lfs, dict) else {}
         size = row.get("size", lfs.get("size"))
         if image and (
-            re.search(r"-\d+-of-\d+\.", name)
+            re.search(r"(?:^|[_.-])mlx(?:[_.-]|$)", name, re.I)
+            or re.search(r"-\d+-of-\d+\.", name)
             or type(size) is not int or not 0 < size <= 64 * 1024**3
             or not re.fullmatch(r"[a-f0-9]{64}", str(lfs.get("sha256", "")))
         ):

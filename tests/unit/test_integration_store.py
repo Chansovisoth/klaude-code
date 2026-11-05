@@ -549,3 +549,23 @@ def test_reviewed_skill_import_preserves_pinned_source_and_never_runs_scripts(st
     )
     assert len(downloaded) == 1 and downloaded[0].revision == SHA
     assert not list(service.cfg.skills_dir.glob(".remote-*"))
+
+
+@pytest.mark.parametrize("kind,code", [("model-image-download", 202), ("model-pull", 409)])
+def test_skill_admission_with_independent_image_transfer(store, monkeypatch, kind, code):
+    from klaude_application import model_store
+
+    host, service, auth, _ = store
+    item = service.integration_store.catalog("skills")["items"][0]
+    service.integration_store.detail(item["id"], resolve=True)
+    review = _review(host, auth, {"operation": "skill-store-install", "id": item["id"],
+                                 "name": "testing"})
+    other = uuid.uuid4().hex
+    admitted = service.journal.admit(request_id=other, owner_id="web-admin", kind=kind,
+                                      resource=model_store.RESOURCE, payload={})
+    service.journal.start(other, "web-admin", admitted.fence)
+    monkeypatch.setattr(service._jobs, "submit", lambda *a, **kw: None)
+    assert _request(host, "POST", "/api/v1/library/submit", body={
+        "review_id": review["review_id"], "request_id": uuid.uuid4().hex, "control_epoch": 0,
+    }, **auth)[0] == code
+    assert service.journal.resource_busy(model_store.RESOURCE)

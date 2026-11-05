@@ -668,6 +668,8 @@ const fileIconPaths = {
   options: "M4 7h16M4 17h16M8 4v6m8 4v6",
   disclosure: "M8.7 4.8a1.5 1.5 0 0 0-2.3 1.3v11.8a1.5 1.5 0 0 0 2.3 1.3l9.4-5.9a1.5 1.5 0 0 0 0-2.6L8.7 4.8Z",
   close: "m6 6 12 12M6 18 18 6",
+  pause: "M8 5v14M16 5v14",
+  play: "m8 5 11 7-11 7Z",
   more: "M12 4a1 1 0 1 0 0 2 1 1 0 0 0 0-2M12 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2M12 18a1 1 0 1 0 0 2 1 1 0 0 0 0-2",
   download: "M12 3v12m-5-5 5 5 5-5M4 17v4h16v-4",
   copy: "M9 9h11v11H9ZM5 15H3V3h12v2", check: "m5 12 4 4L19 6",
@@ -2550,20 +2552,22 @@ async function prepareChange(draft, { current = () => true, beforeOpen = () => {
   managementReview = { ...result, request_id: requestId(), onAccepted, onDiscard };
   const destructive = ["delete-selected", "delete", "model-delete", "model-connection-remove", "skill-delete", "memory-delete", "mcp-remove", "session-delete", "knowledge-delete"].includes(draft.operation);
   const ai = ["vision-analyze", "vision-tags"].includes(draft.operation), tags = draft.operation === "vision-tags";
-  const download = ["model-pull", "model-image-download"].includes(draft.operation);
+  const download = ["model-pull", "model-image-download", "model-image-install-plan"].includes(draft.operation);
+  const planDownload = draft.operation === "model-image-install-plan";
+  const bundleInstall = ["comfy-install","comfy-import","comfy-store-install"].includes(draft.operation), bundleCheck = draft.operation === "comfy-recover";
   const storeAdd = draft.operation === "mcp-store-add", storeSkill = draft.operation === "skill-store-install";
   reviewDialog.classList.toggle("model-download-confirmation", download);
   reviewDialog.classList.toggle("ai-confirmation", ai);
-  byId("domain-review-title").textContent = storeAdd ? "Add MCP server?" : storeSkill ? "Install skill?" : download ? "Download model?" : ai ? tags ? "Suggest image tags?" : "Review image?" : destructive ?
+  byId("domain-review-title").textContent = draft.operation === "comfy-remove" ? "Remove image model?" : bundleInstall ? "Install image model?" : bundleCheck ? "Check installation?" : storeAdd ? "Add MCP server?" : storeSkill ? "Install skill?" : planDownload ? "Install planned files?" : download ? "Download model?" : ai ? tags ? "Suggest image tags?" : "Review image?" : destructive ?
     draft.operation === "delete-selected" ? `Delete ${draft.targets.length} selected file${draft.targets.length === 1 ? "" : "s"} permanently?` : draft.operation === "knowledge-delete" ? draft.source ? "Delete this source?" : "Delete this knowledge?" : draft.operation === "delete" ? "Delete file permanently?" : "Remove this item?" : "Review change";
-  byId("domain-review-confirm").textContent = storeAdd ? "Add server" : storeSkill ? "Install skill" : download ? "Download" : ai ? tags ? "Suggest tags" : "Review image" : destructive ? "Delete permanently" : "Confirm";
+  byId("domain-review-confirm").textContent = draft.operation === "comfy-remove" ? "Remove" : bundleInstall ? "Install" : bundleCheck ? "Check installation" : storeAdd ? "Add server" : storeSkill ? "Install skill" : planDownload ? "Approve downloads" : download ? "Download" : ai ? tags ? "Suggest tags" : "Review image" : destructive ? "Delete permanently" : "Confirm";
   byId("domain-review-confirm").classList.toggle("danger", destructive);
-  byId("domain-review-summary").textContent = download ? "" : ai ? tags ? "Klaude will analyze this image and suggest tags for you to review." :
+  byId("domain-review-summary").textContent = download && !planDownload ? "" : ai ? tags ? "Klaude will analyze this image and suggest tags for you to review." :
     "Klaude will analyze this image to answer your question." : result.summary;
-  byId("domain-review-target").hidden = !ai && !download;
+  byId("domain-review-target").hidden = !ai && !download || planDownload;
   byId("domain-review-target").textContent = ai ? filename : "";
   byId("domain-review-target").title = ai ? filename : "";
-  if (download) {
+  if (download && !planDownload) {
     const target = byId("domain-review-target"), rows = document.createElement("dl");
     const model = String(draft.model || ""), split = model.startsWith("hf.co/") ? model.lastIndexOf(":") : -1;
     const fields = split > 0 ? [["Model", model.slice(0, split)], ["File", model.slice(split + 1)]] : [["Model", model]];
@@ -2577,7 +2581,7 @@ async function prepareChange(draft, { current = () => true, beforeOpen = () => {
   byId("domain-review-notice").hidden = !ai;
   byId("domain-review-notice").textContent = ai ? "Image data will be sent to the configured model provider(s). Provider charges may apply." +
     (tags ? " Suggested tags are not saved automatically." : "") : "";
-  byId("domain-review-technical").hidden = !ai && !download;
+  byId("domain-review-technical").hidden = !ai && !download || planDownload;
   byId("domain-review-technical").querySelector("summary").textContent = download ? "More details" : "Technical details";
   byId("domain-review-technical").open = false;
   byId("domain-review-technical-summary").textContent = ai || download ? result.summary : "";
@@ -2889,7 +2893,11 @@ function renderSkillDetails() {
   if (!detailSkill) return;
   const skill = detailSkill;
   byId("skill-detail-title").textContent = skill.name;
-  byId("skill-detail-description").textContent = skill.description || "No description provided.";
+  const description=skill.description||'';
+  byId("skill-detail-description").textContent = window.StoreDesign.brief(description);
+  byId("skill-detail-description").hidden = !description;
+  byId("skill-detail-badge").textContent = skill.enabled ? 'Enabled' : 'Disabled';
+  const about=byId('skill-detail-about');about.hidden=description===window.StoreDesign.brief(description);about.querySelector('p').textContent=description;
   const metadata = byId("skill-detail-metadata");
   metadata.replaceChildren();
   for (const [label, value] of [["Status", skill.enabled ? "Enabled" : "Disabled"],
@@ -2955,14 +2963,14 @@ async function loadOperations() {
     for (const [name, pending] of skillChanges) {
       const operation = data.items.find(item => item.request_id === pending.request_id);
       if (!operation || !["completed", "failed", "unknown"].includes(operation.state)) continue;
-      if (operation.state === "unknown") pending.phase = "unknown";
+      if (operation.state === "unknown" && !operation.retired_unverified) pending.phase = "unknown";
       else {
         skillChanges.delete(name); skillSettled = true;
       }
     }
     updateSkillStates();
     document.dispatchEvent(new CustomEvent("klaude-operations", { detail: data.items }));
-    const signature = `${data.management_allowed}:` + data.items.map((item) => `${item.request_id}:${item.state}:${item.stage || ""}:${item.code || ""}`).join("|");
+    const signature = `${data.management_allowed}:` + data.items.map((item) => `${item.request_id}:${item.state}:${item.stage || ""}:${item.code || ""}:${Boolean(item.retired_unverified)}`).join("|");
     const render = signature !== operationSignature;
     const changed = operationSignature !== null && signature !== operationSignature;
     operationSignature = signature;
@@ -2970,7 +2978,7 @@ async function loadOperations() {
       const node = domainText("article", "", "operation-row");
       node.dataset.operationId = item.request_id;
       node.tabIndex = -1;
-      const status = item.state === "unknown" ? "Unconfirmed · local reconciliation required; do not resubmit" :
+      const status = item.retired_unverified ? "Retired · historical outcome unverified" : item.state === "unknown" ? "Unconfirmed · local reconciliation required; do not resubmit" :
         item.state === "failed" && item.kind === "skill-store-install" ? "Failed · review the reason before trying again" :
         item.state === "failed" ? "Rejected · reload and review the current item" : item.state;
       const title = item.kind === "skill-store-install" ? `Skill install: ${item.resource.replace(/^skill:/, "")}` : item.kind.replaceAll("-", " ");
@@ -2979,7 +2987,7 @@ async function loadOperations() {
       if (item.kind === "skill-store-install") {
         if (item.message) node.append(domainText("p", item.message));
         node.append(domainText("small", `Last stage: ${(item.stage || "unavailable").replaceAll("_", " ")}`, "muted"));
-        if (item.state === "unknown" && data.management_allowed && "evidence_version" in item) {
+        if (item.state === "unknown" && !item.retired_unverified && data.management_allowed && "evidence_version" in item) {
           const inspect = domainText("button", "Inspect recovery", "text-button");
           inspect.type = "button";
           inspect.addEventListener("click", async () => {

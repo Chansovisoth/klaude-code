@@ -14,6 +14,8 @@ from klaude_core.model_management import reference_parts
 from klaude_core.vision import inspect_model
 
 from .browser_models import BrowserModels
+from .comfyui_install import OPERATIONS as COMFY_OPERATIONS
+from .comfyui_install import inventory as comfy_inventory
 from .image_model_selection import OPERATIONS as IMAGE_MODEL_OPERATIONS
 from .image_settings import image_settings_resource, recover_image_settings, save_image_settings
 from .model_capabilities import BATCH_SIZE, read_capabilities
@@ -24,9 +26,12 @@ from .model_default_settings import (
 )
 from .operation_journal import OperationConflict, OperationJournal
 
-OPERATIONS = frozenset({"defaults-save", "image-settings-save",
-                        "defaults-recover", "image-settings-recover"}) | IMAGE_MODEL_OPERATIONS
-WITNESSED = frozenset({"defaults-save", "image-settings-save", "image-model-load"})
+OPERATIONS = (frozenset({"defaults-save", "image-settings-save",
+                        "defaults-recover", "image-settings-recover"})
+              | IMAGE_MODEL_OPERATIONS | COMFY_OPERATIONS)
+WITNESSED = frozenset({"defaults-save", "image-settings-save", "image-model-load", "comfy-install",
+                        "comfy-import", "comfy-remove", "comfy-repair",
+                        "comfy-store-install", "comfy-recover"})
 FIELDS = frozenset({"chat", "utility", "research", "vision", "fallbacks", "vision_fallbacks",
                     "vision_enabled", "output_tokens"})
 
@@ -42,7 +47,8 @@ def media_settings(cfg: Config) -> dict[str, Any]:
                 pending[kind] = {"request_id": fenced.receipt.request_id,
                                  "state": fenced.receipt.state}
     return {"defaults": read_defaults(cfg).public(), "image_service": read(cfg),
-            "connections": BrowserModels(cfg).inventory(), "pending": pending}
+            "connections": BrowserModels(cfg).inventory(), "pending": pending,
+            "comfyui": comfy_inventory(cfg)}
 
 
 def default_model_catalog(
@@ -133,6 +139,10 @@ def prepare_media_setting(
     cfg: Config, draft: dict[str, Any],
 ) -> tuple[dict[str, Any], str, str]:
     operation = draft["operation"]
+    if operation in COMFY_OPERATIONS:
+        from .comfyui_install import prepare
+
+        return prepare(cfg, draft)
     if operation in IMAGE_MODEL_OPERATIONS:
         from .image_model_selection import prepare
 
@@ -159,11 +169,16 @@ def prepare_media_setting(
         image_current = read(cfg)
         if image_current["revision"] != draft["revision"]:
             raise ValueError("Image-service settings changed; refresh before reviewing")
-        url = endpoint(draft["endpoint"]) if draft["endpoint"] else ""
         provider = draft.get("provider", "sdcpp")
-        if provider not in {"sdcpp", "ollama"}:
-            raise ValueError("Choose stable-diffusion.cpp or Ollama")
-        evidence = inspect(url, provider, draft.get("model", "")) if draft["enabled"] else None
+        if provider not in {"sdcpp", "ollama", "comfyui"}:
+            raise ValueError("Choose ComfyUI, stable-diffusion.cpp or Ollama")
+        if provider == "comfyui" and draft["endpoint"] != "managed":
+            raise ValueError("ComfyUI uses the managed local engine")
+        url = ("managed" if provider == "comfyui" else
+               endpoint(draft["endpoint"]) if draft["endpoint"] else "")
+        image_probe = {"endpoint": url, "provider": provider, "model": draft.get("model", "")}
+        evidence = (inspect_settings(image_probe, cfg) if provider == "comfyui" else
+                    inspect(url, provider, draft.get("model", ""))) if draft["enabled"] else None
         if (evidence and provider == "sdcpp" and draft.get("model")
                 and evidence["model"] != draft["model"]):
             raise ValueError(
@@ -177,7 +192,7 @@ def prepare_media_setting(
                 "evidence": evidence}, image_settings_resource(cfg.config_dir), (
             f"{'Enable' if image_candidate['enabled'] else 'Disable'} image generation.\n"
             f"Server: {url or '(none)'}\nModel: {image_candidate['model'] or '(none)'}\n"
-            "Enabling checks the server's loaded model and generation capabilities."
+            "Enabling checks the installed model and service capabilities; no image is generated."
         )
     if (operation != "defaults-save" or set(draft) != {"operation", "field", "value", "expected"}
             or not isinstance(draft["field"], str) or draft["field"] not in FIELDS):
@@ -225,7 +240,7 @@ def run_media_setting(cfg: Config, request: dict[str, Any]) -> dict[str, bool]:
         return {"ok": True}
     if request["operation"] == "image-settings-save":
         candidate = request["candidate"]
-        if candidate["enabled"] and inspect_settings(candidate) != request["evidence"]:
+        if candidate["enabled"] and inspect_settings(candidate, cfg) != request["evidence"]:
             return {"rejected": True}
         save_image_settings(cfg, candidate, request["revision"], journal,
                             request["request_id"], "web-admin", admitted=True)

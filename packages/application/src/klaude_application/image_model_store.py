@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -50,7 +51,22 @@ def root() -> Path:
 
 def parts(fields):
     # Every directory component is controlled here, never a browser-supplied path.
-    return ("checkpoints", *fields["repo"].split("/"), fields["filename"])
+    category = fields.get("category", "checkpoints")
+    if (not isinstance(category, str) or category not in {
+        "checkpoints", "diffusion_models", "text_encoders", "vae", "vae_approx",
+    }):
+        raise ValueError("Unsupported image component category")
+    repo, filename = fields["repo"], fields["filename"]
+    component = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}"
+    if (not re.fullmatch(rf"{component}/{component}", repo)
+            or not re.fullmatch(rf"(?:{component}/){{0,5}}{component}", filename)):
+        raise ValueError("Unsafe image component path")
+    return (category, *repo.split("/"), *filename.split("/"))
+
+
+def resource(fields):
+    identity = [fields["root_device"], fields["root_inode"], parts(fields)]
+    return "image-download:" + hashlib.sha256(repr(identity).encode()).hexdigest()
 
 
 @contextmanager
@@ -59,6 +75,7 @@ def directory(fields, *, create=False, lock=False, missing=False):
     regular_path(path)
     descriptors = [os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
     lock_fd = None
+    target_lock = None
     try:
         info = os.fstat(descriptors[0])
         if (info.st_dev, info.st_ino) != (fields["root_device"], fields["root_inode"]):
@@ -66,14 +83,24 @@ def directory(fields, *, create=False, lock=False, missing=False):
         if lock:
             lock_fd = os.open(
                 ".klaude-download.lock",
-                os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+                os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
                 0o600,
                 dir_fd=descriptors[0],
             )
             try:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+                    raise ValueError("Unsafe download lock")
+                # New transfers share this migration gate. Older workers hold
+                # it exclusively and cannot race a new per-target worker.
+                fcntl.flock(lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                name = ".klaude-download-" + resource(fields).split(":")[1] + ".lock"
+                target_lock = os.open(name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                      0o600, dir_fd=descriptors[0])
+                if not stat.S_ISREG(os.fstat(target_lock).st_mode):
+                    raise ValueError("Unsafe download lock")
+                fcntl.flock(target_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                raise OperationConflict("A local image-model download is still active") from None
+                raise OperationConflict("This image file has an active download") from None
         for name in parts(fields)[:-1]:
             if create:
                 try:
@@ -93,6 +120,8 @@ def directory(fields, *, create=False, lock=False, missing=False):
                 return
         yield descriptors[-1]
     finally:
+        if target_lock is not None:
+            os.close(target_lock)
         if lock_fd is not None:
             os.close(lock_fd)
         for descriptor in reversed(descriptors):
@@ -107,9 +136,11 @@ def _exists(descriptor, name):
         return False
 
 
-def prepare(cfg, draft):
+def describe(cfg, draft):
+    """Resolve exact metadata and destination identity without admitting a transfer."""
     if (
-        set(draft) != {"operation", "connection", "model"}
+        set(draft) not in ({"operation", "connection", "model"},
+                           {"operation", "connection", "model", "category"})
         or draft["connection"] != "image:sdcpp"
         or not isinstance(draft["model"], str)
     ):
@@ -120,7 +151,9 @@ def prepare(cfg, draft):
     repo, filename = match.groups()
     data = hub_gguf_files(cfg.huggingface_base_url, "", repo, image=True)
     selected = next((row for row in data["files"] if row["filename"] == filename), None)
-    if selected is None or not re.fullmatch(r"[a-f0-9]{40}", str(data["revision"])):
+    if (selected is None or not re.fullmatch(r"[a-f0-9]{40}", str(data["revision"]))
+            or not re.fullmatch(r"[a-f0-9]{64}", str(selected.get("sha256", "")))
+            or type(selected.get("size")) is not int or selected["size"] <= 0):
         raise ValueError("No supported file with a verified size, checksum and revision")
     path = root()
     info = path.stat()
@@ -139,19 +172,51 @@ def prepare(cfg, draft):
         "size": selected["size"],
         "base_url": cfg.huggingface_base_url.rstrip("/"),
     }
+    if "category" in draft:
+        fields["category"] = draft["category"]
+    parts(fields)
+    return fields
+
+
+def artifact_identity(fields):
+    """Exact source and destination witness; excludes progress and receipt state."""
+    value = {key: fields[key] for key in KEYS}
+    value["category"] = fields.get("category", "checkpoints")
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def prepare(cfg, draft):
+    expected = draft.get("expected_artifact")
+    if "expected_artifact" in draft and (
+        not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected)
+    ):
+        raise ValueError("Choose an exact planned artifact")
+    fields = describe(cfg, {key: value for key, value in draft.items()
+                            if key != "expected_artifact"})
+    if expected is not None and artifact_identity(fields) != expected:
+        raise ValueError("Download source or destination changed; rebuild the install plan")
+    path = Path(fields["root"])
+    leaf = parts(fields)[-1]
+    retained = 0
     try:
         with directory(fields) as descriptor:
-            if _exists(descriptor, filename):
+            partial = partial_name(fields)
+            if not _exists(descriptor, partial):
+                partial = f".klaude-{fields['sha256']}.part"
+            retained = retained_size(descriptor, partial)
+            if _exists(descriptor, leaf):
                 raise ValueError("This file is already installed; refresh Installed")
     except FileNotFoundError:
         pass
-    if shutil.disk_usage(path).free < fields["size"] + 16 * 1024**2:
+    if shutil.disk_usage(path).free < max(0, fields["size"] - retained) + 16 * 1024**2:
         raise ValueError("Not enough free space in the image-model directory")
     return (
         fields,
-        "browser-model-work",
+        resource(fields),
         (
-            f"Download {filename} ({fields['size']:,} bytes) from {repo} to the local "
+            f"Download {fields['filename']} ({fields['size']:,} bytes) "
+            f"from {fields['repo']} to the local "
             "Stable Diffusion model directory. Verifies the pinned revision and SHA256. "
             "Loading the model and any required components is a separate image-server action."
         ),
@@ -175,59 +240,102 @@ def _redirect(url, origin):
         raise ValueError("Model download redirect is outside the Hugging Face CDN")
 
 
+class InvalidPartial(ValueError):
+    """A retained file cannot be used as a prefix of the reviewed weights."""
+
+
+def partial_name(fields):
+    # Content-addressed across explicit retry attempts, never browser-supplied.
+    if not re.fullmatch(r"[a-f0-9]{64}", fields["sha256"]):
+        raise ValueError("Invalid image-model checksum")
+    target = hashlib.sha256(fields["filename"].encode()).hexdigest()[:16]
+    return f".klaude-{fields['sha256']}-{target}.part"
+
+
+def retained_size(descriptor, name):
+    try:
+        info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return 0
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+        raise ValueError("Unsafe partial model file")
+    return info.st_size
+
+
 def _transfer(fields, descriptor, temporary, progress, check):
     url = f"{fields['base_url']}/{fields['repo']}/resolve/{fields['revision']}/{fields['filename']}"
     deadline = time.monotonic() + 1800
-    with httpx.Client(
-        timeout=httpx.Timeout(30, connect=5), trust_env=False, follow_redirects=False
-    ) as client:
-        for _ in range(6):
-            _redirect(url, fields["base_url"])
-            with client.stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
-                if response.is_redirect:
-                    url = urljoin(url, response.headers.get("location", ""))
-                    continue
-                if response.status_code != 200:
-                    raise ValueError("Image-model source unavailable or requires access approval")
-                if response.headers.get("content-encoding", "identity") != "identity":
-                    raise ValueError("Unexpected compressed model response")
+    fd = os.open(temporary, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+                 0o600, dir_fd=descriptor)
+    with os.fdopen(fd, "r+b") as output:
+        info = os.fstat(output.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+            raise ValueError("Unsafe partial model file")
+        if info.st_size > fields["size"]:
+            raise InvalidPartial("Partial exceeds the reviewed size")
+        digest, completed, reported = hashlib.sha256(), 0, 0.0
+        while chunk := output.read(1024 * 1024):
+            check()
+            digest.update(chunk)
+            completed += len(chunk)
+        if completed == fields["size"]:
+            if digest.hexdigest() != fields["sha256"]:
+                raise InvalidPartial("Image-model checksum verification failed")
+            return
+        headers = {"Accept-Encoding": "identity"}
+        if completed:
+            headers["Range"] = f"bytes={completed}-"
+        with httpx.Client(
+            timeout=httpx.Timeout(30, connect=5), trust_env=False, follow_redirects=False
+        ) as client:
+            for _ in range(6):
                 check()
-                fd = os.open(
-                    temporary,
-                    os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
-                    0o644,
-                    dir_fd=descriptor,
-                )
-                digest, completed, reported = hashlib.sha256(), 0, 0.0
-                with os.fdopen(fd, "wb") as output:
+                _redirect(url, fields["base_url"])
+                with client.stream("GET", url, headers=headers) as response:
+                    if response.is_redirect:
+                        url = urljoin(url, response.headers.get("location", ""))
+                        continue
+                    if response.status_code == 206:
+                        match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)",
+                                             response.headers.get("content-range", ""))
+                        if (not match or tuple(map(int, match.groups())) !=
+                                (completed, fields["size"] - 1, fields["size"])):
+                            raise ValueError("Invalid model resume response")
+                    elif response.status_code == 200:
+                        # Some servers ignore Range; restart explicitly, never append a full file.
+                        output.seek(0)
+                        output.truncate()
+                        digest, completed = hashlib.sha256(), 0
+                    else:
+                        raise ValueError("Image-model source unavailable or requires approval")
+                    if response.headers.get("content-encoding", "identity") != "identity":
+                        raise ValueError("Unexpected compressed model response")
+                    progress({"stage": "Resuming download" if completed else "Downloading file",
+                              "completed": completed, "total": fields["size"]})
                     for chunk in response.iter_bytes(256 * 1024):
+                        check()
                         if time.monotonic() > deadline:
                             raise ValueError("Image-model download reached its time limit")
-                        completed += len(chunk)
-                        if completed > fields["size"]:
-                            raise ValueError("Image-model size differs from the reviewed file")
+                        if completed + len(chunk) > fields["size"]:
+                            raise InvalidPartial("Image-model size differs from the reviewed file")
                         output.write(chunk)
+                        completed += len(chunk)
                         digest.update(chunk)
                         now = time.monotonic()
                         if now - reported >= 0.25:
-                            check()
-                            progress(
-                                {
-                                    "stage": "Downloading file",
-                                    "completed": completed,
-                                    "total": fields["size"],
-                                }
-                            )
+                            progress({"stage": "Downloading file", "completed": completed,
+                                      "total": fields["size"]})
                             reported = now
                     output.flush()
                     os.fsync(output.fileno())
-                progress(
-                    {"stage": "Verifying download", "completed": completed, "total": fields["size"]}
-                )
-                if completed != fields["size"] or digest.hexdigest() != fields["sha256"]:
-                    raise ValueError("Image-model checksum or size verification failed")
-                return
-        raise ValueError("Too many image-model download redirects")
+                    if completed != fields["size"]:
+                        raise ValueError("Image-model transfer ended before the reviewed size")
+                    progress({"stage": "Verifying download", "completed": completed,
+                              "total": fields["size"]})
+                    if digest.hexdigest() != fields["sha256"]:
+                        raise InvalidPartial("Image-model checksum verification failed")
+                    return
+            raise ValueError("Too many image-model download redirects")
 
 
 def run(cfg, request, progress):
@@ -239,40 +347,51 @@ def run(cfg, request, progress):
     def check():
         journal.check_effect(request["request_id"], OWNER, request["fence"])
 
-    temporary = f".klaude-{request['request_id']}.part"
+    temporary = partial_name(request)
+    leaf = parts(request)[-1]
     published = False
     try:
         check()
         with directory(request, create=True, lock=True) as descriptor:
             try:
                 check()
-                if _exists(descriptor, request["filename"]):
+                if _exists(descriptor, leaf):
                     raise ValueError("Destination already exists; no file was replaced")
-                if shutil.disk_usage(request["root"]).free < request["size"] + 16 * 1024**2:
+                legacy = f".klaude-{request['sha256']}.part"
+                if not _exists(descriptor, temporary) and _exists(descriptor, legacy):
+                    retained_size(descriptor, legacy)  # Refuse unsafe legacy entries.
+                    try:
+                        os.rename(legacy, temporary, src_dir_fd=descriptor, dst_dir_fd=descriptor)
+                    except FileNotFoundError:
+                        pass  # Another identical-content target adopted it first.
+                remaining = max(0, request["size"] - retained_size(descriptor, temporary))
+                if shutil.disk_usage(request["root"]).free < remaining + 16 * 1024**2:
                     raise ValueError("Not enough free space in the image-model directory")
                 _transfer(request, descriptor, temporary, progress, check)
                 check()
                 # Hard-link publication is atomic and fails if the destination exists.
                 os.link(
                     temporary,
-                    request["filename"],
+                    leaf,
                     src_dir_fd=descriptor,
                     dst_dir_fd=descriptor,
                     follow_symlinks=False,
                 )
                 published = True
                 os.fsync(descriptor)
+            except InvalidPartial:
+                os.unlink(temporary, dir_fd=descriptor)
+                raise
             finally:
-                try:
+                if published or (_exists(descriptor, temporary)
+                                 and retained_size(descriptor, temporary) == 0):
                     os.unlink(temporary, dir_fd=descriptor)
-                except FileNotFoundError:
-                    pass
         return {"ok": True, "message": "Downloaded. Load the model in your image server."}
     except (ValueError, OSError, httpx.HTTPError):
         return {
             "ok": False,
             "rejected": not published,
-            "message": "Image-model download failed. Check access, disk space and source.",
+            "message": "Download failed. Retry resumes retained bytes when the source supports it.",
         }
 
 
@@ -290,7 +409,7 @@ def reconcile(cfg, journal, identity):
         if descriptor is not None:
             try:
                 fd = os.open(
-                    fields["filename"],
+                    parts(fields)[-1],
                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
                     dir_fd=descriptor,
                 )
@@ -304,10 +423,15 @@ def reconcile(cfg, journal, identity):
                     if hashlib.file_digest(stream, "sha256").hexdigest() != fields["sha256"]:
                         raise OperationConflict("Installed file checksum differs from the target")
                     installed = True
-            try:
-                os.unlink(f".klaude-{identity}.part", dir_fd=descriptor)
-            except FileNotFoundError:
-                pass
+            cleanup = () if fields.get("paused") is True and not installed else (
+                f".klaude-{identity}.part", f".klaude-{fields['sha256']}.part",
+                partial_name(fields),
+            )
+            for temporary in cleanup:
+                try:
+                    os.unlink(temporary, dir_fd=descriptor)
+                except FileNotFoundError:
+                    pass
         return {
             "request_id": identity,
             "state": journal.reconcile_witness(
@@ -339,7 +463,7 @@ def inventory(cfg):
                     if entries > 2000:
                         break
                     if entry.is_dir(follow_symlinks=False):
-                        if len(Path(entry.path).relative_to(path).parts) < 5:
+                        if len(Path(entry.path).relative_to(path).parts) < 10:
                             pending.append(Path(entry.path))
                     elif entry.is_file(follow_symlinks=False) and (
                         Path(entry.name).suffix.lower()

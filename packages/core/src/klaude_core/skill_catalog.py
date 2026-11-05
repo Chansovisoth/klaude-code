@@ -531,7 +531,11 @@ def check_github_skill_update(
 
 
 class SkillSourceError(ValueError):
-    """The pinned source failed bounded package validation; contains no public diagnostic."""
+    """Pinned validation failure with an optional machine-readable classification."""
+
+    def __init__(self, message: str, *, code: str = "SOURCE_REJECTED"):
+        super().__init__(message)
+        self.code = code
 
 
 def download_resolved_skill(
@@ -571,7 +575,10 @@ def download_resolved_skill(
         if not isinstance(kind, str) or not isinstance(mode, str) or (
             kind, mode
         ) not in {("tree", "040000"), ("blob", "100644"), ("blob", "100755")}:
-            raise SkillSourceError("Skill contains a symlink, submodule, or unsupported file")
+            raise SkillSourceError(
+                "Skill contains a symlink, submodule, or unsupported file",
+                code="PACKAGE_UNSUPPORTED_ENTRY",
+            )
         return name, kind, mode, sha
 
     folder = record.skill_path.split("/")[:-1]
@@ -594,7 +601,9 @@ def download_resolved_skill(
         prefix, current_sha, depth = queued.pop()
         directories += 1
         if directories > MAX_SKILL_FILES:
-            raise SkillSourceError("Skill package has too many directories")
+            raise SkillSourceError(
+                "Skill package has too many directories", code="PACKAGE_FILE_LIMIT",
+            )
         if depth > 12:
             raise SkillSourceError("Skill folder is too deep")
         for item in entries(current_sha):
@@ -605,16 +614,24 @@ def download_resolved_skill(
             if kind == "tree":
                 queued.append((path + "/", sha, depth + 1))
                 if len(queued) > MAX_SKILL_FILES:
-                    raise SkillSourceError("Skill package has too many directories")
+                    raise SkillSourceError(
+                        "Skill package has too many directories", code="PACKAGE_FILE_LIMIT",
+                    )
                 continue
             size = item.get("size")
             if type(size) is not int or not 0 <= size <= MAX_SKILL_FILE_BYTES:
-                raise SkillSourceError("Skill file is too large or has unknown size")
+                raise SkillSourceError(
+                    "Skill file is too large or has unknown size", code="PACKAGE_SIZE_LIMIT",
+                )
             total += size
             if len(files) >= MAX_SKILL_FILES:
-                raise SkillSourceError("Skill package has too many files")
+                raise SkillSourceError(
+                    "Skill package has too many files", code="PACKAGE_FILE_LIMIT",
+                )
             if total > MAX_SKILL_PACKAGE_BYTES:
-                raise SkillSourceError("Skill package exceeds download limits")
+                raise SkillSourceError(
+                    "Skill package exceeds download limits", code="PACKAGE_SIZE_LIMIT",
+                )
             blob = http.get(f"{base}/blobs/{sha}")
             if blob.get("sha") != sha or blob.get("encoding") != "base64" or (
                 blob.get("size") != size or not isinstance(blob.get("content"), str)
@@ -628,12 +645,14 @@ def download_resolved_skill(
                 f"blob {len(body)}\0".encode() + body, usedforsecurity=False
             ).hexdigest()
             if len(body) != size or object_id != sha:
-                raise SkillSourceError("Pinned skill file failed integrity check")
+                raise SkillSourceError(
+                    "Pinned skill file failed integrity check", code="SOURCE_INTEGRITY_FAILED",
+                )
             files[path] = body
     if "SKILL.md" not in files:
-        raise SkillSourceError("Pinned folder has no SKILL.md")
+        raise SkillSourceError("Pinned folder has no SKILL.md", code="SKILL_MANIFEST_INVALID")
     try:
         files["SKILL.md"].decode("utf-8")
     except UnicodeError as exc:
-        raise SkillSourceError("SKILL.md is not UTF-8 text") from exc
+        raise SkillSourceError("SKILL.md is not UTF-8 text", code="SKILL_MANIFEST_INVALID") from exc
     return files

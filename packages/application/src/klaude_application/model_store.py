@@ -233,7 +233,9 @@ def private_target(fields: dict[str, Any]) -> dict[str, Any]:
     if fields.get("endpoint") == "image:sdcpp":
         from .image_model_store import KEYS
 
-        return {key: fields[key] for key in KEYS}
+        return {key: fields[key] for key in KEYS} | (
+            {"category": fields["category"]} if "category" in fields else {}
+        )
     keys = ("endpoint", "model", "revision", "credential_revision", "digest")
     return {k: fields[k] for k in keys}
 
@@ -247,6 +249,15 @@ def save_message(cfg: Config, identity: str, message: str) -> None:
     with settings_lock(path):
         target = read_record(path, limit=16_384)
         atomic_write_private(path, json.dumps({**target, "message": message}))
+
+
+def mark_paused(cfg: Config, identity: str) -> None:
+    path = target_path(cfg, identity)
+    with settings_lock(path):
+        target = read_record(path, limit=16_384)
+        if target.get("endpoint") != "image:sdcpp":
+            raise ValueError("Only owned image downloads support pausing")
+        atomic_write_private(path, json.dumps({**target, "paused": True}))
 
 
 def dismiss(cfg: Config, journal: OperationJournal, identity: str) -> dict[str, Any]:
@@ -266,6 +277,8 @@ def dismiss(cfg: Config, journal: OperationJournal, identity: str) -> dict[str, 
 
 
 def jobs(cfg: Config, journal: OperationJournal) -> dict[str, Any]:
+    from .image_model_store import KEYS, artifact_identity
+
     items = []
     receipts = journal.recent(OWNER, limit=100)
     pending = journal.fenced_operation(RESOURCE)
@@ -283,9 +296,16 @@ def jobs(cfg: Config, journal: OperationJournal) -> dict[str, Any]:
                 **asdict(receipt),
                 "model": target.get("model", "Unknown model"),
                 "connection": target.get("endpoint", ""),
+                **({"category": target.get("category", "checkpoints"),
+                    "artifact_id": artifact_identity(target) if all(
+                        key in target for key in KEYS
+                    ) else ""}
+                   if receipt.kind == "model-image-download" else {}),
                 "message": target.get("message", ""),
                 **({"size": target["size"]} if target.get("endpoint") == "image:sdcpp" else {}),
                 "dismissed": dismissed,
+                "paused": (target.get("paused") is True and
+                           receipt.state in {"failed", "cancelled"}),
             }
         )
         if len(items) == 30:

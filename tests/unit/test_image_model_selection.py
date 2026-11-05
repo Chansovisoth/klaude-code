@@ -77,6 +77,18 @@ def model_server():
         def do_POST(self):
             state["calls"].append(("POST", self.path))
             if self.path == "/sdcpp/v1/models/refresh":
+                if "pending_files" in state:
+                    state["files"] = state.pop("pending_files")
+                if state.get("scan_root"):
+                    root = state["scan_root"]
+                    state["files"] = [
+                        {"id": path.relative_to(root).as_posix(),
+                         "name": path.relative_to(root / category).as_posix(),
+                         "category": category}
+                        for category in ("checkpoints", "diffusion_models", "text_encoders", "vae")
+                        for path in (root / category).rglob("*")
+                        if path.is_file() and not path.name.endswith(".part")
+                    ]
                 self.reply({"errors": []})
                 return
             assert self.path == "/sdcpp/v1/models/load"
@@ -221,3 +233,25 @@ def test_explicit_busy_rejection_is_terminal_and_empty_catalog_keeps_loaded_choi
     state["files"] = []
     data = catalog(service.cfg, url)
     assert data["files"] == [] and data["model"] == "original-model"
+
+
+@pytest.mark.parametrize("kind,allowed", [("model-image-download", True), ("model-pull", False)])
+def test_only_independent_image_download_fences_allow_loading(image_browser, kind, allowed):
+    import uuid
+
+    from klaude_application import model_store
+
+    host, service, auth, url, state = image_browser
+    rid = uuid.uuid4().hex
+    receipt = service.journal.admit(request_id=rid, owner_id=model_store.OWNER,
+                                    kind=kind, resource=model_store.RESOURCE, payload={})
+    service.journal.start(rid, model_store.OWNER, receipt.fence)
+    service.journal.mark_unknown(rid, model_store.OWNER, receipt.fence)
+    review = _review(host, auth, draft(service, url))
+    code, _, _ = _request(host, "POST", "/api/v1/library/submit", body={
+        "review_id": review["review_id"], "request_id": uuid.uuid4().hex,
+        "control_epoch": 0,
+    }, **auth)
+    assert code == (202 if allowed else 409)
+    assert service.journal.status(rid, model_store.OWNER).state == "unknown"
+    assert service.journal.resource_busy(model_store.RESOURCE)

@@ -244,6 +244,7 @@ async def verify(host, root):
             await tab.click("#models-discard")
             assert await tab.js("SettingsDrafts.value('models','fallbacks').length===0")
             await tab.click("[data-model-screen=image]")
+            await tab.js("byId('image-service-advanced').open=true")
             await tab.js("byId('image-service-url').value=''; "
                          "byId('image-service-url').dispatchEvent(new Event('input')); "
                          "byId('image-service-provider').value='ollama'; "
@@ -260,6 +261,9 @@ async def verify(host, root):
                          "byId('image-service-provider').dispatchEvent(new Event('change'))")
             assert await tab.js("byId('image-service-url').value===" +
                                 json.dumps(host.library.cfg.ollama_url))
+            assert await tab.js("byId('image-model-selection').compareDocumentPosition("
+                                "byId('image-service-connection')) & "
+                                "Node.DOCUMENT_POSITION_FOLLOWING")
             await tab.command('Emulation.setDeviceMetricsOverride', {
                 'width':320, 'height':568, 'deviceScaleFactor':1, 'mobile':False,
             })
@@ -268,7 +272,7 @@ async def verify(host, root):
               const input=byId('image-service-model-name').getBoundingClientRect();
               const browse=byId('image-service-model-name-picker').getBoundingClientRect();
               return input.width>=60 && browse.width>=44 && browse.height>=44 &&
-                input.right<=browse.left+1 && browse.right<=row.right+1 &&
+                browse.right<=row.right+1 && byId('image-service-advanced').open &&
                 document.documentElement.scrollWidth<=innerWidth;
             })()""")
             await tab.js("window.savedDomainRequest=domainRequest; "
@@ -278,7 +282,7 @@ async def verify(host, root):
             await tab.click('#image-service-model-name-picker')
             await tab.wait("byId('role-picker-status').textContent.includes('Restart the Web UI host') && "
                            "Boolean(byId('role-picker-items').querySelector('.store-row'))")
-            assert await tab.js("byId('role-picker-items').textContent.includes('not verified')")
+            assert await tab.js("byId('role-picker-items').textContent.includes('Capability unknown')")
             await tab.js("domainRequest=window.savedDomainRequest")
             await tab.click('#role-picker-refresh')
             await tab.wait("byId('role-model-picker').open && "
@@ -364,6 +368,8 @@ async def verify(host, root):
                 " native') && !byId('model-connection-add').disabled"
             )
 
+            await tab.click("#model-connection-close")
+
             async def action(label):
                 await tab.js(
                     "[...byId('model-settings-connections').querySelectorAll('.management-row')]"
@@ -414,10 +420,23 @@ async def verify(host, root):
             await tab.click("#store-detail-back")
             await tab.wait("byId('store-detail').hidden")
             await tab.click("#store-tab-installed")
-            assert await tab.js("!byId('store-endpoint-label').hidden")
+            await tab.wait("!byId('store-endpoint-label').hidden")
             await tab.js("showView('settings', {section:'models'})")
             await tab.click("[data-model-screen=connections]")
             await tab.wait("!byId('model-connection-add').disabled")
+            assert await tab.js(
+                "byId('model-connection-add').textContent.includes('Add connection')"
+            )
+            await tab.js(
+                "[...byId('model-settings-connections').querySelectorAll('.management-row')]"
+                         ".find(r=>r.querySelector('h3').textContent==='Browser native')"
+                         ".querySelector('[aria-label=\"Manage Browser native\"]').click()")
+            await tab.wait(
+                "!!byId('model-settings-connections').querySelector(':popover-open')"
+            )
+            await tab.js(
+                "byId('model-settings-connections').querySelector(':popover-open')?.hidePopover()"
+            )
             await action("Test")
             await tab.wait(
                 "byId('model-connections-status').textContent.includes('Connection reached')"
@@ -446,6 +465,16 @@ async def verify(host, root):
                     (output / f"model-settings-{width}-{theme}.png").write_bytes(
                         base64.b64decode(shot["data"])
                     )
+                assert await tab.js("""[...byId('model-settings-connections')
+                  .querySelectorAll('.management-actions > button')].every(button => {
+                    const r=button.getBoundingClientRect();
+                    return r.width>=44 && r.height>=44 && r.left>=0 && r.right<=innerWidth;
+                  })"""), (width, "connection action geometry")
+                await tab.js("byId('model-settings-connections').firstElementChild"
+                             ".scrollIntoView({block:'start'})")
+                shot = await tab.command("Page.captureScreenshot", {"format": "png"})
+                (output / f"connection-actions-{width}.png").write_bytes(
+                    base64.b64decode(shot["data"]))
                 await tab.js("byId('model-connections-heading').scrollIntoView({block:'start'})")
                 shot = await tab.command("Page.captureScreenshot", {"format": "png"})
                 (output / f"connections-{width}.png").write_bytes(base64.b64decode(shot["data"]))
@@ -540,12 +569,13 @@ async def verify(host, root):
                     else:
                         assert breadcrumb["defaults"] and breadcrumb["refresh"], breadcrumb
                     if screen == "overview":
-                        assert await tab.js("""!document.querySelector(
+                        assert await tab.js("""!!document.querySelector(
                           '#models-overview-links [data-model-screen="catalog"]')""")
                         assert await tab.js(
                             "new Set([...document.querySelectorAll('.settings-role-grid > "
                             ".settings-role-container')]"
-                            ".map(row=>Math.round(row.getBoundingClientRect().left))).size===1"
+                            ".map(row=>Math.round(row.getBoundingClientRect().left))).size==="
+                            + ("1" if width<=600 else "2")
                         )
                         await tab.js("byId('model-fallbacks').open=true")
                         assert await tab.js("""(() => {
@@ -561,12 +591,12 @@ async def verify(host, root):
                           });
                         })()""")
                         assert await tab.js("""(() => {
-                          const roles=getComputedStyle(
-                            document.querySelector('.settings-role-grid'));
-                          const advanced=getComputedStyle(byId('model-fallbacks'));
-                          return roles.borderColor===advanced.borderColor &&
-                            roles.borderRadius===advanced.borderRadius &&
-                            roles.backgroundColor===advanced.backgroundColor;
+                          const cards=[...document.querySelectorAll('.model-default-card')];
+                          return cards.length===4 && cards.every(card=>{
+                            const s=getComputedStyle(card),r=card.getBoundingClientRect();
+                            return r.height>=100 && parseFloat(s.borderTopWidth)===1 &&
+                              parseFloat(s.borderRadius)>=12;
+                          });
                         })()""")
                         assert await tab.js("""(() => {
                           const input=byId('default-output-tokens');
@@ -597,7 +627,9 @@ async def verify(host, root):
                           });
                         })()""")
                         assert len(role_typography) == 10 and all(
-                            style == role_typography[0] for style in role_typography
+                            style == role_typography[0] for style in role_typography[:4]
+                        ) and all(
+                            style == role_typography[4] for style in role_typography[4:]
                         ), (width, role_typography)
                         rows = await tab.js("""[...document.querySelectorAll(
                               '.settings-role-row, .settings-navigation-row')]

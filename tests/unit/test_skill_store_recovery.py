@@ -132,7 +132,8 @@ def test_legacy_absence_does_not_prove_failure(attempt):
 
 @pytest.mark.parametrize("exc,code", [
     (CatalogFailure(CatalogStatus.RATE_LIMIT), "SOURCE_RATE_LIMIT"),
-    (SkillSourceError("Skill contains a symlink, submodule, or unsupported file"),
+    (SkillSourceError("Skill contains a symlink, submodule, or unsupported file",
+                      code="PACKAGE_UNSUPPORTED_ENTRY"),
      "PACKAGE_UNSUPPORTED_ENTRY"),
     (RuntimeError("Authorization: Bearer private-secret"), "UNEXPECTED_FAILURE"),
     (ValueError("Authorization: Bearer private-secret"), "UNEXPECTED_FAILURE"),
@@ -517,3 +518,97 @@ def test_manifest_metadata_change_rejects_a_stale_inspection(attempt, tmp_path):
         skills.reconcile(cfg, journal, request["request_id"], apply=True,
                          expected_fingerprint=inspected["fingerprint"])
     assert journal.resource_busy("skill:testing")
+
+
+@pytest.mark.parametrize("code", ["SOURCE_INTEGRITY_FAILED", "SKILL_MANIFEST_INVALID",
+                                  "PACKAGE_FILE_LIMIT", "PACKAGE_SIZE_LIMIT"])
+def test_typed_source_failure_does_not_expose_exception_text(code):
+    result = skills.failure(SkillSourceError("Bearer secret", code=code), "download")
+    assert result == {"stage": "download", "code": code}
+    assert "secret" not in json.dumps(skills.public({"failure": result}))
+
+
+def test_unknown_source_code_is_not_published():
+    result = skills.failure(SkillSourceError("secret", code="secret"), "download")
+    assert result["code"] == "SOURCE_REJECTED"
+
+
+def test_unknown_receipt_without_worker_result_has_safe_explanation():
+    result = skills.public({}, "unknown")
+    assert result["code"] == "OUTCOME_UNCONFIRMED"
+    assert result["effect_status"] == "unproven"
+    assert result["retry_policy"] == "manual_review"
+
+
+def test_generic_reconcile_refuses_changed_resource_generation(attempt):
+    cfg, journal, request = attempt
+    rid = request["request_id"]
+    journal.mark_unknown(rid, skills.OWNER, request["fence"])
+    with journal._connect() as db:
+        db.execute("UPDATE operation_resources SET generation=generation+1")
+    with pytest.raises(OperationConflict, match="fence changed"):
+        journal.reconcile(rid, skills.OWNER, state="failed", evidence="reviewed")
+    assert journal.status(rid, skills.OWNER).state == "unknown"
+
+
+def legacy_attempt(attempt):
+    cfg, journal, request = attempt
+    with journal._connect() as db:
+        db.execute("DELETE FROM operation_evidence")
+    journal.mark_unknown(request["request_id"], skills.OWNER, request["fence"])
+    return cfg, journal, request
+
+
+def test_explicit_legacy_retirement_preserves_unknown_history_and_revokes_worker(attempt):
+    cfg, journal, request = legacy_attempt(attempt)
+    inspected = skills.retire_legacy(cfg, journal, request["request_id"], reason="Reviewed legacy")
+    assert journal.resource_busy("skill:testing")
+    skills.retire_legacy(cfg, journal, request["request_id"], reason="Reviewed legacy",
+                         apply=True, expected_fingerprint=inspected["fingerprint"])
+    assert journal.status(request["request_id"], skills.OWNER).state == "unknown"
+    assert journal.retirement(request["request_id"], skills.OWNER)["reason"] == "Reviewed legacy"
+    assert not journal.resource_busy("skill:testing")
+    with pytest.raises(OperationFenceLost):
+        journal.check_effect(request["request_id"], skills.OWNER, request["fence"])
+    next_id = uuid.uuid4().hex
+    next_attempt = journal.admit(request_id=next_id, owner_id=skills.OWNER,
+                                  kind="skill-store-install", resource="skill:testing", payload={})
+    assert next_attempt.fence > request["fence"]
+
+
+@pytest.mark.parametrize("change", ["package", "index", "fingerprint", "new_evidence"])
+def test_legacy_retirement_rejects_conflicts_and_stale_reviews(attempt, change):
+    cfg, journal, request = legacy_attempt(attempt)
+    inspected = skills.retire_legacy(cfg, journal, request["request_id"], reason="Reviewed legacy")
+    if change == "package":
+        (cfg.skills_dir / "testing").mkdir()
+    elif change == "index":
+        index(cfg, [["testing", "skill://testing/SKILL.md", "changed"]])
+    elif change == "new_evidence":
+        with journal._connect() as db:
+            db.execute("INSERT INTO operation_evidence VALUES(?,?)", (request["request_id"], '{}'))
+    with pytest.raises(OperationConflict):
+        skills.retire_legacy(cfg, journal, request["request_id"], reason="Reviewed legacy",
+                             apply=True, expected_fingerprint=("bad" if change == "fingerprint"
+                                                               else inspected["fingerprint"]))
+    assert journal.resource_busy("skill:testing")
+
+
+@pytest.mark.parametrize("confirmation,code,retired", [("n\n", 1, False), ("y\n", 0, True)])
+def test_retirement_cli_confirmation(attempt, monkeypatch, confirmation, code, retired):
+    from klaude_cli import skill_store
+    from typer.testing import CliRunner
+
+    cfg, journal, request = legacy_attempt(attempt)
+    monkeypatch.setattr(skill_store, "load_config", lambda: cfg)
+    result = CliRunner().invoke(skill_store.app, ["retire", request["request_id"],
+        "--reason", "Reviewed legacy evidence", "--apply"], input=confirmation)
+    assert result.exit_code == code, result.output
+    assert bool(journal.retirement(request["request_id"], skills.OWNER)) == retired
+    assert journal.status(request["request_id"], skills.OWNER).state == "unknown"
+    assert journal.resource_busy("skill:testing") != retired
+    if retired:
+        backup, = cfg.data_dir.glob("skill-retirement-*")
+        with sqlite3.connect(backup / "operations.db") as db:
+            assert db.execute("SELECT state FROM operations WHERE request_id=?",
+                              (request["request_id"],)).fetchone() == ("unknown",)

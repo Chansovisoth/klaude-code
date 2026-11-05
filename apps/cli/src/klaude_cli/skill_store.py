@@ -70,3 +70,28 @@ def reconcile(
 ) -> None:
     """Inspect by default; --apply confirms only proven recovery outcomes."""
     _run(request_id, apply, as_json)
+
+
+@app.command("retire")
+def retire(request_id: str, reason: str = typer.Option(..., "--reason"),
+           apply: bool = typer.Option(False, "--apply")) -> None:
+    """Inspect legacy retirement; --apply confirms releasing an unproven Skill fence."""
+    from klaude_application.operation_journal import OperationJournal
+    from klaude_application.skill_store_operations import retire_legacy
+
+    try:
+        cfg = load_config()
+        journal = OperationJournal(cfg.data_dir / "operations.db")
+        result = retire_legacy(cfg, journal, request_id, reason=reason)
+        typer.echo(f"{result['resource']}: {result['message']}")
+        if apply:
+            if not typer.confirm("Retire this unverified attempt and release its Skill name?"):
+                raise typer.Exit(1)
+            result = retire_legacy(cfg, journal, request_id, reason=reason, apply=True,
+                                   expected_fingerprint=result["fingerprint"])
+            typer.echo(f"Retired without replay. Evidence backup: {result['backup']}")
+    except typer.Exit:
+        raise
+    except (OSError, ValueError, RuntimeError, sqlite3.Error):
+        typer.echo("Retirement unavailable: active work, changed state or insufficient evidence.")
+        raise typer.Exit(2) from None

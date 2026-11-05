@@ -62,8 +62,9 @@ klaude skill-store reconcile REQUEST_ID --apply
 
 `--apply` reviews and confirms a proven decision. Exit 2 means active work,
 insufficient evidence or unavailable recovery; exit 1 means declined recovery.
-No administrative retirement, forced retry, pending-package repair or automatic
-cleanup of abandoned staging directories is provided. Existing package recovery
+Local administrative retirement is available only through the explicit reviewed
+legacy-empty-state path described below. Forced retry, pending-package repair and
+automatic cleanup of abandoned staging directories are not provided. Existing package recovery
 is not invoked speculatively. Old hosts lack recovery controls until restarted;
 new assets only offer them for receipts carrying the new projection.
 
@@ -112,3 +113,64 @@ tests passed. Follow-up runs passed eight CLI/error-classification checks and
 The browser smoke passed with zero console errors; touched-file Ruff, Python
 compilation and JavaScript syntax checks passed. Full-repository tests were not
 run, and no live restart, install, recovery or cleanup was performed.
+
+## Follow-up hardening, 2026-10-29
+
+Source validation now carries typed error codes for integrity, manifest, file-count,
+size and unsupported-entry failures. Receipt messages remain fixed allowlisted
+text; unknown codes fall back to SOURCE_REJECTED. Package-write failures have
+an explicit PACKAGE_INSTALL_FAILED code. Unknown outcomes with no persisted worker
+failure display OUTCOME_UNCONFIRMED without guessing why the worker stopped.
+The persisted receipt state, request ID and stage remain the recovery authority.
+
+Generic journal reconciliation now rechecks the exact resource request and fencing
+generation inside its write transaction, matching witnessed recovery's guard.
+A stale ownership observation cannot settle a receipt. Regression tests cover
+changed generations, unknown codes, safe messages and typed classifications.
+
+Validation: 169 Skill recovery/catalog/install/management/background tests and
+7 shared journal tests passed. Touched Python passed Ruff and whitespace checks.
+The historical REA, Impeccable and Design receipts were rechecked read-only and
+remain unknown. No historical fence was released, installation replayed or live
+host restarted. Their original source identity and historical effect outcome
+still require evidence before safe recovery.
+
+## Authorized legacy REA retirement and successful install, 2026-10-29
+
+A separate operation_retirements record now supports explicit operator retirement
+of legacy Skill receipts without rewriting their historical unknown outcome.
+Eligibility requires an unknown Skill install, no evidence/witness records, exact
+resource generation, the Skill mutation lock, no package and no active or historical
+Knowledge owner state. Apply rechecks its fingerprint and creates consistent
+owner-only SQLite backups through the backup API before the journal transaction
+records retired_unverified and releases only that generation. Old workers remain
+unable to pass the effect gate. New evidence, local changes and stale ownership
+reject retirement. Activity shows retired history separately from ordinary failures.
+
+The local CLI is `klaude skill-store retire REQUEST_ID --reason REASON --apply`.
+Without --apply it only inspects. Apply requires an explicit interactive
+confirmation; decline exits 1. This is operator retirement, not proof of failure.
+
+Following the user's explicit request to fix REA after the retirement review,
+receipt 3ceff3c2632ebb5cb54df3cded574af7 was retired with its unknown state preserved.
+Backups are in .klaude/data/skill-retirement-3ceff3c2632ebb5cb54df3cded574af7-cx_g42gl.
+The user-selected morluto/rea source at commit
+8f9af920efb39d22b5a915605403b67a1005bc0e,
+.agents/skills/reverse-engineer-anything/SKILL.md, passed bounded verification:
+8 files, 151205 bytes. Configured nomic-embed-text readiness passed with 768 dimensions.
+
+Fresh request 8943c9bf51064c8b887e4f383295cbf3 completed under generation 2.
+Full package/manifest/source digests and the exact Knowledge owner snapshot passed
+verify_complete; no unresolved REA resource fence remains. The shared installed
+Skills reader lists reverse-engineer-anything as enabled. No scripts ran.
+Impeccable and Design's historical receipts were not retired or changed.
+
+An independent image-file download may coexist with a Skill install; conflicting
+Ollama model work still blocks admission. This avoids moving the same unnecessary
+global block from model downloads onto Skill installs.
+
+Validation: 87 recovery/integration/journal tests passed, plus two CLI confirmation
+and consistent-backup cases after the final command fix. Tests cover unknown-history
+preservation, old-worker denial, changed package/index/evidence/fingerprint refusal,
+new-generation admission and image-download coexistence. Ruff, JS syntax and
+whitespace checks passed. No production host restart was performed.

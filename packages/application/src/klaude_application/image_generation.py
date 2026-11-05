@@ -14,11 +14,11 @@ from .operation_journal import OperationConflict, OperationJournal
 
 Operation = Literal[
     "read", "inspect", "save", "prepare", "run", "recovery_review", "recover",
-    "history", "review_job", "refresh", "forget", "cancel", "status",
+    "history", "review_job", "refresh", "forget", "cancel", "status", "comfy_probe",
 ]
 OPERATIONS = frozenset({"read", "inspect", "save", "prepare", "run", "recovery_review",
                         "recover", "history", "review_job", "refresh", "forget",
-                        "cancel", "status"})
+                        "cancel", "status", "comfy_probe"})
 FIELDS = frozenset({"endpoint", "settings", "revision", "prompt", "options", "spec",
                     "id", "offset", "abandon", "request_id", "owner_id", "provider", "model"})
 
@@ -54,6 +54,9 @@ class ImageGenerationCommand:
             not isinstance(operation, str) or operation not in OPERATIONS
             or not config_dir.is_absolute() or not data_dir.is_absolute()
             or set(values) - FIELDS
+            or operation == "comfy_probe" and (
+                set(values) != {"endpoint"} or not isinstance(values.get("endpoint"), str)
+            )
             or operation in {"run", "recover", "forget"}
             and not isinstance(values.get("spec"), dict)
             or operation in {"cancel", "status", "recover", "forget", "refresh",
@@ -78,6 +81,13 @@ class ImageGenerationCommand:
                 **self.values}
 
     def execute(self) -> dict:
+        if self.operation == "comfy_probe":
+            from klaude_core.comfyui_probe import probe
+
+            try:
+                return {"probe": probe(self.values["endpoint"])}
+            except ValueError as exc:
+                return {"status": "error", "message": str(exc)}
         if self.operation == "save":
             from klaude_core.image_generation import inspect_settings
 
@@ -87,7 +97,7 @@ class ImageGenerationCommand:
                 if type(candidate.get("enabled")) is not bool:
                     raise ValueError("Invalid generation enable switch")
                 if candidate["enabled"]:
-                    evidence = inspect_settings(candidate)
+                    evidence = inspect_settings(candidate, cfg)
                     if evidence["model"] != candidate["model"]:
                         raise ValueError("Loaded model changed; Test again")
                 journal = OperationJournal(self.data_dir / "operations.db")

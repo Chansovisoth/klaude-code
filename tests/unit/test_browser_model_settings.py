@@ -29,10 +29,13 @@ def add(host, service, auth):
             "source": "Local",
         },
     )
+    assert review["connection_id"].startswith("model-")
     receipt, _ = _submit(host, service, auth, review)
     assert receipt["state"] == "completed"
     result = _request(host, "GET", "/api/v1/settings/model-connections", **auth)[2]
-    return next(c for c in result["connections"] if c["name"] == "Extra local")
+    connection = next(c for c in result["connections"] if c["name"] == "Extra local")
+    assert connection["id"] == review["connection_id"]
+    return connection
 
 
 def test_reviewed_connection_and_write_only_credentials(native):

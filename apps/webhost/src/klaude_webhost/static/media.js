@@ -279,14 +279,65 @@ window.ChatImageResults = (() => {
   document.addEventListener('scroll', () => { if (menuTrigger) positionMenu(); }, {capture:true, passive:true});
   return {renderMessage, captureFocus, submission, clear};
 })();
+// Shared catalog presentation; operations and reviews stay with their owners.
+window.StoreDesign = (() => {
+  const brief=(value,limit=110)=>{
+    const text=String(value||'').replace(/\s+/g,' ').trim();
+    if(text.length<=limit)return text;
+    const sentence=text.match(/^(.{25,100}?[.!?])(?:\s|$)/)?.[1];
+    return sentence||text.slice(0,limit-1).replace(/\s+\S*$/,'')+'…';
+  };
+  const disclosure=(label,content,id='')=>{const node=domainText('details','','catalog-disclosure');if(id)node.id=id;node.append(domainText('summary',label),content);return node;};
+  function route(runtime='all',section='discover'){
+    if(currentView==='settings'&&settingsSection==='models'&&!ModelsSettingsNavigation.canLeave())return;
+    const url=new URL(location.href);
+    for(const key of [...url.searchParams.keys()])if(key.startsWith('store-integration')||key.startsWith('models-'))url.searchParams.delete(key);
+    url.searchParams.set('view','store');url.searchParams.set('models-runtime',runtime);url.searchParams.set('models-section',section);
+    history.pushState(history.state,'',url);showView('store',{restore:true});ModelStoreUI.restoreFromLocation();sync();
+    byId('store-view').scrollTop=0;
+  }
+  const nav=domainText('nav','','store-kind-nav');nav.id='store-kind-nav';nav.setAttribute('aria-label','Browse Store');
+  for(const [kind,label,icon] of [['models','Chat models','chat'],['images','Image models','image'],['mcps','MCP servers','connection'],['skills','Skills','text']]){
+    const button=domainButton('',()=>kind==='mcps'||kind==='skills'?IntegrationStoreUI.open(kind):route(kind==='images'?'comfyui':'ollama'),'quiet');
+    button.id='store-kind-'+kind;button.dataset.storeKind=kind;button.append(libraryIcon(icon),domainText('span',label));nav.append(button);
+  }
+  byId('store-sidebar-categories').append(nav);byId('store-sidebar-sections').append(byId('store-sections'));
+  byId('store-advanced-files').addEventListener('click',()=>route('sdcpp'));
+  byId('store-mobile-location').addEventListener('change',event=>{
+    const value=event.target.value;
+    if(['mcps','skills'].includes(value))IntegrationStoreUI.open(value);
+    else if(['installed','downloads'].includes(value))route('all',value);
+    else route(value==='explore'?'all':value);
+  });
+  function sync(){
+    const p=new URLSearchParams(location.search),kind=p.get('store-integrations'),runtime=p.get('models-runtime')||'all',section=p.get('models-section')||'discover';
+    const selected=kind||({'ollama':'models','comfyui':'images'}[runtime]||'');
+    for(const button of nav.children){const on=button.dataset.storeKind===selected;if(on)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');}
+    const title=kind?kind==='mcps'?'MCP servers':'Skills':section==='installed'?'Installed':section==='downloads'?'Downloads':runtime==='ollama'?'Chat models':runtime==='comfyui'?'Image models':runtime==='sdcpp'?'Advanced model files':'Explore';
+    byId('store-title').textContent=title;byId('store-mobile-location').value=kind||(['installed','downloads'].includes(section)?section:runtime==='all'?'explore':runtime);
+    for(const button of byId('store-sections').children)button.classList.toggle('is-current',!kind&&button.dataset.section===section&&(section!=='discover'||runtime==='all'));
+    byId('store-advanced-files').classList.toggle('is-current',!kind&&runtime==='sdcpp');
+  }
+  nav.addEventListener('keydown',event=>{if(!['ArrowDown','ArrowUp','Home','End'].includes(event.key))return;const buttons=[...nav.children],i=buttons.indexOf(document.activeElement);const next=event.key==='Home'?0:event.key==='End'?buttons.length-1:(i+(event.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length;event.preventDefault();buttons[next].focus();});
+  function categories(){
+    const grid=domainText('div','','store-category-launchers');
+    for(const [kind,label,icon,copy] of [['models','Chat & code','chat','Talk, write and build'],['images','Create images','image','Generate on your device'],['mcps','Connect tools','connection','Give Klaude new tools'],['skills','Add skills','text','New ways to work']]){
+      const b=domainButton('',()=>byId('store-kind-'+kind).click(),'store-category-launcher');b.dataset.category=kind;
+      const mark=domainText('span','','store-category-mark');mark.append(libraryIcon(icon));const text=domainText('span','');text.append(domainText('strong',label),domainText('small',copy));b.append(mark,text);grid.append(b);
+    }return grid;
+  }
+  document.addEventListener('klaude-view',sync);window.addEventListener('popstate',sync);sync();
+  return {brief,disclosure,sync,categories,route,openImages:(section='discover')=>route('comfyui',section)};
+})();
+
 window.ModelsSettingsNavigation = (() => {
   let screen = 'overview';
   const screens = ['overview', 'connections', 'catalog', 'image'];
   const panels = {overview: 'model-default-settings', connections: 'model-connections-settings', catalog: 'models-configured', image: 'image-service-settings'};
   const links = byId('models-overview-links'), imageLink = byId('models-image-link');
   links.hidden = false; imageLink.hidden = false;
-  links.innerHTML = `<section class="settings-section"><h3>Connections</h3><p id="models-connections-summary" class="muted">Loading connection status…</p><div class="settings-row-group"><button type="button" data-model-screen="connections" class="quiet settings-navigation-row">Manage connections <span aria-hidden="true">›</span></button></div></section>`;
-  imageLink.innerHTML = `<section class="settings-section"><h3>Image generation</h3><p id="models-image-summary" class="muted">Loading service status…</p><div class="settings-row-group"><button type="button" data-model-screen="image" class="quiet settings-navigation-row">Configure service <span aria-hidden="true">›</span></button></div></section>`;
+  links.innerHTML = `<section class="settings-section models-connections-section"><div class="settings-row-group"><button type="button" data-model-screen="connections" class="quiet settings-navigation-row"><span class="settings-row-copy"><strong>Connections</strong><small id="models-connections-summary">Loading…</small></span><span aria-hidden="true">›</span></button><button type="button" data-model-screen="catalog" class="quiet settings-navigation-row"><span>Connected models</span><span aria-hidden="true">›</span></button></div></section>`;
+  imageLink.innerHTML = `<section class="settings-section"><div class="settings-row-group"><button type="button" data-model-screen="image" class="quiet settings-navigation-row"><span class="settings-row-copy"><strong>Image generation</strong><small id="models-image-summary">Loading…</small></span><span aria-hidden="true">›</span></button></div></section>`;
   function show(next, {restore = false, focus = false} = {}) {
     if (!screens.includes(next)) next = 'overview';
     if (!restore && next !== screen && !canLeave()) return;
@@ -294,7 +345,7 @@ window.ModelsSettingsNavigation = (() => {
     for (const [name, id] of Object.entries(panels)) byId(id).hidden = name !== screen;
     links.hidden = screen !== 'overview';
     imageLink.hidden = screen !== 'overview';
-    byId('models-overview-description').hidden = screen !== 'overview';
+    byId('models-overview-description').hidden = true;
     byId('models-heading-label').hidden = screen !== 'overview';
     byId('models-settings-back').hidden = screen === 'overview';
     byId('models-breadcrumb-separator').hidden = screen === 'overview';
@@ -460,12 +511,16 @@ window.BrowserModelsUI = (() => {
 
 window.BrowserMedia = (() => {
   let settings = null, models = [], reading = null, catalogReading = null, generation = 0, catalogGeneration = 0;
-  let catalogConnection = "", catalogLoaded = false;
+  let catalogConnection = "", catalogLoaded = false, settingsLoad = null;
   let ready, loadingCatalog = false;
   let fallbacksOpen = false;
   const active = () => authenticated && currentView === "settings";
   const manager = () => window.BrowserManagement;
   const busy = kind => !settings || settings.management_allowed === false || SettingsDrafts.locked(kind === "image_service" ? "image-service" : "models") || Boolean(settings.pending[kind]) || manager().busy(`media-${kind}`);
+  byId('image-model-selection').querySelector('.settings-row-group').after(byId('image-service-enabled').closest('.setting-row'));
+  byId('image-service-enabled').closest('.setting-row').classList.add('image-enable-row');
+  byId('image-browse-store').addEventListener('click',()=>StoreDesign.openImages());
+  const manualImage=domainText('div','','setting-row image-manual-model');const manualLabel=domainText('label','Model ID');manualLabel.htmlFor='image-service-model-name';manualImage.append(manualLabel,byId('image-service-model-name'));byId('image-service-save').append(manualImage);
   const labels = { chat: "Startup chat", utility: "Utility", research: "Research", vision: "Vision",
     fallbacks: "Utility fallbacks", vision_fallbacks: "Vision fallbacks", output_tokens: "Utility output tokens", vision_enabled: "Vision image input", image_service: "Image generation service" };
   const settingsAdapter = {
@@ -479,13 +534,14 @@ window.BrowserMedia = (() => {
     normalized: normalizedDraft,
     reviewed: (entry, prepared) => entry.base.id === "image_service" ? prepared.image_settings : undefined,
     validate: entries => entries.every(entry => {
+      if(entry.base.id==='image_service'&&entry.value.provider==='comfyui')return true;
       const inputs = entry.base.id === "image_service" ? [byId("image-service-url")] :
         [...byId("default-model-fields").querySelectorAll(`[data-draft-field="${entry.base.id}"]`)];
       return inputs.every(SettingsDrafts.validateInput);
     }),
     warning: entry => entry.base.id === "vision_enabled" && entry.value && !entry.base.value ?
       "Enable Vision image input: images can be sent to your configured Vision model and fallbacks when you request analysis." :
-      entry.base.id === "image_service" && entry.value.enabled && (!entry.base.value.enabled || entry.value.endpoint !== entry.base.value.endpoint) ?
+      entry.base.id === "image_service" && entry.value.provider!=='comfyui' && entry.value.enabled && (!entry.base.value.enabled || entry.value.endpoint !== entry.base.value.endpoint) ?
         `Image generation: enable requests to ${entry.value.endpoint}. Generation prompts will be sent to this server.` : null,
   };
   SettingsDrafts.register("models", {...settingsAdapter,
@@ -494,6 +550,7 @@ window.BrowserMedia = (() => {
     blocked: () => !settings || settings.management_allowed === false || Boolean(settings.pending.image_service)});
   function normalizedDraft(entry) {
     if (entry.base.id !== "image_service") return entry.value;
+    if(entry.value.provider==='comfyui')return entry.value;
     let endpoint = SettingsDrafts.normalizedEndpoint(entry.value.endpoint);
     const sdcpp = endpoint.endsWith("/sdcpp/v1");
     endpoint = endpoint.replace(/\/(?:api|v1)$/, "");
@@ -507,7 +564,7 @@ window.BrowserMedia = (() => {
       models.filter(item => item.roles[role] !== false) : [];
     select.append(option("", loadingCatalog ? "Loading models…" : catalogLoaded && !choices.length ? "No compatible models · Unset" : "Unset"),
       ...choices.map(item => option(item.id, `${item.name}${item.roles[role] === null ? " · Capability unknown" : ""}`)));
-    if (value && !choices.some(item => item.id === value)) select.append(option(value, `Saved · ${value}`));
+    if (value && !choices.some(item => item.id === value)) select.append(option(value, value.replace(/^[^/]+\//,'')));
     select.value = value || "";
     const describe = () => { select.title = select.selectedOptions[0]?.textContent || ""; };
     select.addEventListener("change", describe); describe();
@@ -531,6 +588,9 @@ window.BrowserMedia = (() => {
   function renderBusy() {
     for (const input of byId("default-model-fields").querySelectorAll("input, select, button")) input.disabled = busy("defaults");
     for (const input of byId("image-service-save").querySelectorAll("input, select, button")) input.disabled = busy("image_service");
+    byId('image-service-enabled').disabled=busy('image_service');
+    for (const input of byId("image-service-model-row").querySelectorAll("input, button"))
+      input.disabled = busy("image_service") || !byId("image-service-url").value.trim()&&!latest?.image_comfyui;
     byId("default-model-catalog").querySelector("button").disabled = !settings || loadingCatalog;
     byId('image-service-test').disabled = imageTestBusy || busy('image_service') || !latest?.model_settings;
   }
@@ -546,7 +606,7 @@ window.BrowserMedia = (() => {
       const heading = domainText("h3", title); heading.id = id;
       group.setAttribute("aria-labelledby", id); group.append(heading); return group;
     };
-    const roles = section("model-roles-heading", "Model roles");
+    const roles = section("model-roles-heading", "Default models");
     const roleFields = domainText("div", "", "settings-form-grid settings-role-grid"); roles.append(roleFields);
     for (const [field, label, icon] of [["chat", "Startup chat", "chat"], ["utility", "Utility", "tools"], ["research", "Research", "search"], ["vision", "Vision", "vision"]]) {
       const form = domainText("form", "", "setting-row");
@@ -558,7 +618,7 @@ window.BrowserMedia = (() => {
       controls.append(select, RoleModelPicker.decorate(select, label, field, settings.connections));
       select.addEventListener("change", () => stage(field, select.value || null));
       const picker = controls.querySelector('button');
-      picker.classList.add('settings-role-row'); picker.prepend(title); title.removeAttribute('for');
+      picker.classList.add('settings-role-row','model-default-card'); picker.prepend(title); title.removeAttribute('for');
       form.append(controls); form.classList.add('settings-role-container'); form.addEventListener("submit", event => { event.preventDefault(); stage(field, select.value || null); });
       roleFields.append(form);
     }
@@ -571,7 +631,7 @@ window.BrowserMedia = (() => {
       const form = domainText("form", "", "settings-fallback-form");
       const heading = domainText("h3", "", "model-role-label");
       heading.append(libraryIcon(icon), domainText("span", label));
-      form.append(heading, domainText("p", "Optional models, tried in this order only when the primary cannot complete the request.", "muted"));
+      form.append(heading);
       const selects = [0, 1, 2].map(index => {
         const row = domainText("div", "", "setting-row");
         const label = domainText("span", `Fallback ${index + 1}`, "model-role-label");
@@ -602,7 +662,7 @@ window.BrowserMedia = (() => {
     const optionFields = domainText("div", "", "settings-form-grid");
     optionFields.append(output); options.append(optionFields);
     const enabled = domainText("div", "", "setting-row settings-toggle-row");
-    const enabledLabel = domainText("label", "Enable Vision for image input and analysis"); enabledLabel.htmlFor = "default-vision-enabled";
+    const enabledLabel = domainText("label", "Vision image input"); enabledLabel.htmlFor = "default-vision-enabled";
     const enabledControls = domainText("div", "", "settings-controls");
     const toggleLabel = domainText("label", "", "switch");
     const toggle = document.createElement("input"); toggle.type = "checkbox"; toggle.id = "default-vision-enabled"; toggle.checked = defaults.vision_enabled;
@@ -620,10 +680,26 @@ window.BrowserMedia = (() => {
     byId("image-service-model-name").value = image.model;
     renderImageChoice();
     byId("image-service-enabled").checked = image.enabled;
-    byId("image-service-model").textContent = settings.image_service.model ? `Saved model: ${settings.image_service.model}` : "No image model configured.";
     recovery("defaults"); recovery("image_service"); renderBusy();
   }
-  async function load(refreshCatalog = false, force = false) {
+  function load(refreshCatalog = false, force = false) {
+    settingsLoad = readSettings(refreshCatalog, force);
+    return settingsLoad;
+  }
+  async function whenLoaded() {
+    if (!settingsLoad) load(false, true);
+    // Navigation/capability reads can supersede one another. Wait for the latest
+    // read without starting another refresh that would abort the page's read.
+    for (let attempt=0; attempt<8; attempt++) {
+      const current=settingsLoad, [result]=await Promise.allSettled([current]);
+      if (current!==settingsLoad) continue;
+      if (result.status==='rejected') throw result.reason;
+      if (!settings) throw new Error('Model settings unavailable. Refresh and try again.');
+      return;
+    }
+    throw new Error('Model settings are refreshing. Try again when they finish.');
+  }
+  async function readSettings(refreshCatalog = false, force = false) {
     if (!force && !active()) return;
     if (!latest?.media_management) {
       byId("media-settings-status").textContent = "Restart the Web UI host and reload to configure model defaults and image services.";
@@ -642,7 +718,7 @@ window.BrowserMedia = (() => {
       }
       settings = result;
       byId('models-connections-summary').textContent = `${settings.connections.length} configured · ${settings.connections.filter(item => item.enabled).length} enabled`;
-      byId('models-image-summary').textContent = `${settings.image_service.enabled ? 'Enabled' : 'Disabled'} · ${settings.image_service.provider === 'ollama' ? 'Ollama' : 'stable-diffusion.cpp'}${settings.image_service.model ? ' · ' + settings.image_service.model : ''}`;
+      byId('models-image-summary').textContent = settings.image_service.enabled ? (window.ManagedImageBundles?.name(settings.image_service.model)||settings.image_service.model||'On') : 'Off';
       SettingsDrafts.ingest("models", [
         ...Object.entries(settings.defaults).map(([id, value]) => ({ id, value, version: value, label: labels[id] })),
       ]);
@@ -671,7 +747,7 @@ window.BrowserMedia = (() => {
     if (connection !== catalogConnection) { models = []; catalogConnection = connection; catalogLoaded = false; }
     if (!connection) {
       loadingCatalog = false; renderSettings();
-      byId("media-settings-status").textContent = "No enabled model connection. Configure one in Klaude’s terminal Model settings.";
+      byId("media-settings-status").textContent = "Add a connection to choose models.";
       return;
     }
     loadingCatalog = true; renderSettings();
@@ -683,7 +759,7 @@ window.BrowserMedia = (() => {
         throw new Error("Restart the Web UI host and reload to check model capabilities.");
       catalogLoaded = true; loadingCatalog = false;
       models = result.models; renderSettings();
-      byId("media-settings-status").textContent = models.length ? "" : "This connection returned no models.";
+      byId("media-settings-status").textContent = '';
     } catch (error) {
       if (active() && epoch === authEpoch && current === catalogGeneration && error.name !== "AbortError") {
         domainError(error, "media-settings-status");
@@ -711,18 +787,31 @@ window.BrowserMedia = (() => {
     if (settings) stage("image_service", { endpoint: byId("image-service-url").value.trim(), enabled: byId("image-service-enabled").checked, provider: byId("image-service-provider").value, model: byId("image-service-model-name").value.trim() });
   };
   function renderImageChoice() {
-    const native=byId('image-service-provider').value==='sdcpp';
+    const managed=byId('image-service-provider').value==='comfyui';
+    const native=managed||byId('image-service-provider').value==='sdcpp';
+    byId('image-service-provider').querySelector('[value=comfyui]').hidden=!latest?.image_comfyui;
+    byId('image-service-url').closest('.setting-row').hidden=managed;
     byId('image-service-model-row').hidden=false;
-    byId('image-service-model-name').hidden=native;
+    byId('image-service-model-name').hidden=native;byId('image-service-model-name').closest('.image-manual-model').hidden=native;
     const button=byId('image-service-model-name-picker');
-    button.classList.toggle('model-choice-button',native);
-    button.classList.toggle('settings-role-row',native);
-    byId('image-service-model-row').classList.toggle('settings-role-container',native);
-    button.replaceChildren(domainText('span',native ? byId('image-service-model-name').value || 'Choose model' : 'Choose model','model-role-value'));
-    if(native){button.prepend(domainText('span','Image model','model-role-label'));const arrow=domainText('span','›','model-role-chevron');arrow.setAttribute('aria-hidden','true');button.append(arrow);}
+    button.classList.add('model-choice-button');
+    button.classList.add('image-choice-card');button.classList.add('settings-role-row');
+    byId('image-service-model-row').classList.add('settings-role-container');
+    const value=byId('image-service-model-name').value;
+    const title=managed?(window.ManagedImageBundles?.name(value)||value):value;
+    const mark=domainText('span','','image-choice-mark');mark.append(libraryIcon('image'));
+    const copy=domainText('span','','image-choice-copy');copy.append(domainText('small','Selected model','muted'),domainText('strong',title||'Choose an image model','model-role-value'));
+    if(title)copy.append(domainText('small',managed?'ComfyUI · On this device':byId('image-service-provider').value==='sdcpp'?'External image service':'Ollama · Experimental','muted'));
+    button.replaceChildren(mark,copy,domainText('span','Change','image-choice-change'));
     button.setAttribute('aria-label','Choose image generation model');
+    const saved=settings?.image_service?.model||'',draft=byId('image-service-model-name').value.trim();
+    byId('image-service-model').textContent=managed?'':!byId('image-service-url').value.trim()?'Choose an installed model or connect a service.':saved&&draft!==saved?'Unsaved model choice.':'';
+    byId('image-service-model').hidden=!byId('image-service-model').textContent;
+    button.disabled=busy('image_service')||!byId('image-service-url').value.trim()&&!latest?.image_comfyui;
+    const legacyInventory=byId('settings-saved-setups');if(legacyInventory)legacyInventory.hidden=managed;
+    window.ManagedImageBundles?.render();
     const label=byId('image-service-model-row').querySelector('label');
-    label.hidden=native;label.htmlFor=native?button.id:'image-service-model-name';
+    label.hidden=true;label.htmlFor=button.id;
   }
   byId('image-service-test').addEventListener('click', async () => {
     const endpoint = byId('image-service-url').value.trim(), epoch = authEpoch;
@@ -741,6 +830,8 @@ window.BrowserMedia = (() => {
   byId("image-service-url").addEventListener("input", changeImage);
   byId("image-service-model-name").addEventListener("input", changeImage);
   byId("image-service-provider").addEventListener("change", () => {
+    if (byId("image-service-provider").value === "comfyui") byId("image-service-url").value="managed";
+    else if(byId("image-service-url").value==="managed") byId("image-service-url").value="";
     if (byId("image-service-provider").value === "ollama" && !byId("image-service-url").value.trim()) {
       byId("image-service-url").value = "http://localhost:11434";
     }
@@ -763,16 +854,17 @@ window.BrowserMedia = (() => {
   let lastOperations = "";
   document.addEventListener("klaude-auth-reset", () => {
     generation += 1; catalogGeneration += 1; reading?.abort(); catalogReading?.abort(); loadingCatalog = false;
-    settings = null; models = []; ready = undefined; lastOperations = ""; imageTestResult = null; imageTestBusy = false;
+    settings = null; settingsLoad = null; models = []; ready = undefined; lastOperations = ""; imageTestResult = null; imageTestBusy = false;
     catalogConnection = ""; catalogLoaded = false;
     for (const id of ["default-model-fields", "default-model-connection", "defaults-recovery", "image-settings-recovery", "media-settings-status", "image-service-model", "image-settings-status"]) byId(id).replaceChildren();
     fallbacksOpen = false; byId("image-service-save").reset(); renderBusy();
+    byId('image-service-enabled').checked=false;
   });
   function capabilitiesChanged() {
     const value = Boolean(latest?.media_management);
     if (value !== ready) { ready = value; if (active()) load(); }
   }
-  return { renderBusy, capabilitiesChanged, load };
+  return { renderBusy, capabilitiesChanged, load, whenLoaded };
 })();
 
 window.BrowserVision = (() => {
@@ -1296,9 +1388,9 @@ window.BrowserVision = (() => {
 window.IntegrationStoreUI = (() => {
   const names = {mcps:'MCPs', skills:'Skills'};
   const descriptions = {mcps:'Connect Klaude to your tools and services.', skills:'Give Klaude reusable instructions for the way you work.'};
-  const defaults = {mcps:'search', skills:'coding'};
+  const defaults = {mcps:'', skills:''};
   const view = byId('store-view'), page = domainText('section', '', 'integration-store-page');
-  page.id = 'integration-store-page'; page.hidden = true; view.append(page);
+  page.id = 'integration-store-page'; page.hidden = true; byId('store-main').append(page);
   const previews = domainText('section', '', 'store-integrations'); previews.id = 'store-integrations';
   const previewData = new Map(), details = new Map(), previewReads = new Map(), work = new Map();
   let kind = '', selected = '', query = '', provider = 'skillsmp', order = 'stars', number = 1;
@@ -1406,10 +1498,10 @@ window.IntegrationStoreUI = (() => {
     const status=page.querySelector('#integration-store-order-status');
     if(!status)return;
     const items=data.items || [], pending=items.some(item=>item.github_repository && !stars.has(item.id));
-    status.textContent=pending?'Reading repository stars…':'Stars in these results';
+    status.textContent=pending?'Loading stars…':'';
     if(pending)return;
     if(items.some(item=>!Number.isSafeInteger(stars.get(item.id)?.stars)))
-      status.textContent+=' · Some counts unavailable';
+      status.textContent='Some star counts unavailable';
     const grid=page.querySelector('.store-integration-grid');if(!grid)return;
     const nodes=new Map([...grid.children].map(node=>[node.dataset.integrationItem,node]));
     const count=item=>Number.isSafeInteger(stars.get(item.id)?.stars)?stars.get(item.id).stars:-1;
@@ -1445,13 +1537,13 @@ window.IntegrationStoreUI = (() => {
     heading.append(domainText('strong', item.name));
     const mark = libraryIcon(item.kind === 'mcps' ? 'connection' : 'text');
     heading.prepend(mark); button.append(heading);
-    if (item.description) button.append(domainText('span',item.description,'store-integration-description'));
-    if (item.updated_at) button.append(domainText('small','Updated ' + new Date(item.updated_at).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'}),'muted'));
+    if (item.description) button.append(domainText('span',StoreDesign.brief(item.description,115),'store-integration-description'));
+
     const meta = domainText('small','','store-integration-meta muted');
     meta.append(domainText('span',item.publisher));
     const badge = starBadge(item,button); if (badge) meta.append(badge); button.append(meta);
     button.title = item.name + (item.description ? ' · ' + item.description : '');
-    if (!preview && item.version) button.append(domainText('small', 'Version ' + item.version, 'muted'));
+
     queueMicrotask(()=>paintStars(item.id)); return button;
   }
   function previewGeometry() {
@@ -1459,7 +1551,7 @@ window.IntegrationStoreUI = (() => {
     const minimum = parseFloat(style.getPropertyValue('--store-grid-min')) || 290;
     const gap = parseFloat(style.getPropertyValue('--store-grid-gap')) || 8;
     const columns = Math.max(1, Math.floor((previews.getBoundingClientRect().width + gap) / (minimum + gap)));
-    return {columns, capacity:columns * 4};
+    return {columns, capacity:columns};
   }
   function previewItems(items) {
     const {columns, capacity} = previewGeometry(), count = Math.min(capacity, items.length);
@@ -1470,7 +1562,7 @@ window.IntegrationStoreUI = (() => {
     const focusItem = focused?.dataset.integrationItem, focusLabel = focused?.getAttribute('aria-label');
     previews.replaceChildren();
     const intro = domainText('header','','store-integrations-heading');
-    intro.append(domainText('h2','Integrations'), domainText('p','Extend what Klaude can do.','muted'));
+    intro.append(domainText('h2','Tools & skills'));
     previews.append(intro);
     for (const name of ['mcps','skills']) {
       const section = domainText('section','','store-integration-collection'); section.id = `store-integration-${name}`;
@@ -1478,7 +1570,7 @@ window.IntegrationStoreUI = (() => {
       const title = domainText('h3', names[name]); title.id = `store-integration-${name}-heading`;
       const see = domainButton(supported() ? 'See all' : 'Manage', () => supported() ? open(name) : installed(name), 'quiet');
       see.setAttribute('aria-label', `${supported() ? 'See all' : 'Manage'} ${names[name]}`);
-      header.append(title,see); section.append(header, domainText('p',descriptions[name],'store-integration-caption muted'));
+      header.append(title,see); section.append(header);
       section.setAttribute('aria-labelledby', title.id);
       const result = previewData.get(name);
       if (!supported()) {
@@ -1486,7 +1578,7 @@ window.IntegrationStoreUI = (() => {
       } else if (!result) loading(section, `Loading ${names[name]}…`);
       else {
         if (result.items?.length) {
-          section.append(domainText('small',name === 'mcps' ? 'Search & research · Official MCP Registry' : 'For coding · SkillsMP','store-integration-caption muted'));
+
           const grid = domainText('div','','store-integration-grid');
           previewItems(result.items).forEach(item => grid.append(card(item,true))); section.append(grid);
         }
@@ -1559,7 +1651,7 @@ window.IntegrationStoreUI = (() => {
     if (!kind) { returnFocus=names[nextKind]; browseScroll=view.scrollTop; history.replaceState({...history.state,storeIntegrationScroll:browseScroll},'',location.href); }
     if (kind !== nextKind) { kind=nextKind; query=defaults[kind]; provider='skillsmp';order='stars'; number=1; data=null; }
     selected=id; pending=false; syncUrl(); render();
-    view.scrollTop=0; page.querySelector('h1')?.focus({preventScroll:true});
+    view.scrollTop=0;if(selected)page.querySelector('h1')?.focus({preventScroll:true});else byId('store-kind-'+kind)?.focus({preventScroll:true});
     if (selected) loadDetail(); else load();
   }
   function back() {
@@ -1576,65 +1668,73 @@ window.IntegrationStoreUI = (() => {
     const activity=page.querySelector('#integration-store-activity'); if(activity)activity.hidden=!entry;
     if (status) status.textContent=entry ? ({completed:kind==='mcps'?'Server added disabled. Enable it in Integrations.':'Skill installed.',
       failed:'Installation failed. Check Activity before reviewing again.',unknown:'Outcome unconfirmed. Check Activity; do not resubmit.'}[entry.state] || 'Installing…') : '';
+    if(entry?.state==='completed'){const badge=byId('integration-store-state');if(badge)badge.textContent=kind==='mcps'?'Added · disabled':'Installed';if(install)install.textContent=kind==='mcps'?'Added':'Installed';}
     if (install) install.disabled=pending || !item?.management_allowed || !item?.can_install || Boolean(entry) || Boolean(latest?.active_turn_id) || Boolean(latest?.queue?.length);
   }
   function render() {
     filterMenus.forEach(menu=>menu.close());
     page.dataset.capabilities=capabilities();
+    StoreDesign.sync();
     const opened=active() && Boolean(kind);
-    page.hidden=!opened; view.classList.toggle('has-integration-store',opened);
+    page.hidden=!opened; view.classList.toggle('has-integration-store',opened);view.classList.toggle('has-integration-detail',opened&&Boolean(selected));
     if (!opened) { view.setAttribute('aria-labelledby',byId('store-detail').hidden?'store-title':'store-detail-title'); return; }
-    view.setAttribute('aria-labelledby','integration-store-title');
+    view.setAttribute('aria-labelledby',selected?'integration-store-title':'store-title');
+    byId('store-view-heading').hidden=Boolean(selected);
     const focused=page.contains(document.activeElement)?document.activeElement.id:'';
+    const openDetails=new Set(page.dataset.item===selected?[...page.querySelectorAll('details[open][id]')].map(n=>n.id):[]);
     const draftName=page.dataset.item===selected?page.querySelector('#integration-store-name')?.value:'';
     const sourceDraft=page.dataset.item===selected?page.querySelector('#integration-store-source-url')?.value:''; page.dataset.item=selected;
     page.replaceChildren();
     const backButton=domainButton(selected?names[kind]:'Store',back,'quiet model-detail-back'); backButton.prepend(libraryIcon('previous'));
-    page.append(backButton);
+    if(selected)page.append(backButton);
     const header=domainText('header','','integration-store-heading');
     const item=details.get(selected);
     const title=domainText('h1',selected?item?.name || (item?.error?'Item unavailable':'Loading details…'):names[kind]); title.id='integration-store-title'; title.tabIndex=-1;
-    header.append(title,domainText('p',selected?item?.publisher || '':descriptions[kind],'muted'));
+    header.append(title);if(selected&&item?.publisher)header.append(domainText('p',item.publisher,'catalog-publisher muted'));
+    else header.classList.add('catalog-browse-heading');
     page.append(header);
     if (!supported()) { page.append(domainText('p','Restart the WebUI host and reload to browse integrations.','domain-status')); return; }
     if (selected) {
       if (!item) { loading(page,'Loading details…'); return; }
       if (item.error) { page.append(domainText('p',item.error,'domain-status'),domainButton('Retry',()=>loadDetail(),'quiet')); return; }
-      const about=domainText('section','','integration-store-about');
-      about.append(domainText('h2','About'),domainText('p',item.description || 'Read the source for details.'));
-      const source=external('View source',item.source_url); if(source) about.append(source); page.append(about);
-      const facts=domainText('dl','','preview-metadata integration-store-facts');
-      for (const [label,value] of [['Catalog',item.source],['Updated',item.updated_at],['Version',item.version],['Commit',item.revision],['Skill file',item.skill_path],['License',item.license],['Remote server',item.endpoint]])
-        if (value) facts.append(domainText('dt',label),domainText('dd',value));
-      page.append(facts);
-      if (item.github_repository && latest?.integration_store_stars) {
-        const label=domainText('dt','GitHub stars'), value=domainText('dd','');
-        label.hidden=value.hidden=true;
-        const badge=starBadge(item,about); if(badge)value.append(badge); facts.append(label,value);
-        queueMicrotask(()=>paintStars(item.id));
-      }
-      const setup=domainText('section','','integration-store-setup'); setup.append(domainText('h2',kind==='mcps'?'Connect this server':'Install this skill'));
-      setup.append(domainText('p',item.notice,'muted'));
+      const hero=domainText('section','','catalog-detail-hero');
+      const mark=domainText('div','','catalog-detail-icon');mark.append(libraryIcon(kind==='mcps'?'connection':'text'));
+      const intro=domainText('div','','catalog-detail-intro');
+      intro.append(domainText('span',kind==='mcps'?'MCP server':'Skill','catalog-type'),header,
+        domainText('p',StoreDesign.brief(item.description),'catalog-detail-summary'));
+      const setup=domainText('section','','integration-store-setup catalog-action-panel');
+      const status=domainText('span',item.can_install?'Ready to add':'Source verification needed','catalog-state');status.id='integration-store-state';setup.append(status);
+      const options=domainText('div','','catalog-install-options');
       if (kind==='skills' && !item.can_install) {
         if (!item.can_resolve) {
-          const label=domainText('label','Original SKILL.md URL'); label.htmlFor='integration-store-source-url';
-          const input=document.createElement('input'); input.type='url'; input.id=label.htmlFor; input.maxLength=1000;
-          input.placeholder='https://github.com/owner/repo/blob/main/path/SKILL.md'; input.value=sourceDraft || ''; label.append(input); setup.append(label);
+          const label=domainText('label','Source URL');label.htmlFor='integration-store-source-url';
+          const input=document.createElement('input');input.type='url';input.id=label.htmlFor;input.maxLength=1000;
+          input.placeholder='GitHub SKILL.md URL';input.value=sourceDraft||'';label.append(input);setup.append(label);
         }
-        const resolve=domainButton('Verify source',()=>loadDetail(true),'secondary'); resolve.dataset.verifySource='true'; resolve.disabled=pending; const actions=domainText('div','','dialog-actions');actions.append(resolve);setup.append(actions);
+        const resolve=domainButton('Verify source',()=>loadDetail(true),'');resolve.dataset.verifySource='true';resolve.disabled=pending;setup.append(resolve);
       }
-      if (item.can_install) {
-        const label=domainText('label','Local name'); label.htmlFor='integration-store-name';
-        const input=document.createElement('input'); input.id=label.htmlFor; input.maxLength=80; input.required=true;
-        input.value=draftName || item.name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^[^a-z0-9]+/,'').slice(0,80) || 'integration';
-        label.append(input); setup.append(label);
-        const action=domainButton(item.install_label,()=>reviewItem(item)); action.id='integration-store-install';
-        const actions=domainText('div','','dialog-actions'); actions.append(action); setup.append(actions);
+      if(item.can_install){
+        const label=domainText('label','Name in Klaude');label.htmlFor='integration-store-name';
+        const input=document.createElement('input');input.id=label.htmlFor;input.maxLength=80;input.required=true;
+        input.value=draftName||item.name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^[^a-z0-9]+/,'').slice(0,80)||'integration';
+        label.append(input);options.append(label);
+        const action=domainButton(kind==='mcps'?'Add MCP':'Install skill',()=>reviewItem(item),'');action.id='integration-store-install';setup.append(action);
+        setup.append(StoreDesign.disclosure('Install options',options,'integration-install-options'));
       }
-      const feedback=domainText('p','','domain-status'); feedback.id='integration-store-feedback'; feedback.setAttribute('role','status'); setup.append(feedback);
-      const manage=domainButton(`Manage ${names[kind]}`,()=>installed(kind),'quiet');
+      const feedback=domainText('p','','domain-status');feedback.id='integration-store-feedback';feedback.setAttribute('role','status');setup.append(feedback);
+      const manage=domainButton('Manage '+names[kind],()=>installed(kind),'quiet');
       const activity=domainButton('View Activity',()=>showView('activity'),'quiet');activity.id='integration-store-activity';
-      const footer=domainText('div','','dialog-actions');footer.append(activity,manage);setup.append(footer);page.append(setup);renderState();
+      const footer=domainText('div','','catalog-secondary-actions');footer.append(activity,manage);setup.append(footer);
+      hero.append(mark,intro,setup);page.append(hero);
+      const reading=domainText('div','','catalog-detail-reading');
+      if(item.description&&item.description!==StoreDesign.brief(item.description))reading.append(StoreDesign.disclosure('About',domainText('p',item.description),'integration-store-about'));
+      const facts=domainText('dl','','preview-metadata integration-store-facts');
+      for(const [label,value] of [['Catalog',item.source],['Updated',item.updated_at],['Version',item.version],['Commit',item.revision],['Skill file',item.skill_path],['License',item.license],['Server',item.endpoint]])
+        if(value)facts.append(domainText('dt',label),domainText('dd',value));
+      const source=external('View source',item.source_url);const technical=domainText('div','','catalog-technical');technical.append(facts);if(source)technical.append(source);
+      reading.append(StoreDesign.disclosure('Details & source',technical,'integration-store-technical'));
+      if(item.notice)reading.append(StoreDesign.disclosure(kind==='mcps'?'Connection & permissions':'Installation & permissions',domainText('p',item.notice),'integration-store-permissions'));
+      page.append(reading);for(const id of openDetails)page.querySelector('#'+id)?.setAttribute('open','');renderState();
     } else {
       const form=document.createElement('form'); form.className='domain-toolbar store-search-row integration-store-toolbar';
       const label=domainText('label','','file-search-label');
@@ -1642,12 +1742,12 @@ window.IntegrationStoreUI = (() => {
       const input=document.createElement('input'); input.type='search'; input.id='integration-store-query'; input.maxLength=120; input.placeholder=`Search ${names[kind]}…`; input.value=query;
       input.addEventListener('input',()=>{query=input.value;number=1;stopStars();read?.abort();generation++;data=null;clearTimeout(searchTimer);searchTimer=setTimeout(()=>{syncUrl(true);load();},300);});
       label.append(input); form.append(label); form.addEventListener('submit',event=>{event.preventDefault();clearTimeout(searchTimer);number=1;syncUrl(true);load();});
-      const refresh=domainButton('',()=>load(true),'icon-button quiet');refresh.setAttribute('aria-label',`Refresh ${names[kind]}`);refresh.append(libraryIcon('refresh'));form.append(refresh);page.append(form);
+      page.append(form);
       filterRow.setAttribute('aria-label',`${names[kind]} filters`);sourceField.hidden=kind!=='skills';
       sourceSelect.value=provider;orderSelect.value=order;orderSelect.disabled=!latest?.integration_store_sort;
       orderSelect.options[1].disabled=kind==='skills'&&provider==='skills.sh';
       filterMenus.forEach(menu=>menu.sync());page.append(filterRow);
-      page.append(domainText('p',kind==='mcps'?'Official MCP Registry · bounded search results':'Community catalog · verify source before installing','store-integration-caption muted'));
+      page.append(domainText('p',kind==='mcps'?'MCP Registry':provider==='skills.sh'?'skills.sh':'SkillsMP','store-integration-caption muted'));
       if(!latest?.integration_store_sort)page.append(domainText('p','Restart the WebUI host and reload to enable ordering.','muted'));
       else if(kind==='skills'&&provider==='skills.sh')page.append(domainText('p','Updated dates are unavailable from skills.sh. Choose SkillsMP for recently updated skills.','muted'));
       if(latest?.integration_store_sort && localStars()){
@@ -1707,7 +1807,7 @@ window.IntegrationStoreUI = (() => {
   }
   async function reviewItem(item) {
     if(pending || !item.management_allowed || work.has(item.id))return;
-    const input=page.querySelector('#integration-store-name');if(!input.reportValidity())return;
+    const input=page.querySelector('#integration-store-name');if(!input.checkValidity()){input.closest('details').open=true;input.reportValidity();return;}
     const epoch=authEpoch,id=selected;pending=true;renderState();
     try{
       await prepareChange({operation:kind==='mcps'?'mcp-store-add':'skill-store-install',id:item.id,name:input.value.trim()},{
@@ -1735,26 +1835,154 @@ window.IntegrationStoreUI = (() => {
   document.addEventListener('klaude-snapshot',()=>{if(active()&&kind){if(!page.querySelector('h1') || page.dataset.capabilities!==capabilities())restore();else renderState();}});
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!event.defaultPrevented&&active()&&kind&&!document.querySelector('dialog[open], [popover]:popover-open')){event.preventDefault();event.stopPropagation();back();}});
   document.addEventListener('klaude-auth-reset',()=>{stopStars(true);read?.abort();detailRead?.abort();generation++;detailSerial++;for(const request of previewReads.values())request.abort();previewReads.clear();previewData.clear();details.clear();work.clear();observer.disconnect();clearInterval(poll);clearTimeout(searchTimer);kind=selected='';order='stars';data=null;page.replaceChildren();page.hidden=true;previews.replaceChildren();cancelAnimationFrame(previewResizeFrame);previewColumns=0;view.classList.remove('has-integration-store');});
-  return {preview,refresh:()=>{previewData.clear();if(previews.isConnected){renderPreviews();for(const name of ['mcps','skills'])loadPreview(name,true);}},isOpen:()=>active()&&Boolean(kind)};
+  return {open,preview,manage:installed,refresh:()=>{if(kind){if(selected)loadDetail();else load(true);return;}previewData.clear();if(previews.isConnected){renderPreviews();for(const name of ['mcps','skills'])loadPreview(name,true);}},isOpen:()=>active()&&Boolean(kind)};
+})();
+
+// One metadata inventory and readiness presentation shared by Store and image flows.
+window.ImageReadinessUI = (() => {
+  let data=null,error='',reading=false,checking='',serial=0,timer=null,revision=0,query='',page=1;
+  const slots=[];
+  const slot=(id,parent)=>{const node=domainText('section','','settings-section image-readiness-inventory');node.id=id;parent.append(node);slots.push(node);return node;};
+  const store=slot('store-saved-setups',byId('store-panel'));
+  const settings=slot('settings-saved-setups',byId('image-service-advanced'));
+  const composer=slot('composer-saved-setups',byId('generation-image'));
+  function visible(node){
+    if(!authenticated||!latest?.image_readiness_inventory)return false;
+    if(node===store)return currentView==='store'&&new URLSearchParams(location.search).get('models-section')==='installed'&&
+      ['sdcpp','all'].includes(byId('store-runtime').value)&&byId('store-detail').hidden;
+    if(node===settings)return byId('image-service-provider').value!=='comfyui'&&currentView==='settings'&&settingsSection==='models'&&new URLSearchParams(location.search).get('models-screen')==='image';
+    return byId('image-generate-panel').open;
+  }
+  const entries=model=>(latest?.image_readiness_inventory?data?.items||[]:[]).filter(item=>!model||item.model_refs.includes(model));
+  function text(item){return item.checked_at&&!item.live_status?`Last check: ${item.headline}`:item.headline;}
+  function continuation(item){
+    const options={model:item.model_refs[0]||item.name,planId:item.plan_id,
+      setupId:item.kind==='setup'?item.id:'',targetEndpoint:item.endpoint||data.default_endpoint};
+    if(byId('image-generate-panel').open)BrowserManagement.beginImageSetup(options);else ImageSetupNavigation.open(options);
+  }
+  async function refresh(){
+    if(reading||!authenticated||!latest?.image_readiness_inventory)return;
+    reading=true;const ticket=serial,epoch=authEpoch;
+    try{
+      const result=await domainRequest('/api/v1/settings/models/image-readiness','POST',{action:'list'});
+      if(ticket!==serial||epoch!==authEpoch)return;
+      data=result;error='';revision++;render();
+      document.dispatchEvent(new Event('klaude-image-readiness'));
+    }catch(failure){if(ticket===serial&&epoch===authEpoch){error=failure.message;data=null;revision++;render();document.dispatchEvent(new Event('klaude-image-readiness'));}}
+    finally{if(ticket===serial)reading=false;}
+  }
+  async function check(item){
+    if(checking||!latest?.image_readiness_inventory)return;checking=`${item.kind}:${item.id}`;render();
+    const epoch=authEpoch;
+    try{
+      const endpoint=item.endpoint||data.default_endpoint;
+      if(!endpoint)throw Error('Configure an image service before checking this plan.');
+      await domainRequest('/api/v1/settings/models/image-readiness','POST',{
+        action:'check',kind:item.kind,id:item.id,...(item.kind==='plan'?{endpoint}:{}),
+      });
+      if(epoch===authEpoch)await refresh();
+    }catch(failure){if(epoch===authEpoch){error=failure.message;render();}}
+    finally{if(epoch===authEpoch){checking='';render();}}
+  }
+  function summary(model=''){
+    const items=entries(model);if(!items.length)return null;
+    const node=domainText('section','','image-readiness-summary');node.dataset.imageReadiness='true';
+    const selected=items[0];
+    node.append(domainText('strong',text(selected)));
+    if(selected.checked_at)node.append(domainText('p',`Checked ${new Date(selected.checked_at*1000).toLocaleString()}. Compatibility and generation remain unverified.`,'muted'));
+    const actions=domainText('div','','dialog-actions');
+    actions.append(domainButton('Continue setup',()=>continuation(selected),'quiet'));
+    const button=domainButton('Check setup',()=>check(selected),'quiet');button.disabled=Boolean(checking);actions.append(button);node.append(actions);return node;
+  }
+  function label(model){const item=entries(model)[0];return item?text(item):'Downloaded · Setup not checked';}
+  function render(){
+    for(const node of slots){
+      node.hidden=!visible(node);if(node.hidden)continue;
+      const focused=node.contains(document.activeElement)?document.activeElement.dataset.readinessFocus:'';
+      const selection=focused==='search'?document.activeElement.selectionStart:null;
+      node.replaceChildren(domainText('h3','Saved image setups'));
+      node.append(domainText('p','Plans and server selections saved on this host. Checks are dated observations; continuing setup never loads a model.','muted'));
+      if(error){const message=domainText('p',error);message.setAttribute('role','status');node.append(message);}
+      for(const message of data?.errors||[])node.append(domainText('p',message,'muted'));
+      if(node===settings&&data&&!data.errors.length&&!entries().length){
+        node.replaceChildren(domainText('h3','Saved image setups'),domainText('p',
+          'No saved setups yet. Select the loaded model above or open the picker to set up a downloaded file.','muted'));
+        continue;
+      }
+      const tools=domainText('div','','image-readiness-tools');
+      const search=document.createElement('input');search.type='search';search.placeholder='Search saved setups';search.setAttribute('aria-label','Search saved image setups');search.value=query;search.dataset.readinessFocus='search';
+      search.addEventListener('input',()=>{query=search.value;page=1;render();});
+      const reload=domainButton('Refresh inventory',refresh,'quiet');reload.disabled=reading;reload.dataset.readinessFocus='refresh';
+      tools.append(search,reload);node.append(tools);
+      if(!data){node.append(domainText('p',error?'Inventory unavailable. Refresh to try again.':'Loading saved setups…','muted'));continue;}
+      const items=entries().filter(item=>`${item.name} ${item.endpoint} ${item.model_refs.join(' ')}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+      page=Math.max(1,Math.min(page,Math.ceil(items.length/10)||1));
+      if(!items.length)node.append(domainText('p',query?'No matching saved setups.':'No image plans or setups saved yet. Choose a model in Store or save a selection in the image model picker.','muted'));
+      const list=domainText('div','','settings-row-group');
+      for(const item of items.slice((page-1)*10,page*10)){
+        const row=domainText('article','','image-readiness-row');row.dataset.savedImageItem=`${item.kind}:${item.id}`;
+        const copy=domainText('div','','image-readiness-copy');
+        copy.append(domainText('strong',item.name),domainText('p',`${item.kind==='setup'?'Saved setup':'Installation plan'} · ${item.endpoint||'Host downloads'}`,'muted'),domainText('p',text(item)));
+        if(item.checked_at)copy.append(domainText('p',`Checked ${new Date(item.checked_at*1000).toLocaleString()}`,'muted'));
+        if(item.kind==='setup'&&item.plan_id)copy.append(domainText('p',item.plan_available?'Linked installation plan':'Originating plan no longer available','muted'));
+        for(const transfer of item.transfers){
+          const progress=transfer.progress;copy.append(domainText('p',`${transfer.model.split(':').pop().split('/').pop()}: ${transfer.paused?'Paused':transfer.state}${Number.isFinite(progress?.completed)&&Number.isFinite(progress?.total)?` · ${fileSize(progress.completed)} / ${fileSize(progress.total)}`:''}`,'muted'));
+          if(transfer.message&&['failed','unknown','cancelled'].includes(transfer.state))copy.append(domainText('p',transfer.message,'muted'));
+        }
+        const actions=domainText('div','','dialog-actions');
+        const open=domainButton('Continue setup',()=>continuation(item),'secondary');open.dataset.readinessFocus=`open-${item.kind}-${item.id}`;
+        const checkButton=domainButton(checking===`${item.kind}:${item.id}`?'Checking…':'Check setup',()=>check(item),'quiet');checkButton.disabled=Boolean(checking);checkButton.dataset.readinessFocus=`check-${item.kind}-${item.id}`;
+        actions.append(checkButton,open);
+        if(item.transfers.length){
+          const downloads=domainButton('View downloads',()=>{
+            if(byId('image-generate-panel').open)byId('image-generate-panel').close();
+            const url=new URL(location.href);url.searchParams.set('view','store');url.searchParams.set('models-runtime','sdcpp');url.searchParams.set('models-section','downloads');url.searchParams.delete('models-detail');url.searchParams.delete('models-variant');
+            if(item.plan_available)url.searchParams.set('models-plan',item.plan_id);else url.searchParams.delete('models-plan');
+            history.pushState(history.state,'',url.pathname+url.search+url.hash);showView('store',{restore:true});ModelStoreUI.restoreFromLocation();
+          },'quiet');downloads.dataset.readinessFocus=`downloads-${item.kind}-${item.id}`;actions.prepend(downloads);
+        }
+        row.append(copy,actions);list.append(row);
+      }
+      node.append(list);
+      if(items.length>10){
+        const nav=domainText('nav','','dialog-actions');nav.setAttribute('aria-label','Saved setup pages');
+        const back=domainButton('Previous',()=>{page--;render();},'quiet'),next=domainButton('Next',()=>{page++;render();},'quiet');back.disabled=page<=1;next.disabled=page*10>=items.length;back.dataset.readinessFocus='page-back';next.dataset.readinessFocus='page-next';
+        nav.append(back,domainText('span',`${page} / ${Math.ceil(items.length/10)}`),next);node.append(nav);
+      }
+      if(focused){const target=[...node.querySelectorAll('[data-readiness-focus]')].find(item=>item.dataset.readinessFocus===focused);target?.focus({preventScroll:true});if(selection!==null)target?.setSelectionRange?.(selection,selection);}
+    }
+  }
+  function sync(){
+    render();
+    if(slots.some(visible)||authenticated&&latest?.image_readiness_inventory&&currentView==='store'){if(!timer){refresh();timer=setInterval(refresh,5000);}}
+    else{clearInterval(timer);timer=null;}
+  }
+  document.addEventListener('klaude-view',sync);
+  let capability;
+  document.addEventListener('klaude-snapshot',()=>{if(capability!==latest?.image_readiness_inventory){capability=latest?.image_readiness_inventory;sync();}});
+  new MutationObserver(()=>{if(authenticated)sync();}).observe(byId('image-generate-panel').closest('dialog'),{attributes:true,attributeFilter:['open']});
+  document.addEventListener('klaude-auth-reset',()=>{serial++;data=null;error=checking=query='';reading=false;page=1;revision++;clearInterval(timer);timer=null;slots.forEach(node=>{node.hidden=true;node.replaceChildren();});});
+  return {summary,label,refresh,sync,revision:()=>revision};
 })();
 
 window.ModelStoreUI = (() => {
   const sections = ['discover', 'installed', 'downloads'];
-  const labels = ['Discover', 'Installed', 'Downloads'];
+  const labels = ['Explore', 'Installed', 'Downloads'];
   const categories = ['Coding', 'Reasoning', 'Vision', 'General-purpose', 'Lightweight'];
   let section = 'discover', collection = '', category = '', catalog = null, connections = [], endpoint = '', inventory = null;
-  let runtime = 'ollama';
+  let runtime = 'all';
   const imageStore = () => runtime === 'sdcpp';
+  const managedOnly = () => runtime === 'comfyui';
   const runtimeQuery = () => imageStore() ? '&runtime=sdcpp' : '';
   // Early hosts advertised SD support before the namespaced download contract.
   const imageStoreReady = () => latest?.model_store_sdcpp === true && latest?.model_store_sdcpp_revision === 1;
-  const runtimeReady = () => runtime === 'ollama' || imageStoreReady();
+  const runtimeReady = () => managedOnly() ? latest?.image_comfyui === true : runtime === 'ollama' || imageStoreReady();
   const modelKey = item => `${item.runtime || runtime}|${item.id || item.name}`;
   const allPageEnds = new Map();
   let livePageSize = 40;
   let liveCatalog = null, livePage = 1, liveSerial = 0, liveReading = null, searchTimer = null, detailReading = '', liveLoading = false;
   const liveDetails = new Map();
-  const hub = () => imageStore() || collection === 'charts' || byId('store-source').value === 'huggingface';
+  const hub = () => !managedOnly() && (imageStore() || collection === 'charts' || byId('store-source').value === 'huggingface');
   const liveLanding = () => hub() && !byId('store-query').value.trim() && !category && !collection && byId('store-sort').value === 'downloads';
   let popularCatalog = null, recentCatalog = null, popularReading = null, popularSerial = 0;
   let jobs = [], observedTransfers = [], jobsLoaded = false, serial = 0, allowed = false, pending = false, timer = null, reading = null, busyRead = false;
@@ -1802,11 +2030,17 @@ window.ModelStoreUI = (() => {
   }
   function removeDownloadBar(key) { const bar = downloadBars.get(key); bar?.destroy?.(); bar?.element.remove(); downloadBars.delete(key); }
   function clearDownloadBars() { for (const key of downloadBars.keys()) removeDownloadBar(key); }
-  const active = () => authenticated && currentView === 'store';
+  const active = () => authenticated && currentView === 'store' && !new URLSearchParams(location.search).has('store-integrations');
   const supported = () => latest?.model_store === true;
   const restartMessage = 'Restart the WebUI host, then reload this page to use Model Store. Connection settings remain available in Settings → Models.';
   const dialog = byId('store-detail'), downloadDialog = byId('store-download-dialog');
   const storeFilterMenus = ['store-runtime','store-source','store-sort','store-capability','store-size'].map(id => createTrailingFilterChip(byId(id))).filter(Boolean);
+  const welcome=StoreDesign.categories();welcome.id='store-discovery-categories';byId('store-image-bundles').before(welcome);
+  const installedTools=domainText('section','','store-installed-integrations');installedTools.id='store-installed-integrations';installedTools.append(domainText('h2','Tools & skills'));
+  for(const [label,section] of [['MCP servers','connections'],['Skills','skills']]){const b=domainButton('',()=>IntegrationStoreUI.manage(section==='connections'?'mcps':'skills'),'quiet settings-navigation-row');b.append(domainText('span','Manage installed '+label),domainText('span','›'));installedTools.append(b);}byId('store-content').after(installedTools);installedTools.hidden=true;
+  const filters=StoreDesign.disclosure('Filters',byId('store-filter-chips'),'store-browse-filters');byId('store-search-row').after(filters);
+  byId('store-download-open').textContent='Install by reference';byId('store-download-open').className='quiet';filters.append(byId('store-download-open'));
+
   const closeStoreFilters = () => storeFilterMenus.forEach(menu => menu.close());
   const downloadInfo = byId('store-download-info');
   let downloadInfoKey = '', downloadInfoSource = '', downloadInfoError = '';
@@ -1818,7 +2052,7 @@ window.ModelStoreUI = (() => {
   const urlState = () => {
     canonicalizeStoreLocation();
     const p = new URLSearchParams(location.search);
-    const nextRuntime = ['all','sdcpp'].includes(p.get('models-runtime')) ? p.get('models-runtime') : 'ollama';
+    const nextRuntime = ['all','sdcpp','comfyui','ollama'].includes(p.get('models-runtime')) ? p.get('models-runtime') : 'all';
     if (nextRuntime !== runtime) resetRuntime(nextRuntime);
     byId('store-runtime').value = runtime;
     const oldSection = p.get('models-section');
@@ -1853,7 +2087,7 @@ window.ModelStoreUI = (() => {
     section = next; category = cat; detail = id; collection = section === 'discover' ? group : '';
     if (cat) { collection = ''; byId('store-source').value = 'curated'; }
     const url = new URL(location.href);
-    for (const [key, value] of Object.entries({'models-runtime': runtime === 'ollama' ? '' : runtime, 'models-section': section, 'models-category': category,
+    for (const [key, value] of Object.entries({'models-runtime': runtime, 'models-section': section, 'models-category': category,
       'models-collection': collection, 'models-page': livePage > 1 ? String(livePage) : '', 'models-page-size': livePage > 1 ? String(livePageSize) : '', 'models-detail': detail, 'models-variant': detail ? variant : '', 'models-query': byId('store-query').value,
       'models-source': byId('store-source').value === 'curated' ? 'offline' : 'huggingface', 'models-sort': byId('store-sort').value,
       'models-size': byId('store-size').value, 'models-capability': byId('store-capability').value})) {
@@ -1861,7 +2095,7 @@ window.ModelStoreUI = (() => {
     }
     history[replace ? 'replaceState' : 'pushState'](history.state, '', url.pathname + url.search + url.hash);
     render();
-    if (section === 'downloads') loadJobs();
+    if (section === 'downloads'&&!managedOnly()) loadJobs();
     if (section === 'discover' && liveLanding()) loadPopular(enteringDiscover);
     else if (section === 'discover' && hub()) loadLive(enteringDiscover);
   }
@@ -1873,8 +2107,10 @@ window.ModelStoreUI = (() => {
     const a = domainText('a', label); a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer'; return a;
   }
   function openDetail(id, trigger, targetRuntime = runtime) {
+    clearTimeout(searchTimer);
     const context = {scroll:byId('store-view').scrollTop, focus:trigger?.dataset.storeKey || trigger?.dataset.storeModel || id, page:installedPage, section, url:location.href, endpoint};
-    if (runtime === 'all') {
+    const changedRuntime = runtime !== targetRuntime;
+    if (changedRuntime) {
       const selectedEndpoint = endpoint;
       resetRuntime(targetRuntime); byId('store-runtime').value = runtime;
       if (targetRuntime === 'ollama' && connections.some(c => c.id === selectedEndpoint)) endpoint = selectedEndpoint;
@@ -1883,7 +2119,7 @@ window.ModelStoreUI = (() => {
     history.replaceState({...history.state, klaudeStoreBrowse:browseContext}, '', location.href);
     message(''); variant = ''; variantPageSelection = ''; variantPage = 1; detailsOpen.clear(); detailSignature = '';
     navigate(section, category, id);
-    if (context.url.includes('models-runtime=all')) load();
+    if (changedRuntime) load();
   }
   function restoreDetailFocus() {
     const target = [...byId('store-content').querySelectorAll('[data-store-model]')].find(node => (node.dataset.storeKey || node.dataset.storeModel) === returnFocusId);
@@ -1927,7 +2163,7 @@ window.ModelStoreUI = (() => {
   }
   const updatedLabel = date => date ? new Intl.DateTimeFormat(undefined, {dateStyle:'medium'}).format(date) : 'Unknown';
   function modelRow(item, rank = 0) {
-    const button = domainButton('', () => openDetail(item.id, button, item.runtime || runtime), 'store-row quiet');
+    const button = domainButton('', () => openDetail(item.id, button, ['text-to-image','image-to-image'].includes(modelTask(item).toLowerCase()) ? 'sdcpp' : item.runtime || runtime), 'store-row quiet');
     button.dataset.storeModel = item.id; button.dataset.storeKey = modelKey(item);
     const content = domainText('span', '', 'store-card-content');
     content.append(domainText('strong', item.name));
@@ -1950,7 +2186,7 @@ window.ModelStoreUI = (() => {
 
     if (rank) { button.classList.add('store-ranked-row'); button.append(domainText('span', String(rank), 'store-rank')); }
     const installed = inventory?.models?.some(local => (!item.runtime || item.runtime === local.runtime) && item.variants?.some(v => v.tag === local.name));
-    button.append(icon(item.id, 40), content, domainText('span', installed ? 'Installed' : 'View', 'store-cta'));
+    button.append(icon(item.id, 40), content, domainText('span', installed ? (item.runtime || runtime) === 'sdcpp' ? 'Downloaded' : 'Installed' : 'View', 'store-cta'));
     button.title = `${item.name} · ${item.summary || purpose}`;
     return button;
   }
@@ -1997,6 +2233,142 @@ window.ModelStoreUI = (() => {
     history.replaceState(history.state, '', url.pathname + url.search + url.hash);
     renderDetail();
   }
+  let installPlan = null, planRead = '', planError = '', planBusy = false, planProfile = 'file-only';
+  const planLocation = () => new URLSearchParams(location.search).get('models-plan') || '';
+  function rememberPlan(id) {
+    const url = new URL(location.href); url.searchParams.set('models-plan', id);
+    history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+  }
+  async function readInstallPlan() {
+    const id = planLocation();
+    if (!latest?.image_install_plans || !imageStore() || !id || planRead === id) return;
+    planRead = id; installPlan = null; planError = ''; const epoch = authEpoch;
+    try {
+      const result = await domainRequest('/api/v1/settings/models/image-install-plans','POST',{action:'get',id});
+      if (!active() || epoch !== authEpoch || planLocation() !== id) { planRead = ''; return; }
+      installPlan = result; planProfile = result.selection.profile;
+    } catch (error) { if (epoch === authEpoch && planLocation() === id) planError = error.message; }
+    if (active() && epoch === authEpoch) { detailSignature = ''; render(); }
+  }
+  async function buildInstallPlan() {
+    if (planBusy || !variant || !allowed) return;
+    const model = variant, profile = planProfile, epoch = authEpoch;
+    planBusy = true; planError = ''; detailSignature = ''; renderDetail();
+    try {
+      const result = await domainRequest('/api/v1/settings/models/image-install-plans','POST',{action:'create',model,profile});
+      if (!active() || epoch !== authEpoch || variant !== model || !imageStore()) return;
+      installPlan = result; rememberPlan(result.id); planRead = result.id;
+    } catch (error) { if (epoch === authEpoch && variant === model) planError = error.message; }
+    finally { if (epoch === authEpoch) { planBusy = false; detailSignature = ''; renderDetail(); } }
+  }
+  async function reviewPlannedFile(component) {
+    if (!canWrite()) return;
+    const epoch = authEpoch, id = installPlan?.id, model = variant, focusId = document.activeElement?.id;
+    pending = true; detailSignature = ''; renderDetail();
+    const current = () => active() && imageStore() && epoch === authEpoch && installPlan?.id === id && variant === model && !dialog.hidden;
+    const finish = async () => { if (epoch === authEpoch) {
+      pending = false; detailSignature = ''; renderDetail(); await loadJobs();
+      requestAnimationFrame(() => { if (current()) {
+        const action=byId(focusId)||document.querySelector(`[data-plan-slot="${component.slot}"] button`);
+        action?.focus({preventScroll:true});
+      } });
+    } };
+    try {
+      const opened = await prepareChange(component.draft, {
+        downloadDestination:`Local Stable Diffusion models / ${component.destination}`,
+        current, onAccepted:finish, onDiscard:receipt=>{
+          if(epoch===authEpoch&&receipt.uncertain)planError='Download submission unconfirmed. Check Downloads before retrying.';
+          finish();
+        },
+      });
+      if (!opened) finish();
+    } catch (error) { if (current()) planError = error.message; finish(); }
+  }
+  async function reviewPlannedFiles(plan, components) {
+    if (!canWrite() || planBusy || !components.length) return;
+    const epoch=authEpoch, id=plan.id, model=variant, focusId=document.activeElement?.id;
+    pending=true; detailSignature=''; renderDetail();
+    const current=()=>active()&&imageStore()&&epoch===authEpoch&&installPlan?.id===id&&variant===model&&!dialog.hidden;
+    const finish=async receipt=>{
+      if(epoch!==authEpoch)return;
+      if(receipt?.uncertain)planError='Submission unconfirmed. Check each file in Downloads before approving again.';
+      pending=false; detailSignature=''; await loadJobs(); renderDetail();
+      requestAnimationFrame(()=>{if(current())byId(focusId)?.focus({preventScroll:true});});
+    };
+    try{
+      const opened=await prepareChange({operation:'model-image-install-plan',plan_id:id,slots:components.map(row=>row.slot)}, {
+        current,onAccepted:result=>{
+          if(result.state==='partial')planError='Some files were not submitted. Check Downloads, then review the remaining files.';
+          finish();
+        },onDiscard:finish,
+      });
+      if(!opened)finish();
+    }catch(error){if(current())planError=error.message;finish();}
+  }
+  function renderInstallPlan(parent) {
+    if (!imageStore() || !variant || !latest?.image_install_plans) return;
+    readInstallPlan();
+    const panel = detailSection('Installation plan','store-install-plan'); panel.classList.add('store-install-plan');
+    panel.append(domainText('p','Choose the profile specified by the model card. Downloads do not verify compatibility, server access or memory requirements.','muted'));
+    const label = domainText('label','Setup profile'), select = document.createElement('select');
+    select.id = 'store-plan-profile';
+    for (const [key,name] of [['file-only','Selected file only'],['flux3-klein','FLUX.3 Klein'],['flux3-klein-base','FLUX.3 Klein Base']]) select.append(new Option(name,key));
+    select.value = planProfile; select.disabled = planBusy || pending;
+    select.addEventListener('change',()=>{planProfile=select.value;}); label.append(select);
+    const controls=domainText('div','','store-plan-controls');controls.append(label);panel.append(controls);
+    const plan = installPlan?.id === planLocation() && installPlan.selection.model === variant ? installPlan : null;
+    const build = domainButton(planBusy ? 'Preparing plan…' : plan ? 'Rebuild plan' : 'Preview installation',buildInstallPlan,'secondary');
+    build.id = 'store-plan-build'; build.disabled = planBusy || pending || !allowed;
+    controls.append(build);
+    if (planError) { const error=domainText('p',planError,'domain-status');error.setAttribute('role','status');panel.append(error); }
+    if (plan) {
+      const data = plan.selection;
+      panel.append(domainText('h3',data.name));
+      panel.append(domainText('p',`${data.components.length} file${data.components.length===1?'':'s'} · ${fileSize(data.total_bytes)} (${data.total_bytes.toLocaleString()} bytes) total. ${fileSize(plan.free_bytes)} free when planned.`, 'store-plan-total'));
+      panel.append(domainText('p',`Planned ${new Date(plan.checked_at*1000).toLocaleString()}. Full sizes; partial data is not deducted. Downloads can be approved together, then tracked separately. Existing files are never overwritten.`, 'muted'));
+      if (plan.free_bytes < data.total_bytes + 16*1024**2) panel.append(domainText('p','Free space may be insufficient for the full plan. Each transfer checks remaining space again.','domain-status'));
+      const list = domainText('div','','store-plan-files');
+      for (const component of data.components) {
+        const job = jobs.find(item=>item.kind==='model-image-download' && item.artifact_id===component.artifact_id);
+        const row=domainText('article','','store-plan-file');row.dataset.planSlot=component.slot;
+        const copy=domainText('div','','store-plan-copy');
+        copy.append(domainText('h4',component.label),link(component.filename,component.source_url));
+        copy.append(domainText('p',`${fileSize(component.size)} (${component.size.toLocaleString()} bytes) · ${component.category}`,'muted'));
+        const source=domainText('details','','model-detail-disclosure');source.id=`store-plan-source-${component.slot}`;source.open=detailsOpen.has(source.id);
+        source.append(decorateDisclosure(domainText('summary','Source and destination')),
+          domainText('p',`Revision: ${component.revision}\nSHA256: ${component.sha256}\nDestination: ${component.destination}`));copy.append(source);
+        const existed = plan.existing_unverified.includes(component.slot);
+        const status = domainText('p',job ? `${job.state==='completed'?'Last transfer completed; setup not checked':downloadState(job)}${Number.isFinite(job.progress?.completed)&&Number.isFinite(job.progress?.total)?` · ${fileSize(job.progress.completed)} / ${fileSize(job.progress.total)}`:''}` : existed ? 'Destination existed when planned; contents not verified.' : jobsLoaded ? 'Not present when planned.' : 'Checking recent transfers…','muted');
+        status.dataset.planStatus=component.slot;copy.append(status);
+        if(job?.message)copy.append(domainText('p',job.message,'domain-status'));
+        const actions=domainText('div','','dialog-actions');
+        const action=(name,run,key)=>{const button=domainButton(name,run,'quiet');button.id=`store-plan-${component.slot}-${key}`;button.dataset.planAction=key;button.disabled=pending||!allowed;actions.append(button);return button;};
+        if(job){
+          if(['accepted','running'].includes(job.state)&&job.cancellable&&latest?.model_download_pause){
+            action('Pause',()=>jobAction('/api/v1/models/pause',job.request_id),'pause');
+            action('Stop and discard partial',()=>jobAction('/api/v1/models/cancel',job.request_id),'stop');
+          }else if(['failed','cancelled'].includes(job.state)&&latest?.model_download_pause)action(job.paused?'Resume':'Retry',()=>retryImageDownload(job),'resume');
+          else if(job.state==='unknown')action('Check status',()=>jobAction('/api/v1/models/reconcile',job.request_id),'check');
+          const info=action('Transfer details',()=>openDownloadInfo('owned',job.request_id),'info');info.disabled=false;
+        }
+        if(!job && !existed) action('Install',()=>reviewPlannedFile(component),'install').disabled=!canWrite()||!jobsLoaded;
+        row.append(copy,actions);list.append(row);
+      }
+      panel.append(list);
+      const actions=domainText('div','','dialog-actions');
+      const missing=data.components.filter(component=>!plan.existing_unverified.includes(component.slot)&&
+        !jobs.some(item=>item.kind==='model-image-download'&&item.artifact_id===component.artifact_id));
+      if(missing.length&&latest?.image_install_plan_group){
+        const all=domainButton(`Install ${missing.length} remaining file${missing.length===1?'':'s'}`,()=>reviewPlannedFiles(plan,missing),'primary');
+        all.id='store-plan-install-all';all.disabled=!canWrite()||!jobsLoaded||planBusy;actions.append(all);
+      }
+      const downloads=domainButton('View Downloads',()=>navigate('downloads'),'quiet');downloads.id='store-plan-downloads';
+      const configure=domainButton('Configure model',()=>ImageSetupNavigation.open({model:variant,planId:plan.id}),'secondary');
+      configure.id='store-plan-configure'; actions.append(downloads,configure);panel.append(actions);
+      panel.append(domainText('p','After downloading, Configure model checks the image server and lets you select its recipe and files. Loading and applying defaults remain separate steps.','muted'));
+    }
+    parent.append(panel);
+  }
   function renderDetail() {
     if (!active() || !detail || dialog.hidden) return;
     const item = liveDetails.get(detail) || catalog?.models.find(item => item.id === detail) || liveCatalog?.models?.find(item => item.id === detail) || popularCatalog?.models?.find(item => item.id === detail) || recentCatalog?.models?.find(item => item.id === detail);
@@ -2012,7 +2384,7 @@ window.ModelStoreUI = (() => {
     const destination = imageStore() ? 'Local Stable Diffusion models' : connections.find(c => c.id === endpoint)?.name || '';
     const current = Boolean(!imageStore() && installed && !latest?.requires_model_selection && (latest?.model_ref === `ollama@${endpoint}/${variant}` || endpoint === 'default-ollama' && [variant,`ollama/${variant}`].includes(latest?.model_ref || latest?.model)));
     const useAllowed = Boolean(!imageStore() && installed && !inventory.stale && !current && !pending && !runtimeChoiceInFlight && !latest?.active_turn_id && !latest?.queue?.length && (latest?.model_providers || endpoint === 'default-ollama'));
-    const signature = JSON.stringify([detail,variant,variantPage,item,modelTask(item),local,inventory?.stale,inventory?.checked_at,connections,endpoint,pending,allowed,latest?.active_turn_id,latest?.queue?.length,jobs.map(job=>job.state),canWrite(),useAllowed,current,byId('store-status').textContent]);
+    const signature = JSON.stringify([detail,variant,variantPage,item,modelTask(item),local,inventory?.stale,inventory?.checked_at,connections,endpoint,pending,allowed,latest?.active_turn_id,latest?.queue?.length,jobs.map(job=>[job.request_id,job.state,job.paused,job.progress]),ImageReadinessUI.revision(),installPlan?.id,planBusy,planError,jobsLoaded,latest?.image_install_plans,canWrite(),useAllowed,current,byId('store-status').textContent]);
     if (signature === detailSignature) return;
     detailSignature = signature;
     const focused = document.activeElement, focusId = dialog.contains(focused) ? focused.id : '';
@@ -2036,22 +2408,34 @@ window.ModelStoreUI = (() => {
     } else byline.textContent = destination ? `Installed on ${destination}` : 'Model details';
     summary.append(title, byline);
     summary.append(runtimeBadge());
+    const synopsis=item?.summary;if(synopsis&&!synopsis.startsWith('Community GGUF')&&!['text-to-image','image-to-image'].includes(synopsis))summary.append(domainText('p',StoreDesign.brief(synopsis),'catalog-detail-summary'));
     if (item?.stale) summary.append(domainText('p', 'Cached metadata', 'model-detail-source muted'));
     const actionArea = domainText('div', '', 'model-detail-actions');
-    const install = domainButton(installed ? imageStore() ? 'Installed' : current ? 'Current model' : 'Use model' : variant ? `Download${downloadSize ? ` · ${downloadSize}` : ''}` : 'Choose model', async () => {
+    const install = domainButton(installed ? imageStore() ? latest?.image_comfyui?'Advanced setup':'Configure model' : current ? 'Current model' : 'Use model' : variant ? `Download${downloadSize ? ` · ${downloadSize}` : ''}` : 'Choose model', async () => {
       if (!installed) {
         if (!variant) focusVariants(); else review('model-pull', variant);
         return;
       }
       if (installed) {
+        if (imageStore()) { ImageSetupNavigation.open({model:variant||detail,planId:installPlan?.selection.model===variant?installPlan.id:''}); return; }
         if (!useAllowed) return; pending = true; renderDetail();
         try { await chooseRuntime('model', latest.model_providers ? `ollama@${endpoint}/${variant}` : variant, {onError:error => message(error.message)}); }
         finally { pending = false; renderDetail(); }
       }
     }, installed || variant ? 'model-detail-install' : 'secondary model-detail-choose'); install.id = 'store-detail-install';
-    install.disabled = installed ? !useAllowed : variant ? !canWrite() || !inventory?.models || inventory.stale : !variants.length;
+    install.disabled = installed ? imageStore() ? false : !useAllowed : variant ? !canWrite() || !inventory?.models || inventory.stale : !variants.length;
     if (!installed && variant) install.prepend(libraryIcon('download'));
     actionArea.append(install);
+    if(imageStore()&&latest?.image_comfyui&&(variant||detail).toLowerCase().endsWith('.safetensors')){
+      const managed=domainButton('Install for image generation',()=>ManagedImageBundles.install(variant||detail,installed),'secondary');managed.id='store-managed-install';managed.className='model-detail-install';actionArea.prepend(managed);install.hidden=true;
+    }
+    if(imageStore()&&latest?.image_comfyui&&(variant||detail).toLowerCase().endsWith('.gguf'))actionArea.append(domainText('p','GGUF setup is not supported by the managed installer.','muted'));
+    if (imageStore() && variant && latest?.image_install_plans) {
+      const preview = domainButton('Advanced install',()=>{
+        byId('store-advanced-installation')?.setAttribute('open','');byId('store-install-plan')?.scrollIntoView({block:'start'});
+        byId('store-plan-profile')?.focus({preventScroll:true});
+      },'secondary');preview.id='store-plan-open';actionArea.append(preview);
+    }
     let blocker = '';
     if (!loading && !variants.length) blocker = item?.error || 'No supported variants are available.';
     else if (!runtimeReady()) blocker = 'Restart the WebUI host and reload to browse Stable Diffusion models.';
@@ -2067,7 +2451,12 @@ window.ModelStoreUI = (() => {
     if (!endpoint) settingsLink(actionArea);
     else if (!inventory?.models || inventory.stale) actionArea.append(domainButton('Refresh inventory', () => loadInventory(), 'quiet'));
     if (item?.error && detail.startsWith('hf:')) actionArea.append(domainButton('Retry source details', () => { liveDetails.delete(detail); detailSignature = ''; loadLiveDetail(detail); }, 'quiet'));
+    if (imageStore() && installed) {
+      const readiness = domainText('p', inventory.stale ? 'Cached download inventory. Refresh to check this file.' : 'Downloaded · setup required', 'muted');
+      readiness.id = 'store-image-readiness'; actionArea.append(readiness);
+    }
     identity.append(logo,summary,actionArea); body.append(identity);
+    if(imageStore()){const readiness=ImageReadinessUI.summary(variant);if(readiness)body.append(readiness);}
     if (item?.source_url) {
       const cardLink = link('', item.source_url); cardLink.className = 'icon-button quiet model-card-link';
       cardLink.setAttribute('aria-label', 'Open model card in a new tab'); cardLink.title = 'Open model card in a new tab';
@@ -2096,18 +2485,12 @@ window.ModelStoreUI = (() => {
     stats.hidden = !facts.length;
     body.append(stats);
     const reading = domainText('div', '', 'model-detail-reading');
-    const about = detailSection('About this model','store-detail-about');
-    const description = item?.summary || (local ? imageStore() ? 'Downloaded image weights. Load this file and its required components in your Stable Diffusion server, then test and save the service in Settings → Models → Image generation.' : 'This exact model is installed on the selected native Ollama endpoint.' : 'Source metadata is not available for this model.');
-    if (description.length > 360) {
-      const preview = domainText('p',description.slice(0,360) + '…'); about.append(preview);
-      const more = domainText('details', '', 'model-about-more'); more.id = 'store-detail-more'; more.open = detailsOpen.has(more.id);
-      const summary = domainText('summary',''), label = domainText('span',more.open ? 'Show less' : 'Show more'); summary.id = 'store-detail-more-summary'; summary.append(label);
-      more.append(decorateDisclosure(summary),domainText('p',description)); preview.hidden = more.open;
-      more.addEventListener('toggle', () => { preview.hidden = more.open; label.textContent = more.open ? 'Show less' : 'Show more'; }); about.append(more);
-    } else about.append(domainText('p',description));
-    const genericAbout = modelTask(item).toLowerCase() === description || ['Community GGUF model. Capabilities and device fit are not verified.', 'Community GGUF. Read its model card and choose an exact file.'].includes(description);
-    if (!genericAbout) reading.append(about);
-    const variantSection = detailSection('Choose your download','store-variants-heading'); variantSection.id = 'store-variants-section'; variantSection.querySelector('h2').tabIndex = -1;
+    const description=item?.summary||'';
+    if(description&&description!==StoreDesign.brief(description)){
+      const about=StoreDesign.disclosure('About',domainText('p',description),'store-detail-about');
+      about.open=detailsOpen.has(about.id);reading.append(about);
+    }
+    const variantSection = detailSection('Variants','store-variants-heading'); variantSection.id = 'store-variants-section'; variantSection.querySelector('h2').tabIndex = -1;
     const variantCount = domainText('p', loading ? 'Finding available variants…' : `${variants.length} ${variants.length === 1 ? 'variant' : 'variants'} available`, 'model-variant-count muted');
     variantCount.id = 'store-variant-count'; variantSection.append(variantCount);
     if (!imageStore() && connections.length > 1) {
@@ -2129,7 +2512,7 @@ window.ModelStoreUI = (() => {
       if (info.length) copy.append(domainText('small',info.join(' · '),'muted'));
       const state = domainText('span', '', 'model-variant-state');
       state.append(domainText('strong', actual?.size != null ? fileSize(actual.size) : row.size != null ? fileSize(row.size) : row.size_label || 'Size unknown'));
-      if (actual || input.checked) state.append(domainText('small',actual ? inventory.stale ? 'Cached' : 'Installed' : 'Selected'));
+      if (actual || input.checked) state.append(domainText('small',actual ? inventory.stale ? 'Cached' : imageStore() ? 'Downloaded' : 'Installed' : 'Selected'));
       label.append(input,copy,state); fieldset.append(label);
     });
     variantSection.append(fieldset);
@@ -2154,8 +2537,10 @@ window.ModelStoreUI = (() => {
       }
       const status = domainText('span','','visually-hidden'); status.id = 'store-variants-page'; status.setAttribute('role','status'); nav.append(status);variantSection.append(nav);
     }
-    if (variantFooter) variantSection.append(variantFooter);
-    reading.append(variantSection);
+    if (variantFooter) {variantFooter.hidden=true;variantSection.append(variantFooter);}
+    reading.prepend(variantSection);
+    const installation=StoreDesign.disclosure('Advanced installation',domainText('div','','catalog-technical'),'store-advanced-installation');
+    installation.open=detailsOpen.has(installation.id)||Boolean(planLocation());renderInstallPlan(installation.lastChild);if(installation.lastChild.childElementCount)reading.append(installation);
     const details = detailSection('Details','store-model-details');
     const disclosure = (id,title,text) => {
       const node = document.createElement('details'); node.id = id; node.className = 'model-detail-disclosure'; node.open = detailsOpen.has(id);
@@ -2169,34 +2554,52 @@ window.ModelStoreUI = (() => {
     if (installed && !imageStore()) {
       const remove = domainButton('Delete model',()=>review('model-delete',variant),'quiet danger'); remove.disabled = !canWrite() || inventory.stale; details.append(remove);
     }
-    if (imageStore() && installed) details.append(domainButton('Image generation settings', () => { showView('settings', {section:'models'}); ModelsSettingsNavigation.show('image', {focus:true}); }, 'quiet'));
-    reading.append(details);
+    if (imageStore() && installed) details.append(domainButton('Choose or resume setup', () => ImageSetupNavigation.open({model:variant||detail,planId:installPlan?.selection.model===variant?installPlan.id:''}), 'quiet'));
+    const technical=StoreDesign.disclosure('Details & compatibility',details,'store-detail-technical');technical.open=detailsOpen.has(technical.id);reading.append(technical);
     const links = detailSection('Links','store-detail-links');
     if (metadata?.source_url) links.append(link('Exact variant source',metadata.source_url));
     if (!item?.source_url && !metadata?.source_url) links.append(domainText('p','No verified external source is recorded for this installed model.','muted'));
-    if (links.querySelector('a, p')) reading.append(links); body.append(reading);
+    if (links.querySelector('a, p')) technical.lastChild.append(links); body.append(reading);
     if (variants.length > 20) updateDomainPager('store-variants',(variantPage-1)*20,{items:variants.slice((variantPage-1)*20,variantPage*20),total:variants.length,page_size:20,more:variantPage*20<variants.length});
     const previousFocus = (focusId ? byId(focusId) : null) || (focusPage ? byId('store-variants-numbers')?.querySelector(`[data-page="${focusPage}"]`) : null);
     previousFocus?.focus({preventScroll:true});
     if (loading && detailReading !== detail) loadLiveDetail(detail);
   }
   const canWrite = () => supported() && runtimeReady() && allowed && endpoint && !pending && !latest?.active_turn_id && !latest?.queue?.length &&
-    !jobs.some(job => ['accepted', 'running', 'cancelling', 'unknown'].includes(job.state));
+    !jobs.some(job => ['accepted', 'running', 'cancelling', 'unknown'].includes(job.state)&&
+      (!imageStore()||job.kind!=='model-image-download'));
   async function review(operation, model, manual = false) {
     if (!canWrite()) return;
     if (imageStore()) operation = 'model-image-download';
     pending = true; const epoch = authEpoch, selectedEndpoint = endpoint;
+    const openerId = manual ? 'store-download-tag' : document.activeElement?.id;
+    const restoreOpener = () => requestAnimationFrame(() => { if (active() && epoch === authEpoch) byId(openerId)?.focus({preventScroll:true}); });
     try {
       const opened = await prepareChange({operation, connection: endpoint, model}, {
         downloadDestination: imageStore() ? 'Local Stable Diffusion models' : connections.find(connection => connection.id === endpoint)?.name || endpoint,
         current: () => active() && epoch === authEpoch && selectedEndpoint === endpoint && (manual ? downloadDialog.open : variant === model && !dialog.hidden),
-        beforeOpen: () => { detail = ''; dialog.hidden = true; downloadDialog.close(); navigate('downloads'); },
-        onAccepted: () => { if (epoch === authEpoch) { pending = false; loadJobs(); } },
-        onDiscard: () => { if (epoch === authEpoch) { pending = false; loadJobs(); } },
+        beforeOpen: () => { if (manual) downloadDialog.close(); },
+        onAccepted: () => { if (epoch === authEpoch) { pending = false; if (active()) navigate('downloads'); loadJobs(); } },
+        onDiscard: receipt => { if (epoch === authEpoch) {
+          pending = false;
+          if (receipt.uncertain && active()) navigate('downloads');
+          else if (active()) { render(); if (manual && !downloadDialog.open) downloadDialog.showModal(); restoreOpener(); }
+          loadJobs();
+        } },
       });
       if (!opened) pending = false;
     } catch (error) { if (epoch === authEpoch) { pending = false; message(error.message); if (manual) byId('store-download-status').textContent = error.message; } }
     if (epoch === authEpoch) render();
+  }
+  async function retryImageDownload(item) {
+    if(pending||!allowed)return;
+    const epoch=authEpoch;pending=true;render();
+    try{
+      await domainRequest('/api/v1/models/resume','POST',{
+        request_id:item.request_id,new_request_id:requestId(),
+      });
+    }catch(error){if(authEpoch===epoch)message(error.message);}
+    finally{if(authEpoch===epoch){pending=false;await loadJobs();render();}}
   }
   async function jobAction(path, id) {
     if (pending) return; pending = true;
@@ -2226,6 +2629,7 @@ window.ModelStoreUI = (() => {
     return model.startsWith('hf.co/') && /\.(gguf|safetensors)$/i.test(tag) ? tag : model.split('/').at(-1);
   }
   function downloadState(item) {
+    if(item.paused)return 'Paused';
     if (item.source === 'ollama') return item.state === 'quiet' ? 'No recent activity' : 'Downloading';
     if (item.source === 'sdcpp') return item.state === 'quiet' ? 'No recent activity' : 'Recent file activity';
     const stage = {'Checking manifest':'Preparing…', 'Preparing download':'Preparing…',
@@ -2308,7 +2712,7 @@ window.ModelStoreUI = (() => {
       const progress = item.progress;
       const bytes = ['running','cancelling'].includes(item.state) && Number.isFinite(progress?.total) && progress.total > 0 && Number.isFinite(progress.completed);
       const status = domainText('span', bytes ? `${fileSize(progress.completed)} / ${fileSize(progress.total)}` : downloadState(item), 'store-download-status');
-      status.dataset.state = item.state; status.title = status.textContent;
+      status.dataset.state = item.paused ? 'paused' : item.state; status.title = status.textContent;
       const facts = downloadMetadata(item), metadata = domainText('div', '', 'store-download-metadata muted');
       content.append(title, domainText('span', facts.parameters, 'store-download-parameters muted'));
       metadata.append(status);
@@ -2318,13 +2722,23 @@ window.ModelStoreUI = (() => {
           'Estimated from reported file progress; available after two updates' : 'Speed unavailable: byte progress is not reported';
         metadata.append(speed);
       } else metadata.append(domainText('span', facts.size, 'store-download-size'));
+      if (!observed && ['failed','unknown'].includes(item.state)) {
+        const notice = domainText('p', item.state === 'unknown' ? 'Outcome unknown. Check status before starting another download.' : item.message || 'Download failed. Open details to check the cause.', 'muted');
+        notice.classList.add('store-download-error'); content.append(notice);
+      }
       const actions = domainText('div', '', 'store-download-actions');
+      if(!observed&&item.kind==='model-image-download'){
+        if(latest?.model_download_pause&&item.cancellable&&['accepted','running'].includes(item.state))
+          actions.append(downloadAction('Pause download','pause',()=>jobAction('/api/v1/models/pause',key),'pause'));
+        else if(['failed','cancelled'].includes(item.state))
+          actions.append(downloadAction('Resume download','play',()=>retryImageDownload(item),'resume'));
+      }
       if (!observed && item.cancellable && ['model-pull','model-image-download'].includes(item.kind) && ['accepted','running'].includes(item.state))
-        actions.append(downloadAction('Stop download', 'close', () => jobAction('/api/v1/models/cancel', key), 'stop'));
+        actions.append(downloadAction(item.kind === 'model-image-download' ? 'Stop and discard partial' : 'Stop download', 'close', () => jobAction('/api/v1/models/cancel', key), 'stop'));
       else if (!observed && item.state === 'unknown')
         actions.append(downloadAction('Check download status', 'refresh', () => jobAction('/api/v1/models/reconcile', key), 'check'));
       else if (!observed && !item.cancellable && ['completed','failed','cancelled'].includes(item.state) && latest?.model_download_dismissal)
-        actions.append(downloadAction('Remove download', 'close', () => jobAction('/api/v1/models/dismiss', key), 'remove'));
+        actions.append(downloadAction('Remove from history', 'close', () => jobAction('/api/v1/models/dismiss', key), 'remove'));
       for (const button of actions.children) button.disabled = pending || !allowed;
       const info = downloadAction('Download details', 'info', () => openDownloadInfo(source, key), 'info');
       info.id = `store-download-info-${source}-${key}`; info.setAttribute('aria-haspopup', 'dialog');
@@ -2351,9 +2765,10 @@ window.ModelStoreUI = (() => {
     if (fullPage || section !== 'downloads') downloadInfo.close();
     if (fullPage) clearDownloadBars();
     byId('store-view').classList.toggle('has-model-detail', fullPage);
-    byId('store-view').querySelector(':scope > .view-heading').hidden = fullPage;
-    byId('store-sections').hidden = fullPage; byId('store-panel').hidden = fullPage;
+    byId('store-view-heading').hidden = fullPage;
+    byId('store-sections').hidden = false; byId('store-panel').hidden = fullPage;
     dialog.hidden = !fullPage;
+    StoreDesign.sync();ImageReadinessUI.sync(); window.ManagedImageBundles?.render();
     byId('store-view').setAttribute('aria-labelledby', window.IntegrationStoreUI?.isOpen() ? 'integration-store-title' : fullPage ? 'store-detail-title' : 'store-title');
     if (fullPage) renderDetail(); else renderContent();
     shownDetail = fullPage ? detail : '';
@@ -2374,6 +2789,7 @@ window.ModelStoreUI = (() => {
     }
   }
   function renderStoreCounts() {
+    if(managedOnly())return;
     const counts = {
       installed: inventory?.truncated ? undefined : inventory?.models?.length,
       downloads: jobsLoaded ? observedTransfers.length + jobs.filter(job => !job.dismissed || job.state === 'unknown').length : undefined,
@@ -2391,6 +2807,7 @@ window.ModelStoreUI = (() => {
     if (!active()) return;
     const focusedRow = document.activeElement?.closest('.store-download-row');
     const downloadFocus = focusedRow ? {key:focusedRow.dataset.downloadId, action:document.activeElement.dataset.downloadAction} : null;
+    welcome.hidden=runtime!=='all'||section!=='discover';installedTools.hidden=section!=='installed'||managedOnly();
     if (section !== 'downloads') clearDownloadBars();
     renderStoreCounts();
     for (const button of byId('store-sections').children) {
@@ -2401,9 +2818,10 @@ window.ModelStoreUI = (() => {
     byId('store-panel').setAttribute('aria-labelledby', `store-tab-${section}`);
     byId('store-search-row').hidden = section === 'downloads' || !supported();
     byId('store-query').placeholder = section === 'installed' ? 'Search installed models…' : hub() ? 'Search community models…' : 'Search offline collection…';
-    byId('store-endpoint-label').hidden = imageStore() || !supported() || connections.length < 2 || section === 'discover' || section === 'downloads' && !jobs.length;
+    byId('store-endpoint-label').hidden = managedOnly() || imageStore() || !supported() || connections.length < 2 || section === 'discover' || section === 'downloads' && !jobs.length;
     byId('store-download-open').hidden = runtime !== 'ollama';
     byId('store-source').options[0].textContent = runtime === 'all' ? 'Hugging Face models' : imageStore() ? 'Hugging Face image models' : 'Hugging Face GGUF';
+    byId('store-runtime').querySelector('[value=comfyui]').disabled = !latest?.image_comfyui;
     for (const value of ['sdcpp','all']) byId('store-runtime').querySelector(`[value=${value}]`).disabled = !imageStoreReady();
     byId('store-download-open').disabled = !canWrite() || !inventory?.models || inventory.stale;
     byId('store-source').disabled = !latest?.model_store_catalog || section !== 'discover' || collection === 'charts';
@@ -2411,10 +2829,12 @@ window.ModelStoreUI = (() => {
     byId('store-capability').disabled = section !== 'discover' || hub();
     byId('store-size').disabled = section !== 'installed';
     byId('store-filter-chips').hidden = section === 'downloads' || !supported();
+    filters.hidden=section==='downloads'||managedOnly()||!supported();
     for (const id of ['store-runtime','store-source','store-sort','store-capability','store-size']) {
       const select = byId(id), field = select.closest('.file-filter-field, label');
-      field.hidden = id === 'store-runtime' ? false : section === 'installed' ? id !== 'store-size' : id === 'store-size' || id === 'store-capability' && hub() || imageStore() && id === 'store-source';
+      field.hidden = id === 'store-runtime' ? false : managedOnly() ? true : section === 'installed' ? id !== 'store-size' : id === 'store-size' || id === 'store-capability' && hub() || imageStore() && id === 'store-source';
     }
+    byId('store-runtime').closest('.file-filter-field, label').hidden=true;
     storeFilterMenus.forEach(menu => menu.sync());
     const target = byId('store-content'); if (section !== 'downloads' || !supported()) target.replaceChildren(); target.classList.remove('is-empty');
     target.setAttribute('aria-busy', 'false');
@@ -2423,8 +2843,22 @@ window.ModelStoreUI = (() => {
       allowed = false; dialog.hidden = true; downloadDialog.close(); closeStoreFilters(); message(restartMessage);
       emptyState(target, 'Model Store needs the updated host', 'Restart the host and reload this page.', 'models'); settingsLink(target); return;
     }
+    if(managedOnly()){
+      byId('store-query').placeholder=section==='installed'?'Search installed image models…':'Search image models…';
+      byId('store-installed-pages').hidden=byId('store-live-pages').hidden=true;
+      window.ManagedImageBundles?.render();
+      return;
+    }
     if (section === 'downloads') {
       renderJobs(target); renderDetail();
+      readInstallPlan();
+      if (imageStore() && latest?.image_install_plans && installPlan?.id === planLocation()) {
+        const back=domainButton('Return to installation plan',()=>{
+          variant=installPlan.selection.model;
+          navigate('discover','',`hf:${variant.slice(6,variant.lastIndexOf(':'))}`);
+          requestAnimationFrame(()=>{byId('store-advanced-installation')?.setAttribute('open','');byId('store-install-plan')?.scrollIntoView({block:'start'});});
+        },'secondary');back.id='store-return-plan';target.prepend(back);
+      }
       if (downloadFocus && !downloadInfo.open) {
         const row = [...target.querySelectorAll('.store-download-row')].find(row => row.dataset.downloadId === downloadFocus.key);
         (row?.querySelector(`[data-download-action="${downloadFocus.action}"]`) || row?.querySelector('[data-download-action=info]') || byId('store-tab-downloads')).focus({preventScroll:true});
@@ -2448,8 +2882,9 @@ window.ModelStoreUI = (() => {
         button.title = row.name;
         const copy = domainText('span', '', 'store-card-content');
         copy.append(domainText('strong', row.display_name || row.name), domainText('small', `${row.parameters || 'Parameters unknown'} · ${row.size != null ? fileSize(row.size) : 'Size unknown'}`, 'muted'));
+        if ((row.runtime || runtime) === 'sdcpp') copy.append(domainText('small', ImageReadinessUI.label(row.name), 'muted'));
         if (runtime === 'all') copy.append(runtimeBadge(row.runtime));
-        button.append(icon(row.name, 40), copy, domainText('span', 'Manage', 'store-cta'));
+        button.append(icon(row.name, 40), copy, domainText('span', (row.runtime || runtime) === 'sdcpp' ? 'Configure' : 'Manage', 'store-cta'));
         card.append(button); list.append(card);
       }
       if (rows.length) target.append(list);
@@ -2466,7 +2901,7 @@ window.ModelStoreUI = (() => {
       byId('store-live-pages').hidden = true;
       const popular = completeLandingRows(landingRows('downloads'));
       target.append(sectionHeading('Popular models', 'See all', () => navigate('discover', '', '', false, 'charts')));
-      target.append(domainText('p', 'By Hugging Face downloads' + (popularCatalog?.stale ? ' · Cached' : ''), 'store-source-note muted'));
+      if(popularCatalog?.stale)target.append(domainText('p','Cached','store-source-note muted'));
       if (runtime === 'all' && popularCatalog?.error) target.append(domainText('p', popularCatalog.error, 'domain-status'));
       if (popular.length) target.append(modelGrid(popular, true));
       else target.append(domainText('p', popularCatalog?.error ? 'Catalog unavailable. Try Refresh.' : latest?.model_store_catalog ? 'Loading models…' : 'Update the host to explore more models.', 'muted'));
@@ -2478,7 +2913,8 @@ window.ModelStoreUI = (() => {
         }), modelGrid(recent));
         if (recentCatalog.stale) target.append(domainText('p', 'Cached collection', 'store-source-note muted'));
       }
-      window.IntegrationStoreUI?.preview(target);
+
+      if(runtime==='all')window.IntegrationStoreUI?.preview(target);
       if (!popular.length && popularCatalog?.error) {
         target.append(sectionHeading('Available offline'), modelGrid(catalog?.models || []));
       }
@@ -2488,7 +2924,7 @@ window.ModelStoreUI = (() => {
         byId('store-query').value = ''; byId('store-source').value = 'huggingface'; byId('store-sort').value = 'downloads'; byId('store-capability').value = 'all'; navigate('discover', '', '', false, '');
       }); target.append(back);
       if (hub()) {
-        target.append(domainText('p', runtime === 'all' ? 'Hugging Face models for Ollama and Stable Diffusion.' : imageStore() ? 'Hugging Face image models · check source compatibility and required components.' : 'Hugging Face public catalog · repository downloads, not Ollama usage. Capabilities and device fit are not verified.', 'store-source-note muted'));
+
         if (liveCatalog?.checked_at) target.append(domainText('p', `${liveCatalog.stale ? 'Cached' : 'Checked'} ${new Date(liveCatalog.checked_at * 1000).toLocaleString()} · ${livePageSize} results per page`, 'store-source-note muted'));
         if (liveCatalog?.error) target.append(domainText('p', liveCatalog.error, 'domain-status'));
         const rows = liveCatalog?.models || [];
@@ -2693,6 +3129,7 @@ window.ModelStoreUI = (() => {
     finally { if (selectedRuntime === runtime && detailReading === id) detailReading = ''; }
   }
   async function loadInventory() {
+    if(managedOnly())return;
     if ((!endpoint && runtime !== 'all') || !runtimeReady()) { inventory = null; render(); return; }
     const selected = endpoint, selectedRuntime = runtime, epoch = authEpoch, read = ++inventoryRead;
     try {
@@ -2723,6 +3160,7 @@ window.ModelStoreUI = (() => {
     render();
   }
   async function loadJobs() {
+    if (managedOnly())return;
     if (!active() || !supported() || busyRead) return;
     busyRead = true; const epoch = authEpoch;
     try {
@@ -2738,6 +3176,7 @@ window.ModelStoreUI = (() => {
   }
   async function load() {
     if (!supported() || !runtimeReady()) { render(); return; }
+    if(managedOnly()){render();window.ManagedImageBundles?.refresh();return;}
     const id = ++serial, epoch = authEpoch; reading?.abort(); reading = new AbortController();
     const current = () => active() && serial === id && epoch === authEpoch;
     const results = await Promise.allSettled([
@@ -2772,7 +3211,7 @@ window.ModelStoreUI = (() => {
     const rect = downloadInfo.getBoundingClientRect();
     if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) downloadInfo.close();
   });
-  sections.forEach((name, i) => { const b = domainButton(labels[i], () => navigate(name, '', '', false, ''), ''); b.replaceChildren(domainText('span', labels[i])); b.dataset.section = name; b.id = `store-tab-${name}`; b.setAttribute('aria-pressed', String(name === section)); b.setAttribute('aria-controls','store-panel'); byId('store-sections').append(b); });
+  sections.forEach((name, i) => { const b = domainButton(labels[i], () => StoreDesign.route('all',name), ''); b.replaceChildren(libraryIcon(['models','library','download'][i]),domainText('span', labels[i])); b.dataset.section = name; b.id = `store-tab-${name}`; b.setAttribute('aria-pressed', String(name === section)); b.setAttribute('aria-controls','store-panel'); byId('store-sections').append(b); });
   compactDomainPages.addEventListener('change', () => {
     const numbers = byId('store-installed-numbers');
     if (active() && section === 'installed' && numbers.dataset.current)
@@ -2811,7 +3250,7 @@ window.ModelStoreUI = (() => {
   });
   function changeEndpoint(value) { endpoint = value; byId('store-endpoint').value = value; byId('store-download-destination').textContent = connections.find(c => c.id === endpoint)?.name || ''; installedPage = 1; inventory = null; loadInventory(); }
   byId('store-endpoint').addEventListener('change', () => changeEndpoint(byId('store-endpoint').value));
-  byId('store-download-open').append(libraryIcon('plus'));
+
   byId('store-download-open').addEventListener('click', () => { if (!byId('store-download-open').disabled) { closeStoreFilters(); byId('store-download-status').textContent = ''; byId('store-download-destination').textContent = connections.find(c => c.id === endpoint)?.name || ''; const picker = byId('store-download-endpoint'); picker.replaceChildren(...connections.map(c => new Option(c.name,c.id))); picker.value = endpoint; byId('store-download-endpoint-label').hidden = connections.length < 2; downloadDialog.showModal(); byId('store-download-tag').focus(); } });
   byId('store-download-endpoint').addEventListener('change', () => changeEndpoint(byId('store-download-endpoint').value));
   byId('store-download-close').addEventListener('click', () => downloadDialog.close());
@@ -2821,19 +3260,19 @@ window.ModelStoreUI = (() => {
   byId('store-sort').addEventListener('change', () => { livePage = 1; liveCatalog = null; navigate(section, category, '', true); });
   byId('store-size').addEventListener('change', () => { installedPage = 1; navigate(section, category, '', true); });
   byId('store-capability').addEventListener('change', () => navigate(section, category, '', true));
-  byId('store-refresh').addEventListener('click', () => { load(); window.IntegrationStoreUI?.refresh(); });
-  byId('store-home').addEventListener('click', event => {
-    if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
-    event.preventDefault(); clearTimeout(searchTimer); closeStoreFilters();
-    byId('store-query').value = '';
-    byId('store-source').value = 'huggingface'; byId('store-sort').value = 'downloads';
-    byId('store-capability').value = byId('store-size').value = 'all';
-    livePage = 1;
-    navigate('discover', '', '', false, '');
-    byId('store-view').scrollTop = 0;
+  byId('store-refresh').addEventListener('click', () => { if(window.IntegrationStoreUI?.isOpen()){IntegrationStoreUI.refresh();return;}load();window.ManagedImageBundles?.refresh(); });
+  byId('store-home').addEventListener('click',event=>{
+    if(event.button!==0||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;
+    event.preventDefault();clearTimeout(searchTimer);closeStoreFilters();StoreDesign.route('all');
   });
   byId('store-detail-back').prepend(libraryIcon('previous'));
   byId('store-detail-back').addEventListener('click', () => {
+    if(history.state?.storeSetupReturned&&browseContext?.url){
+      const destination=new URL(browseContext.url,location.href);
+      const state={...history.state};delete state.storeSetupReturned;
+      history.replaceState(state,'',destination.pathname+destination.search+destination.hash);
+      urlState();load();return;
+    }
     if (browseContext?.url && history.length > 1) history.back();
     else navigate(section, category, '', true);
   });
@@ -2858,7 +3297,9 @@ window.ModelStoreUI = (() => {
     if (capability) timer = setInterval(loadJobs, 2000);
   });
   window.addEventListener('popstate', () => { if (active() && urlState() !== false) { loadInventory(); render(); if (liveLanding()) loadPopular(); else if (hub()) loadLive(); } });
+  document.addEventListener('klaude-image-readiness',()=>{if(active())render();});
   document.addEventListener('klaude-auth-reset', () => {
+    installPlan=null;planRead=planError='';planBusy=false;planProfile='file-only';
     downloadInfo.close(); downloadInfoKey = downloadInfoSource = downloadInfoError = '';
     clearDownloadBars(); downloadRates.clear(); allPageEnds.clear();
     const historyState = {...history.state}; delete historyState.klaudeStoreAllEnds; history.replaceState(historyState, '', location.href);
@@ -2879,10 +3320,107 @@ window.ModelStoreUI = (() => {
   return {render, restoreFromLocation};
 })();
 
+// Shared handoff to existing reviewed setup/load/default controls.
+window.ImageSetupNavigation = (() => {
+  const panel=domainText('section','','settings-section');panel.id='image-setup-handoff';panel.hidden=true;
+  byId('image-service-settings').prepend(panel);
+  let serial=0,opening=false,resumeComposer=null;
+  const active=()=>authenticated&&currentView==='settings'&&settingsSection==='models'&&
+    new URLSearchParams(location.search).get('models-screen')==='image';
+  function context(){
+    const value=history.state?.imageSetupReturn;
+    if(!value||!['store','chat','library','settings'].includes(value.view)||typeof value.url!=='string')return null;
+    try{const url=new URL(value.url,location.href);if(url.origin!==location.origin||url.pathname!==location.pathname)return null;}catch{return null;}
+    return value;
+  }
+  function render(){
+    const source=context();panel.hidden=!active()||!source;panel.replaceChildren();if(panel.hidden)return;
+    panel.append(domainText('h3',['store','settings'].includes(source.view)?'Set up this image model':'Set up image generation'));
+    if(source.model)panel.append(domainText('p',source.model,'muted'));
+    panel.append(domainText('p','Choose or resume a setup on this service. Loading and Apply changes remain separate.','muted'));
+    const actions=domainText('div','','dialog-actions');
+    const choose=domainButton('Choose or resume setup',()=>launch(),'quiet');choose.id='image-setup-choose';
+    choose.disabled=opening||!latest?.media_management;
+    const back=domainButton(source.view==='store'?'Return to model':source.view==='settings'?'Return to image settings':'Return to image composer',finish,'quiet');back.id='image-setup-return';
+    actions.append(choose,back);panel.append(actions);
+    if(!['store','settings'].includes(source.view))panel.append(domainText('p',resumeComposer?'Your image draft is kept while you configure this service.':'Return opens the image composer. Prompt drafts are not retained across reloads.','muted'));
+    if(!latest?.image_setup_drafts)panel.append(domainText('p','Saved setups need an updated host. Existing service configuration remains available.','muted'));
+  }
+  async function launch(){
+    if(!active()||opening||byId('role-model-picker').open)return;
+    const ticket=++serial,epoch=authEpoch;opening=true;render();
+    try{
+      await BrowserMedia.whenLoaded();
+      if(ticket!==serial||epoch!==authEpoch||!active())return;
+      const target=context()?.setupEndpoint;
+      if(target&&(byId('image-service-url').value.trim()!==target||byId('image-service-provider').value!=='sdcpp')){
+        if(SettingsDrafts.category('image-service').drafts.changed().length)throw Error('Apply or discard your service edits before continuing with another server.');
+        byId('image-service-provider').value='sdcpp';byId('image-service-provider').dispatchEvent(new Event('change'));
+        byId('image-service-url').value=target;byId('image-service-url').dispatchEvent(new Event('input'));
+      }
+      if(ticket!==serial||epoch!==authEpoch||!active())return;
+      if(!byId('image-service-url').value.trim()){
+        byId('image-settings-status').textContent='Enter your image service URL, then choose or resume a setup.';byId('image-service-url').focus();return;
+      }
+      if(byId('image-service-model-name-picker').disabled)return;
+      const id=new URLSearchParams(location.search).get('models-setup');
+      await RoleModelPicker.openImage({setupId:/^[a-f0-9]{64}$/.test(id||'')?id:'',installPlanId:new URLSearchParams(location.search).get('models-install-plan')||'',advanced:byId('image-service-provider').value!=='comfyui'});
+    }catch(error){if(active()&&epoch===authEpoch)byId('image-settings-status').textContent=error.message;}
+    finally{if(ticket===serial){opening=false;render();}}
+  }
+  function open({model='',resume=null,planId='',setupId='',targetEndpoint=''}={}){
+    if(!authenticated)return;
+    const previous={url:location.pathname+location.search+location.hash,view:currentView,
+      state:{...history.state},scroll:byId(currentView+'-view')?.scrollTop||0,
+      focus:document.activeElement?.id||'',model:String(model).slice(0,1000),setupEndpoint:targetEndpoint};
+    delete previous.state.imageSetupReturn;
+    resumeComposer=resume;
+    showView('settings',{section:'models'});ModelsSettingsNavigation.show('image',{restore:true,focus:true});
+    const url=new URL(location.href);url.searchParams.set('models-screen','image');url.searchParams.delete('models-setup');if(/^[a-f0-9]{64}$/.test(setupId))url.searchParams.set('models-setup',setupId);
+    if(latest?.image_install_plan_setup&&/^[a-f0-9]{64}$/.test(planId))url.searchParams.set('models-install-plan',planId);else url.searchParams.delete('models-install-plan');
+    history.replaceState({...history.state,imageSetupReturn:previous},'',url.pathname+url.search+url.hash);
+    if(!active())return;
+    render();launch();
+  }
+  function remember(identity,planId=''){
+    if(!active()||!context())return;
+    const url=new URL(location.href);if(identity)url.searchParams.set('models-setup',identity);else url.searchParams.delete('models-setup');
+    if(planId)url.searchParams.set('models-install-plan',planId);else url.searchParams.delete('models-install-plan');
+    history.replaceState(history.state,'',url.pathname+url.search+url.hash);
+  }
+  function finish(){
+    const source=context();if(!source||!ModelsSettingsNavigation.canLeave())return;
+    serial++;opening=false;byId('role-model-picker').close();
+    const resume=resumeComposer;resumeComposer=null;
+    const returnedState={...source.state,...(source.view==='store'?{storeSetupReturned:true}:{})};
+    history.replaceState(returnedState,'',source.url);
+    showView(source.view,{restore:true});
+    window.dispatchEvent(new PopStateEvent('popstate',{state:returnedState}));
+    requestAnimationFrame(()=>{
+      if(!authenticated||currentView!==source.view)return;
+      if(source.view==='store'){ModelStoreUI.restoreFromLocation();byId('store-view').scrollTop=source.scroll;byId(source.focus)?.focus({preventScroll:true});}
+      else if(resume)resume();else if(source.view==='settings'){byId('settings-view').scrollTop=source.scroll;byId(source.focus)?.focus({preventScroll:true});}else BrowserManagement.resumeImageSetup(source.view);
+    });
+    render();
+  }
+  document.addEventListener('klaude-view',()=>{if(!active()){serial++;opening=false;}render();});
+  document.addEventListener('klaude-snapshot',render);
+  document.addEventListener('klaude-auth-reset',()=>{
+    serial++;opening=false;resumeComposer=null;panel.hidden=true;panel.replaceChildren();
+    const state={...history.state};delete state.imageSetupReturn;
+    const url=new URL(location.href);url.searchParams.delete('models-setup');url.searchParams.delete('models-install-plan');history.replaceState(state,'',url.pathname+url.search+url.hash);
+  });
+  return {open,remember,render};
+})();
+
 window.RoleModelPicker = (() => {
   const dialog = byId('role-model-picker');
   let target = '', role = '', entries = [], pending = null, serial = 0, page = 1, epoch, imageEndpoint = '';
-  let imageProvider='',nativeData=null,nativeRecipe='',nativeModels={},nativeReceipt=null,nativeExpected=null,nativeBusy=false,nativePoll=null;
+  let imageProvider='',nativeData=null,nativeRecipe='',nativeFile=null,nativeModels={},nativeReceipt=null,nativeExpected=null,nativeBusy=false,nativePoll=null;
+  const dependencyPlans=new Map(),dependencyTransfers=new Map();
+  let dependencyProgressReady=false,dependencyProgressRead=null,dependencyProgressError='',dependencyGeneration=0;
+  let savedSetups=[],setupEvidence=null,setupNotice='';
+  const setupKey=()=>JSON.stringify([imageEndpoint,nativeRecipe,nativeModels]);
   const nativePanel=domainText('section','','image-model-setup');nativePanel.hidden=true;
   byId('role-picker-items').after(nativePanel);
   const nativeMode=()=>role==='image-generation'&&imageProvider==='sdcpp';
@@ -2893,6 +3431,12 @@ window.RoleModelPicker = (() => {
     if (!valid()) return;
     const field = byId(target);
     if (!field) return close();
+    if(role==='image-generation'&&imageProvider==='comfyui'){
+      if(!reference){byId('image-service-provider').value='comfyui';byId('image-service-provider').dispatchEvent(new Event('change'));byId('image-service-enabled').checked=false;field.value='';field.dispatchEvent(new Event('input',{bubbles:true}));close();return;}
+      if(!reference.startsWith('comfyui/'))return close();
+      if(byId('image-service-provider').value!=='comfyui'){byId('image-service-provider').value='comfyui';byId('image-service-provider').dispatchEvent(new Event('change'));}
+      field.value=reference.slice(8);field.dispatchEvent(new Event('input',{bubbles:true}));close();return;
+    }
     if (role === 'image-generation') {
       const match = /^ollama(?:@[^/]+)?\/(.+)$/.exec(reference);
       if (!match || byId('image-service-url').value.trim() !== imageEndpoint || byId('image-service-provider').value !== 'ollama') return close();
@@ -2906,9 +3450,12 @@ window.RoleModelPicker = (() => {
   function render() {
     if (!valid()) return;
     nativePanel.hidden=!nativeMode();
-    byId('role-picker-connection').closest('label').hidden=nativeMode();
+    if(role==='image-generation'){byId('role-picker-unset').hidden=imageProvider!=='comfyui';byId('role-picker-unset').textContent='Turn off image generation';}
+    if(byId('role-picker-managed-models'))byId('role-picker-managed-models').hidden=!nativeMode();
+    byId('role-picker-connection').closest('label').hidden=nativeMode()||imageProvider==='comfyui';
     byId('role-picker-refresh').parentElement.classList.toggle('image-picker-toolbar',nativeMode());
     if(nativeMode())return renderNative();
+    byId('role-picker-query').hidden=false;
     const query = byId('role-picker-query').value.trim().toLocaleLowerCase();
     const matches = entries.filter(entry => `${entry.name} ${entry.id}`.toLocaleLowerCase().includes(query));
     page = Math.max(1, Math.min(page, Math.ceil(matches.length / 20)));
@@ -2917,15 +3464,30 @@ window.RoleModelPicker = (() => {
       const row = domainButton('', () => select(entry.id, entry.name), 'store-row quiet');
       const icon = domainText('span', '', 'model-brand-icon'); setModelBrandIcon(icon, entry.id, '', {size: 32});
       const content = domainText('span', '', 'store-card-content');
-      content.append(domainText('strong', entry.name), domainText('small', entry.id, 'muted'),
-        domainText('small', role === 'image-generation' ? (entry.roles?.[role] === true ? 'Supports image generation' : entry.roles?.[role] === false ? 'Image generation not declared' : 'Image generation capability not verified') : entry.roles[role] === null ? 'Role capability not verified' : 'Compatible with this role', 'muted'));
-      row.append(icon, content); row.setAttribute('aria-pressed', String(role === 'image-generation' ? byId(target)?.value === entry.id.replace(/^ollama(?:@[^/]+)?\//, '') : byId(target)?.value === entry.id)); return row;
+      content.append(domainText('strong',entry.name));row.title=entry.id;
+      const note=role==='image-generation'?(imageProvider==='comfyui'?'On this device':entry.roles?.[role]===false?'Image generation not declared':entry.roles?.[role]!==true?'Capability unknown':''):entry.roles[role]===null?'Capability unknown':'';
+      if(note)content.append(domainText('small',note,'muted'));
+      row.append(icon, content); row.setAttribute('aria-pressed', String(role === 'image-generation' ? byId(target)?.value === entry.id.replace(/^(?:comfyui|ollama(?:@[^/]+)?)\//, '') : byId(target)?.value === entry.id)); return row;
     }));
-    if (!rows.length) byId('role-picker-items').append(domainText('p', 'No matching models in this connection.', 'muted'));
+    if (!rows.length && imageProvider!=='comfyui') byId('role-picker-items').append(domainText('p',query?'No matching models.':'No models in this connection.','muted'));
     updateDomainPager('role-picker', (page - 1) * 20, {items: rows, total: matches.length, page_size: 20, more: page * 20 < matches.length});
     byId('role-picker-pages').hidden = matches.length <= 20;
   }
   async function load() {
+    if(imageProvider==='comfyui'){
+      const id=++serial;pending?.abort();pending=new AbortController();entries=[];render();
+      try{
+        const data=await domainRequest('/api/v1/settings/models/image-bundles','POST',{action:'list'},{signal:pending.signal});
+        if(!valid()||id!==serial)return;
+        if(!data.pending)entries=(data.items||[{id:data.bundle.id,name:data.bundle.name,installed:data.installed}]).filter(item=>item.installed).map(item=>({id:'comfyui/'+item.id,name:item.name,roles:{'image-generation':true}}));
+        entries.sort((a,b)=>Number(b.id==='comfyui/'+byId(target).value)-Number(a.id==='comfyui/'+byId(target).value));
+        byId('role-picker-status').textContent=data.pending?(data.pending.state==='unknown'?'Installation needs checking.':'Installation in progress.'):entries.length?'':'No image models installed.';
+        render();
+        if(!entries.length)byId('role-picker-items').append(domainButton('Browse Store',()=>{close();StoreDesign.openImages();},'secondary'));
+        if(byId('image-service-provider').value!=='comfyui'&&imageEndpoint)byId('role-picker-items').append(domainButton('Advanced service models',()=>openImage({advanced:true}),'quiet'));
+      }catch(error){if(valid()&&id===serial)byId('role-picker-status').textContent=error.message;}
+      return;
+    }
     if(nativeMode())return loadNative();
     const id = ++serial, selected = byId('role-picker-connection').value;
     pending?.abort(); pending = new AbortController(); page = 1; entries = [];
@@ -2954,13 +3516,13 @@ window.RoleModelPicker = (() => {
       }
       entries = role === 'image-generation' ? result.models.filter(entry => /^ollama(?:@[^/]+)?\/.+/.test(entry.id)) : result.models.filter(entry => entry.roles?.[role] !== false);
       if (role === 'image-generation') entries.sort((a, b) => (b.roles?.[role] === true) - (a.roles?.[role] === true));
-      byId('role-picker-status').textContent = role === 'image-generation' ? (legacyImageCatalog ? 'Installed models are unverified. Restart the Web UI host and reload to check image generation capabilities.' : 'Installed models on this server. Use Test service to check the selected model before saving.') : 'Saving remains separate. Unknown capability labels are not a guarantee of provider support.'; render();
+      byId('role-picker-status').textContent = role === 'image-generation' ? (legacyImageCatalog ? 'Installed models are unverified. Restart the Web UI host and reload to check image generation capabilities.' : '') : ''; render();
     } catch (error) { if (valid() && serial === id && error.name !== 'AbortError') byId('role-picker-status').textContent = error.message; }
   }
   function decorate(select, label, roleName, connections) {
     const button = domainButton('', () => {
       imageProvider='';nativeRecipe='';nativePanel.hidden=true;
-      target = select.id; role = roleName; epoch = authEpoch; byId('role-picker-unset').hidden = false;
+      target = select.id; role = roleName; epoch = authEpoch; byId('role-picker-unset').hidden = false;byId('role-picker-unset').textContent='Unset';
       byId('role-picker-title').textContent = `Choose ${label.toLocaleLowerCase()} model`;
       byId('role-picker-query').value = '';
       byId('role-picker-connection').replaceChildren(...connections.filter(c => c.enabled).map(c => new Option(`${c.name} · ${c.backend}`, c.id)));
@@ -2973,7 +3535,7 @@ window.RoleModelPicker = (() => {
     const valueLabel = domainText('span', '', 'model-role-value');
     const arrow = domainText('span', '›', 'model-role-chevron'); arrow.setAttribute('aria-hidden', 'true');
     button.append(valueLabel, arrow);
-    const describe = () => { valueLabel.textContent = (select.value ? select.selectedOptions[0]?.textContent : 'Automatic / unconfigured') || 'Unconfigured'; button.title = select.value || 'Unset'; button.setAttribute('aria-label', `Choose ${label.toLocaleLowerCase()} model, ${valueLabel.textContent}`); };
+    const describe = () => { valueLabel.textContent = (select.value ? select.selectedOptions[0]?.textContent : 'Automatic') || 'Not set'; button.title = select.value || 'Unset'; button.setAttribute('aria-label', `Choose ${label.toLocaleLowerCase()} model, ${valueLabel.textContent}`); };
     select.addEventListener('change', describe); describe();
     select.hidden = true;
     queueMicrotask(() => { const fieldLabel = document.querySelector(`label[for="${select.id}"]`); if (fieldLabel) fieldLabel.htmlFor = button.id; });
@@ -2983,15 +3545,81 @@ window.RoleModelPicker = (() => {
     try { const url = new URL(value); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return ''; return url.href.replace(/\/+$/, ''); }
     catch { return ''; }
   }
-  async function openImage() {
+  let nativeInstallPlan='',planEvidence=null,planCheckError='';
+  async function checkInstallPlan(){
+    if(!nativeCurrent()||nativeBusy||!nativeInstallPlan||!latest?.image_install_plan_setup)return;
+    const generation=dependencyGeneration,identity=nativeInstallPlan;nativeBusy=true;planEvidence=null;planCheckError='';render();
+    try{
+      const result=await domainRequest('/api/v1/settings/models/image-install-plans','POST',{
+        action:'check-server',id:identity,endpoint:imageEndpoint,
+      });
+      if(!nativeCurrent()||generation!==dependencyGeneration||nativeInstallPlan!==identity)return;
+      planEvidence=result;nativeData=result.catalog;setupEvidence=null;
+    }catch(error){if(nativeCurrent()&&generation===dependencyGeneration){planCheckError=error.message;nativeData=null;}}
+    finally{if(nativeCurrent()&&generation===dependencyGeneration){nativeBusy=false;render();}}
+  }
+  function renderPlanHandoff(){
+    if(!nativeInstallPlan||!latest?.image_install_plan_setup)return;
+    const panel=domainText('section','','settings-section');panel.dataset.planHandoff='true';
+    panel.append(domainText('h3','Files from your installation plan'),domainText('p',
+      'Server paths are candidates. File contents and compatibility remain unverified. Review the files before loading.','muted'));
+    if(planCheckError){const error=domainText('p',planCheckError);error.setAttribute('role','status');panel.append(error);}
+    if(planEvidence)for(const component of planEvidence.components){
+      const row=domainText('div','','settings-row-group');row.dataset.planVisibility=component.visibility;
+      row.append(domainText('strong',component.label),domainText('p',component.visibility==='candidate'?
+        `Visible path candidate: ${component.candidates[0].id}`:component.visibility==='ambiguous'?
+        'Several server files match this path. Choose the exact file manually.':
+        `Not visible at the planned path: ${component.destination}`,'muted'));panel.append(row);
+    }
+    const actions=domainText('div','','dialog-actions');
+    const refresh=domainButton(nativeBusy?'Checking server…':'Check planned files',checkInstallPlan,'quiet');
+    refresh.dataset.planCheck='true';refresh.disabled=nativeBusy;actions.append(refresh);
+    if(planCheckError){
+      const detach=domainButton('Choose files without this plan',()=>{
+        nativeInstallPlan='';planEvidence=null;planCheckError='';setupEvidence=null;
+        nativeRecipe='';nativeFile=null;nativeModels={};
+        ImageSetupNavigation.remember('');setupNotice='Choose the server recipe and files manually.';
+        if(!nativeData)loadNative(false,true);else render();
+      },'quiet');detach.dataset.planDetach='true';detach.disabled=nativeBusy;actions.append(detach);
+    }
+    if(planEvidence){
+      const choose=domainButton('Use visible files',()=>{
+        const profile=planEvidence.plan.selection.profile;
+        const recipe=nativeData.recipes.find(item=>item.id===profile);
+        const primary=planEvidence.components.find(item=>item.slot==='primary');
+        nativeModels={};nativeFile=null;setupEvidence=null;
+        if(recipe){
+          nativeRecipe=recipe.id;
+          for(const slot of recipe.slots){
+            const component=planEvidence.components.find(item=>item.slot===slot.id||
+              item.slot==='primary'&&['model','diffusion_model'].includes(slot.id));
+            const file=component?.visibility==='candidate'?component.candidates[0]:null;
+            nativeModels[slot.id]=file&&slot.categories.includes(file.category)?file.id:'';
+          }
+        }else{
+          nativeRecipe='';nativeFile=primary?.visibility==='candidate'?primary.candidates[0]:null;
+        }
+        setupNotice='Visible files selected as a draft. Review the recipe and components; loading requires confirmation.';
+        render();nativePanel.querySelector('[data-model-slot], [data-native-recipe]')?.focus();
+      },'secondary');choose.dataset.planUse='true';choose.disabled=nativeBusy||Boolean(nativeData?.pending)||
+        !planEvidence.components.some(item=>item.visibility==='candidate');actions.append(choose);
+    }
+    panel.append(actions);nativePanel.append(panel);
+  }
+  async function openImage({setupId='',installPlanId='',advanced=false}={}) {
+    advanced=advanced||byId('image-service-advanced').open&&byId('image-service-provider').value!=='comfyui';
     target = 'image-service-model-name'; role = 'image-generation'; epoch = authEpoch;
     imageEndpoint = byId('image-service-url').value.trim();
-    imageProvider=byId('image-service-provider').value;nativeData=null;nativeRecipe='';nativeReceipt=null;nativeExpected=null;nativeBusy=false;
+    dependencyPlans.clear();dependencyTransfers.clear();dependencyProgressReady=false;dependencyProgressRead=null;dependencyProgressError='';dependencyGeneration++;
+    savedSetups=[];setupEvidence=null;setupNotice='';
+    nativeInstallPlan=/^[a-f0-9]{64}$/.test(installPlanId)?installPlanId:'';planEvidence=null;planCheckError='';
+    imageProvider=latest?.image_comfyui&&!advanced&&!setupId&&!installPlanId?'comfyui':byId('image-service-provider').value;nativeData=null;nativeRecipe='';nativeFile=null;nativeReceipt=null;nativeExpected=null;nativeBusy=false;
     byId('role-picker-title').textContent = 'Choose image model';
     byId('role-picker-unset').hidden = true; byId('role-picker-query').value = '';
     byId('role-picker-connection').replaceChildren(); entries = []; page = 1;
     dialog.showModal(); byId('role-picker-query').focus();
-    if(nativeMode()){render();return loadNative();}
+    if(imageProvider==='comfyui'){render();await load();return;}
+    if(nativeMode()){render();await loadNative(false,true);if(setupId&&nativeCurrent()&&nativeData&&latest?.image_setup_drafts)await restoreSetup(setupId);if(nativeInstallPlan&&nativeCurrent()&&nativeData)await checkInstallPlan();return;}
     const id = ++serial; pending?.abort(); pending = new AbortController();
     byId('role-picker-status').textContent = 'Loading connections…';
     try {
@@ -3007,13 +3635,13 @@ window.RoleModelPicker = (() => {
     } catch (error) { if (valid() && id === serial && error.name !== 'AbortError') byId('role-picker-status').textContent = error.message; }
   }
   async function loadNative(use=false,refresh=false) {
-    const id=++serial;pending?.abort();pending=new AbortController();nativeBusy=true;
+    const id=++serial;pending?.abort();pending=new AbortController();nativeBusy=true;setupEvidence=null;planEvidence=null;
     byId('role-picker-status').textContent='Loading image models…';render();
     try {
       if(!latest?.image_model_selection)throw new Error('Restart the WebUI host and reload to choose Stable Diffusion models.');
       const data=await domainRequest('/api/v1/settings/models/image-models','POST',{endpoint:imageEndpoint,refresh},{signal:pending.signal});
       if(!nativeCurrent()||id!==serial)return;
-      nativeData=data;nativeBusy=false;render();
+      nativeData=data;nativeBusy=false;render();loadDependencyProgress();loadSavedSetups();
       if(use&&nativeExpected&&data.runtime.recipe===nativeExpected.recipe&&
           Object.entries(nativeExpected.models).filter(([,file])=>file).every(([key,file])=>data.runtime.models[key]===file))await useLoaded();
     }catch(error){if(nativeCurrent()&&id===serial&&error.name!=='AbortError')byId('role-picker-status').textContent=error.message;}
@@ -3036,76 +3664,380 @@ window.RoleModelPicker = (() => {
       const recipe=nativeData?.recipes.find(item=>item.id===nativeRecipe);
       const complete=recipe&&recipe.slots.every(slot=>!slot.required||nativeModels[slot.id])&&
         (recipe.required_any||[]).every(group=>group.some(key=>nativeModels[key]));
-      load.disabled=nativeBusy||Boolean(nativeData?.pending)||nativeData?.runtime.state==='loading'||!complete;
+      const visible=recipe&&Object.entries(nativeModels).every(([key,value])=>!value||nativeData.files.some(file=>file.id===value&&recipe.slots.find(slot=>slot.id===key)?.categories.includes(file.category)));
+      load.disabled=nativeBusy||Boolean(nativeData?.pending)||nativeData?.runtime.state==='loading'||!complete||!visible||
+        (setupEvidence?.key===setupKey()&&!setupEvidence.readiness.can_review_load);
     }
     for(const node of nativePanel.querySelectorAll('select,[data-native-recover]'))node.disabled=nativeBusy||Boolean(nativeData?.pending&&nativeData.pending.state!=='unknown');
+    for(const node of nativePanel.querySelectorAll('[data-setup-save],[data-setup-check]'))node.disabled=nativeBusy||Boolean(nativeData?.pending)||node.dataset.setupSaved==='true';
+    for(const node of nativePanel.querySelectorAll('[data-install-dependency]'))node.disabled=nativeBusy||Boolean(nativeData?.pending);
   }
   function renderNative() {
+    if(latest?.image_comfyui){
+      let managed=byId('role-picker-managed-models');
+      if(!managed){managed=domainButton('Installed ComfyUI models',()=>{imageProvider='comfyui';render();load();},'quiet');managed.id='role-picker-managed-models';byId('role-picker-status').after(managed);}
+      managed.hidden=false;
+    }
     const list=byId('role-picker-items');list.replaceChildren();nativePanel.replaceChildren();
     byId('role-picker-pages').hidden=true;
-    byId('role-picker-query').hidden=Boolean(nativeRecipe);
+    byId('role-picker-query').hidden=Boolean(nativeRecipe||nativeFile);
+    renderPlanHandoff();
     if(!nativeData)return;
     const current=nativeData.runtime,state=nativeData.pending;
     byId('role-picker-status').textContent=nativeBusy?'Loading image models…':state?
       state.state==='unknown'?'Model loading is unconfirmed. Check the loaded state before another attempt.':'A shared model load is in progress.':
       current.state==='loading'?'The server is loading a model. Refresh to check its state.':
       !nativeData.files.length?'The server exposes no model files. Its model folder must include the downloaded weights. The currently loaded model remains available.':
-      'Choose a model setup and its files. Loading requires review; saving the image default stays separate.';
+      nativeRecipe?'Review this setup and its required components. Loading requires approval.':
+      nativeFile?'Choose a setup supported by this server for the selected file.':
+      'Select the current server model, continue a saved setup, or set up a downloaded file.';
     if(state?.state==='unknown'){
       const check=domainButton('Check loaded state',()=>reviewNative(true),'quiet');check.dataset.nativeRecover='true';nativePanel.append(check);
     }
+    if(setupNotice)nativePanel.append(domainText('p',setupNotice,'muted'));
     if(!nativeRecipe){
-      if(current.state==='ready'&&nativeData.model){
-        const loaded=domainButton('',useLoaded,'store-row quiet');
-        const text=domainText('span','','store-card-content');text.append(domainText('strong',nativeData.model),domainText('small','Currently loaded · Use as image generation model','muted'));
-        const icon=domainText('span','','model-brand-icon');setModelBrandIcon(icon,nativeData.model,'',{size:32});
-        loaded.append(icon,text);loaded.setAttribute('aria-pressed',String(byId(target)?.value===nativeData.model));loaded.disabled=nativeBusy||Boolean(state);list.append(loaded);
-      }
       const query=byId('role-picker-query').value.trim().toLocaleLowerCase();
-      const matches=nativeData.recipes.filter(item=>`${item.name} ${item.description}`.toLocaleLowerCase().includes(query));
+      if(!nativeFile){
+      if(current.state==='ready'&&nativeData.model&&(!query||nativeData.model.toLocaleLowerCase().includes(query))){
+        list.append(domainText('h3','Current server model'),domainText('p','Loaded on this server. Selecting it creates a settings draft; Apply saves the default. Generation has not been tested.','muted'));
+        const loaded=domainButton('',useLoaded,'store-row quiet');
+        const text=domainText('span','','store-card-content');text.append(domainText('strong',nativeData.model),domainText('small','Loaded · Select as image default','muted'));
+        const icon=domainText('span','','model-brand-icon');setModelBrandIcon(icon,nativeData.model,'',{size:32});
+        loaded.append(icon,text,domainText('span','Select','image-picker-action'));loaded.setAttribute('aria-pressed',String(byId(target)?.value===nativeData.model));loaded.disabled=nativeBusy||Boolean(state);list.append(loaded);
+      }
+      const matchingSetups=savedSetups.filter(item=>!query||`${item.name} ${Object.values(item.models).join(' ')}`.toLocaleLowerCase().includes(query));
+      if(latest?.image_setup_drafts&&matchingSetups.length){
+        list.append(domainText('h3','Saved image setups'),domainText('p','Continue a saved selection. Klaude checks its current files and server state before loading.','muted'));
+        for(const item of matchingSetups){
+          const row=domainButton('',()=>restoreSetup(item.id),'store-row quiet');
+          row.dataset.savedSetup=item.id;row.disabled=nativeBusy;
+          const copy=domainText('span','','store-card-content');
+          copy.append(domainText('strong',item.name),domainText('small',Object.values(item.models).filter(Boolean).join(' · ')||'No components selected','muted'),domainText('small','Saved setup · Check before use','muted'));
+          const icon=domainText('span','','model-brand-icon');setModelBrandIcon(icon,item.name,'',{size:32});
+          row.append(icon,copy,domainText('span','Continue','image-picker-action'));
+          const forget=domainButton('Forget saved setup',()=>forgetSetup(item.id),'quiet');forget.disabled=nativeBusy;
+          const group=domainText('div','','settings-row-group'),actions=domainText('div','','dialog-actions');actions.append(forget);group.append(row,actions);list.append(group);
+        }
+      }
+      const matches=nativeData.files.filter(file=>['checkpoints','diffusion_models'].includes(file.category)&&
+        file.name.toLocaleLowerCase().includes(query));
       page=Math.max(1,Math.min(page,Math.ceil(matches.length/20)||1));
-      for(const recipe of matches.slice((page-1)*20,page*20)){
-        const row=domainButton('',()=>{nativeRecipe=recipe.id;nativeModels={};
-          for(const slot of recipe.slots){const value=recipe.models?.[slot.id];nativeModels[slot.id]=nativeData.files.some(file=>file.id===value&&slot.categories.includes(file.category))?value:'';}render();},'store-row quiet');
-        const content=domainText('span','','store-card-content');content.append(domainText('strong',recipe.name));
-        if(recipe.description)content.append(domainText('small',recipe.description,'muted'));
-        const icon=domainText('span','','model-brand-icon');setModelBrandIcon(icon,recipe.name,'',{size:32});
-        row.append(icon,content);row.setAttribute('aria-label',`Configure ${recipe.name}`);row.disabled=nativeBusy||Boolean(state);list.append(row);
+      if(matches.length)list.append(domainText('h3','Downloaded files · setup required'),
+        domainText('p','These are weight files visible to the server. Choose one to review its recipe and components.','muted'));
+      for(const file of matches.slice((page-1)*20,page*20)){
+        const row=domainButton('',()=>{nativeFile=file;nativeRecipe='';render();},'store-row quiet');
+        const content=domainText('span','','store-card-content');
+        content.append(domainText('strong',file.name),domainText('small',`${file.category==='diffusion_models'?'Diffusion weights':'Checkpoint'} · Needs setup`,'muted'));
+        const icon=domainText('span','','model-brand-icon');setModelBrandIcon(icon,file.name,'',{size:32});
+        row.append(icon,content,domainText('span','Set up','image-picker-action'));row.setAttribute('aria-label',`Set up ${file.name}`);
+        row.disabled=nativeBusy||Boolean(state);list.append(row);
       }
       updateDomainPager('role-picker',(page-1)*20,{items:matches.slice((page-1)*20,page*20),total:matches.length,page_size:20,more:page*20<matches.length});
       byId('role-picker-pages').hidden=matches.length<=20;
+      }else{
+        const back=domainButton('Back to image models',()=>{nativeFile=null;render();byId('role-picker-query').focus();},'quiet');
+        nativePanel.append(back,domainText('h3',nativeFile.name),domainText('p','Downloaded file · Setup required before this model can be loaded.','muted'));
+        const label=domainText('label','Model setup'),select=document.createElement('select');
+        select.dataset.nativeRecipe='true';select.append(new Option('Choose a compatible setup',''));
+        for(const recipe of nativeData.recipes.filter(item=>item.slots.some(slot=>
+          ['model','diffusion_model'].includes(slot.id)&&slot.categories.includes(nativeFile.category))))
+          select.append(new Option(recipe.name,recipe.id));
+        select.addEventListener('change',()=>{
+          nativeRecipe=select.value;nativeModels={};
+          const recipe=nativeData.recipes.find(item=>item.id===nativeRecipe);
+          if(recipe)for(const slot of recipe.slots){
+            const value=recipe.models?.[slot.id];
+            nativeModels[slot.id]=['model','diffusion_model'].includes(slot.id)&&slot.categories.includes(nativeFile.category)?nativeFile.id:
+              nativeData.files.some(file=>file.id===value&&slot.categories.includes(file.category))?value:'';
+          }
+          render();
+        });
+        label.append(select);nativePanel.append(label);
+      }
     }else{
       const recipe=nativeData.recipes.find(item=>item.id===nativeRecipe);
       if(!recipe){nativeRecipe='';return render();}
-      nativePanel.append(domainButton('Model setups',()=>{nativeRecipe='';render();},'quiet'),domainText('h3',recipe.name));
+      nativePanel.append(domainButton('Back to image models',()=>{nativeRecipe='';nativeFile=null;render();},'quiet'),domainText('h3',recipe.name));
       for(const slot of recipe.slots){
         const label=domainText('label',slot.label+(slot.required?' · Required':' · Optional'));
         const select=document.createElement('select');select.dataset.modelSlot=slot.id;
         select.append(new Option('Choose model file',''),...nativeData.files.filter(file=>slot.categories.includes(file.category)).map(file=>new Option(file.name,file.id)));
-        select.value=nativeModels[slot.id]||'';select.addEventListener('change',()=>{nativeModels[slot.id]=select.value;renderNativeActions();});
+        select.value=nativeModels[slot.id]||'';select.addEventListener('change',()=>{nativeModels[slot.id]=select.value;setupEvidence=null;render();nativePanel.querySelector(`[data-model-slot="${CSS.escape(slot.id)}"]`)?.focus();});
         label.append(select);nativePanel.append(label);
       }
       for(const group of recipe.required_any||[])nativePanel.append(domainText('p','Choose at least one: '+group.map(key=>recipe.slots.find(slot=>slot.id===key)?.label||key).join(' or '),'muted'));
+      const dependencies=domainText('section','','image-dependencies');dependencies.dataset.imageDependencies='true';nativePanel.append(dependencies);renderDependencies(recipe,dependencies);
+      renderSetupDraft();
       const actions=domainText('div','','dialog-actions'),load=domainButton('Load and use model',()=>reviewNative());load.dataset.nativeLoad='true';actions.append(load);nativePanel.append(actions);
     }
     renderNativeActions();
   }
+  async function loadSavedSetups(){
+    if(!nativeCurrent()||!latest?.image_setup_drafts)return;
+    const generation=dependencyGeneration;
+    try{
+      const result=await domainRequest('/api/v1/settings/models/image-setups','POST',{action:'list',endpoint:imageEndpoint});
+      if(!nativeCurrent()||generation!==dependencyGeneration)return;
+      savedSetups=result.items;if(!nativeRecipe)render();
+    }catch(error){if(nativeCurrent()&&generation===dependencyGeneration){setupNotice='Saved setups unavailable. '+error.message;if(!nativeRecipe)render();}}
+  }
+  function renderSetupDraft(){
+    if(!latest?.image_setup_drafts)return;
+    const section=domainText('section','','image-setup-readiness');
+    section.append(domainText('h3','Save this setup'));
+    section.append(domainText('p','Keep this selection to reopen later. Downloads, loading and defaults stay separate.','muted'));
+    const current=setupEvidence?.key===setupKey()?setupEvidence:null;
+    const actions=domainText('div','','dialog-actions');
+    if(current){
+      const status=domainText('p',current.readiness.headline);status.setAttribute('role','status');status.dataset.setupReadiness='true';section.append(status);
+      section.append(domainText('p','Compatibility and image generation are unverified.','muted'));
+      const check=domainButton('Check setup',()=>restoreSetup(current.id),'quiet');check.dataset.setupCheck='true';actions.append(check);
+    }
+    const save=domainButton(current?'Saved':'Save setup',saveSetup,'quiet');save.dataset.setupSave='true';save.dataset.setupSaved=String(Boolean(current));actions.append(save);section.append(actions);nativePanel.append(section);
+  }
+  async function forgetSetup(identity){
+    if(!nativeCurrent()||nativeBusy)return;
+    const generation=dependencyGeneration;nativeBusy=true;render();
+    try{
+      await domainRequest('/api/v1/settings/models/image-setups','POST',{action:'forget',id:identity});
+      if(!nativeCurrent()||generation!==dependencyGeneration)return;
+      savedSetups=savedSetups.filter(item=>item.id!==identity);setupNotice='Saved selection forgotten. Model files and running operations are unchanged.';
+    }catch(error){if(nativeCurrent()&&generation===dependencyGeneration)setupNotice=error.message;}
+    finally{if(nativeCurrent()&&generation===dependencyGeneration){nativeBusy=false;render();}}
+  }
+  async function saveSetup(){
+    if(!nativeCurrent()||nativeBusy||!nativeData||!nativeRecipe)return;
+    const generation=dependencyGeneration,key=setupKey();nativeBusy=true;renderNativeActions();
+    try{
+      const result=await domainRequest('/api/v1/settings/models/image-setups','POST',{
+        action:'save',endpoint:imageEndpoint,recipe:nativeRecipe,models:{...nativeModels},catalog_revision:nativeData.catalog_revision,
+        ...(nativeInstallPlan&&latest?.image_install_plan_setup?{install_plan:nativeInstallPlan}:{}),
+      });
+      if(!nativeCurrent()||generation!==dependencyGeneration||key!==setupKey())return;
+      ImageSetupNavigation.remember(result.id,nativeInstallPlan);setupEvidence={...result,key};setupNotice='Setup saved. Reopen it from Saved setups in this server’s model picker.';
+      loadSavedSetups();
+    }catch(error){if(nativeCurrent()&&generation===dependencyGeneration)setupNotice=error.message;}
+    finally{if(nativeCurrent()&&generation===dependencyGeneration){nativeBusy=false;render();}}
+  }
+  async function restoreSetup(identity){
+    if(!nativeCurrent()||nativeBusy)return;
+    const generation=dependencyGeneration;nativeBusy=true;renderNativeActions();
+    try{
+      const result=await domainRequest('/api/v1/settings/models/image-setups','POST',{action:'check',id:identity});
+      if(!nativeCurrent()||generation!==dependencyGeneration)return;
+      if(endpointKey(result.selection.endpoint)!==endpointKey(imageEndpoint))throw Error('This setup belongs to another image server.');
+      if(!result.catalog||result.readiness.recipe==='changed'){
+        setupEvidence=null;setupNotice=result.readiness.headline+'. The saved selection was kept. Refresh the server and choose its current setup before loading.';
+        // Invalidate an earlier successful check and prevent stale load controls.
+        nativeData=null;nativeRecipe='';return;
+      }
+      nativeInstallPlan=result.selection.install_plan||'';planEvidence=null;planCheckError='';
+      nativeData=result.catalog;nativeRecipe=result.selection.recipe.id;nativeModels={...result.selection.models};
+      ImageSetupNavigation.remember(result.id,nativeInstallPlan);nativeFile=null;setupEvidence={...result,key:setupKey()};setupNotice='Saved setup reopened. Check its state before loading.';
+      loadDependencyProgress();
+    }catch(error){if(nativeCurrent()&&generation===dependencyGeneration){setupEvidence=null;nativeData=null;nativeRecipe='';setupNotice=error.message;}}
+    finally{if(nativeCurrent()&&generation===dependencyGeneration){nativeBusy=false;render();if(!nativeData)byId('role-picker-status').textContent=setupNotice;}}
+  }
+  function dependencyKey(){return JSON.stringify([serial,imageEndpoint,nativeRecipe,nativeModels]);}
+  const transferActive=record=>['accepted','running','cancelling'].includes(record.state);
+  function startNativePolling(){
+    if(nativePoll)return;
+    nativePoll=setInterval(()=>{
+      if(!nativeCurrent())return;
+      if(nativeReceipt)loadOperations();
+      if([...dependencyTransfers.values()].some(transferActive))loadDependencyProgress();
+      else if(!nativeReceipt){clearInterval(nativePoll);nativePoll=null;}
+    },1000);
+  }
+  function matchingTransfer(item){
+    const matches=[...dependencyTransfers.values()].reverse().filter(record=>
+      record.model===item.draft.model&&record.category===item.draft.category)
+      .sort((a,b)=>(b.updated_at||0)-(a.updated_at||0));
+    return matches.find(record=>transferActive(record)||record.state==='unknown')||matches[0];
+  }
+  function redrawDependencies(){
+    if(!nativeCurrent())return;
+    const recipe=nativeData?.recipes.find(item=>item.id===nativeRecipe);
+    const holder=nativePanel.querySelector('[data-image-dependencies]');
+    if(recipe&&holder)renderDependencies(recipe,holder);
+  }
+  async function loadDependencyProgress(){
+    if(!nativeCurrent()||dependencyProgressRead)return;
+    const ticket={},generation=dependencyGeneration;dependencyProgressRead=ticket;
+    try{
+      const result=await domainRequest('/api/v1/models/downloads');
+      if(!nativeCurrent()||generation!==dependencyGeneration)return;
+      let refresh=false;
+      for(const job of [...result.items].reverse()){
+        if(job.kind!=='model-image-download')continue;
+        const before=dependencyTransfers.get(job.request_id);
+        if(before&&before.state!=='completed'&&job.state==='completed')refresh=true;
+        dependencyTransfers.delete(job.request_id);
+        dependencyTransfers.set(job.request_id,{...before,...job});
+      }
+      dependencyProgressReady=true;dependencyProgressError='';
+      if([...dependencyTransfers.values()].some(transferActive))startNativePolling();
+      if(refresh){dependencyPlans.clear();await loadNative(false,true);}
+      else redrawDependencies();
+    }catch(error){
+      if(nativeCurrent()&&generation===dependencyGeneration){
+        dependencyProgressReady=true;dependencyProgressError=error.message;redrawDependencies();
+      }
+    }finally{if(dependencyProgressRead===ticket)dependencyProgressRead=null;}
+  }
+  function renderDependencies(recipe,holder){
+    const focused=holder.contains(document.activeElement)?document.activeElement.dataset.dependencyFocus:'';
+    holder.replaceChildren();
+    const incomplete=recipe.slots.some(slot=>slot.required&&!nativeModels[slot.id])||
+      recipe.required_any.some(group=>!group.some(key=>nativeModels[key]));
+    const pendingForRecipe=[...dependencyTransfers.values()].filter(record=>
+      record.recipe===nativeRecipe&&transferActive(record));
+    if(!latest?.image_model_dependencies)return;
+    if(!incomplete&&!pendingForRecipe.length){
+      if([...dependencyTransfers.values()].some(record=>record.recipe===nativeRecipe&&record.state==='completed'))
+        holder.append(domainText('p','All required components are ready. Review loading below.','muted'));
+      return;
+    }
+    holder.append(domainText('h3','Required components'));
+    if(nativeBusy){holder.append(domainText('p','Refreshing component inventory…','muted'));return;}
+    if(!dependencyProgressReady){holder.append(domainText('p','Checking downloads…','muted'));return;}
+    if(dependencyProgressError)holder.append(domainText('p',dependencyProgressError,'muted'),
+      domainButton('Refresh downloads',()=>loadDependencyProgress(),'quiet'));
+    const key=dependencyKey();let plan=dependencyPlans.get(key);
+    if(!plan){
+      plan={loading:true};dependencyPlans.set(key,plan);
+      while(dependencyPlans.size>12)dependencyPlans.delete(dependencyPlans.keys().next().value);
+      domainRequest('/api/v1/settings/models/image-dependencies','POST',{
+        endpoint:imageEndpoint,recipe:nativeRecipe,models:{...nativeModels},
+      }).then(result=>{
+        if(!nativeCurrent()||!dependencyPlans.has(key))return;
+        dependencyPlans.set(key,result);
+        if(key!==dependencyKey())return;
+        for(const item of result.components){
+          const record=matchingTransfer(item);
+          if(item.available&&record?.state==='completed'&&record.recipe===nativeRecipe&&!nativeModels[item.slot]){
+            nativeModels[item.slot]=item.available;
+            const field=nativePanel.querySelector(`[data-model-slot="${item.slot}"]`);
+            if(field)field.value=item.available;
+          }
+        }
+        renderNativeActions();redrawDependencies();
+      }).catch(error=>{
+        if(!nativeCurrent()||!dependencyPlans.has(key))return;
+        dependencyPlans.set(key,{error:error.message});
+        if(key===dependencyKey())redrawDependencies();
+      });
+    }
+    if(plan.loading){holder.append(domainText('p','Checking required downloads…','muted'));return;}
+    if(plan.error){
+      holder.append(domainText('p',plan.error,'muted'),domainButton('Retry dependency check',()=>{
+        dependencyPlans.delete(key);renderDependencies(recipe,holder);
+      },'quiet'));return;
+    }
+    const parallel=Boolean(latest?.image_model_parallel_downloads);
+    const activeTransfer=[...dependencyTransfers.values()].some(transferActive);
+    const components=[...plan.components];
+    for(const record of pendingForRecipe)if(record.offer&&!components.some(item=>item.slot===record.offer.slot))
+      components.push(record.offer);
+    holder.append(domainText('p',components.length?
+      `${plan.total_bytes?fileSize(plan.total_bytes)+' of required files. ':''}You can download components together. Each download needs approval; loading stays separate.`:
+      'No verified download recommendation is available. Select compatible installed files.','muted'));
+    if(!parallel&&activeTransfer)holder.append(domainText('p',
+      'Restart Klaude to enable simultaneous component downloads. Pause active downloads first.','muted'));
+    for(const item of components){
+      const record=matchingTransfer(item),row=domainText('div','','setting-row image-dependency-row');
+      row.dataset.dependencySlot=item.slot;
+      const content=domainText('div');content.append(domainText('strong',item.label),
+        domainText('p',`${item.filename} · ${fileSize(item.size)}`,'muted'));
+      const source=domainText('a','Source','muted');source.href=item.source_url;source.target='_blank';source.rel='noopener noreferrer';content.append(source);
+      const controls=domainText('div','','dialog-actions');
+      const addControl=(label,glyph,action)=>{
+        const button=domainButton('',()=>controlDependency(record,action),'quiet icon-button');
+        button.setAttribute('aria-label',label);button.title=label;button.append(libraryIcon(glyph));
+        button.dataset.dependencyControl=action;button.dataset.slot=item.slot;
+        button.dataset.dependencyFocus=item.slot+':'+action;button.disabled=Boolean(record.changing);
+        controls.append(button);
+      };
+      if(record&&(transferActive(record)||record.state==='unknown'||(!item.available&&['failed','cancelled'].includes(record.state)))){
+        let status=record.paused?'Paused':({accepted:'Queued',running:'Downloading',cancelling:'Pausing…',unknown:'Needs check',failed:'Stopped or failed',cancelled:'Stopped'}[record.state]||record.state);
+        if(record.progress?.completed>0)status+=` · ${fileSize(record.progress.completed)} / ${fileSize(item.size)}`;
+        const progress=domainText('p',status,'muted');progress.dataset.dependencyStatus=item.slot;content.append(progress);
+        if(record.error)content.append(domainText('p',record.error,'muted'));
+        if(['accepted','running'].includes(record.state)){
+          addControl('Pause download','pause','pause');addControl('Stop download','close','cancel');
+        }else if(record.state==='unknown')addControl('Check download status','refresh','reconcile');
+        else if(['failed','cancelled'].includes(record.state))addControl('Resume download','play','resume');
+      }else{
+        const action=domainButton(item.available?'Use installed':'Install',()=>{
+          if(item.available){
+            const field=nativePanel.querySelector(`[data-model-slot="${item.slot}"]`);
+            if(field){field.value=item.available;field.dispatchEvent(new Event('change'));}
+          }else installDependency(item);
+        },'quiet');
+        action.dataset.installDependency=item.slot;action.dataset.dependencyFocus=item.slot+':install';
+        action.disabled=nativeBusy||Boolean(nativeData.pending)||
+          (!item.available&&(Boolean(dependencyProgressError)||(!parallel&&activeTransfer)));
+        controls.append(action);
+      }
+      row.append(content,controls);holder.append(row);
+    }
+    if(plan.unresolved.length)holder.append(domainText('p','Other required files need manual selection.','muted'));
+    if(focused)holder.querySelector(`[data-dependency-focus="${focused}"]`)?.focus({preventScroll:true});
+  }
+  async function controlDependency(record,action){
+    if(!nativeCurrent()||record.changing)return;
+    const generation=dependencyGeneration;
+    record.changing=true;record.error='';redrawDependencies();
+    try{
+      const result=await domainRequest('/api/v1/models/'+action,'POST',{
+        request_id:record.request_id,...(action==='resume'?{new_request_id:requestId()}:{}),
+      });
+      if(!nativeCurrent()||generation!==dependencyGeneration)return;
+      if(action==='resume')dependencyTransfers.delete(record.request_id);
+      const updated={...record,...result,changing:false,paused:action==='pause'||(action!=='resume'&&record.paused)};
+      dependencyTransfers.set(result.request_id,updated);startNativePolling();
+      if(updated.state==='completed'){dependencyPlans.clear();await loadNative(false,true);}
+      await loadDependencyProgress();
+    }catch(error){if(nativeCurrent()&&generation===dependencyGeneration)record.error=error.message;}
+    finally{record.changing=false;if(generation===dependencyGeneration)redrawDependencies();}
+  }
+  async function installDependency(item){
+    if(!nativeCurrent()||nativeBusy)return;
+    const record=matchingTransfer(item);
+    if(record&&(transferActive(record)||record.state==='unknown'))return;
+    const selected=nativeRecipe,generation=dependencyGeneration;nativeBusy=true;renderNativeActions();
+    try{
+      await prepareChange(item.draft,{
+        downloadDestination:`Local Stable Diffusion models · ${item.draft.category}`,
+        current:()=>nativeCurrent()&&nativeRecipe===selected&&generation===dependencyGeneration,
+        onAccepted:receipt=>{if(!nativeCurrent()||generation!==dependencyGeneration)return;
+          dependencyTransfers.set(receipt.request_id,{...receipt,recipe:selected,offer:item,
+            model:item.draft.model,category:item.draft.category});
+          nativeBusy=false;render();startNativePolling();
+          if(receipt.state==='completed'){dependencyPlans.clear();loadNative(false,true);}
+          else loadDependencyProgress();},
+        onDiscard:()=>{if(nativeCurrent()&&generation===dependencyGeneration){nativeBusy=false;render();}},
+      });
+    }catch(error){if(nativeCurrent()&&generation===dependencyGeneration)byId('role-picker-status').textContent=error.message;}
+    finally{if(nativeCurrent()&&generation===dependencyGeneration){nativeBusy=false;renderNativeActions();}}
+  }
   async function reviewNative(recover=false) {
     if(!nativeCurrent()||nativeBusy||!nativeData)return;
-    const data=nativeData,selected=nativeRecipe,models={...nativeModels};nativeBusy=true;renderNativeActions();
+    const data=nativeData,selected=nativeRecipe,models={...nativeModels},generation=dependencyGeneration;nativeBusy=true;renderNativeActions();
     try {
       await prepareChange(recover?{operation:'image-model-recover',endpoint:imageEndpoint,target:data.pending.request_id}:
         {operation:'image-model-load',endpoint:imageEndpoint,recipe:selected,models,catalog_revision:data.catalog_revision,runtime_revision:data.runtime_revision},{
           current:()=>nativeCurrent(),
-          onAccepted:receipt=>{if(!nativeCurrent())return;nativeReceipt=receipt;nativeExpected=recover?null:{recipe:selected,models};nativeData.pending=receipt;nativeBusy=false;render();
-            clearInterval(nativePoll);nativePoll=setInterval(()=>{if(nativeCurrent())loadOperations();},1000);},
+          onAccepted:receipt=>{if(!nativeCurrent()||generation!==dependencyGeneration)return;nativeReceipt=receipt;nativeExpected=recover?null:{recipe:selected,models};nativeData.pending=receipt;nativeBusy=false;render();
+            startNativePolling();},
           onDiscard:()=>{if(nativeCurrent()){nativeBusy=false;renderNativeActions();}},
         });
     }catch(error){if(nativeCurrent())byId('role-picker-status').textContent=error.message;}
     finally{if(nativeCurrent()){nativeBusy=false;renderNativeActions();}}
   }
   document.addEventListener('klaude-operations',event=>{
-    if(!nativeCurrent()||!nativeReceipt)return;
+    if(!nativeCurrent())return;
+    if(!nativeReceipt)return;
     const receipt=event.detail.find(item=>item.request_id===nativeReceipt.request_id);if(!receipt)return;
     nativeReceipt=receipt;nativeData.pending=receipt;
     if(['completed','failed','cancelled','unknown'].includes(receipt.state)){
@@ -3125,10 +4057,10 @@ window.RoleModelPicker = (() => {
     byId(`role-picker-${action}`).addEventListener('click', () => { page += delta; render(); });
   }
   byId('role-picker-numbers').addEventListener('click', event => { const b = event.target.closest('[data-page]'); if (b) { page = Number(b.dataset.page); render(); } });
-  dialog.addEventListener('close', () => { if (dialog.open) return; serial++; pending?.abort(); entries = [];nativeData=null;nativeReceipt=null;nativeExpected=null;nativeRecipe='';clearInterval(nativePoll);nativePoll=null;nativePanel.replaceChildren(); byId('role-picker-query').hidden=false;byId('role-picker-connection').closest('label').hidden=false;byId('role-picker-items').replaceChildren(); byId(target + '-picker')?.focus(); });
+  dialog.addEventListener('close', () => { if (dialog.open) return; savedSetups=[];setupEvidence=null;setupNotice='';nativeInstallPlan='';planEvidence=null;planCheckError='';serial++; pending?.abort();dependencyPlans.clear();dependencyTransfers.clear();dependencyProgressReady=false;dependencyProgressRead=null;dependencyProgressError='';dependencyGeneration++; entries = [];nativeData=null;nativeReceipt=null;nativeExpected=null;nativeRecipe='';clearInterval(nativePoll);nativePoll=null;nativePanel.replaceChildren(); byId('role-picker-query').hidden=false;byId('role-picker-connection').closest('label').hidden=false;byId('role-picker-items').replaceChildren(); byId(target + '-picker')?.focus(); });
   document.addEventListener('klaude-view', () => { if (!valid()) close(); });
   document.addEventListener('klaude-auth-reset', () => { close(); byId('role-picker-query').value = ''; });
-  return {decorate};
+  return {decorate,openImage};
 })();
 
 window.ModelConnectionsUI = (() => {
@@ -3139,6 +4071,147 @@ window.ModelConnectionsUI = (() => {
   const currentConnection = () => latest?.model_connection || `default-${latest?.provider?.replaceAll('_', '-')}`;
   const locked = () => !data?.management_allowed || pending || Boolean(data.pending) || Boolean(latest?.active_turn_id) || Boolean(latest?.queue?.length);
   let editorTrigger = null;
+  let guided=false,guideTarget='',guideOperation=null,guideReview=false,guideTest=null,guideNotice='',guidePoll=null;
+  const guidePanel=byId('model-connection-setup');
+  const definition=byId('model-connection-definition'),definitionDisclosure=document.createElement('details');
+  const definitionSummary=domainText('summary','1. Provider and connection · Saved');
+  definitionDisclosure.id='connection-guide-definition';definitionDisclosure.className='settings-disclosure';
+  definition.before(definitionDisclosure);definitionDisclosure.append(decorateDisclosure(definitionSummary),definition);
+  let definitionKey='';
+
+  const credentialStage=domainText('section','','domain-fields');
+  const credentialHeading=domainText('h3','2. Credential'),credentialStatus=domainText('p','','muted');
+  const credentialActions=domainText('div','','dialog-actions');
+  const credentialReview=domainButton('Review credential',()=>{
+    const item=data?.connections.find(item=>item.id===guideTarget),value=byId('model-credential-value').value;
+    if(!item||!value){guideNotice='Enter a credential before reviewing it.';renderGuide();byId('model-credential-value').focus();return;}
+    guideChange({operation:'model-connection-credential',connection:item.id,revision:item.revision,value});
+  },'quiet');credentialReview.id='connection-guide-credential';credentialActions.append(credentialReview);
+  guidePanel.before(credentialStage);credentialStage.append(credentialHeading,credentialStatus,byId('model-credential-fields'),credentialActions);
+
+  const guideKey=item=>item?`${item.id}:${item.revision}:${item.credential_set}`:'';
+  function clearGuideRoute(){
+    const url=new URL(location.href);url.searchParams.delete('connection-setup');url.searchParams.delete('connection-request');
+    history.replaceState(history.state,'',url.pathname+url.search+url.hash);
+  }
+  function closeEditor(){clearGuideRoute();byId('model-credential-value').value='';dialog.close();}
+  function guideLocation(){
+    const url=new URL(location.href);
+    if(guideTarget)url.searchParams.set('connection-setup',guideTarget);else url.searchParams.delete('connection-setup');
+    if(guideOperation)url.searchParams.set('connection-request',guideOperation.request_id);else url.searchParams.delete('connection-request');
+    history.replaceState(history.state,'',url.pathname+url.search+url.hash);
+  }
+  function renderGuide(){
+    if(!guided||!dialog.open){definitionDisclosure.open=true;definitionSummary.hidden=true;definition.querySelector('h3').hidden=false;guidePanel.hidden=true;credentialStage.hidden=mode!=='credential'||!dialog.open;credentialHeading.hidden=true;credentialStatus.hidden=true;credentialActions.hidden=true;return;}
+    guidePanel.hidden=false;guidePanel.replaceChildren();
+    const item=data?.connections.find(item=>item.id===guideTarget);
+    if(item){
+      selected=item;
+      byId('model-connection-name').value=item.name;byId('model-connection-url').value=item.url||'';
+      byId('model-connection-source').value=item.source;byId('model-connection-adapter').value=item.backend;
+      byId('model-connection-authentication').checked=item.authentication;
+    }
+    definitionSummary.hidden=!item;definition.querySelector('h3').hidden=Boolean(item);
+    if(item&&definitionKey!==item.id){definitionDisclosure.open=false;definitionKey=item.id;}
+    if(!item)definitionDisclosure.open=true;
+    const busy=pending||guideReview||Boolean(guideOperation)||Boolean(data?.pending)||Boolean(latest?.active_turn_id)||Boolean(latest?.queue?.length);
+    for(const input of byId('model-connection-definition').querySelectorAll('input,select'))input.disabled=Boolean(guideTarget)||busy;
+    byId('model-connection-submit').hidden=Boolean(guideTarget);
+    byId('model-connection-submit').disabled=busy;
+    byId('model-connection-submit').textContent='Review disabled connection';
+    byId('model-credential-fields').hidden=!item?.authentication;
+    byId('model-credential-value').disabled=busy||!item?.credential_editable||currentConnection()===item?.id;
+    byId('model-credential-remove').hidden=true;
+    guidePanel.append(domainText('p',guideTarget?item?`Definition saved · ${item.enabled?'Enabled':'Disabled'} · ${item.name}`:'Checking the saved connection…':'Save a disabled definition first. Credentials and enabling each have their own review.','muted'));
+    if(guideNotice){const status=domainText('p',guideNotice);status.setAttribute('role','status');guidePanel.append(status);}
+    if(guideOperation)guidePanel.append(domainText('p',guideOperation.state==='unknown'?'Save outcome unconfirmed. Check saved state before another change.':'Saving this stage. You can close and resume setup.','muted'));
+    const action=(label,run,id,disabled=busy)=>{const button=domainButton(label,run,'quiet');button.id=id;button.disabled=disabled;return button;};
+    if(data?.pending?.state==='unknown')guidePanel.append(action('Check saved state',()=>guideChange({operation:'model-connection-recover',target:data.pending.request_id},true),'connection-guide-recover',pending||guideReview));
+    if(guideOperation?.state==='unknown'&&!data?.pending)guidePanel.append(action('Refresh saved state',()=>inspectGuide(),'connection-guide-refresh',false));
+    credentialStage.hidden=!item;
+    if(!item){
+      if(guideTarget&&!guideOperation&&!data?.pending)guidePanel.append(action('Review a new disabled definition',()=>{guideTarget='';guideLocation();guideNotice='No saved definition was found. Review the definition again to start a new attempt.';renderGuide();},'connection-guide-restart',false));
+      return;
+    }
+    credentialStage.hidden=false;credentialHeading.hidden=false;credentialStatus.hidden=false;
+    credentialStatus.textContent=item.authentication?item.credential_set?'Credential saved. Enter a replacement below only if needed.':'Add the API key or token for this connection. Saved values are never displayed.':'This connection does not use a saved credential.';
+    credentialActions.hidden=!item.authentication||!item.credential_editable;
+    credentialReview.disabled=busy||currentConnection()===item.id;credentialReview.textContent=item.credential_set?'Review replacement credential':'Review credential';
+    const tested=guideTest?.key===guideKey(item)?guideTest:null;
+    guidePanel.append(domainText('h3','3. Test and enable'),domainText('p',tested?`${tested.message} Checked ${new Date(tested.at).toLocaleTimeString()}.`:'Connection not tested in this editor. Testing does not enable it or generate a response.','muted'));
+    const actions=domainText('div','','dialog-actions');
+    actions.append(action('Test connection',()=>testGuide(item),'connection-guide-test',busy||item.authentication&&!item.credential_set));
+    if(!item.enabled)actions.append(action('Review enabling',()=>guideChange({operation:'model-connection-enabled',connection:item.id,revision:item.revision,enabled:true}),'connection-guide-enable',busy||!tested?.available));
+    else actions.append(action('Done',closeEditor,'connection-guide-done',busy));
+    guidePanel.append(actions);
+  }
+  function focusGuideStage(){
+    if(!guided||!dialog.open||reviewDialog.open||guideOperation||pending)return;
+    const item=data?.connections.find(item=>item.id===guideTarget);
+    const next=item?.enabled?byId('connection-guide-done'):item?.authentication&&!item.credential_set?byId('model-credential-value'):guideTest?.available&&guideTest.key===guideKey(item)?byId('connection-guide-enable'):byId('connection-guide-test');
+    if(next&&!next.disabled)next.focus({preventScroll:true});
+  }
+  async function testGuide(item){
+    if(pending)return;
+    pending=true;guideNotice='Testing connection…';renderGuide();const epoch=authEpoch,version=formVersion;
+    try{
+      const result=await domainRequest('/api/v1/settings/model-connections/test','POST',{connection:item.id,revision:item.revision});
+      if(epoch!==authEpoch||version!==formVersion||!dialog.open)return;
+      guideTest={...result,key:guideKey(item),at:Date.now()};guideNotice=result.available?'Test complete. Review enabling when ready.':result.message;
+    }catch(error){if(epoch===authEpoch&&version===formVersion){guideTest=null;guideNotice=error.message;}}
+    finally{if(epoch===authEpoch){pending=false;render();focusGuideStage();}}
+  }
+  async function inspectGuide(){
+    if(!guideOperation)return;
+    const epoch=authEpoch,version=formVersion,id=guideOperation.request_id;
+    try{
+      const result=await domainRequest('/api/v1/library/operations');
+      if(epoch!==authEpoch||version!==formVersion||!dialog.open||guideOperation?.request_id!==id)return;
+      const receipt=result.items.find(item=>item.request_id===id);
+      if(!receipt||receipt.state==='unknown'){
+        guideOperation={request_id:id,state:'unknown'};clearInterval(guidePoll);guidePoll=null;
+        guideNotice='The outcome is unconfirmed. Inspect the saved state; do not repeat the change.';
+      }else if(['completed','failed','cancelled'].includes(receipt.state)){
+        guideOperation=null;clearInterval(guidePoll);guidePoll=null;guideLocation();
+        guideNotice=receipt.state==='completed'?'Stage saved. Continue with the next step.':'This stage did not complete. Check the saved state before reviewing another change.';
+        guideTest=null;
+      }else{
+        guideOperation={request_id:id,state:receipt.state};
+        if(!guidePoll)guidePoll=setInterval(inspectGuide,1000);
+      }
+      await load();
+    }catch(error){if(epoch===authEpoch&&version===formVersion){guideNotice=error.message;}}
+    if(epoch===authEpoch&&version===formVersion){renderGuide();if(!guideOperation)focusGuideStage();}
+  }
+  async function guideChange(draft,recovery=false){
+    if(pending||guideReview||guideOperation&&!recovery||!data?.management_allowed||!recovery&&data.pending||reviewDialog.open)return;
+    const epoch=authEpoch,version=formVersion;
+    pending=true;guideReview=true;guideNotice='';renderGuide();
+    try{
+      const prepared=await prepareChange(draft,{
+        current:()=>epoch===authEpoch&&dialog.open&&version===formVersion&&guided,
+        beforeOpen:()=>{byId('model-credential-value').value='';},
+        onAccepted:operation=>{
+          if(epoch!==authEpoch)return;
+          pending=false;guideReview=false;guideTest=null;
+          guideTarget=prepared.connection_id||guideTarget;
+          guideOperation={request_id:operation.request_id,state:operation.state};guideLocation();
+          if(dialog.open&&version===formVersion){
+            guideNotice='Saving this stage…';renderGuide();clearInterval(guidePoll);guidePoll=setInterval(inspectGuide,1000);inspectGuide();
+          }
+        },
+        onDiscard:result=>{
+          if(epoch!==authEpoch)return;
+          pending=false;guideReview=false;
+          guideNotice=result.uncertain?'Submission unconfirmed. Refresh and inspect saved state before trying again.':draft.operation==='model-connection-credential'?'Review cancelled. Re-enter the credential to review it again.':'Review cancelled. Your definition draft is retained.';
+          if(result.uncertain){guideTarget=prepared.connection_id||guideTarget;guideOperation={request_id:result.request_id,state:'unknown'};guideLocation();inspectGuide();}
+          render();load();
+        },
+      });
+      if(!prepared){pending=false;guideReview=false;renderGuide();}
+    }catch(error){if(epoch===authEpoch){pending=false;guideReview=false;guideNotice=error.message;renderGuide();load();}}
+    if(epoch===authEpoch)render();
+  }
   function connectionMenu(trigger, actions, identity, label = 'Connection actions') {
     const menu = domainText('div', '', 'message-menu context-action-menu');
     menu.id = `connection-actions-${identity}`;
@@ -3216,24 +4289,28 @@ window.ModelConnectionsUI = (() => {
       };
       const disabled = locked() || inUse;
       const choices = [
-        ['Test', 'connection', testConnection, locked()],
         ...(item.backend !== 'openai_codex' ? [['Edit', 'options', () => open('edit', item), disabled]] : []),
         [item.enabled ? 'Disable' : 'Enable', item.enabled ? 'close' : 'connection', () => review({operation: 'model-connection-enabled', connection: item.id, revision: item.revision, enabled: !item.enabled}), disabled],
         ...(item.credential_editable ? [['Credential', 'shield', () => open('credential', item), disabled]] : []),
         ['Remove', 'trash', () => review({operation: 'model-connection-remove', connection: item.id, revision: item.revision}), disabled, true],
       ];
-      const more = domainButton('', () => {}, 'icon-button quiet');
-      more.setAttribute('aria-label', `Options for ${item.name}`); more.title = 'Connection options';
-      more.append(libraryIcon('more')); more.disabled = locked();
+      const test = domainButton('Test', testConnection, 'quiet');
+      test.setAttribute('aria-label', `Test ${item.name}`); test.disabled = locked();
+      const more = domainButton('Manage', () => {}, 'quiet');
+      more.setAttribute('aria-label', `Manage ${item.name}`); more.disabled = locked();
       const menu = connectionMenu(more, choices, item.id);
-      if (inUse) actions.append(domainText('span', 'Current', 'muted model-connection-current'));
-      actions.append(more);
+      if (inUse) content.append(domainText('small', 'Current chat connection. Switch the chat model before editing or removing this connection.', 'muted'));
+      if(latest?.model_connection_setup&&!item.enabled&&item.backend!=='openai_codex'){
+        const resume=domainButton('Continue setup',()=>open('setup',item),'secondary');resume.disabled=disabled;actions.append(resume);
+      }
+      actions.append(test, more);
       const icon = domainText('span', '', 'model-connection-icon'); icon.setAttribute('aria-hidden', 'true');
       const mark = domainText('span', '', 'model-brand-icon');
       window.AIIcons?.setPlatformIcon(mark, item.backend, {appearance:'color', size:24});
       icon.append(mark);
       node.append(icon, content, actions, menu); container.append(node);
     }
+    renderGuide();
     const recovery = byId('model-connections-recovery'); recovery.replaceChildren();
     if (data.pending) {
       recovery.append(domainText('p', data.pending.state === 'unknown' ? 'Connection save unconfirmed. Check the exact saved state before another change.' : 'A shared connection change is in progress.', 'muted'));
@@ -3248,16 +4325,29 @@ window.ModelConnectionsUI = (() => {
       const result = await domainRequest('/api/v1/settings/model-connections', 'GET', undefined, {signal: read.signal});
       if (!active() || epoch !== authEpoch || id !== serial) return;
       data = result;
+      const adapter=byId('model-connection-adapter').value;
       byId('model-connection-adapter').replaceChildren(...data.adapters.map(a => new Option(a.id, a.id)));
+      if(data.adapters.some(item=>item.id===adapter))byId('model-connection-adapter').value=adapter;
       message(result.management_allowed ? '' : 'Connection editing and credentials require an admin account.'); render();
+      const restore=new URLSearchParams(location.search).get('connection-setup');
+      if(latest?.model_connection_setup&&!dialog.open&&!reviewDialog.open&&restore&&data.management_allowed){
+        const item=data.connections.find(item=>item.id===restore);
+        if(item||/^[a-f0-9]{32}$/.test(new URLSearchParams(location.search).get('connection-request')||''))open('setup',item);
+      }
     } catch (error) { if (id === serial && active() && epoch === authEpoch && error.name !== 'AbortError') message(error.message); }
     finally { if (id === serial) loading = false; }
   }
   function open(nextMode, item = null) {
-    if (locked() || reviewDialog.open) return;
+    if ((locked()&&!(nextMode==='setup'&&data?.management_allowed&&!pending)) || reviewDialog.open) return;
     editorTrigger = document.activeElement;
     mode = nextMode; selected = item; formVersion++; byId('model-connection-form').reset();
-    byId('model-connection-title').textContent = mode === 'credential' ? `Credential · ${item.name}` : item ? `Edit ${item.name}` : 'Add model connection';
+    definitionKey='';
+    guided=Boolean(latest?.model_connection_setup)&&(mode==='add'||mode==='setup');guideTarget=mode==='setup'?item?.id||new URLSearchParams(location.search).get('connection-setup')||'':'';guideTest=null;guideNotice='';guideReview=false;
+    const request=new URLSearchParams(location.search).get('connection-request');
+    guideOperation=guided&&request&&/^[a-f0-9]{32}$/.test(request)?{request_id:request,state:'accepted'}:null;
+    byId('model-connection-submit').hidden=false;byId('model-connection-submit').disabled=false;byId('model-connection-submit').textContent='Review change';
+    if(guided)guideLocation();
+    byId('model-connection-title').textContent = mode==='setup'?`Set up ${item?.name||'connection'}`:mode === 'credential' ? `Credential · ${item.name}` : item ? `Edit ${item.name}` : 'Add model connection';
     byId('model-connection-definition').hidden = mode === 'credential'; byId('model-credential-fields').hidden = mode !== 'credential';
     for (const input of byId('model-connection-definition').querySelectorAll('input,select')) input.disabled = mode === 'credential';
     byId('model-credential-value').disabled = mode !== 'credential';
@@ -3267,8 +4357,10 @@ window.ModelConnectionsUI = (() => {
     byId('model-connection-authentication').checked = Boolean(item?.authentication);
     byId('model-connection-adapter').value = item?.backend || 'ollama'; byId('model-connection-adapter').disabled = mode !== 'add';
     byId('model-credential-remove').hidden = mode !== 'credential' || !item?.credential_set;
-    byId('model-connection-editor-status').textContent = ''; dialog.showModal();
-    byId(mode === 'credential' ? 'model-credential-value' : 'model-connection-name').focus();
+    byId('model-connection-editor-status').textContent = ''; dialog.showModal();renderGuide();
+    if(guideOperation){clearInterval(guidePoll);guidePoll=setInterval(inspectGuide,1000);inspectGuide();}
+    if(guided){if(guideTarget)focusGuideStage();else byId('model-connection-adapter').focus();}
+    else byId(mode === 'credential' ? 'model-credential-value' : 'model-connection-name').focus();
   }
   async function review(draft, recovery = false) {
     if (pending || !data?.management_allowed || !recovery && data.pending || reviewDialog.open) return;
@@ -3287,6 +4379,7 @@ window.ModelConnectionsUI = (() => {
   }
   byId('model-connection-form').addEventListener('submit', event => {
     event.preventDefault();
+    if(guided){if(guideTarget){if(document.activeElement===byId('model-credential-value'))credentialReview.click();return;}if(!guideTarget)guideChange({operation:'model-connection-add',backend:byId('model-connection-adapter').value,name:byId('model-connection-name').value.trim(),url:byId('model-connection-url').value.trim(),source:byId('model-connection-source').value,authentication:byId('model-connection-authentication').checked});return;}
     if (mode === 'credential') review({operation: 'model-connection-credential', connection: selected.id, revision: selected.revision, value: byId('model-credential-value').value});
     else review({operation: mode === 'add' ? 'model-connection-add' : 'model-connection-edit',
       ...(selected ? {connection: selected.id, revision: selected.revision} : {backend: byId('model-connection-adapter').value}),
@@ -3309,8 +4402,10 @@ window.ModelConnectionsUI = (() => {
   byId('model-connection-add').addEventListener('click', () => open('add'));
   byId('model-connections-refresh').addEventListener('click', load);
   byId('model-connection-close').append(libraryIcon('close'));
-  byId('model-connection-close').addEventListener('click', () => dialog.close());
-  dialog.addEventListener('close', () => { formVersion++; byId('model-credential-value').value = ''; (editorTrigger?.isConnected ? editorTrigger : byId('model-connection-add')).focus(); });
+  byId('model-connection-close').addEventListener('click',closeEditor);
+  dialog.addEventListener('cancel',clearGuideRoute);
+  dialog.addEventListener('close', () => { if(dialog.open)return;clearInterval(guidePoll);guidePoll=null;guideReview=false;formVersion++;
+    const url=new URL(location.href);url.searchParams.delete('connection-setup');url.searchParams.delete('connection-request');history.replaceState(history.state,'',url.pathname+url.search+url.hash); byId('model-credential-value').value = ''; (editorTrigger?.isConnected ? editorTrigger : byId('model-connection-add')).focus(); });
   document.addEventListener('klaude-view', () => { if (active()) load(); else { serial++; read?.abort(); dialog.close(); } });
   document.addEventListener('klaude-snapshot', () => { if (active() && !data && !loading && latest?.model_settings) load(); });
   document.addEventListener('klaude-operations', event => {
@@ -3376,7 +4471,7 @@ window.SettingsSearch = (() => {
     ['Memory','Automatic memory remember useful facts','memory','memory-auto'],
     ['Memory','Saved memories search edit forget','memory','memory-query'],
     ['Memory','Add memory','memory','memory-create'],
-    ['System','Restart Web UI server','system','system-restart'],
+    ['System','Restart Klaude Web UI server hosted agent','system','system-restart'],
     ['System','Shut down Klaude and terminal sessions','system','system-shutdown',null,'shutdown stop exit quit'],
   ].map(([category,label,section,target,screen,keywords])=>({category,label,section,target,screen,keywords}));
   function render() {

@@ -740,7 +740,11 @@ window.BrowserManagement = (() => {
     if (!detailConnection || !connections) return;
     const item = detailConnection;
     byId("connection-detail-title").textContent = item.name;
-    byId("connection-detail-description").textContent = item.description || "No description provided.";
+    const description=item.description||'';
+  byId("connection-detail-description").textContent = window.StoreDesign.brief(description);
+  byId("connection-detail-description").hidden = !description;
+  byId("connection-detail-badge").textContent = item.enabled ? 'Enabled' : 'Disabled';
+  const about=byId('connection-detail-about');about.hidden=description===window.StoreDesign.brief(description);about.querySelector('p').textContent=description;
     const metadata = byId("connection-detail-metadata");
     metadata.replaceChildren();
     for (const [label, value] of [["Status", connectionToggleUpdating(item) ? "Updating…" : item.enabled ? "Enabled" : "Disabled"],
@@ -1017,6 +1021,21 @@ window.BrowserManagement = (() => {
     byId('image-prompt').focus();
     await Promise.all([loadJobs(), checkImageService()]);
   }
+  function resumeImageSetup(view){
+    if(!authenticated||currentView!==view)return;
+    studioFromChat=view==='chat';generationPreparation++;selectGenerationType('image');
+    generationDialog.showModal();renderImageStatus();loadJobs();checkImageService();byId('image-prompt').focus();
+  }
+  function beginImageSetup(options={}){
+    if(!generationDialog.open||reviewDialog.open)return;
+    const view=currentView,epoch=authEpoch;
+    const draft=Object.fromEntries(['prompt','width','height','steps','seed'].map(key=>[key,byId('image-'+key).value]));
+    generationDialog.close();
+    ImageSetupNavigation.open({...options,resume:()=>{
+      if(epoch!==authEpoch)return;restoreImageDraft(draft);resumeImageSetup(view);
+    }});
+  }
+  byId('image-setup-open').addEventListener('click',()=>beginImageSetup());
   for (const id of ["chat-create-image", "attach-create-image"]) byId(id)?.addEventListener("click", openChatImageStudio);
   byId("image-generate-close")?.append(libraryIcon("close"));
   byId("image-generate-close")?.addEventListener("click", () => generationDialog?.close());
@@ -1514,7 +1533,7 @@ window.BrowserManagement = (() => {
     if (active("connections")) loadConnections();
     if (active("jobs")) loadJobs();
   }
-  return { review, busy, loadConnections, loadJobs, sessionRow, capabilitiesChanged, hasPending: () => [...changes.values()].some(item => item.phase === "accepted") };
+  return { review, busy, loadConnections, loadJobs, sessionRow, resumeImageSetup,beginImageSetup, capabilitiesChanged, hasPending: () => [...changes.values()].some(item => item.phase === "accepted") };
 })();
 
 window.SystemSettings = (() => {
@@ -1548,10 +1567,10 @@ window.SystemSettings = (() => {
     try{
       const result=await domainRequest('/api/v1/system/review','POST',{action});
       if(!active()||current!==authEpoch)return;
-      review=result;byId('system-confirm-title').textContent=action==='restart'?'Restart Web UI?':'Shut down Klaude?';
+      review=result;byId('system-confirm-title').textContent=action==='restart'?'Restart Klaude?':'Shut down Klaude?';
       byId('system-confirm-summary').textContent=result.summary;
       byId('system-confirm-status').textContent='';
-      const apply=byId('system-confirm-apply');apply.textContent=action==='restart'?'Restart Web UI':'Shut down Klaude';
+      const apply=byId('system-confirm-apply');apply.textContent=action==='restart'?'Restart Klaude':'Shut down Klaude';
       apply.classList.toggle('danger',action==='shutdown');apply.disabled=false;
       dialog.showModal();byId('system-confirm-cancel').focus();
     }catch(error){if(active()&&current===authEpoch){status(error.message);load();}}
@@ -1559,7 +1578,7 @@ window.SystemSettings = (() => {
   }
   function showTransition(action){
     phase=action;transition.hidden=false;byId('system-transition-reload').hidden=true;
-    byId('system-transition-title').textContent=action==='restart'?'Restarting Web UI…':'Shutting down Klaude…';
+    byId('system-transition-title').textContent=action==='restart'?'Restarting Klaude…':'Shutting down Klaude…';
     byId('system-transition-message').textContent=action==='restart'?'Reconnecting to the Web UI. You will need to sign in again.':'Klaude and this profile’s terminal sessions are stopping. This page will disconnect.';
     const loading=byId('system-transition-loading');loading.replaceChildren();
     if(window.MaterialLoadingCircle)loading.append(MaterialLoadingCircle.create({size:'medium'}));

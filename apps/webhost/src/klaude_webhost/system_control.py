@@ -199,7 +199,8 @@ class SystemControl:
             raise ValueError("Close an existing System review before retrying")
         self.reviews[identity] = {"owner": owner, "action": action, "revision": state["revision"],
                                   "peers": peers, "expires_at": time.time() + 120}
-        summary = ("Restart the Web UI. The hosted conversation, workspace and LAN settings "
+        summary = ("Restart Klaude’s Web UI and hosted agent. "
+                   "The conversation, workspace and LAN settings "
                    "are preserved. All browsers disconnect and must sign in again. "
                    "Unsaved browser drafts may be lost. Terminal sessions keep running."
                    if action == "restart" else

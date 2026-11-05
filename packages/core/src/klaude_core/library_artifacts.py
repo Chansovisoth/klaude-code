@@ -351,7 +351,9 @@ class ArtifactStore:
                 return self.get(existing["artifact"])
             item = self._insert(
                 data, "media", "generated-" + spec["id"][:12] + ".png",
-                "Generated image · stable-diffusion.cpp", spec["session"], spec["id"],
+                "Generated image · " + {"comfyui": "ComfyUI", "ollama": "Ollama"}.get(
+                    spec["settings"].get("provider", "sdcpp"), "stable-diffusion.cpp"),
+                spec["session"], spec["id"],
                 spec["settings"]["model"], db=db,
             )
             db.execute(

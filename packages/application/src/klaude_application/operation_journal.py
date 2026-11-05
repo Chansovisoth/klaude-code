@@ -108,6 +108,52 @@ class OperationJournal:
                 "payload TEXT NOT NULL)"
             )
 
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS operation_retirements ("
+                "request_id TEXT PRIMARY KEY REFERENCES operations(request_id), "
+                "owner_id TEXT NOT NULL, resource TEXT NOT NULL, fence INTEGER NOT NULL, "
+                "reason TEXT NOT NULL, fingerprint TEXT NOT NULL, retired_at REAL NOT NULL, "
+                "outcome TEXT NOT NULL)"
+            )
+
+    def retirement(self, request_id: str, owner_id: str) -> dict:
+        with closing(self._connect()) as db:
+            row = db.execute(
+                "SELECT reason,fingerprint,retired_at FROM operation_retirements "
+                "WHERE request_id=? AND owner_id=?", (request_id, owner_id),
+            ).fetchone()
+            return (dict(zip(("reason", "fingerprint", "retired_at"), row, strict=True))
+                    if row else {})
+
+    def retire_legacy_skill(self, request_id: str, owner_id: str, *, resource: str,
+                            fence: int, reason: str, fingerprint: str) -> None:
+        """Record explicit retirement; never rewrite an unproven historical outcome.
+
+        The domain caller must inspect package and Knowledge state while holding
+        the Skill mutation lock. This method only releases that exact generation.
+        """
+        if (not 1 <= len(reason) <= 500 or not reason.isprintable()
+                or not re.fullmatch(r"[a-f0-9]{64}", fingerprint)):
+            raise ValueError("A bounded reason and reviewed fingerprint are required")
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM operations WHERE request_id=? AND owner_id=?",
+                             (request_id, owner_id)).fetchone()
+            owned = db.execute("SELECT request_id,generation FROM operation_resources "
+                               "WHERE resource=?", (resource,)).fetchone()
+            if (not row or row[2] != "skill-store-install" or row[3] != resource
+                    or row[5] != "unknown" or row[6] != fence or row[11] or row[12]
+                    or owned != (request_id, fence)
+                    or db.execute("SELECT 1 FROM operation_evidence WHERE request_id=?",
+                                  (request_id,)).fetchone()):
+                raise OperationConflict("Legacy Skill retirement evidence or ownership changed")
+            db.execute("INSERT INTO operation_retirements VALUES(?,?,?,?,?,?,?,?)",
+                       (request_id, owner_id, resource, fence, reason, fingerprint, self._clock(),
+                        "retired_unverified"))
+            db.execute("UPDATE operation_resources SET request_id='' "
+                       "WHERE resource=? AND generation=? AND request_id=?",
+                       (resource, fence, request_id))
+
     def evidence(self, request_id: str, owner_id: str) -> dict:
         """Private domain evidence; never included in generic public receipts."""
         with closing(self._connect()) as db:
@@ -286,6 +332,22 @@ class OperationJournal:
                 raise OperationConflict("Recovery resource fence changed")
             return hmac.compare_digest(self._witness_digest(db, candidate), row[12])
 
+    def settled_witness_after_matches(
+        self, request_id: str, owner_id: str, *, candidate: object,
+    ) -> bool:
+        """Authenticate an old target for a new explicitly requested attempt.
+
+        Terminal receipts no longer own a resource fence. This read never
+        reconciles them or grants mutation authority to their old worker.
+        """
+        with closing(self._connect()) as db:
+            row = db.execute(
+                "SELECT state,witness_after FROM operations WHERE request_id=? AND owner_id=?",
+                (request_id, owner_id),
+            ).fetchone()
+            return bool(row and row[0] in TERMINAL and row[1] and
+                        hmac.compare_digest(self._witness_digest(db, candidate), row[1]))
+
     def _expire(self, db: sqlite3.Connection, now: float) -> None:
         # An accepted operation has not passed the effect gate. Expiration can
         # release its resource without asking an owner to reconcile an effect
@@ -318,6 +380,7 @@ class OperationJournal:
         payload: object,
         lease_seconds: float = 15,
         conflicts_with: tuple[str, ...] = (),
+        compatible_conflict_kinds: tuple[str, ...] = (),
         exclusive: bool = False,
     ) -> OperationReceipt:
         self._validate(request_id, owner_id, kind, resource)
@@ -325,6 +388,9 @@ class OperationJournal:
             raise ValueError("Invalid operation lease")
         if len(conflicts_with) > 8 or any(not IDENTITY.fullmatch(r) for r in conflicts_with):
             raise ValueError("Invalid conflicting resources")
+        if (len(compatible_conflict_kinds) > 8
+                or any(not IDENTITY.fullmatch(kind) for kind in compatible_conflict_kinds)):
+            raise ValueError("Invalid compatible operation kinds")
         now = self._clock()
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
@@ -342,10 +408,12 @@ class OperationJournal:
             ).fetchone():
                 raise OperationConflict("Finish or reconcile other operations before model work")
             for conflict in conflicts_with:
-                if db.execute(
-                    "SELECT 1 FROM operation_resources WHERE resource=? AND request_id<>''",
+                owned_conflict = db.execute(
+                    "SELECT r.request_id,o.kind FROM operation_resources r LEFT JOIN operations o "
+                    "ON o.request_id=r.request_id WHERE r.resource=? AND r.request_id<>''",
                     (conflict,),
-                ).fetchone():
+                ).fetchone()
+                if owned_conflict and owned_conflict[1] not in compatible_conflict_kinds:
                     raise OperationConflict("Conflicting model work is active or unresolved")
             owned = db.execute(
                 "SELECT generation,request_id FROM operation_resources WHERE resource=?",
@@ -410,6 +478,19 @@ class OperationJournal:
                 (owner_id, limit, offset),
             ).fetchall()
             return tuple(self._receipt(row) for row in rows)
+
+    def kind_busy(self, kind: str) -> bool:
+        """Include independent per-file resources in maintenance status."""
+        if not isinstance(kind, str) or not IDENTITY.fullmatch(kind):
+            raise ValueError("Invalid operation kind")
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            self._expire(db, self._clock())
+            return db.execute(
+                "SELECT 1 FROM operation_resources r JOIN operations o "
+                "ON o.request_id=r.request_id WHERE o.kind=? AND r.request_id<>'' LIMIT 1",
+                (kind,),
+            ).fetchone() is not None
 
     def resource_busy(self, resource: str) -> bool:
         """Check whether a resource still has active or unresolved work."""
@@ -599,6 +680,12 @@ class OperationJournal:
             ).fetchone()
             if row is None or row[5] != "unknown":
                 raise OperationConflict("Only unknown operations can be reconciled")
+            owned = db.execute(
+                "SELECT request_id,generation FROM operation_resources WHERE resource=?",
+                (row[3],),
+            ).fetchone()
+            if owned != (request_id, row[6]):
+                raise OperationConflict("Operation resource fence changed")
             digest = self._fingerprint(db, "reconcile", row[3], evidence)
             db.execute(
                 "UPDATE operations SET state=?,outcome='reconciled',reconciliation=?,"

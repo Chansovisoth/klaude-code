@@ -184,4 +184,4 @@ def detail(cfg, identity, *, refresh=False, runtime="ollama"):
         }
 
     return _cache(cfg, ("sdcpp:" if runtime == "sdcpp" else "") + "detail:" + repo,
-                  read, refresh)
+                  read, refresh, metadata_version=2 if runtime == "sdcpp" else None)
