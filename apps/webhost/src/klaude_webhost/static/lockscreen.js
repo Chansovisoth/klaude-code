@@ -13,22 +13,8 @@ window.KlaudeLockScreen = (() => {
   const svgNS = 'http://www.w3.org/2000/svg';
   let clockTimer = null, exitTimer = null, visible = false, lastMinute = '', maskState = '';
   let activeState = 'Locked', maskReady = false;
-  const iconPaths = {
-    lock: 'M7 10V7a5 5 0 0 1 10 0v3M6 10h12v11H6ZM12 14v3',
-    account: 'M20 21a8 8 0 0 0-16 0M16 8a4 4 0 1 1-8 0 4 4 0 0 1 8 0ZM23 12a11 11 0 1 1-22 0 11 11 0 0 1 22 0Z',
-    arrow: 'M4 12h15M13 6l6 6-6 6',
-    globe: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z',
-    help: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM9 9a3 3 0 1 1 4 3c-1 0-1 1-1 2M12 17h.01',
-    reload: 'M20 9a8 8 0 1 0 0 6M20 4v5h-5',
-  };
-  for (const target of screen.querySelectorAll('[data-lock-icon]')) {
-    const svg = document.createElementNS(svgNS, 'svg'), path = document.createElementNS(svgNS, 'path');
-    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('aria-hidden', 'true');
-    svg.setAttribute('fill', 'none'); svg.setAttribute('stroke', 'currentColor');
-    svg.setAttribute('stroke-width', '2'); svg.setAttribute('stroke-linecap', 'round');
-    svg.setAttribute('stroke-linejoin', 'round'); path.setAttribute('d', iconPaths[target.dataset.lockIcon]);
-    svg.append(path); target.append(svg);
-  }
+  for (const target of screen.querySelectorAll('[data-lock-icon]'))
+    target.append(window.KlaudeUIIcons.create(target.dataset.lockIcon));
   const vector = name => window.KlaudeExpressive.shape(name, 64);
   by('lock-clock-face').append(vector('clock-cookie'));
   by('lock-day-shape').append(vector('pentagon'));

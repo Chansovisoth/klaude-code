@@ -189,10 +189,85 @@ window.KlaudeExpressive = (() => {
     window.addEventListener('resize', refresh);
     document.fonts.ready.then(refresh);
   }
+  function bindWelcomeSpinner(emblem, backing) {
+    let drag = null, motion = null, frame = 0, velocity = 0, lastFrame = 0;
+    let duration = 20000, idleVelocity = 18;
+    const clamp = value => Math.max(-1440, Math.min(1440, value));
+    const wrap = value => (value % duration + duration) % duration;
+    function releasePointer() {
+      const pointer = drag?.id; drag = null;
+      emblem.classList.remove('is-spinning');
+      if (pointer !== undefined && emblem.hasPointerCapture(pointer)) emblem.releasePointerCapture(pointer);
+    }
+    function stop() {
+      cancelAnimationFrame(frame); frame = 0; releasePointer();
+      // Resume the same CSS timeline, preserving the exact rotation phase.
+      if (motion && motion.playState !== 'idle' && !reduced()) motion.play();
+      motion = null;
+    }
+    function coast(now) {
+      frame = 0;
+      if (reduced() || document.hidden || !emblem.getClientRects().length || !motion) { stop(); return; }
+      const seconds = Math.min(.05, Math.max(0, (now - lastFrame) / 1000)); lastFrame = now;
+      motion.currentTime = wrap(Number(motion.currentTime) + velocity * seconds * duration / 360);
+      velocity = idleVelocity + (velocity - idleVelocity) * Math.exp(-.5 * seconds);
+      if (Math.abs(velocity - idleVelocity) < .5) { stop(); return; }
+      frame = requestAnimationFrame(coast);
+    }
+    function finish(event, fling) {
+      if (!drag || drag.id !== event.pointerId) return;
+      if (fling && drag.distance < 4) velocity = clamp(velocity + 600);
+      else if (fling) velocity = idleVelocity + (velocity-idleVelocity) *
+        Math.exp(-Math.max(0,performance.now()-drag.time-50)/120);
+      releasePointer();
+      if (!fling || reduced()) { stop(); return; }
+      lastFrame = performance.now(); frame = requestAnimationFrame(coast);
+    }
+    emblem.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || drag || reduced()) return;
+      const animation = backing.getAnimations().find(item => item.animationName === 'klaude-welcome-shape-rotation');
+      if (!animation) return;
+      cancelAnimationFrame(frame); frame = 0;
+      if (motion !== animation) velocity = idleVelocity;
+      motion = animation; duration = Number(motion.effect.getTiming().duration);
+      idleVelocity = 360000 / duration; motion.pause();
+      const rect = emblem.getBoundingClientRect();
+      const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+      drag = {id:event.pointerId, x, y, angle:Math.atan2(event.clientY-y,event.clientX-x),
+        time:performance.now(), distance:0};
+      emblem.setPointerCapture(event.pointerId); emblem.classList.add('is-spinning');
+      event.preventDefault();
+    });
+    emblem.addEventListener('pointermove', event => {
+      if (!drag || drag.id !== event.pointerId) return;
+      const x = event.clientX - drag.x, y = event.clientY - drag.y;
+      if (Math.hypot(x, y) < 6) return;
+      const angle = Math.atan2(y, x), now = performance.now();
+      const degrees = Math.atan2(Math.sin(angle-drag.angle),Math.cos(angle-drag.angle)) * 180 / Math.PI;
+      motion.currentTime = wrap(Number(motion.currentTime) + degrees * duration / 360);
+      velocity = clamp(degrees * 1000 / Math.max(16, now - drag.time));
+      drag.angle = angle; drag.time = now; drag.distance += Math.abs(degrees);
+      event.preventDefault();
+    });
+    emblem.addEventListener('pointerup', event => finish(event, true));
+    emblem.addEventListener('pointercancel', event => finish(event, false));
+    emblem.addEventListener('lostpointercapture', event => finish(event, false));
+    document.addEventListener('visibilitychange', () => { if (document.hidden) stop(); });
+    document.addEventListener('klaude-view', stop);
+    document.addEventListener('klaude-auth-reset', stop);
+    new MutationObserver(() => { if (reduced()) stop(); }).observe(root,
+      {attributes:true,attributeFilter:['data-motion']});
+    new MutationObserver(() => { if (byId('welcome').hidden) stop(); }).observe(byId('welcome'),
+      {attributes:true,attributeFilter:['hidden']});
+    matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', () => { if (reduced()) stop(); });
+  }
   function setup() {
     for (const element of document.querySelectorAll('[data-material-shape]')) element.append(shape(element.dataset.materialShape));
     const emblem = document.querySelector('.welcome-emblem');
-    if (emblem) { const backing = shape('cookie', 90); backing.classList.add('welcome-shape'); emblem.prepend(backing); }
+    if (emblem) {
+      const backing = shape('cookie', 90); backing.classList.add('welcome-shape'); emblem.prepend(backing);
+      bindWelcomeSpinner(emblem, backing);
+    }
     themePreview(appearance, true);
     const loadingVisibility = new MutationObserver(() => syncLoadingPreview());
     for (const element of [byId('settings-view'), byId('theme-settings'), document.querySelector('.layout')])
@@ -277,9 +352,8 @@ window.KlaudeExpressive = (() => {
       button.style.setProperty('--ripple-x', `${x ?? box.width / 2}px`);
       button.style.setProperty('--ripple-y', `${y ?? box.height / 2}px`);
       ripples.get(button)?.cancel();
-      const ripple = button.animate([{ opacity: .18, transform: 'scale(0)' },
-        { opacity: .08, offset: .7, transform: 'scale(1)' }, { opacity: 0, transform: 'scale(1)' }],
-        { duration: 1200, easing: 'cubic-bezier(0,0,0,1)', pseudoElement: '::after' });
+      const ripple = button.animate([{ opacity: .14 }, { opacity: 0 }],
+        { duration: 260, easing: 'ease-out', pseudoElement: '::after' });
       ripples.set(button, ripple);
     }
     document.addEventListener('pointerdown', event => {
@@ -387,10 +461,26 @@ window.KlaudeExpressive = (() => {
     const trigger = text('button', '', 'icon-button command-trigger'); trigger.id = 'command-open'; trigger.type = 'button';
     trigger.setAttribute('aria-label', 'Search commands'); trigger.title = `Search commands (${mod}+K)`;
     trigger.setAttribute('aria-haspopup', 'dialog'); trigger.setAttribute('aria-controls', 'command-palette');
-    trigger.append(libraryIcon('search')); document.querySelector('.topbar-actions').prepend(trigger);
-    const dialog = text('dialog', '', 'command-palette domain-dialog'); dialog.id = 'command-palette';
+    const commandSymbol = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    commandSymbol.setAttribute('class', 'command-symbol');
+    commandSymbol.setAttribute('viewBox', '0 0 28 28');
+    commandSymbol.setAttribute('aria-hidden', 'true');
+    const commandGlyph = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    commandGlyph.textContent = '⌘';
+    commandGlyph.setAttribute('fill', 'currentColor');
+    commandSymbol.append(commandGlyph);
+    trigger.append(commandSymbol);
+    document.querySelector('.topbar-actions').prepend(trigger);
+    const centerCommandGlyph = () => {
+      const bounds = commandGlyph.getBBox();
+      if (bounds.width && bounds.height) commandGlyph.setAttribute('transform',
+        `translate(${14 - bounds.x - bounds.width / 2} ${14 - bounds.y - bounds.height / 2})`);
+    };
+    document.fonts.ready.then(() => requestAnimationFrame(centerCommandGlyph));
+    new ResizeObserver(centerCommandGlyph).observe(trigger);
+    const dialog = text('dialog', '', 'command-palette'); dialog.id = 'command-palette';
     dialog.setAttribute('aria-labelledby', 'command-title');
-    const heading = text('div', '', 'dialog-heading'), title = text('h2', 'Find your next action'); title.id = 'command-title';
+    const heading = text('div', '', 'conversation-search-heading'), title = text('h2', 'Search commands', 'visually-hidden'); title.id = 'command-title';
     const close = text('button', '', 'icon-button quiet'); close.type = 'button'; close.setAttribute('aria-label', 'Close commands');
     close.append(libraryIcon('close'));
     close.onclick = () => dialog.close(); heading.append(title, close);
@@ -406,7 +496,9 @@ window.KlaudeExpressive = (() => {
       const button = text('button', label, 'quiet'); button.type = 'button'; button.dataset.mode = value;
       button.onclick = () => { mode = value; active = 0; render(); search.focus(); }; modes.append(button);
     }
-    dialog.append(heading, search, modes, results, status, footer); document.body.append(dialog);
+    heading.prepend(search);
+    heading.querySelector('h2')?.remove();
+    dialog.append(title, heading, modes, results, status, footer); document.body.append(dialog);
     const shortcuts = () => [
       ['Navigation', 'Search commands', `${mod}+K`], ['Navigation', 'Keyboard shortcuts', `${mod}+Shift+/`],
       ['Navigation', 'Open Settings', `${mod}+,`], ['Chat', 'Send message', enterSends() ? 'Enter' : 'Send button'],
@@ -539,9 +631,7 @@ window.KlaudeExpressive = (() => {
     for (const line of lines) {
       const directory = line[0] === 'd', filePath = line.slice(2);
       const button = document.createElement('button'); button.type = 'button'; button.className = 'workspace-file-row';
-      const icon = document.createElementNS(svgNS, 'svg'); icon.setAttribute('viewBox', '0 0 24 24'); icon.classList.add('icon'); icon.setAttribute('aria-hidden', 'true');
-      const outline = document.createElementNS(svgNS, 'path'); outline.setAttribute('fill', 'none'); outline.setAttribute('stroke', 'currentColor'); outline.setAttribute('stroke-width', '1.7');
-      outline.setAttribute('d', directory ? 'M3 6h7l2 2h9v12H3Z' : 'M5 3h9l5 5v13H5ZM14 3v6h5M8 13h8M8 17h5'); icon.append(outline);
+      const icon = window.KlaudeUIIcons.create(directory ? 'folder' : 'text');
       const name = document.createElement('span'); name.textContent = filePath.split('/').at(-1);
       const kind = document.createElement('small'); kind.textContent = directory ? 'Folder' :
         name.textContent.includes('.') ? name.textContent.split('.').at(-1).toUpperCase() : 'File';

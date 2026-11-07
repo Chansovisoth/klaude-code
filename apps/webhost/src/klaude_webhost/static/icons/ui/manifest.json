@@ -1,0 +1,14 @@
+{
+  "reviewed": "2026-11-06",
+  "source": {
+    "package": "@fortawesome/free-solid-svg-icons",
+    "version": "7.2.0",
+    "tarball": "https://registry.npmjs.org/@fortawesome/free-solid-svg-icons/-/free-solid-svg-icons-7.2.0.tgz",
+    "integrity": "sha512-YTVITFGN0/24PxzXrwqCgnyd7njDuzp5ZvaCx5nq/jg55kUYd94Nj8UTchBdBofi/L0nwRfjGOg0E41d2u9T1w=="
+  },
+  "license": "Font Awesome Free icons: CC BY 4.0; code: MIT",
+  "assets": {
+    "fontawesome.json": "40965502955c277558e7842ecd29c6d0de8c91fba753bb4103224cd5deae132f",
+    "LICENSE.txt": "20c6f40715a567c97b80f6944beb8bb325835cab47ea7dcab89ee3b8e077eced"
+  }
+}

@@ -52,7 +52,7 @@ async def verify(host, root, chrome):
             await tab.command("Page.enable")
             await tab.command("Page.navigate", {"url": host.origin})
             await tab.wait('typeof byId!=="undefined" && !byId("local-access").hidden')
-            await tab.js('byId("login-password").value=' + json.dumps(
+            await tab.js('byId("login-username").value="admin";byId("login-password").value=' + json.dumps(
                 host.accounts.initial_password()
             ) + ';byId("account-login").requestSubmit()')
             await tab.wait('latest?.attachments && window.FileDropUI && window.ChatAttachmentsUI')
@@ -218,29 +218,19 @@ async def verify(host, root, chrome):
             assert await tab.js('byId("artifact-file").files[0].name==="first.txt" && '
                                 'droppedImports.files.length===3')
             await tab.js('window.fetch=liveDropFetch;byId("artifact-import").requestSubmit()')
-            await tab.wait('byId("domain-review").open && '
-                           'byId("domain-review-status").textContent.includes("File 1 of 3")')
-            assert not host.library.listing()["items"], "Drop bypassed import confirmation"
-            await tab.click("#domain-review-confirm")
-            await tab.wait('byId("domain-review").open && '
-                           'byId("domain-review-status").textContent.includes("File 2 of 3")')
-            await tab.click("#domain-review-cancel")
-            await tab.wait('!byId("domain-review").open && droppedImports===null')
-            for _ in range(100):
+            # The retry submits the batch one file at a time without another dialog.
+            for _ in range(200):
+                if await tab.js('droppedImports===null && !importDialog.open'):
+                    break
+                await asyncio.sleep(.1)
+            assert await tab.js('droppedImports===null && !importDialog.open')
+            assert await tab.js('!reviewDialog.open')
+            for _ in range(200):
                 items = host.library.listing()["items"]
-                if items:
+                if len(items) == 3:
                     break
                 await asyncio.sleep(.05)
-            assert [item["filename"] for item in items] == ["first.txt"], items
-            # Complete a two-file batch, with independent exact confirmations.
-            await drag(["second.md", "third.txt"], "drop")
-            for index in (1, 2):
-                await tab.wait('byId("domain-review").open && '
-                               'byId("domain-review-status").textContent.includes('
-                               + json.dumps(f"File {index} of 2") + ')')
-                await tab.click("#domain-review-confirm")
-            await tab.wait('!byId("domain-review").open && droppedImports===null')
-            await tab.wait("filePage?.total===3")
+            assert {item["filename"] for item in items} == {"first.txt", "second.md", "third.txt"}, items
             # A lost submit acknowledgement must not advance or replay the remaining files.
             await tab.js('''window.dropDomainRequest=domainRequest;
               domainRequest=async(path,method,body,options)=>{
@@ -249,16 +239,11 @@ async def verify(host, root, chrome):
                 return result;
               };''')
             await drag(["uncertain.txt", "never.txt"], "drop")
-            await tab.wait('reviewDialog.open && byId("domain-review-status").textContent'
-                           '.includes("File 1 of 2")')
-            await tab.click("#domain-review-confirm")
-            await tab.wait('byId("domain-review-status").textContent'
-                           '.includes("Fixture acknowledgement lost")')
-            assert await tab.js('reviewDialog.open && droppedImports.index===0 && '
-                                '!droppedImports.accepted')
-            await tab.click("#domain-review-cancel")
-            await tab.wait("droppedImports===null && !reviewDialog.open")
-            await tab.js("domainRequest=dropDomainRequest")
+            await tab.wait('importDialog.open && byId("artifact-import-status").textContent'
+                           '.includes("unconfirmed")')
+            assert await tab.js('!reviewDialog.open && droppedImports===null && '
+                                'byId("artifact-import").querySelector("[type=submit]").disabled')
+            await tab.js('importDialog.close();domainRequest=dropDomainRequest')
             # Generated and unrelated destinations never receive Uploads imports.
             await tab.click('#library-sections [data-section="outputs"]')
             await drag(["first.txt"])
@@ -291,7 +276,7 @@ async def verify(host, root, chrome):
             assert not tab.errors, tab.errors
             print(json.dumps({"real_file_drags": True, "overlay_layouts": len(layouts),
                               "chat_limits_errors_drafts": True, "stale_chat_cleanup": True,
-                              "reviewed_library_batches": True, "cancel_stops_remaining": True,
+                              "direct_library_batches": True,
                               "failed_import_retry_and_uncertain_submit": True,
                               "text_folder_and_page_guards": True, "logout_cleanup": True,
                               "console_errors": 0, "screenshots": str(OUT)}, indent=2))

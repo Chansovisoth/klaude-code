@@ -538,6 +538,7 @@ window.BrowserManagement = (() => {
     byId('image-service-status').dataset.state = 'checking';
     byId('image-check-service').disabled = true;
     byId('image-capabilities-status').textContent = '';
+    render();
     try {
       const result = await domainRequest('/api/v1/library/image-capabilities');
       if (id !== studioCheck || epoch !== authEpoch || !active('jobs')) return;
@@ -562,6 +563,7 @@ window.BrowserManagement = (() => {
     if (id === studioCheck && epoch === authEpoch) { byId('image-check-service').disabled = false; render(); }
   }
   byId('image-check-service').addEventListener('click', checkImageService);
+  byId('image-check-inline').addEventListener('click', checkImageService);
   byId('image-submit').prepend(libraryIcon('sparkles'));
   byId('image-ratio-quick').addEventListener('change', event => {
     if (!event.target.matches('input')) return;
@@ -835,6 +837,7 @@ window.BrowserManagement = (() => {
     completed_remote:'Output ready to recover', running:'Generating…', generating:'Generating…',
     completed:'Completed', complete:'Completed', failed:'Failed', cancelled:'Cancelled',
     interrupted:'Interrupted', unknown:'Outcome unconfirmed'}[item?.status] || item?.status || '');
+  const activeImageStates = ['queued', 'running', 'generating', 'queued_remote', 'running_remote'];
   async function downloadImageOutput(artifact) {
     const epoch = authEpoch;
     try {
@@ -869,8 +872,10 @@ window.BrowserManagement = (() => {
     node.prepend(mark);
     if (item.artifact) actions.append(...imageOutputActions(item).children);
     else if (item.status !== 'cancelled' && item.recoverable !== false) {
-      actions.append(domainButton('Recover output', () => reviewJob({operation:'image-recover', target:identity}, `image-recovery:${identity}`, 'image'), 'quiet'),
-        domainButton('Cancel job', () => reviewJob({operation:'image-cancel', target:identity}, `image-control:${identity}`, 'image'), 'quiet'));
+      const recover = domainButton('Recover output', () => reviewJob({operation:'image-recover', target:identity}, `image-recovery:${identity}`, 'image'), 'quiet');
+      const cancel = domainButton('Cancel job', () => reviewJob({operation:'image-cancel', target:identity}, `image-control:${identity}`, 'image'), 'quiet');
+      recover.prepend(libraryIcon('refresh')); cancel.prepend(libraryIcon('stop'));
+      actions.append(recover, cancel);
     }
     for (const button of actions.children) button.disabled = busy(`image-control:${identity}`) || busy(`image-recovery:${identity}`);
     if (actions.children.length) {
@@ -889,17 +894,33 @@ window.BrowserManagement = (() => {
   function renderImageStatus() {
     if (!generationDialog.open || !active('jobs')) return;
     const images = jobs?.images || [], newest = images[0];
-    const activeImage = images.find(item => ['queued','running','generating','queued_remote','running_remote'].includes(item.status));
+    const activeImage = images.find(item => activeImageStates.includes(item.status));
     const preparation = changes.get('image-generate');
     const generating = preparation?.phase === 'accepted' || Boolean(activeImage);
     const status = byId('image-result-status');
-    status.textContent = generating ? 'Generating image…' : preparation?.phase === 'unknown' ? 'Outcome unconfirmed' : preparation ? 'Preparing generation…' : newest ? imageJobState(newest) : '';
+    const service = byId('image-service-status');
+    status.textContent = generating ? 'Generating image…' : preparation?.phase === 'unknown' ? 'Outcome unconfirmed' : preparation ? 'Preparing generation…' :
+      newest && ['unknown', 'interrupted', 'completed_remote', 'failed'].includes(newest.status) ? imageJobState(newest) : service.textContent;
     status.dataset.state = generating ? 'generating' : newest?.status || 'idle';
+    const cancel = byId('image-cancel-current');
+    cancel.hidden = !activeImage || activeImage.recoverable === false;
+    cancel.disabled = Boolean(activeImage && (busy(`image-control:${activeImage.id || activeImage.job}`) || busy(`image-recovery:${activeImage.id || activeImage.job}`)));
+    const check = byId('image-check-inline');
+    check.hidden = service.dataset.state !== 'error';
+    check.disabled = byId('image-check-service').disabled;
+    byId('image-capabilities-status').hidden = service.dataset.state !== 'error';
     const cancelling = [...changes.values()].some(change => change.operation === 'image-cancel');
     const notice = byId('image-cancellation-notice');
     notice.hidden = !cancelling && !activeImage;
     notice.textContent = cancelling || activeImage ? studioCapabilities?.cancellation_notice || 'The service must confirm cancellation before the job is stopped.' : '';
   }
+  byId('image-cancel-current').addEventListener('click', () => {
+    const item = (jobs?.images || []).find(row => activeImageStates.includes(row.status));
+    if (item && item.recoverable !== false) {
+      const identity = item.id || item.job;
+      reviewJob({operation:'image-cancel', target:identity}, `image-control:${identity}`, 'image');
+    }
+  });
   function render() {
     renderMemory(); renderConnections(); if (sessionsLoaded) renderSessionList();
     renderSessionControls();
@@ -970,7 +991,12 @@ window.BrowserManagement = (() => {
         byId('image-capabilities-status').replaceChildren("Enable an image service in Klaude's ", link, " to generate images.");
       }
       for (const [kind, items] of [["research", result.research], ["image", result.images]]) {
-        const rows = items.map(item => {
+        const currentImage = kind === 'image' ? items.find(item => activeImageStates.includes(item.status)) : null;
+        const visibleItems = items.filter((item, index) => kind === "research" ? item.status !== "completed" :
+          item !== currentImage && !item.artifact && (activeImageStates.includes(item.status) ||
+          ['unknown', 'interrupted', 'completed_remote'].includes(item.status) ||
+          !currentImage && index === 0 && item.status === 'failed'));
+        const rows = visibleItems.map(item => {
           if (kind === 'image') return imageJobRow(item);
           const identity = item.id || item.job;
           const { node, actions } = row(item.question, `${item.status}${item.phase ? ` · ${item.phase}` : ""}`);
@@ -982,9 +1008,11 @@ window.BrowserManagement = (() => {
           return node;
         });
         reconcileRows(byId(`${kind}-jobs`), rows);
-        if (!rows.length) byId(`${kind}-jobs`).replaceChildren(domainText("p", `No ${kind === "research" ? "Research" : "image"} jobs yet.`, "muted"));
+        byId(`${kind}-history`).hidden = !rows.length;
+        if (kind === 'image') byId('image-attention-label').textContent = `View job details (${rows.length})`;
       }
-      byId("generated-jobs-status").textContent = result.research_more || result.images_more ? "Showing the 20 most recent jobs of each type." : "";
+      byId('image-jobs-coverage').hidden = !result.images_more;
+      byId("generated-jobs-status").textContent = result.research_more && generationType === 'research' ? "Showing the 20 most recent research jobs." : "";
       render();
     } catch (error) { if (generation === jobsLoad) domainError(error, "generated-jobs-status"); }
   }
@@ -1012,6 +1040,9 @@ window.BrowserManagement = (() => {
       generationDialog.scrollTop = 0;
     }
     generationType = type;
+    const coverageStatus = byId('generated-jobs-status');
+    if (!coverageStatus.textContent || coverageStatus.textContent === 'Showing the 20 most recent research jobs.')
+      coverageStatus.textContent = type === 'research' && jobs?.research_more ? 'Showing the 20 most recent research jobs.' : '';
     for (const tab of generationTabs.querySelectorAll("[data-generation]")) {
       const selected = tab.dataset.generation === type;
       tab.setAttribute("aria-selected", String(selected));
@@ -1084,6 +1115,7 @@ window.BrowserManagement = (() => {
     if (generationDialog.open) return;
     generationPreparation += 1;
     byId('image-create-settings').close(); byId('research-create-settings').close();
+    byId('image-history').open = false; byId('image-setups-details').open = false;
     byId("image-generate-status").textContent = "";
     if (studioFromChat && authenticated && currentView === "chat") byId("attach-file").focus({preventScroll:true});
   });
@@ -1217,11 +1249,7 @@ window.BrowserManagement = (() => {
       const help = domainText("p", settingHelp, "muted");
       help.id = `${id}-help`; help.hidden = true;
       const button = domainButton("", () => showAgentSettingHelp(button, labelText, settingHelp), "icon-button settings-help-button");
-      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("aria-hidden", "true");
-      const path = document.createElementNS(svg.namespaceURI, "path");
-      path.setAttribute("d", "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM9 9a3 3 0 1 1 4 3c-1 0-1 1-1 2M12 17h.01");
-      svg.append(path); button.append(svg);
+      button.append(libraryIcon('help'));
       button.setAttribute("aria-label", `Help for ${labelText}`);
       button.setAttribute("aria-haspopup", "dialog"); button.setAttribute("aria-controls", "agent-help-dialog");
       input.setAttribute("aria-describedby", help.id);

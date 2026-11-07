@@ -39,13 +39,7 @@ window.ChatAttachmentsUI = (() => {
     const tile = document.createElement("span");
     tile.className = `attachment-artwork${type === "PDF" ? " attachment-pdf" : ""}`;
     tile.setAttribute("aria-hidden", "true");
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("viewBox", "0 0 24 24");
-    const path = document.createElementNS(svg.namespaceURI, "path");
-    path.setAttribute("d", item.image ?
-      "M4 3h16a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm0 13 5-5 4 4 3-3 5 5M8 7h.01" :
-      "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6M8 13h8M8 17h5");
-    svg.append(path);
+    const svg = window.KlaudeUIIcons.create(item.image ? 'image' : 'text');
     tile.append(svg);
     if (type === "PDF") {
       const badge = document.createElement("span");
@@ -228,6 +222,17 @@ window.ChatAttachmentsUI = (() => {
     } catch (error) { if (current()) rejectUpload(error.message); }
     finally { jobs--; refresh(); }
   }
+  byId("prompt").addEventListener("paste", event => {
+    if (event.defaultPrevented || currentView !== "chat") return;
+    const clipboard = event.clipboardData;
+    if (!clipboard) return;
+    let files = [...clipboard.files];
+    if (!files.length) files = [...clipboard.items]
+      .filter(item => item.kind === "file").map(item => item.getAsFile()).filter(Boolean);
+    if (!files.length) return; // Plain text keeps native paste/selection/undo behavior.
+    event.preventDefault();
+    void uploadFiles(files);
+  });
   window.FileDropUI?.register({
     active: () => currentView === "chat",
     state: () => {
@@ -622,7 +627,7 @@ window.ContextPanel = (() => {
       openArtifact(item.id, { origin: preview, item }).catch(error => { status.textContent = error.message; }));
     row.className = "cp-file file-item"; row.draggable = true;
     row.dataset.artifact = item.id;
-    preview.classList.add("cp-file-preview", "quiet");
+    preview.classList.add("cp-file-preview");
     preview.setAttribute("aria-label", `Preview ${item.name}`);
     preview.querySelector(".file-artwork").classList.add("cp-file-art");
     preview.querySelector(".file-name-group").classList.add("cp-file-caption");

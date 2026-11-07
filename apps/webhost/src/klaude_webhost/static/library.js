@@ -646,75 +646,8 @@ function updateDomainPager(prefix, offset, data) {
   byId(`${prefix}-page`).textContent = `Page ${current}${data.total == null ? "" : ` of ${last}`}`;
 }
 
-const fileIconPaths = {
-  file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6",
-  text: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6M8 13h8M8 17h5",
-  code: "m8 7-5 5 5 5m8-10 5 5-5 5m-3-14-2 18",
-  image: "M3 3h18v18H3ZM3 16l6-6 5 5 3-3 4 4M7 7h.01",
-  landscape: "M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z",
-  portrait: "M7 3h10a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z",
-  video: "M3 5h13v14H3Zm13 5 5-3v10l-5-3",
-  audio: "M9 18V5l11-2v13M9 8l11-2M9 18a3 3 0 1 1-3-3c1.7 0 3 1.3 3 3Zm11-2a3 3 0 1 1-3-3c1.7 0 3 1.3 3 3Z",
-  archive: "M4 3h16v4H4Zm1 4v14h14V7M10 11h4M10 14h4M10 17h4",
-  folder: "M3 6h7l2 2h9v12H3ZM3 6V4h7l2 2",
-  list: "M8 5h13M8 12h13M8 19h13M3 5h.01M3 12h.01M3 19h.01",
-  grid: "M3 3h7v7H3Zm11 0h7v7h-7ZM3 14h7v7H3Zm11 0h7v7h-7Z",
-  gallery: "M3 3h18v18H3ZM3 16l6-6 5 5 3-3 4 4M7 7h.01",
-  previous: "m15 5-7 7 7 7", next: "m9 5 7 7-7 7",
-  expand: "M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5",
-  openNew: "M14 4h6v6m0-6-9 9M18 13v6H5V6h6",
-  sidebar: "M3 3h18v18H3ZM15 3v18",
-  search: "M15 15a7 7 0 1 1 0-10 7 7 0 0 1 0 10Zm0 0 6 6",
-  options: "M4 7h16M4 17h16M8 4v6m8 4v6",
-  disclosure: "M8.7 4.8a1.5 1.5 0 0 0-2.3 1.3v11.8a1.5 1.5 0 0 0 2.3 1.3l9.4-5.9a1.5 1.5 0 0 0 0-2.6L8.7 4.8Z",
-  close: "m6 6 12 12M6 18 18 6",
-  pause: "M8 5v14M16 5v14",
-  play: "m8 5 11 7-11 7Z",
-  more: "M12 4a1 1 0 1 0 0 2 1 1 0 0 0 0-2M12 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2M12 18a1 1 0 1 0 0 2 1 1 0 0 0 0-2",
-  download: "M12 3v12m-5-5 5 5 5-5M4 17v4h16v-4",
-  copy: "M9 9h11v11H9ZM5 15H3V3h12v2", check: "m5 12 4 4L19 6",
-  laptop: "M4 4h16v12H4ZM4 16l-2 4h20l-2-4M9 18h6",
-  smartphone: "M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2ZM10 5h4M11 19h2",
-  fit: "M3 9V3h6m6 0h6v6M3 15v6h6m6 0h6v-6M8 8h8v8H8z",
-  plus: "M12 5v14M5 12h14", minus: "M5 12h14",
-  link: "M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-2 2M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l2-2",
-  tags: "M3 3h7l11 11-7 7L3 10V3Zm4 4h.01",
-  sparkles: "m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3ZM20 2v4m-2-2h4",
-  info: "M12 16v-4m0-4h.01M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z",
-  trash: "M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7",
-  edit: "m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15l-1 6Z",
-  knowledge: "M12 5C8 2 4 3 2 4v15c4-2 7-1 10 1 3-2 6-3 10-1V4c-2-1-6-2-10 1Zm0 0v15",
-  skill: "M4 8h4V5a2 2 0 0 1 4 0v3h6v4h2a2 2 0 0 1 0 4h-2v5H4v-5h2a2 2 0 0 0 0-4H4V8Z",
-  connection: "M8 3v5m8-5v5M6 8h12v4a6 6 0 0 1-12 0V8Zm6 10v3",
-  account: "M20 21v-2a8 8 0 0 0-16 0v2M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z",
-  chat: "M4 4h16v12H8l-4 4V4ZM8 8h8M8 12h5",
-  vision: "M2 12s3-7 10-7 10 7 10 7-3 7-10 7S2 12 2 12ZM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
-  theme: "M12 3a9 9 0 0 0 0 18h1a2.5 2.5 0 0 0 0-5h-.5a1.5 1.5 0 0 1 0-3H17a4 4 0 0 0 4-4c0-3.3-4-6-9-6ZM7 10h.01M9 6.5h.01M14 6.5h.01M17 9h.01",
-  agent: "M12 3v4M5 7h14v13H5ZM2 11v5m20-5v5M9 11h.01M15 11h.01M9 16h6",
-  models: "m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5",
-  clock: "M12 7v5l3 2M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z",
-  star: "m12 3 2.78 5.63L21 9.54l-4.5 4.39 1.06 6.2L12 17.2l-5.56 2.93 1.06-6.2L3 9.54l6.22-.91L12 3Z",
-  system: "M12 2v10M5.6 5.6a9 9 0 1 0 12.8 0",
-  memory: "M12 18V5M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5M17.997 5.125a4 4 0 0 1 2.526 5.77M18 18a4 4 0 0 0 2-7.464M20.303 16.369A4 4 0 1 1 12 18M6.003 5.125a4 4 0 0 0-2.526 5.77M6 18a4 4 0 0 1-2-7.464M3.697 16.369A4 4 0 1 0 12 18",
-  tools: "m14 6 4 4 3-3a6 6 0 0 1-8 7L6 21l-3-3 7-7a6 6 0 0 1 7-8l-3 3Z",
-  shield: "M12 3 3 7v5c0 5 9 10 9 10s9-5 9-10V7l-9-4Zm-4 9 3 3 5-6",
-  web: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM3 12h18M12 3a18 18 0 0 0 0 18 18 18 0 0 0 0-18Z",
-};
 function libraryIcon(type) {
-  if (type === "refresh") return byId("refresh-sessions").querySelector("svg").cloneNode(true);
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("class", "icon");
-  svg.setAttribute("fill", "none");
-  svg.setAttribute("stroke", "currentColor");
-  svg.setAttribute("stroke-width", "1.7");
-  svg.setAttribute("stroke-linecap", "round");
-  svg.setAttribute("stroke-linejoin", "round");
-  svg.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS(svg.namespaceURI, "path");
-  path.setAttribute("d", fileIconPaths[type] || fileIconPaths.file);
-  svg.append(path);
-  return svg;
+  return window.KlaudeUIIcons.create(type);
 }
 function decorateDisclosure(summary) {
   if (summary.classList.contains("rounded-disclosure")) return summary;
@@ -723,8 +656,41 @@ function decorateDisclosure(summary) {
   summary.prepend(icon);
   return summary;
 }
+function settingsChevron(direction = "next") {
+  const icon = libraryIcon("disclosure");
+  icon.classList.add("settings-chevron", `settings-chevron-${direction}`);
+  return icon;
+}
+for (const slot of document.querySelectorAll("[data-settings-chevron]"))
+  slot.replaceChildren(settingsChevron(slot.dataset.settingsChevron || "next"));
+// Keep the original selects, labels and native keyboard/mobile picker behavior.
+// Decoration also covers controls replaced by asynchronous Settings reads.
+function decorateSettingsSelects(root) {
+  const selects = root.matches?.("select") ? [root] : root.querySelectorAll("select");
+  for (const select of selects) {
+    if (select.hidden || select.multiple || select.size > 1 ||
+        select.parentElement.classList.contains("settings-select-control")) continue;
+    const wrapper = document.createElement("span");
+    wrapper.className = "settings-select-control";
+    select.before(wrapper); wrapper.append(select, settingsChevron("down"));
+  }
+}
+const settingsChevronRoots = ["settings-view", "role-model-picker", "model-connection-editor"].map(byId);
+const settingsSelectObserver = new MutationObserver(records => {
+  for (const record of records) for (const node of record.addedNodes)
+    if (node.nodeType === Node.ELEMENT_NODE && settingsChevronRoots.some(root => root.contains(node)))
+      decorateSettingsSelects(node);
+});
+for (const root of settingsChevronRoots) {
+  decorateSettingsSelects(root);
+  settingsSelectObserver.observe(root, {childList: true, subtree: true});
+}
 for (const summary of document.querySelectorAll("details:not(.model-menu, .agent-activity) > summary")) decorateDisclosure(summary);
 for (const button of document.querySelectorAll("[data-refresh-icon]")) button.append(libraryIcon("refresh"));
+for (const title of document.querySelectorAll("[data-page-icon]")) {
+  const icon = libraryIcon(title.dataset.pageIcon); icon.classList.add("page-title-icon");
+  title.prepend(icon);
+}
 for (const node of document.querySelectorAll("#settings-sections [data-settings], #settings-view [data-settings-icon]")) {
   node.prepend(libraryIcon(node.dataset.settingsIcon || node.dataset.settings));
 }
@@ -1656,10 +1622,12 @@ function primaryTabIndicator(tabs) {
   const indicatorElement = indicator.element;
   indicatorElement.style.left = "0px";
   indicatorElement.style.transition = "transform 450ms cubic-bezier(0.2, 0, 0, 1), width 450ms cubic-bezier(0.2, 0, 0, 1)";
-  let ready = false;
+  let ready = false, lastSelected = null, transitionUntil = 0;
   function position(selected = tabs.querySelector("[aria-selected='true']"), immediate = false) {
     const label = selected?.querySelector(".mtrl-button__text");
     if (!label || !tabs.getClientRects().length) { ready = false; return; }
+    if (!immediate && ready && selected !== lastSelected) transitionUntil = performance.now() + 450;
+    lastSelected = selected;
     const width = Math.max(24, label.offsetWidth - 4);
     const left = selected.offsetLeft + label.offsetLeft + (label.offsetWidth - width) / 2;
     if (immediate || !ready) indicatorElement.style.transition = "none";
@@ -1670,7 +1638,13 @@ function primaryTabIndicator(tabs) {
     });
     ready = true;
   }
-  new ResizeObserver(() => position(undefined, true)).observe(tabs);
+  let observedWidth = null;
+  new ResizeObserver(entries => {
+    const width = entries[0]?.contentRect.width;
+    if (width === observedWidth) return;
+    observedWidth = width;
+    position(undefined, performance.now() >= transitionUntil);
+  }).observe(tabs);
   document.fonts?.ready.then(() => position(undefined, true));
   return position;
 }
@@ -2558,9 +2532,9 @@ async function prepareChange(draft, { current = () => true, beforeOpen = () => {
   const storeAdd = draft.operation === "mcp-store-add", storeSkill = draft.operation === "skill-store-install";
   reviewDialog.classList.toggle("model-download-confirmation", download);
   reviewDialog.classList.toggle("ai-confirmation", ai);
-  byId("domain-review-title").textContent = draft.operation === "comfy-remove" ? "Remove image model?" : bundleInstall ? "Install image model?" : bundleCheck ? "Check installation?" : storeAdd ? "Add MCP server?" : storeSkill ? "Install skill?" : planDownload ? "Install planned files?" : download ? "Download model?" : ai ? tags ? "Suggest image tags?" : "Review image?" : destructive ?
+  byId("domain-review-title").textContent = draft.operation === "import" ? "Import file?" : draft.operation === "comfy-remove" ? "Remove image model?" : bundleInstall ? "Install image model?" : bundleCheck ? "Check installation?" : storeAdd ? "Add MCP server?" : storeSkill ? "Install skill?" : planDownload ? "Install planned files?" : download ? "Download model?" : ai ? tags ? "Suggest image tags?" : "Review image?" : destructive ?
     draft.operation === "delete-selected" ? `Delete ${draft.targets.length} selected file${draft.targets.length === 1 ? "" : "s"} permanently?` : draft.operation === "knowledge-delete" ? draft.source ? "Delete this source?" : "Delete this knowledge?" : draft.operation === "delete" ? "Delete file permanently?" : "Remove this item?" : "Review change";
-  byId("domain-review-confirm").textContent = draft.operation === "comfy-remove" ? "Remove" : bundleInstall ? "Install" : bundleCheck ? "Check installation" : storeAdd ? "Add server" : storeSkill ? "Install skill" : planDownload ? "Approve downloads" : download ? "Download" : ai ? tags ? "Suggest tags" : "Review image" : destructive ? "Delete permanently" : "Confirm";
+  byId("domain-review-confirm").textContent = draft.operation === "import" ? "Import" : draft.operation === "comfy-remove" ? "Remove" : bundleInstall ? "Install" : bundleCheck ? "Check installation" : storeAdd ? "Add server" : storeSkill ? "Install skill" : planDownload ? "Approve downloads" : download ? "Download" : ai ? tags ? "Suggest tags" : "Review image" : destructive ? "Delete permanently" : "Confirm";
   byId("domain-review-confirm").classList.toggle("danger", destructive);
   byId("domain-review-summary").textContent = download && !planDownload ? "" : ai ? tags ? "Klaude will analyze this image and suggest tags for you to review." :
     "Klaude will analyze this image to answer your question." : result.summary;
@@ -2594,7 +2568,7 @@ async function prepareChange(draft, { current = () => true, beforeOpen = () => {
 }
 
 async function submitDirectChange(draft, { current = () => true, onSubmitting, onAccepted, onDiscard } = {}) {
-  if (!["skill-enabled", "mcp-enable", "mcp-disable", "session-rename", "source_link", "tags", "vision-tags", "vision-analyze"].includes(draft.operation))
+  if (!["import", "skill-enabled", "mcp-enable", "mcp-disable", "session-rename", "source_link", "tags", "vision-tags", "vision-analyze"].includes(draft.operation))
     throw new Error("This action requires confirmation");
   // The click, inline commit, or rename submission is the owner's action. Keep exact snapshot,
   // revision checks and durable submission without opening a confirmation dialog.
@@ -2667,6 +2641,8 @@ byId("domain-review-confirm").addEventListener("click", async () => {
   } finally { if (current()) byId("domain-review-confirm").disabled = false; }
 });
 
+let artifactImportPreparing = false;
+let artifactImportUncertain = false;
 function bindUploadForm(id, action, statusId) {
   byId(id).addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -2677,10 +2653,14 @@ function bindUploadForm(id, action, statusId) {
       integrationAddDialog.open && generation === integrationAddGeneration) &&
       (id !== "artifact-import" || importVersion === importGeneration && importDialog.open);
     button.disabled = true;
-    byId(statusId).textContent = "Preparing review…";
-    try { await action(); if (current()) byId(statusId).textContent = "Ready for review."; }
+    if (id === "artifact-import") artifactImportPreparing = true;
+    byId(statusId).textContent = id === "artifact-import" ? "Preparing import…" : "Preparing review…";
+    try { await action(); if (current() && id !== "artifact-import") byId(statusId).textContent = "Ready for review."; }
     catch (error) { if (current()) domainError(error, statusId); }
-    finally { button.disabled = false; }
+    finally {
+      if (id === "artifact-import") artifactImportPreparing = false;
+      button.disabled = id === "artifact-import" && (!byId("artifact-file").files.length || !!droppedImports?.waiting || artifactImportUncertain);
+    }
   });
 }
 bindUploadForm("artifact-import", async () => {
@@ -2690,19 +2670,31 @@ bindUploadForm("artifact-import", async () => {
   if (!current()) return;
   const upload_id = await uploadForReview(byId("artifact-file").files[0]);
   if (!current()) { discardStagedUpload(upload_id, epoch); return; }
-  if (current()) await prepareChange({ operation: "import", upload_id }, {
-    current, beforeOpen: () => {
-      if (batch) {
-        batch.reviewing = true;
-        byId("domain-review-status").textContent = `File ${batch.index + 1} of ${batch.files.length}. Each file is imported only after confirmation. Cancel stops the remaining files.`;
-      }
-      importDialog.close();
-    },
-    onAccepted: operation => {
-      if (batch) { batch.accepted = true; batch.receipt = operation; }
-    },
-    onDiscard: () => { if (droppedImports === batch) droppedImports = null; },
-  });
+  let receipt;
+  try {
+    receipt = await submitDirectChange({ operation: "import", upload_id }, {
+      current, onAccepted: operation => { if (batch) batch.receipt = operation; },
+    });
+  } catch (error) {
+    if (batch && droppedImports === batch) droppedImports = null;
+    throw error;
+  }
+  if (!receipt || !current()) return;
+  if (receipt.uncertain) {
+    artifactImportUncertain = true;
+    if (batch && droppedImports === batch) droppedImports = null;
+    byId("artifact-import-status").textContent = "Import status is unconfirmed. Check Activity before trying again.";
+    return;
+  }
+  if (batch && droppedImports === batch) {
+    batch.waiting = true;
+    byId("artifact-file").disabled = true;
+    byId("artifact-import-status").textContent = `Importing file ${batch.index + 1} of ${batch.files.length}… Close to stop the remaining files; this accepted import will continue.`;
+    setTimeout(() => advanceDroppedImport(batch), 0);
+  } else {
+    importDialog.close();
+    byId("library-status").textContent = "Import accepted. Track progress in Activity.";
+  }
 }, "artifact-import-status");
 
 function cancelDroppedImports() {
@@ -2719,6 +2711,7 @@ function nextDroppedImport(batch) {
   const transfer = new DataTransfer();
   transfer.items.add(batch.files[batch.index]);
   byId("artifact-file").files = transfer.files;
+  updateArtifactFile();
   batch.reviewing = batch.accepted = false;
   byId("artifact-import-status").textContent = "";
   if (!importDialog.open) importDialog.showModal();
@@ -2740,34 +2733,51 @@ function advanceDroppedImport(batch) {
 }
 importDialog.addEventListener("close", () => {
   if (!importDialog.open && droppedImports && !droppedImports.reviewing) cancelDroppedImports();
-});
-byId("artifact-file").addEventListener("change", cancelDroppedImports);
-reviewDialog.addEventListener("close", () => {
-  const batch = droppedImports;
-  if (!reviewDialog.open && batch?.reviewing && batch.accepted) {
-    batch.reviewing = false; batch.waiting = true;
-    // All imports share a backend resource. Wait for its terminal receipt before
-    // offering the next independent confirmation; admission alone does not release it.
-    byId("artifact-file").disabled = true;
-    byId("artifact-import").querySelector('button[type="submit"]').disabled = true;
-    byId("artifact-import-status").textContent = `Importing file ${batch.index + 1} of ${batch.files.length}… Close to stop the remaining files; this accepted import will continue.`;
-    if (!importDialog.open) importDialog.showModal();
-    advanceDroppedImport(batch);
+  if (!importDialog.open && !droppedImports?.reviewing) {
+    byId("artifact-file").value = ""; updateArtifactFile();
+    artifactDropZone.classList.remove("is-dragging");
   }
+});
+function updateArtifactFile() {
+  const file = byId("artifact-file").files[0];
+  byId("artifact-file-name").textContent = file ? file.name : "Max 32 MiB";
+  byId("artifact-import").querySelector('button[type="submit"]').disabled =
+    !file || artifactImportPreparing || artifactImportUncertain || !!droppedImports?.waiting;
+}
+byId("artifact-file").addEventListener("change", () => { cancelDroppedImports(); updateArtifactFile(); });
+const artifactDropZone = byId("artifact-drop-zone");
+for (const type of ["dragenter", "dragover"]) artifactDropZone.addEventListener(type, event => {
+  if (!event.dataTransfer?.types.includes("Files")) return;
+  event.preventDefault(); event.stopPropagation();
+  event.dataTransfer.dropEffect = "copy"; artifactDropZone.classList.add("is-dragging");
+});
+artifactDropZone.addEventListener("dragleave", event => {
+  if (!artifactDropZone.contains(event.relatedTarget)) artifactDropZone.classList.remove("is-dragging");
+});
+artifactDropZone.addEventListener("drop", event => {
+  event.preventDefault(); event.stopPropagation(); artifactDropZone.classList.remove("is-dragging");
+  if (artifactImportPreparing || byId("artifact-file").disabled) return;
+  const files = event.dataTransfer?.files;
+  if (!files?.length) return;
+  if (files.length !== 1 || !files[0].size || files[0].size > 32 * 1024 * 1024) {
+    byId("artifact-import-status").textContent = "Choose one nonempty file up to 32 MiB."; return;
+  }
+  cancelDroppedImports(); byId("artifact-file").files = files;
+  byId("artifact-import-status").textContent = ""; updateArtifactFile();
 });
 document.addEventListener("klaude-operations", event => {
   const batch = droppedImports;
   if (!batch?.receipt) return;
   const receipt = event.detail.find(item => item.request_id === batch.receipt.request_id);
-  if (receipt) { batch.receipt = receipt; advanceDroppedImport(batch); }
+  if (receipt) { batch.receipt = receipt; if (batch.waiting) setTimeout(() => advanceDroppedImport(batch), 0); }
 });
 window.FileDropUI?.register({
-  active: () => currentView === "library" && librarySection === "files",
+  active: () => currentView === "library" && librarySection === "files" && !importDialog.open,
   state: () => {
-    const allowed = !byId("artifact-import").querySelector('button[type="submit"]').disabled;
+    const allowed = !artifactImportPreparing && !droppedImports?.waiting;
     return { allowed, title: allowed ? "Drop files into Uploads" : "An import is being prepared",
       detail: allowed ? "Keep documents and images in your private Library." : "Wait for the current file to finish preparing.",
-      note: "32 MiB per file · Review each import" };
+      note: "32 MiB per file · Files import one at a time" };
   },
   receive: files => {
     if (files.length > 20) throw new Error("Drop up to 20 files at a time.");
@@ -3113,12 +3123,15 @@ integrationAddDialog.addEventListener("close", () => {
 });
 byId("file-add").addEventListener("click", () => {
   cancelDroppedImports();
+  artifactImportUncertain = false;
+  byId("artifact-file").value = ""; updateArtifactFile();
   byId("artifact-import-status").textContent = "";
   importDialog.showModal();
   byId("artifact-file").focus();
 });
 byId("artifact-import-close").append(libraryIcon("close"));
 byId("artifact-import-close").addEventListener("click", () => importDialog.close());
+byId("artifact-import-cancel").addEventListener("click", () => importDialog.close());
 byId("skills-refresh").addEventListener("click", () => refreshDomain("integrations"));
 for (const button of byId("integration-sections").querySelectorAll("[data-integration]")) {
   button.addEventListener("click", () => {

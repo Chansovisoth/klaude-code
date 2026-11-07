@@ -314,7 +314,10 @@ window.StoreDesign = (() => {
     const selected=kind||({'ollama':'models','comfyui':'images'}[runtime]||'');
     for(const button of nav.children){const on=button.dataset.storeKind===selected;if(on)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');}
     const title=kind?kind==='mcps'?'MCP servers':'Skills':section==='installed'?'Installed':section==='downloads'?'Downloads':runtime==='ollama'?'Chat models':runtime==='comfyui'?'Image models':runtime==='sdcpp'?'Advanced model files':'Explore';
-    byId('store-title').textContent=title;byId('store-mobile-location').value=kind||(['installed','downloads'].includes(section)?section:runtime==='all'?'explore':runtime);
+    byId('store-title-label').textContent=title;byId('store-mobile-location').value=kind||(['installed','downloads'].includes(section)?section:runtime==='all'?'explore':runtime);
+    const descriptions={Explore:'Models, tools and skills for your workspace.',Installed:'Manage the models and capabilities you have added.',Downloads:'Follow your transfers and manage download history.','Chat models':'Find a model for conversations, writing and code.','Image models':'Find your next image model.','MCP servers':'Connect Klaude to your tools and services.',Skills:'Give Klaude new ways to work.','Advanced model files':'Browse exact files for your image service.'};
+    byId('store-description').textContent=descriptions[title]||'';
+    byId('store-view').dataset.storeSection=kind||section;
     for(const button of byId('store-sections').children)button.classList.toggle('is-current',!kind&&button.dataset.section===section&&(section!=='discover'||runtime==='all'));
     byId('store-advanced-files').classList.toggle('is-current',!kind&&runtime==='sdcpp');
   }
@@ -323,7 +326,7 @@ window.StoreDesign = (() => {
     const grid=domainText('div','','store-category-launchers');
     for(const [kind,label,icon,copy] of [['models','Chat & code','chat','Talk, write and build'],['images','Create images','image','Generate on your device'],['mcps','Connect tools','connection','Give Klaude new tools'],['skills','Add skills','text','New ways to work']]){
       const b=domainButton('',()=>byId('store-kind-'+kind).click(),'store-category-launcher');b.dataset.category=kind;
-      const mark=domainText('span','','store-category-mark');mark.append(libraryIcon(icon));const text=domainText('span','');text.append(domainText('strong',label),domainText('small',copy));b.append(mark,text);grid.append(b);
+      const mark=domainText('span','','store-category-mark');mark.append(libraryIcon(icon));const text=domainText('span','','store-category-copy');text.append(domainText('strong',label),domainText('small',copy));b.append(mark,text,libraryIcon('next'));grid.append(b);
     }return grid;
   }
   document.addEventListener('klaude-view',sync);window.addEventListener('popstate',sync);sync();
@@ -336,8 +339,9 @@ window.ModelsSettingsNavigation = (() => {
   const panels = {overview: 'model-default-settings', connections: 'model-connections-settings', catalog: 'models-configured', image: 'image-service-settings'};
   const links = byId('models-overview-links'), imageLink = byId('models-image-link');
   links.hidden = false; imageLink.hidden = false;
-  links.innerHTML = `<section class="settings-section models-connections-section"><div class="settings-row-group"><button type="button" data-model-screen="connections" class="quiet settings-navigation-row"><span class="settings-row-copy"><strong>Connections</strong><small id="models-connections-summary">Loading…</small></span><span aria-hidden="true">›</span></button><button type="button" data-model-screen="catalog" class="quiet settings-navigation-row"><span>Connected models</span><span aria-hidden="true">›</span></button></div></section>`;
-  imageLink.innerHTML = `<section class="settings-section"><div class="settings-row-group"><button type="button" data-model-screen="image" class="quiet settings-navigation-row"><span class="settings-row-copy"><strong>Image generation</strong><small id="models-image-summary">Loading…</small></span><span aria-hidden="true">›</span></button></div></section>`;
+  links.innerHTML = `<section class="settings-section models-connections-section"><div class="settings-row-group"><button type="button" data-model-screen="connections" class="quiet settings-navigation-row"><span class="settings-row-copy"><strong>Connections</strong><small id="models-connections-summary">Loading…</small></span><span aria-hidden="true" data-settings-chevron></span></button><button type="button" data-model-screen="catalog" class="quiet settings-navigation-row"><span>Connected models</span><span aria-hidden="true" data-settings-chevron></span></button></div></section>`;
+  imageLink.innerHTML = `<section class="settings-section"><div class="settings-row-group"><button type="button" data-model-screen="image" class="quiet settings-navigation-row"><span class="settings-row-copy"><strong>Image generation</strong><small id="models-image-summary">Loading…</small></span><span aria-hidden="true" data-settings-chevron></span></button></div></section>`;
+  for (const slot of [...links.querySelectorAll('[data-settings-chevron]'), ...imageLink.querySelectorAll('[data-settings-chevron]')]) slot.replaceChildren(settingsChevron());
   function show(next, {restore = false, focus = false} = {}) {
     if (!screens.includes(next)) next = 'overview';
     if (!restore && next !== screen && !canLeave()) return;
@@ -480,8 +484,8 @@ window.BrowserModelsUI = (() => {
     }
   }
   byId('models-source').addEventListener('change', () => { selected = byId('models-source').value; page = 1; load(false); });
-  byId("models-previous").append(libraryIcon("previous"));
-  byId("models-next").append(libraryIcon("next"));
+  byId("models-previous").append(settingsChevron("previous"));
+  byId("models-next").append(settingsChevron());
   byId("configured-models-refresh").addEventListener("click", () => load());
   byId("models-query").addEventListener("input", () => { page = 1; render(); });
   byId("models-previous").addEventListener("click", () => { page = Math.max(1, page - 1); render(); });
@@ -619,6 +623,10 @@ window.BrowserMedia = (() => {
       select.addEventListener("change", () => stage(field, select.value || null));
       const picker = controls.querySelector('button');
       picker.classList.add('settings-role-row','model-default-card'); picker.prepend(title); title.removeAttribute('for');
+      const copy = domainText('span', '', 'model-default-copy');
+      copy.append(title, picker.querySelector('.model-role-value'));
+      const roleIcon = title.querySelector('.icon'); roleIcon.classList.add('model-default-icon');
+      picker.prepend(copy); picker.append(roleIcon);
       form.append(controls); form.classList.add('settings-role-container'); form.addEventListener("submit", event => { event.preventDefault(); stage(field, select.value || null); });
       roleFields.append(form);
     }
@@ -1845,20 +1853,20 @@ window.ImageReadinessUI = (() => {
   const slot=(id,parent)=>{const node=domainText('section','','settings-section image-readiness-inventory');node.id=id;parent.append(node);slots.push(node);return node;};
   const store=slot('store-saved-setups',byId('store-panel'));
   const settings=slot('settings-saved-setups',byId('image-service-advanced'));
-  const composer=slot('composer-saved-setups',byId('generation-image'));
+  const composer=slot('composer-saved-setups',byId('image-setups-slot'));
   function visible(node){
     if(!authenticated||!latest?.image_readiness_inventory)return false;
     if(node===store)return currentView==='store'&&new URLSearchParams(location.search).get('models-section')==='installed'&&
       ['sdcpp','all'].includes(byId('store-runtime').value)&&byId('store-detail').hidden;
     if(node===settings)return byId('image-service-provider').value!=='comfyui'&&currentView==='settings'&&settingsSection==='models'&&new URLSearchParams(location.search).get('models-screen')==='image';
-    return byId('image-generate-panel').open;
+    return byId('image-generate-panel').open&&byId('image-create-settings').open&&byId('image-setups-details').open;
   }
   const entries=model=>(latest?.image_readiness_inventory?data?.items||[]:[]).filter(item=>!model||item.model_refs.includes(model));
   function text(item){return item.checked_at&&!item.live_status?`Last check: ${item.headline}`:item.headline;}
   function continuation(item){
     const options={model:item.model_refs[0]||item.name,planId:item.plan_id,
       setupId:item.kind==='setup'?item.id:'',targetEndpoint:item.endpoint||data.default_endpoint};
-    if(byId('image-generate-panel').open)BrowserManagement.beginImageSetup(options);else ImageSetupNavigation.open(options);
+    if(byId('image-generate-panel').open){if(byId('image-create-settings').open)byId('image-create-settings').close();BrowserManagement.beginImageSetup(options);}else ImageSetupNavigation.open(options);
   }
   async function refresh(){
     if(reading||!authenticated||!latest?.image_readiness_inventory)return;
@@ -1935,6 +1943,7 @@ window.ImageReadinessUI = (() => {
         actions.append(checkButton,open);
         if(item.transfers.length){
           const downloads=domainButton('View downloads',()=>{
+            if(byId('image-create-settings').open)byId('image-create-settings').close();
             if(byId('image-generate-panel').open)byId('image-generate-panel').close();
             const url=new URL(location.href);url.searchParams.set('view','store');url.searchParams.set('models-runtime','sdcpp');url.searchParams.set('models-section','downloads');url.searchParams.delete('models-detail');url.searchParams.delete('models-variant');
             if(item.plan_available)url.searchParams.set('models-plan',item.plan_id);else url.searchParams.delete('models-plan');
@@ -1953,6 +1962,7 @@ window.ImageReadinessUI = (() => {
     }
   }
   function sync(){
+    byId('image-setups-details').hidden=!latest?.image_readiness_inventory;
     render();
     if(slots.some(visible)||authenticated&&latest?.image_readiness_inventory&&currentView==='store'){if(!timer){refresh();timer=setInterval(refresh,5000);}}
     else{clearInterval(timer);timer=null;}
@@ -1961,6 +1971,8 @@ window.ImageReadinessUI = (() => {
   let capability;
   document.addEventListener('klaude-snapshot',()=>{if(capability!==latest?.image_readiness_inventory){capability=latest?.image_readiness_inventory;sync();}});
   new MutationObserver(()=>{if(authenticated)sync();}).observe(byId('image-generate-panel').closest('dialog'),{attributes:true,attributeFilter:['open']});
+  new MutationObserver(()=>{if(authenticated)sync();}).observe(byId('image-create-settings'),{attributes:true,attributeFilter:['open']});
+  byId('image-setups-details').addEventListener('toggle',sync);
   document.addEventListener('klaude-auth-reset',()=>{serial++;data=null;error=checking=query='';reading=false;page=1;revision++;clearInterval(timer);timer=null;slots.forEach(node=>{node.hidden=true;node.replaceChildren();});});
   return {summary,label,refresh,sync,revision:()=>revision};
 })();
@@ -2039,6 +2051,7 @@ window.ModelStoreUI = (() => {
   const installedTools=domainText('section','','store-installed-integrations');installedTools.id='store-installed-integrations';installedTools.append(domainText('h2','Tools & skills'));
   for(const [label,section] of [['MCP servers','connections'],['Skills','skills']]){const b=domainButton('',()=>IntegrationStoreUI.manage(section==='connections'?'mcps':'skills'),'quiet settings-navigation-row');b.append(domainText('span','Manage installed '+label),domainText('span','›'));installedTools.append(b);}byId('store-content').after(installedTools);installedTools.hidden=true;
   const filters=StoreDesign.disclosure('Filters',byId('store-filter-chips'),'store-browse-filters');byId('store-search-row').after(filters);
+  const searchMark=libraryIcon('search');searchMark.classList.add('store-search-icon');byId('store-search').prepend(searchMark);
   byId('store-download-open').textContent='Install by reference';byId('store-download-open').className='quiet';filters.append(byId('store-download-open'));
 
   const closeStoreFilters = () => storeFilterMenus.forEach(menu => menu.close());
@@ -2167,6 +2180,8 @@ window.ModelStoreUI = (() => {
     button.dataset.storeModel = item.id; button.dataset.storeKey = modelKey(item);
     const content = domainText('span', '', 'store-card-content');
     content.append(domainText('strong', item.name));
+    if(item.publisher)content.append(domainText('small',item.publisher,'store-model-publisher muted'));
+    const footer=domainText('span','','store-model-footer');
     const purpose = Number.isInteger(item.downloads) ? `${item.downloads.toLocaleString()} Hub downloads` : item.categories?.join(' · ') || item.publisher || item.summary;
     if (Number.isInteger(item.downloads)) {
       const downloads = domainText('small', '', 'store-download-count muted');
@@ -2178,15 +2193,15 @@ window.ModelStoreUI = (() => {
         const time = domainText('time', updatedLabel(modified));
         time.dateTime = modified.toISOString(); time.title = modified.toLocaleString(); updated.append(time);
       } else updated.append(document.createTextNode('Unknown'));
-      metadata.append(downloads, updated); content.append(metadata);
+      metadata.append(downloads, updated); footer.append(metadata);
     } else content.append(domainText('small', purpose, 'muted'));
     const task = modelTask(item);
-    if (task) content.append(domainText('small', task, 'store-task-label muted'));
-    content.append(runtimeBadge(item.runtime || runtime));
+    if (task) content.append(domainText('small', task.replaceAll('-',' '), 'store-task-label muted'));
+    footer.append(runtimeBadge(item.runtime || runtime));
 
     if (rank) { button.classList.add('store-ranked-row'); button.append(domainText('span', String(rank), 'store-rank')); }
     const installed = inventory?.models?.some(local => (!item.runtime || item.runtime === local.runtime) && item.variants?.some(v => v.tag === local.name));
-    button.append(icon(item.id, 40), content, domainText('span', installed ? (item.runtime || runtime) === 'sdcpp' ? 'Downloaded' : 'Installed' : 'View', 'store-cta'));
+    button.append(icon(item.id, 40), content, domainText('span', installed ? (item.runtime || runtime) === 'sdcpp' ? 'Downloaded' : 'Installed' : 'View', 'store-cta'),footer);
     button.title = `${item.name} · ${item.summary || purpose}`;
     return button;
   }
@@ -2408,7 +2423,7 @@ window.ModelStoreUI = (() => {
     } else byline.textContent = destination ? `Installed on ${destination}` : 'Model details';
     summary.append(title, byline);
     summary.append(runtimeBadge());
-    const synopsis=item?.summary;if(synopsis&&!synopsis.startsWith('Community GGUF')&&!['text-to-image','image-to-image'].includes(synopsis))summary.append(domainText('p',StoreDesign.brief(synopsis),'catalog-detail-summary'));
+    const synopsis=item?.summary;if(synopsis&&!synopsis.startsWith('Community GGUF')&&synopsis.toLowerCase()!==modelTask(item).toLowerCase())summary.append(domainText('p',StoreDesign.brief(synopsis),'catalog-detail-summary'));
     if (item?.stale) summary.append(domainText('p', 'Cached metadata', 'model-detail-source muted'));
     const actionArea = domainText('div', '', 'model-detail-actions');
     const install = domainButton(installed ? imageStore() ? latest?.image_comfyui?'Advanced setup':'Configure model' : current ? 'Current model' : 'Use model' : variant ? `Download${downloadSize ? ` · ${downloadSize}` : ''}` : 'Choose model', async () => {
@@ -2467,7 +2482,7 @@ window.ModelStoreUI = (() => {
     const capabilities = item?.capabilities?.length ? item.capabilities.join(' · ') : 'Unknown';
     const facts = [];
     const task = modelTask(item);
-    if (task) facts.push(['Task', task]);
+    if (task) facts.push(['Task', task.replaceAll('-',' ')]);
     if (Number.isInteger(item?.downloads)) facts.push(['Hub downloads', new Intl.NumberFormat(undefined, {notation:'compact', maximumFractionDigits:1}).format(item.downloads)]);
     if (Number.isInteger(item?.downloads) || modelUpdated(item)) facts.push(['Updated', updatedLabel(modelUpdated(item))]);
     if (variants.length) facts.push(['Available variants', String(variants.length)]);
@@ -2686,10 +2701,9 @@ window.ModelStoreUI = (() => {
     button.append(libraryIcon(glyph)); return button;
   }
   function renderJobs(target) {
-    if (!jobs.length && !observedTransfers.length) {
+    if (!jobs.some(item=>!item.dismissed||item.state==='unknown') && !observedTransfers.length) {
       clearDownloadBars(); target.replaceChildren();
-      emptyState(target, 'No downloads yet', '', 'download');
-      target.querySelector('.collection-empty p')?.remove();
+      emptyState(target, 'No downloads yet', 'Your model downloads will appear here. Find a model in Explore to get started.', 'download');
       target.append(domainButton('Discover models', () => { byId('store-query').value = ''; navigate('discover', '', '', false, ''); }, 'secondary'));
       renderDownloadInfo();
       return;
@@ -2698,11 +2712,24 @@ window.ModelStoreUI = (() => {
     for (const child of [...target.children]) if (!child.classList.contains('store-download-row')) child.remove();
     const retained = new Set();
     let position = 0;
-    for (const item of [...observedTransfers, ...jobs]) {
+    const inProgress=item=>!item.request_id||Boolean(item.paused)||['accepted','running','cancelling','unknown'].includes(item.state);
+    const items=[...observedTransfers,...jobs].filter(item=>!item.dismissed||item.state==='unknown');
+    items.sort((a,b)=>Number(inProgress(b))-Number(inProgress(a)));
+    let group='';
+    for (const item of items) {
+      const nextGroup=inProgress(item)?'Active transfers':'Download history';
+      if(group!==nextGroup){
+        group=nextGroup;
+        const heading=sectionHeading(group);
+        heading.classList.add('store-download-group');
+        heading.append(domainText('span',String(items.filter(row=>inProgress(row)===inProgress(item)).length),'store-group-count muted'));
+        target.insertBefore(heading,target.children[position]||null);position++;
+      }
       const observed = !item.request_id;
       if (item.dismissed && item.state !== 'unknown') continue;
       const key = item.request_id || item.id, source = observed ? 'observed' : 'owned', name = downloadName(item);
       const row = existing.get(key) || domainText('article', '', 'store-download-row collection-row library-card'); row.dataset.downloadId = key; retained.add(key);
+      row.dataset.state=item.paused?'paused':item.state;
       if (observed) row.classList.add('model-observed-transfer');
       if (item.dismissed) row.classList.add('model-dismissed-notice');
       row.setAttribute('aria-label', `${name}: ${downloadState(item)}`);
@@ -2712,6 +2739,7 @@ window.ModelStoreUI = (() => {
       const progress = item.progress;
       const bytes = ['running','cancelling'].includes(item.state) && Number.isFinite(progress?.total) && progress.total > 0 && Number.isFinite(progress.completed);
       const status = domainText('span', bytes ? `${fileSize(progress.completed)} / ${fileSize(progress.total)}` : downloadState(item), 'store-download-status');
+      if(bytes)content.append(domainText('small',downloadState(item),'store-download-phase muted'));
       status.dataset.state = item.paused ? 'paused' : item.state; status.title = status.textContent;
       const facts = downloadMetadata(item), metadata = domainText('div', '', 'store-download-metadata muted');
       content.append(title, domainText('span', facts.parameters, 'store-download-parameters muted'));
@@ -2876,15 +2904,19 @@ window.ModelStoreUI = (() => {
       }
       installedPage = Math.max(1, Math.min(installedPage, Math.ceil(rows.length / 20)));
       const list = domainText('div', '', 'store-installed-list');
+      if(rows.length){
+        const header=domainText('div','','store-installed-header');header.setAttribute('aria-hidden','true');
+        header.append(domainText('span','Model'),domainText('span','Size'),domainText('span',''));list.append(header);
+      }
       for (const row of rows.slice((installedPage - 1) * 20, installedPage * 20)) {
         const card = domainText('div', '', 'collection-row library-card');
         const button = domainButton('', () => { variant = ''; openDetail(row.name, button, row.runtime || runtime); }, 'store-row collection-open quiet'); button.dataset.storeModel = row.name; button.dataset.storeKey = modelKey(row);
         button.title = row.name;
         const copy = domainText('span', '', 'store-card-content');
-        copy.append(domainText('strong', row.display_name || row.name), domainText('small', `${row.parameters || 'Parameters unknown'} · ${row.size != null ? fileSize(row.size) : 'Size unknown'}`, 'muted'));
+        copy.append(domainText('strong', row.display_name || row.name), domainText('small', row.parameters || 'Parameters unknown', 'muted'));
         if ((row.runtime || runtime) === 'sdcpp') copy.append(domainText('small', ImageReadinessUI.label(row.name), 'muted'));
         if (runtime === 'all') copy.append(runtimeBadge(row.runtime));
-        button.append(icon(row.name, 40), copy, domainText('span', (row.runtime || runtime) === 'sdcpp' ? 'Configure' : 'Manage', 'store-cta'));
+        button.append(icon(row.name, 40), copy, domainText('span',row.size!=null?fileSize(row.size):'Size unknown','store-installed-size muted'), domainText('span', (row.runtime || runtime) === 'sdcpp' ? 'Configure' : 'Manage', 'store-cta'));
         card.append(button); list.append(card);
       }
       if (rows.length) target.append(list);
@@ -3533,7 +3565,7 @@ window.RoleModelPicker = (() => {
     button.id = select.id + '-picker'; button.setAttribute('aria-haspopup', 'dialog');
     button.setAttribute('aria-label', `Choose ${label.toLocaleLowerCase()} model`);
     const valueLabel = domainText('span', '', 'model-role-value');
-    const arrow = domainText('span', '›', 'model-role-chevron'); arrow.setAttribute('aria-hidden', 'true');
+    const arrow = settingsChevron(); arrow.classList.add('model-role-chevron');
     button.append(valueLabel, arrow);
     const describe = () => { valueLabel.textContent = (select.value ? select.selectedOptions[0]?.textContent : 'Automatic') || 'Not set'; button.title = select.value || 'Unset'; button.setAttribute('aria-label', `Choose ${label.toLocaleLowerCase()} model, ${valueLabel.textContent}`); };
     select.addEventListener('change', describe); describe();
@@ -4053,7 +4085,7 @@ window.RoleModelPicker = (() => {
   byId('role-picker-connection').addEventListener('change', load);
   byId('role-picker-refresh').addEventListener('click', ()=>nativeMode()?loadNative(false,true):load());
   for (const [action, delta] of [['previous', -1], ['next', 1]]) {
-    byId(`role-picker-${action}`).append(libraryIcon(action));
+    byId(`role-picker-${action}`).append(settingsChevron(action));
     byId(`role-picker-${action}`).addEventListener('click', () => { page += delta; render(); });
   }
   byId('role-picker-numbers').addEventListener('click', event => { const b = event.target.closest('[data-page]'); if (b) { page = Number(b.dataset.page); render(); } });
@@ -4477,15 +4509,17 @@ window.SettingsSearch = (() => {
   function render() {
     const terms=query.value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
     results.replaceChildren(); select(-1); query.setAttribute('aria-expanded','false');
-    if (!terms.length) { status.textContent=agentReady ? '' : 'Loading Agent settings…'; return; }
+    const pages=[...byId('settings-sections').querySelectorAll('[data-settings]')]
+      .filter(button=>button.dataset.settings!=='account'||loginMethod==='password')
+      .map(button=>({label:button.textContent.trim(),section:button.dataset.settings,category:'Settings page',page:true}));
     const choices=[...document.querySelectorAll('#theme-settings input[name="palette"], #theme-settings input[name="theme-variant-choice"], #theme-settings input[name="appearance"], #theme-settings input[name="color-source"], #theme-settings input[name="chat-density"]')].map(input=>({
       category:'Theme', label:input.closest('label')?.textContent.trim() || input.value,
       section:'theme', target:`#theme-settings input[name="${input.name}"][value="${CSS.escape(input.value)}"]`,
       keywords:input.name.replaceAll('-',' '),
     }));
     const entries=[...fixed.filter(item=>item.section!=='account'||loginMethod==='password'),...choices,...fields];
-    const matches=entries.filter(item=>terms.every(term=>`${item.category} ${item.label} ${item.keywords||''}`.toLocaleLowerCase().includes(term)));
-    status.textContent=agentReady ? `${matches.length} result${matches.length===1?'':'s'}` : `${matches.length} results · Loading Agent settings…`;
+    const matches=terms.length ? entries.filter(item=>terms.every(term=>`${item.category} ${item.label} ${item.keywords||''}`.toLocaleLowerCase().includes(term))) : pages;
+    status.textContent=!terms.length ? 'Settings pages' : agentReady ? `${matches.length} result${matches.length===1?'':'s'}` : `${matches.length} results · Loading Agent settings…`;
     query.setAttribute('aria-expanded',String(matches.length>0));
     for (const [index,entry] of matches.entries()) {
       const button=domainButton('',()=>navigate(entry),'quiet settings-search-result');
@@ -4520,6 +4554,12 @@ window.SettingsSearch = (() => {
     const epoch=authEpoch;
     showSettingsSection(entry.section);
     if (settingsSection!==entry.section) return;
+    if (entry.page) {
+      if (entry.section==='models') ModelsSettingsNavigation.show('overview');
+      dialog.close();
+      byId(`settings-tab-${entry.section}`)?.focus({preventScroll:true});
+      return;
+    }
     if (entry.section==='models') {
       ModelsSettingsNavigation.show(entry.screen||'overview');
       const targetScreen=entry.screen||'overview';
@@ -4543,7 +4583,13 @@ window.SettingsSearch = (() => {
       const group=element.closest('.setting-row,.theme-setting-group,.theme-option-surface');
       element=group?.querySelector('button:not([hidden]),input:not([hidden]),select:not([hidden])') || group || element;
     }
-    element.scrollIntoView({block:'center',inline:'nearest'});
+    // Scroll only Settings: scrollIntoView can also scroll its overflow-hidden
+    // shell ancestors, shifting the entire page up and leaving a clipped bottom.
+    const view=byId('settings-view'), bounds=view.getBoundingClientRect();
+    const style=getComputedStyle(view), target=element.getBoundingClientRect();
+    const top=bounds.top+(parseFloat(style.scrollPaddingTop)||0);
+    const bottom=bounds.bottom-(parseFloat(style.scrollPaddingBottom)||0);
+    view.scrollBy({top:(target.top+target.bottom-top-bottom)/2,behavior:'instant'});
     if (!element.matches('input,select,textarea,button,summary,[tabindex]')) element.tabIndex=-1;
     element.focus({preventScroll:true});
   }

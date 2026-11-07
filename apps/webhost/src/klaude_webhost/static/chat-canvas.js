@@ -23,13 +23,7 @@ window.ChatCanvas = (() => {
     if (className) node.className = className;
     return node;
   };
-  const icon = (shape = 'M4 3h16v18H4zM8 7h8M8 11h8M8 15h5') => {
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.classList.add('icon');
-    for (const [key, value] of Object.entries({viewBox:'0 0 24 24', fill:'none', stroke:'currentColor', 'stroke-width':'1.7', 'aria-hidden':'true'})) svg.setAttribute(key, value);
-    const path = document.createElementNS(svg.namespaceURI, 'path');
-    path.setAttribute('d', shape); svg.append(path); return svg;
-  };
+  const icon = (name = 'text') => window.KlaudeUIIcons.create(name);
   function button(text, action, className = 'quiet') {
     const node = element('button', text, className); node.type = 'button';
     node.addEventListener('click', action); return node;
@@ -151,7 +145,7 @@ window.ChatCanvas = (() => {
     panel = element('dialog', undefined, 'chat-canvas'); panel.id = 'chat-canvas'; panel.setAttribute('aria-labelledby', 'canvas-title');
     const heading = element('header', undefined, 'canvas-heading'), title = element('h2', 'Canvas'); title.id = 'canvas-title';
     const close = button('×', () => panel.close(), 'icon-button quiet'); close.setAttribute('aria-label', 'Close Canvas');
-    close.replaceChildren(icon('m6 6 12 12M6 18 18 6'));
+    close.replaceChildren(icon('close'));
     heading.append(title, close);
     const toolbar = element('div', undefined, 'canvas-toolbar');
     documents = element('select'); documents.setAttribute('aria-label', 'Open canvases');
@@ -200,7 +194,8 @@ window.ChatCanvas = (() => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); download(); }
       if (event.key === 'Escape' && !mobile.matches) { event.preventDefault(); panel.close(); }
     });
-    launch = button('Canvas', openAvailable, 'quiet canvas-launch'); launch.prepend(icon()); launch.title = 'Open Canvas';
+    launch = button('', openAvailable, 'icon-button quiet canvas-launch'); launch.prepend(icon()); launch.title = 'Open Canvas';
+    launch.setAttribute('aria-label', 'Open Canvas');
     document.querySelector('.topbar-actions').prepend(launch);
     const menu = document.getElementById('mobile-chat-menu');
     menuItem = button('Canvas', () => { menu.hidePopover?.(); openAvailable(); }, 'message-action');

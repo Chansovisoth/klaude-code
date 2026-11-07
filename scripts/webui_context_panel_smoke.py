@@ -45,7 +45,7 @@ async def verify_file_pickup(tab):
               const image=byId('cp-file-items').querySelector('.cp-file img');
               return !image || image.complete && image.naturalWidth>0;
             })()""")
-            for fraction in ((.15, .2), (.5, .5), (.85, .8)):
+            for fraction in ((0.15, 0.2), (0.5, 0.5), (0.85, 0.8)):
                 await tab.js("window.pickupFraction=" + json.dumps(fraction))
                 pickup = await tab.js("""(()=>{
                   const row=byId('cp-file-items').querySelector('.cp-file');
@@ -106,18 +106,20 @@ async def verify_file_pickup(tab):
                 await tab.wait("""getComputedStyle(document.querySelector('.cp-file.is-dragging'))
                   .transform==='none' &&
                   getComputedStyle(pickupPreview.firstElementChild).transform==='none'""")
-                assert await tab.js("Number(getComputedStyle(document.querySelector("
-                                    "'.cp-file.is-dragging')).opacity)===.35")
+                assert await tab.js(
+                    "Number(getComputedStyle(document.querySelector("
+                    "'.cp-file.is-dragging')).opacity)===.35"
+                )
                 await tab.js("""if(pickupSavedMotion)
                   document.documentElement.dataset.motion=pickupSavedMotion;
                   else delete document.documentElement.dataset.motion;""")
                 shot = await tab.command("Page.captureScreenshot", {"format": "png"})
-                (OUT / f"pickup-{theme}-{mode}.png").write_bytes(
-                    base64.b64decode(shot["data"])
-                )
+                (OUT / f"pickup-{theme}-{mode}.png").write_bytes(base64.b64decode(shot["data"]))
                 await tab.js("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))")
-                assert await tab.js('!document.querySelector(".cp-file.is-dragging") && '
-                                    '!document.querySelector(".cp-drag-preview")')
+                assert await tab.js(
+                    '!document.querySelector(".cp-file.is-dragging") && '
+                    '!document.querySelector(".cp-drag-preview")'
+                )
                 await tab.js("setContextPanel(true)")
     await tab.click('[data-cp-view="list"]')
     await tab.wait('!byId("cp-files").hasAttribute("aria-busy")')
@@ -126,40 +128,129 @@ async def verify_file_pickup(tab):
 async def verify_mobile_collapse(tab):
     await tab.js("setContextPanel(true, true)")
     for width in (851, 850):
-        await tab.command("Emulation.setDeviceMetricsOverride", {
-            "width": width, "height": 760, "deviceScaleFactor": 1, "mobile": width <= 850,
-        })
+        await tab.command(
+            "Emulation.setDeviceMetricsOverride",
+            {
+                "width": width,
+                "height": 760,
+                "deviceScaleFactor": 1,
+                "mobile": width <= 850,
+            },
+        )
         if width == 851:
             await tab.wait("!narrowScreen.matches && contextPanelOpen")
         else:
             await tab.wait("narrowScreen.matches && !contextPanelOpen && byId('inspector').inert")
-    assert await tab.js("byId('context-panel-scrim').hidden && "
-                        "byId('inspector-toggle').getAttribute('aria-expanded')==='false' && "
-                        "document.activeElement===byId('mobile-chat-more') && "
-                        "sessionStorage.getItem('klaude.context-panel.open')==='false'")
-    await tab.click('#mobile-chat-more')
+    assert await tab.js(
+        "byId('context-panel-scrim').hidden && "
+        "byId('inspector-toggle').getAttribute('aria-expanded')==='false' && "
+        "document.activeElement===byId('mobile-chat-more') && "
+        "sessionStorage.getItem('klaude.context-panel.open')==='false'"
+    )
+    await tab.click("#mobile-chat-more")
     await tab.click('[data-mobile-chat-action="context"]')
     await tab.wait("contextPanelOpen && !byId('inspector').inert")
-    await tab.command("Emulation.setDeviceMetricsOverride", {
-        "width": 390, "height": 760, "deviceScaleFactor": 1, "mobile": True,
-    })
+    await tab.command(
+        "Emulation.setDeviceMetricsOverride",
+        {
+            "width": 390,
+            "height": 760,
+            "deviceScaleFactor": 1,
+            "mobile": True,
+        },
+    )
     assert await tab.js("contextPanelOpen")  # intentional mobile open survives mobile resizes
-    await tab.click('#context-panel-scrim')
+    await tab.click("#context-panel-scrim")
     await tab.wait("!contextPanelOpen")
-    await tab.click('#mobile-chat-more')
+    await tab.click("#mobile-chat-more")
     await tab.click('[data-mobile-chat-action="context"]')
     await tab.wait("contextPanelOpen")
     await tab.js("window.contextResizeReload=true")
-    await tab.command('Page.reload')
-    await tab.wait("!window.contextResizeReload && typeof latest!=='undefined' && latest && "
-                   "document.documentElement.dataset.startup==='ready'")
-    assert await tab.js("!contextPanelOpen && byId('inspector').inert && "
-                        "byId('context-panel-scrim').hidden")
-    await tab.command("Emulation.setDeviceMetricsOverride", {
-        "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False,
-    })
+    await tab.command("Page.reload")
+    await tab.wait(
+        "!window.contextResizeReload && typeof latest!=='undefined' && latest && "
+        "document.documentElement.dataset.startup==='ready'"
+    )
+    assert await tab.js(
+        "!contextPanelOpen && byId('inspector').inert && byId('context-panel-scrim').hidden"
+    )
+    await tab.command(
+        "Emulation.setDeviceMetricsOverride",
+        {
+            "width": 1440,
+            "height": 900,
+            "deviceScaleFactor": 1,
+            "mobile": False,
+        },
+    )
     await tab.wait("!narrowScreen.matches")
     assert await tab.js("!contextPanelOpen")
+
+
+async def verify_library_style(tab):
+    results = []
+    assert await tab.js(
+        "byId('cp-scope-current').parentElement.classList.contains('inspector-tabs')"
+    )
+    await tab.js("setContextPanel(true)")
+    await tab.click("#cp-tab-library")
+    await tab.click("#cp-scope-all")
+    await tab.wait("byId('cp-file-items').querySelectorAll('.cp-file').length===6")
+    await tab.js("""window.fileTileStyle=(selector,name)=>{
+      const root=document.querySelector(selector),tile=[...root.querySelectorAll('.file-item')]
+        .find(el=>!name||el.querySelector('.file-name').textContent===name);
+      const art=tile.querySelector('.file-artwork'),caption=tile.querySelector('.file-name-group');
+      const text=tile.querySelector('.file-name'),open=tile.querySelector('.file-open');
+      return {name:text.textContent,background:getComputedStyle(tile).backgroundColor,
+        radius:getComputedStyle(tile).borderRadius,padding:getComputedStyle(open).padding,
+        aspect:getComputedStyle(art).aspectRatio,artBackground:getComputedStyle(art).backgroundColor,
+        captionPadding:getComputedStyle(caption).padding,font:getComputedStyle(text).font,
+        color:getComputedStyle(text).color};
+    };""")
+    for width in (1440, 768, 390, 320):
+        await tab.command(
+            "Emulation.setDeviceMetricsOverride",
+            {
+                "width": width,
+                "height": 900,
+                "deviceScaleFactor": 1,
+                "mobile": False,
+            },
+        )
+        for theme in ("light", "dark"):
+            for mode in ("list", "grid", "gallery"):
+                await tab.js(
+                    "showView('chat');setContextPanel(true);"
+                    "applyAppearance({...appearance,theme:" + json.dumps(theme) + "},true)"
+                )
+                await tab.click(f'[data-cp-view="{mode}"]')
+                await tab.wait("!byId('cp-files').hasAttribute('aria-busy')")
+                await tab.js(
+                    "applyAppearance({...appearance,theme:" + json.dumps(theme) + "},true)"
+                )
+                await asyncio.sleep(0.3)
+                sidebar = await tab.js("fileTileStyle('#cp-file-items')")
+                await tab.js(
+                    "showView('library');applyAppearance({...appearance,theme:"
+                    + json.dumps(theme)
+                    + "},true)"
+                )
+                await tab.click(f'[data-file-view="{mode}"]')
+                await tab.wait("Boolean(byId('library-items').querySelector('.file-item'))")
+                await asyncio.sleep(0.3)
+                main = await tab.js(
+                    "fileTileStyle('#library-items'," + json.dumps(sidebar["name"]) + ")"
+                )
+                if mode == "list":
+                    # The narrow sidebar uses the shared compact-container row inset.
+                    assert sidebar.pop("padding") == "10px 8px", sidebar
+                    assert main.pop("padding") in ("8px", "10px 8px"), main
+                assert sidebar == main, (width, theme, mode, sidebar, main)
+                results.append({"width": width, "theme": theme, "view": mode})
+    await tab.js("showView('chat');setContextPanel(true)")
+    await verify_file_pickup(tab)
+    assert not tab.errors, tab.errors
+    return results
 
 
 async def verify(host, root, chrome, runtime, files):
@@ -206,13 +297,32 @@ async def verify(host, root, chrome, runtime, files):
                 + ';byId("account-login").requestSubmit()'
             )
             await tab.wait("latest?.context_panel && window.ContextPanel")
+            if os.environ.get("KLAUDE_CONTEXT_LIBRARY_STYLE_ONLY"):
+                results = await verify_library_style(tab)
+                print(
+                    json.dumps(
+                        {
+                            "library_style_parity": results,
+                            "drag_preview": "passed",
+                            "browser_exceptions": 0,
+                        }
+                    )
+                )
+                return
             await verify_mobile_collapse(tab)
             if os.environ.get("KLAUDE_CONTEXT_RESPONSIVE_ONLY"):
                 assert not tab.errors, tab.errors
-                print(json.dumps({"desktop_to_mobile_collapses": True,
-                                  "mobile_saved_open_starts_collapsed": True,
-                                  "manual_mobile_open_and_resize": True,
-                                  "focus_and_scrim": True, "browser_exceptions": 0}))
+                print(
+                    json.dumps(
+                        {
+                            "desktop_to_mobile_collapses": True,
+                            "mobile_saved_open_starts_collapsed": True,
+                            "manual_mobile_open_and_resize": True,
+                            "focus_and_scrim": True,
+                            "browser_exceptions": 0,
+                        }
+                    )
+                )
                 return
             if os.environ.get("KLAUDE_CONTEXT_DRAG_ONLY"):
                 await tab.js("setContextPanel(true)")
@@ -228,14 +338,25 @@ async def verify(host, root, chrome, runtime, files):
                   window.pickupPayload=transfer.getData('application/x-klaude-library-artifact');""")
                 point = await tab.js("""(()=>{const r=byId('composer').getBoundingClientRect();
                   return {x:r.left+r.width/2,y:r.top+20}})()""")
-                data = {"items": [{"mimeType": "application/x-klaude-library-artifact",
-                                   "data": await tab.js("pickupPayload")}],
-                        "dragOperationsMask": 1}
+                data = {
+                    "items": [
+                        {
+                            "mimeType": "application/x-klaude-library-artifact",
+                            "data": await tab.js("pickupPayload"),
+                        }
+                    ],
+                    "dragOperationsMask": 1,
+                }
                 await tab.js("window.nativeDragPoint=" + json.dumps(point))
                 for kind in ("dragEnter", "dragOver", "drop"):
-                    await tab.command("Input.dispatchDragEvent", {
-                        "type": kind, **point, "data": data,
-                    })
+                    await tab.command(
+                        "Input.dispatchDragEvent",
+                        {
+                            "type": kind,
+                            **point,
+                            "data": data,
+                        },
+                    )
                     if kind == "dragOver":
                         assert await tab.js("""(()=>{
                           const preview=document.querySelector('.cp-drag-preview');
@@ -246,17 +367,28 @@ async def verify(host, root, chrome, runtime, files):
                           return Math.abs(rect.left+padding+origin[0]-nativeDragPoint.x)<1 &&
                             Math.abs(rect.top+padding+origin[1]-nativeDragPoint.y)<1;
                         })()"""), "The browser dragover must keep the preview under the pointer"
-                await tab.wait("ChatAttachmentsUI.ids().length===1 && "
-                               "!ChatAttachmentsUI.preparing()")
-                assert await tab.js("prompt.value==='Keep my draft' && !latest.active_turn_id && "
-                                    "!document.querySelector('.cp-file.is-dragging') && "
-                                    "!document.querySelector('.cp-drag-preview')")
+                await tab.wait(
+                    "ChatAttachmentsUI.ids().length===1 && !ChatAttachmentsUI.preparing()"
+                )
+                assert await tab.js(
+                    "prompt.value==='Keep my draft' && !latest.active_turn_id && "
+                    "!document.querySelector('.cp-file.is-dragging') && "
+                    "!document.querySelector('.cp-drag-preview')"
+                )
                 assert host.library.listing(kind="all")["total"] == 6
                 assert not tab.errors, tab.errors
-                print(json.dumps({"pickup_previews": 6, "pickup_anchor_cases": 18,
-                                  "native_artifact_drop": True,
-                                  "cleanup": True, "browser_exceptions": 0,
-                                  "screenshots": str(OUT)}))
+                print(
+                    json.dumps(
+                        {
+                            "pickup_previews": 6,
+                            "pickup_anchor_cases": 18,
+                            "native_artifact_drop": True,
+                            "cleanup": True,
+                            "browser_exceptions": 0,
+                            "screenshots": str(OUT),
+                        }
+                    )
+                )
                 return
             assert await tab.js('!byId("cp-refresh")')
             assert await tab.js('!byId("cp-close") && !byId("cp-scope-description")')
@@ -446,18 +578,28 @@ async def verify(host, root, chrome, runtime, files):
             )
             assert await tab.js('!byId("cp-file-items").querySelector(".cp-file-attach")')
             assert await tab.js('byId("cp-library-status").textContent.includes("Drag a file")')
-            await tab.command("Emulation.setDeviceMetricsOverride", {
-                "width": 390, "height": 760, "deviceScaleFactor": 1, "mobile": True,
-            })
+            await tab.command(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": 390,
+                    "height": 760,
+                    "deviceScaleFactor": 1,
+                    "mobile": True,
+                },
+            )
             await tab.wait('byId("cp-library-status").textContent.includes("chat attachment menu")')
             # Context rows only preview. Keyboard/touch attachment uses the composer picker.
             await tab.js("setContextPanel(false)")
             await tab.click("#attach-file")
             await tab.click("#attach-library")
-            await tab.js('byId("attach-search").value="shared.txt";'
-                         'byId("attach-search-form").requestSubmit()')
-            await tab.wait('byId("attach-library-items").children.length===1 && '
-                           'byId("attach-library-items").textContent.includes("shared.txt")')
+            await tab.js(
+                'byId("attach-search").value="shared.txt";'
+                'byId("attach-search-form").requestSubmit()'
+            )
+            await tab.wait(
+                'byId("attach-library-items").children.length===1 && '
+                'byId("attach-library-items").textContent.includes("shared.txt")'
+            )
             await tab.click(".attachment-library-item button")
             await tab.wait("ChatAttachmentsUI.ids().length===1")
             await tab.click("#attach-close")
@@ -472,10 +614,16 @@ async def verify(host, root, chrome, runtime, files):
             await tab.click("#cp-scope-all")
             await tab.wait('byId("cp-file-items").children.length===6')
             await tab.command("Emulation.setTouchEmulationEnabled", {"enabled": False})
-            await tab.command("Emulation.setDeviceMetricsOverride", {
-                "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False,
-            })
-            await asyncio.sleep(.15)
+            await tab.command(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": 1440,
+                    "height": 900,
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                },
+            )
+            await asyncio.sleep(0.15)
             await verify_file_pickup(tab)
             # A real native internal drag uses the same MIME payload emitted by dragstart.
             await tab.js("""const row=[...byId('cp-file-items').children]
@@ -570,8 +718,11 @@ async def verify(host, root, chrome, runtime, files):
                                 metadata:getComputedStyle(tile.querySelector('.file-secondary')).display,
                                 position:getComputedStyle(tile.querySelector('.file-name-group')).position};})""")
                             assert len(tiles) == 3 and all(
-                                t["square"] and t["compact"] and t["metadata"] == "none"
-                                and t["position"] == "absolute" for t in tiles
+                                t["square"]
+                                and t["compact"]
+                                and t["metadata"] == "none"
+                                and t["position"] == "absolute"
+                                for t in tiles
                             ), (width, tiles)
                         fits = await tab.js("""(()=>{
                           const p=byId('inspector'),r=p.getBoundingClientRect();
@@ -709,9 +860,13 @@ def main():
                 "UPDATE artifacts SET session=? WHERE id=?",
                 (app.session_id, files["current"]["id"]),
             )
-            db.execute("UPDATE artifacts SET created=? WHERE id=?", (
-                datetime(2025, 1, 15, tzinfo=UTC).timestamp(), files["older"]["id"],
-            ))
+            db.execute(
+                "UPDATE artifacts SET created=? WHERE id=?",
+                (
+                    datetime(2025, 1, 15, tzinfo=UTC).timestamp(),
+                    files["older"]["id"],
+                ),
+            )
         accounts = AccountStore(cfg.config_dir)
         accounts.initialize()
         host = LocalWebHost(app, accounts=accounts, library=library, staging_dir=root / "staging")

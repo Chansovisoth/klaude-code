@@ -258,8 +258,11 @@ async def verify(host, root, state):
             await wait("byId('store-tab-downloads').getAttribute('aria-pressed')==='true'")
             await tab.js("showView('chat')")
             await tab.click('#chat-create-image')
-            await wait("byId('image-generate-panel').open && "
-                       "!byId('composer-saved-setups').hidden && "
+            await wait("byId('image-generate-panel').open")
+            await tab.click('#image-options')
+            await wait("byId('image-create-settings').open")
+            await tab.js("byId('image-setups-details').open=true")
+            await wait("!byId('composer-saved-setups').hidden && "
                        "byId('composer-saved-setups').querySelector('[data-saved-image-item]')")
             await tab.js("byId('image-prompt').value='Keep this inventory draft'")
             await tab.click('#composer-saved-setups [data-readiness-focus^=open-setup]')
@@ -269,16 +272,21 @@ async def verify(host, root, state):
             await wait("byId('image-generate-panel').open")
             assert await tab.js("byId('image-prompt').value==='Keep this inventory draft'")
             assert not state["loads"]
-            await tab.js("byId('image-generate-panel').close();"
-                         "showView('settings',{section:'models'});"
+            await tab.js("byId('image-generate-panel').close()")
+            await asyncio.sleep(.2)  # Let the closing modal leave the top layer.
+            await tab.js("showView('settings',{section:'models'});"
                          "ModelsSettingsNavigation.show('image',{focus:false})")
             await wait("!byId('settings-saved-setups').hidden && "
                        "byId('settings-saved-setups').querySelector('[data-saved-image-item]')")
+            await tab.js("byId('image-service-advanced').open=true")
             await tab.js("{const search=byId('settings-saved-setups').querySelector('input');"
                          "search.focus();search.value='no-such-saved-setup';"
                          "search.dispatchEvent(new Event('input'))}")
             await wait("byId('settings-saved-setups').textContent.includes('No matching')")
-            assert await tab.js("document.activeElement.dataset.readinessFocus==='search'")
+            assert await tab.js("document.activeElement.dataset.readinessFocus==='search'"), await tab.js(
+                "({active:document.activeElement?.outerHTML?.slice(0,400),"
+                "search:byId('settings-saved-setups').querySelector('input')?.outerHTML,"
+                "dialogs:[...document.querySelectorAll('dialog')].filter(d=>d.open).map(d=>d.id)})")
             await tab.js("{const search=byId('settings-saved-setups').querySelector('input');"
                          "search.value='';search.dispatchEvent(new Event('input'))}")
             await tab.click('#settings-saved-setups [data-readiness-focus^=open-setup]')

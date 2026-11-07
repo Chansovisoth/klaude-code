@@ -40,6 +40,8 @@ def bundle(check: bool = False) -> None:
         + "\n"
         + (STATIC / "expressive.css").read_text().rstrip()
         + "\n"
+        + (STATIC / "store.css").read_text().rstrip()
+        + "\n"
         + END
         + after
     )

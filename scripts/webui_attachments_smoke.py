@@ -2,6 +2,8 @@
 
 Run: uv run --frozen --offline python scripts/webui_attachments_smoke.py
 Optional: KLAUDE_TEST_CHROME=/path/to/headless-chrome
+Set KLAUDE_ATTACHMENT_PASTE_ONLY=1 for focused image/file ClipboardEvent checks
+through real upload endpoints at desktop/phone widths; no OS clipboard is read.
 """
 
 from __future__ import annotations
@@ -41,6 +43,53 @@ class AttachmentFixture(Fixture):
         return super().chat(model, messages, **kwargs)
 
 
+async def verify_clipboard_paste(tab):
+    # Controlled ClipboardEvents exercise the browser handler and actual staged
+    # upload/attachment APIs without reading the user's operating-system clipboard.
+    result = await tab.js("""(async()=>{
+      prompt.value='Keep this draft';prompt.focus();
+      const canvas=document.createElement('canvas');canvas.width=canvas.height=4;
+      canvas.getContext('2d').fillRect(0,0,4,4);
+      const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));
+      const data=new DataTransfer();
+      data.items.add(new File(['clipboard text'],'pasted.txt',{type:'text/plain'}));
+      data.items.add(new File([blob],'pasted.png',{type:'image/png'}));
+      const event=new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true});
+      prompt.dispatchEvent(event);return event.defaultPrevented;
+    })()""")
+    assert result, "File paste was not handled"
+    await tab.wait("ChatAttachmentsUI.ids().length===2 && !ChatAttachmentsUI.preparing()")
+    assert await tab.js("prompt.value==='Keep this draft' && "
+                       "byId('chat-attachments').textContent.includes('pasted.txt') && "
+                       "byId('chat-attachments').textContent.includes('pasted.png')")
+    assert await tab.js("""(()=>{
+      const data=new DataTransfer();data.setData('text/plain','native text');
+      const event=new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true});
+      prompt.dispatchEvent(event);return !event.defaultPrevented;
+    })()"""), "Text-only paste must retain native insertion/selection/undo"
+    assert await tab.js("""(()=>{
+      const event=new Event('paste',{bubbles:true,cancelable:true});
+      Object.defineProperty(event,'clipboardData',{value:{files:[],items:[
+        {kind:'file',getAsFile:()=>new File(['fallback'],'items-only.txt',{type:'text/plain'})}
+      ]}});prompt.dispatchEvent(event);return event.defaultPrevented;
+    })()""")
+    await tab.wait("ChatAttachmentsUI.ids().length===3 && !ChatAttachmentsUI.preparing()")
+    await tab.js("""(()=>{
+      const data=new DataTransfer();
+      for(const name of ['excess-a.txt','excess-b.txt'])
+        data.items.add(new File(['too many'],name,{type:'text/plain'}));
+      prompt.dispatchEvent(new ClipboardEvent('paste',{
+        clipboardData:data,bubbles:true,cancelable:true}));
+    })()""")
+    await tab.wait("!ChatAttachmentsUI.preparing()")
+    assert await tab.js("ChatAttachmentsUI.ids().length===3 && "
+                       "byId('chat-attachment-status').textContent.includes('four files')")
+    await tab.js("""(()=>{
+      while(ChatAttachmentsUI.ids().length)byId('chat-attachments').querySelector('button').click();
+      prompt.value='';prompt.dispatchEvent(new Event('input',{bubbles:true}));
+    })()""")
+
+
 async def verify(host, root, chrome, fixture):
     profile = root / "chrome"
     output = Path("/tmp/klaude-attachments-preview")
@@ -64,7 +113,8 @@ async def verify(host, root, chrome, fixture):
             await tab.command("Page.enable")
             await tab.command("Page.navigate", {"url": host.origin})
             await tab.wait('typeof byId !== "undefined" && !byId("local-access").hidden')
-            await tab.js('byId("login-password").value=' + json.dumps(
+            await tab.js('byId("login-username").value="admin";'
+                         'byId("login-password").value=' + json.dumps(
                 host.accounts.initial_password()
             ) + ';byId("account-login").requestSubmit()')
             await tab.wait('latest?.attachments && !byId("attach-file").disabled')
@@ -135,6 +185,19 @@ async def verify(host, root, chrome, fixture):
                     "nodeId": node["nodeId"], "files": [str(root / name)],
                 })
 
+            if os.environ.get("KLAUDE_ATTACHMENT_PASTE_ONLY"):
+                for width in (1440, 390):
+                    await tab.command("Emulation.setDeviceMetricsOverride", {
+                        "width": width, "height": 900, "deviceScaleFactor": 1, "mobile": False,
+                    })
+                    await verify_clipboard_paste(tab)
+                assert not tab.errors, tab.errors
+                print(json.dumps({"clipboard_image_file_upload": "passed",
+                                  "native_text_paste": "passed", "items_fallback": "passed",
+                                  "file_count_limit": "passed", "widths": [1440, 390],
+                                  "console_errors": 0}))
+                return
+            await verify_clipboard_paste(tab)
             await tab.click("#attach-file")
             await device("device.txt")
             await tab.wait('ChatAttachmentsUI.ids().length === 1 && !ChatAttachmentsUI.preparing()')

@@ -1,5 +1,34 @@
 # Agent Guidance
 
+Store layout (2026-11-06): scoped `static/store.css` is bundled through
+`scripts/bundle_webui_expressive.py`. Explore uses compact categories and
+consistent identity/metadata cards; Installed aligns model names, sizes and
+actions; Downloads separates active/paused/unconfirmed work from history and
+retains 44px controls. Detail pages share the same identity/action surface.
+Container queries accommodate both desktop sidebars; phones retain the native
+location chooser. Existing reviews and transfer contracts remain authoritative.
+Standard inputs, textareas and selects share Store's theme surface and border
+colors, including Settings controls. The chat composer and lockscreen username and
+password fields keep their existing styling.
+Field borders stay unchanged on hover; keyboard focus retains its indicator.
+Conversation, Settings and command search hide the native clear-text cross.
+Library and context panel view controls, plus Library Edit and Refresh, match the
+first navigation rail's icon face and states.
+Filter and input chips share the input surface and border; selection keeps its checkmark.
+Library and Integrations search action buttons are square and match their search fields' height and corner radius.
+Library filter menus size to their contents within the viewport.
+The Library upload dialog offers a single-file drop zone and native file picker;
+Import submits directly through the prepared, journaled operation without another dialog.
+Context Library content sits close below its view controls in all three views.
+Saved image setup rows stack their text and actions when their container is narrow.
+Generated Create's Image and Research split buttons share File Inspector's
+inner-corner behavior on hover, keyboard focus and press.
+The shared tab indicator keeps animating when a tab switch changes container width.
+Menu, dialog and toast entrance animations use a quick 120ms fade and movement;
+menus and dialogs fade and move out over 160ms when the browser supports exit transitions.
+See `docs/webui/store-layout-overhaul.md` and
+`scripts/webui_store_layout_smoke.py` for isolated browser evidence.
+
 This file applies to the whole repository. Keep it current when project
 behavior changes; future agents should be able to understand the product from
 this file before diving into implementation details.
@@ -18,6 +47,31 @@ servers expose Klaude's web and knowledge tools to other agents, but they are
 not the full Klaude chat agent.
 
 Workspace layout:
+
+- WebUI UI icons default to locally bundled Font Awesome Free 7.2.0 Solid.
+  Use semantic `libraryIcon(name)` / `KlaudeUIIcons.create(name)` calls or static
+  `data-ui-icon` SVG markers. `static/icons/ui/registry.json` owns aliases and
+  documented custom fallbacks; preserve filled weight/style for missing icons.
+  The approved rounded chevron and aspect-ratio frames are custom entries.
+  AI/provider logos, Klaude branding and Material animations remain separate.
+  Filled glyphs use 82% optical scale inside existing icon boxes; the refresh
+  glyph uses 74% for visual balance. Preserve full
+  control hit areas and the custom chevron geometry when tuning icon size.
+  Square icon controls share `--square-control-size`: the first navigation rail's
+  36px visible face on every viewport and pointer type. Toolbars,
+  Settings, dialogs, context controls, pagination and icon-only chat/code actions
+  use this size and 8px corners. Labeled actions stay flexible; rail collapse
+  animation still owns its outer targets. Markdown's icon-only actions carry
+  `square-button` rather than inferring square controls from SVG-only markup.
+  Go to latest is an explicit circular exception, including hover, focus, press
+  and its state-layer pseudo-elements.
+  Workspace, Library, Integrations, Store and Activity titles use `data-page-icon`
+  with a leading shared icon; Store updates its label without replacing the icon.
+  Markdown/chat response actions, code-block controls, previews and Share dialog
+  actions also use the shared registry; social-app logos retain their brand paths.
+  No CDN or runtime npm dependency is required. Vendor provenance/licenses,
+  update commands and focused browser evidence are in `docs/webui/ui-icons.md`;
+  regenerate `bundle_ui_icons.py` and `bundle_webui_loading.py` after icon edits.
 
 - `packages/application`: in-process chat composition, typed public events,
   bounded headless turn worker, structured interaction broker, and an additive
@@ -144,6 +198,14 @@ Workspace layout:
   Settings search supports Up/Down through highlighted results and Enter to open
   the selected setting, retaining query focus while typing. Native result buttons
   still support Tab/Enter; Escape dismisses and restores the Search button focus.
+  Opening a result scrolls only the Settings view, respecting its navigation and
+  action clearance. Shell ancestors stay fixed so searching for a lower field
+  such as Source budget and scrolling back up cannot leave the page clipped.
+  Isolated browser regression: `scripts/webui_settings_search_smoke.py`.
+  Settings navigation rows, model choosers, breadcrumbs, pagination and select
+  arrows reuse the rounded disclosure SVG through `settingsChevron`. Dropdown
+  decoration preserves native selects, labels and keyboard/mobile behavior;
+  asynchronously replaced Settings controls receive the same decoration.
 - Settings retains Account, Theme, Agent, Models and Memory, plus System for
   lifecycle controls. System uses the same grouped rows, heading spacing, URL
   restoration, keyboard tabs and Settings search as the other categories.
@@ -173,8 +235,12 @@ Workspace layout:
   models remains available through Settings search and existing links, with
   provider filtering, search and paging; the overview exposes a Connected models
   row beneath Manage connections.
-  Conversation selection stays in Chat. Primary default roles use full-card model
-  choosers in two desktop columns and one phone column; fallbacks, token tuning and Vision enable live in Advanced defaults.
+  Conversation selection stays in Chat. Primary default roles use rounded model
+  tiles in two columns on desktop and phones, inspired by the supplied Mending
+  reference. Each tile puts the role and selected model on the left and a large
+  muted role icon on the right; long model names truncate visually while the
+  chooser retains its full accessible name. Fallbacks, token tuning and Vision
+  enable live in Advanced defaults.
   Each fallback uses the same full-width chooser row as the primary roles;
   these rows use a 64px minimum height consistent with other settings controls.
   Advanced-default setting dividers extend across the card while content stays inset.
@@ -206,8 +272,11 @@ Workspace layout:
   or sign-out. Account, Agent, Models and Memory use compact, divided settings
   groups inspired by the saved GPT reference, adapted to Klaude Material roles.
   Agent category headings sit above the same grouped row surfaces as the other
-  Settings pages; dividers reach the group edges while controls stay inset, and
-  tool policies use two columns where space permits and one on narrow screens. Categories and advanced permissions start expanded; changes to
+  Settings pages; dividers reach the group edges while controls stay inset.
+  Plain row groups have equal top/bottom insets without trailing-only padding.
+  Each row owns its vertical spacing so the last row stays balanced. Tool
+  policies retain their symmetric content inset and use two columns where space
+  permits and one on narrow screens. Categories and advanced permissions start expanded; changes to
   disclosure state persist across rerenders during the signed-in session. Native
   disclosures and help dialogs remain intact.
   Theme uses the same grouped Material surfaces while retaining its live
@@ -431,6 +500,13 @@ Workspace layout:
   older hosts retain the existing individual editor actions. Current-chat edit
   protections, credential writer, tests, enable validation and recovery stay intact.
 - The compact WebUI workspace uses a 48px desktop header, a 52px icon rail with
+  a 32px desktop application menu bar above the workspace. Back/Forward use browser
+  history; compact File, Edit and View menus reuse existing chat, workspace,
+  Settings, logout, search and panel actions. Edit uses browser editing commands
+  with keyboard guidance when unavailable. Edit > Select all selects only the
+  current chat transcript and is unavailable outside Chat. Menus support arrow keys and Escape;
+  the menu bar is hidden on phones.
+  The icon rail retains
   accessible names and shared tooltips, and dedicated Settings navigation alongside
   the independently collapsible conversation sidebar. All Settings categories share a centered 800px maximum reading column and stable scrollbar space; grouped row highlights match their container corners; phone tabs and
   touch targets remain responsive. Desktop controls tighten only when no coarse
@@ -829,10 +905,16 @@ Workspace layout:
   and report/brief/comparison format. Associated form controls retain validation,
   reset and draft behavior, including focusing an invalid field inside settings.
   Both tabs preserve drafts and use a compact single-column form with no output
-  preview side. Recent jobs is a disclosure below each composer, retaining Open,
-  Download, repeat, Research Start/Stop and image cancellation/recovery actions.
-  The desktop dialog caps at 560px and fills phones. Image service diagnostics
-  remain visible; Ready requires a successful capability check. Outputs stay in
+  preview side. Completed jobs are not listed in Create; queued or recoverable
+  jobs retain Research Start/Stop and image cancellation/recovery controls.
+  Image Create shows one current status and Cancel for the active job; other
+  active or unconfirmed jobs live under View job details, without older failures.
+  Image job action menus use compact, left-aligned icon rows with phone-sized targets.
+  Connection checks and saved setups live in Image settings; connection errors
+  remain visible in the composer. Image settings uses equal-width ratio choices,
+  a compact orientation row and grouped Advanced, Connection and saved setup rows.
+  The desktop dialog caps at 560px and fills phones.
+  Ready requires a successful capability check. Outputs stay in
   Library, and creation no longer fetches preview metadata. No endpoints or
   background polling are added. It retains
   the existing generation review, receipts, cancellation, output recovery and
@@ -961,11 +1043,18 @@ Workspace layout:
   permissions, status, current Thinking/Plan state and session identity, with
   Escape/focus return and navigation/session/sign-out cleanup. Transient errors
   use the shared toast stack. The welcome screen uses compact prompt shortcuts.
+  Its decorative backing is a pointer-driven fidget spinner: grab/drag follows
+  rotation, flick/tap adds bounded momentum, then it returns to the same idle
+  CSS timeline without snapping; the paw stays still. Pointer capture supports
+  mouse and touch. Cancellation, hidden welcome/view/sign-out and reduced motion
+  clear the interaction; system or saved reduced motion disables spinning.
+  Focused real-pointer evidence: `scripts/webui_welcome_spinner_smoke.py`.
   Evidence: `docs/webui/chat-layout-validation.md`.
   Completed assistant replies include Worked for in their three-dot options menu,
   beside the timestamp and Branch/Retry actions, using the successful turn's recorded
   acceptance-to-completion duration; older records without timing stay unlabeled.
-  The reply footer shows Avg tokens/s from the turn's reported output-token sum
+  The reply footer shows Avg tokens/s, followed by a 24px gap and Worked for when a recorded
+  duration is available. Avg tokens/s comes from the turn's reported output-token sum
   divided by total generation time. Provider eval timing is preferred; otherwise
   a measured model-request duration is used and identified in the tooltip. Tool
   waits are excluded. Incomplete token accounting omits the rate; no character
@@ -1121,8 +1210,8 @@ Workspace layout:
   if the uploaded filename changes. Lookup/insertion is atomic across uploaders.
   New image content receives its own Added timestamp; generation remains job-based.
   One unrestricted picker opens from the toolbar's labeled plus button in the shared
-  native dialog style, with no type selector. The existing import review remains
-  required; closing an in-flight import discards its late review. Compact Uploads
+  native dialog style, with no type selector. Import submits directly through a
+  prepared operation; closing during preparation discards the late preparation. Compact Uploads
   toolbars use 48px search/action/view controls, with type/status/all sort directions
   in a single horizontally scrolling row of dropdown chips underneath Search,
   with its scrollbar hidden. Below the existing 650px content
@@ -1131,7 +1220,7 @@ Workspace layout:
   Explicit document/media API drafts remain compatible. Old saved tab
   selections migrate to file filters or Generated; section, type and status
   survive page refresh within the tab.
-  Saving owner-scoped uploads to Library needs an explicit import review;
+  Saving owner-scoped uploads to Library uses the explicit Import action;
   previews/downloads never launch a host desktop opener. Tags, archive/restore
   and deletion use artifact revisions. Knowledge opens libraries into their actual
   active indexed sources and paginated chunks, including learned URLs, uploads,
@@ -1730,6 +1819,10 @@ Workspace layout:
   Its Library picker reuses Library file-type icons, concise type/size labels and
   authenticated image thumbnails in compact rows.
   A message accepts four files or images within 32 MiB total.
+  Pasting images/files into the chat composer uses the same staged upload and
+  attachment path as device selection and drop, including count/size/session
+  checks. Clipboard files are read from the paste event, with an items fallback;
+  text-only paste retains native selection and undo without clipboard permissions.
   Selected and sent attachments use tonal file cards with filename, type and size;
   PDFs have a PDF badge and images show a decoded, metadata-free 128px thumbnail.
   Library descriptors include the opaque original artifact ID for conversation
@@ -1750,6 +1843,10 @@ Workspace layout:
   reattaching. Chat previews hide Library metadata management and file navigation.
   Library List/Grid/Gallery controls use separate 12px-radius buttons with small
   gaps in both the main Library and Context panel; only the selected view is filled.
+  Context Library reuses the main Library file typography, artwork, card surfaces
+  and view-control colors, with narrow-container list spacing. Its Current/All
+  scope retains the original primary tabs. Focused parity and drag-preview checks:
+  `KLAUDE_CONTEXT_LIBRARY_STYLE_ONLY=1 scripts/webui_context_panel_smoke.py`.
   UTF-8 text/code and bounded PDF/DOCX extraction become private model input;
   public dialogue contains the prompt and filenames only. PDF/DOCX parsers run
   in disposable resource-limited processes. Images use the existing enabled
@@ -1771,11 +1868,11 @@ Workspace layout:
   and drag inactivity. Open dialogs and unrelated destinations do not accept drops.
   Chat drops use the same picker preparation and 4-file/32-MiB limits (all four may be images),
   preserve unsent text and never submit a message or import into Library.
-  Uploads reviews each dropped file separately, up to 20 files per drop and
-  32 MiB per file. Cancelling a review stops remaining files; accepted imports
+  Uploads imports dropped files sequentially, up to 20 files per drop and
+  32 MiB per file. Closing the import dialog stops remaining files; accepted imports
   continue independently. Folder drops are rejected without traversal. Dropped
-  batches are cancelled on navigation/sign-out; stale preparations cannot reopen
-  reviews. This uses existing assets and APIs without requiring a new host route.
+  batches are cancelled on navigation/sign-out; stale preparations cannot submit.
+  This uses existing assets and APIs without requiring a new host route.
   Evidence: `docs/webui/file-drop-validation.md`.
   Attachments can be prepared during a reply; sending them waits for an idle turn.
   Sending does not Learn/index text or enable Vision. If the attachment script

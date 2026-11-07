@@ -176,6 +176,47 @@ async def verify(host, root, remote, requests, jpg):
                 "!document.querySelector('.shell').inert"
             )
             await tab.js("window.outputArticle=messages.querySelector('.message.assistant')")
+            assert await tab.js("""(()=>{
+              const article=ChatMarkdown.create('assistant','Timing fixture','timing-fixture');
+              ChatMarkdown.metadata(article,{workedSeconds:65,
+                generationStats:{average_tokens_per_second:12.3,timing:'provider'}});
+              const both=article.querySelector('.message-worked').textContent;
+              ChatMarkdown.metadata(article,{generationStats:undefined,workedSeconds:0});
+              const durationOnly=article.querySelector('.message-worked').textContent;
+              ChatMarkdown.metadata(article,{workedSeconds:undefined});
+              return both==='Avg 12.3 tokens/s Worked for 1m 5s' &&
+                durationOnly==='Worked for 0s' && !article.querySelector('.message-worked');
+            })()"""), "Reply timing must follow average tokens and omit unavailable values"
+            assert await tab.js("""(()=>{
+              const labels=['Copy response','Share message','Read aloud'];
+              const buttons=[...outputArticle.querySelectorAll('button')];
+              return labels.every(label=>buttons.some(button=>
+                button.getAttribute('aria-label')===label &&
+                button.querySelector('svg')?.dataset.iconSource==='fontawesome-free-solid')) &&
+                [...outputArticle.querySelectorAll('.message-action svg')]
+                  .every(icon=>icon.dataset.iconSource==='fontawesome-free-solid');
+            })()"""), "Chat response actions must use the shared filled icons"
+            assert await tab.js("""(()=>{
+              const size=parseFloat(getComputedStyle(document.documentElement)
+                .getPropertyValue('--square-control-size'));
+              return [...outputArticle.querySelectorAll('.square-button')].every(button=>{
+                const r=button.getBoundingClientRect();
+                return !r.width || Math.abs(r.width-size)<1 && Math.abs(r.height-size)<1;
+              });
+            })()"""), "Chat icon-only controls must match the navigation rail's square face"
+            await tab.click('[aria-label="Share message"]')
+            await tab.wait("Boolean(document.querySelector('.message-dialog[open]'))")
+            assert await tab.js("""(()=>{
+              const dialog=document.querySelector('.message-dialog');
+              const icons=[...dialog.querySelectorAll('svg.ui-icon')];
+              return icons.length>=3 && icons.every(icon=>
+                icon.dataset.iconSource==='fontawesome-free-solid' &&
+                getComputedStyle(icon.querySelector('path')).fill!=='none' &&
+                getComputedStyle(icon.querySelector('path')).stroke==='none') &&
+                dialog.querySelectorAll('[data-share-app] svg').length===4 &&
+                dialog.querySelector('[data-share-app="email"] svg').dataset.iconName==='envelope';
+            })()"""), "Share actions must use filled icons while retaining social logos"
+            await tab.click('.message-dialog [aria-label^="Close "]')
             assert await tab.js("outputArticle.querySelectorAll('math').length===4")
             assert await tab.js("outputArticle.querySelectorAll('.chat-math-display').length===2")
             assert await tab.js("outputArticle.textContent.includes('cost $5 and $10')")
